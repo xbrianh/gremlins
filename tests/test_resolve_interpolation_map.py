@@ -148,7 +148,7 @@ def test_content_optional_returns_empty(tmp_path):
 # --- exec integration: content() interpolation ---
 
 
-def test_exec_content_injects_env_var(tmp_path):
+def test_exec_content_substitutes_brace_var(tmp_path):
     state = _make_state(tmp_path)
     uri = Uri.parse("artifact://pr.json")
     p = pathlib.Path(state.artifacts.register(uri))

@@ -456,16 +456,27 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
 }
 
 /// Check whether a key appears in the stage's text as `{KEY}` (not `${KEY}`).
+/// The runtime normalizes hyphens to underscores (and vice versa) during
+/// substitution, so e.g. `{child-plan}` matches a key declared as `child_plan`.
 fn key_referenced_in_text(key_str: &str, text: &str) -> bool {
-    let target = format!("{{{key_str}}}");
-    let mut pos = 0;
-    while let Some(idx) = text[pos..].find(&target) {
-        let abs_idx = pos + idx;
-        // Must not be preceded by `$`
-        if abs_idx == 0 || text.as_bytes().get(abs_idx - 1) != Some(&b'$') {
-            return true;
+    let mut targets = Vec::with_capacity(2);
+    targets.push(format!("{{{key_str}}}"));
+    if key_str.contains('-') {
+        targets.push(format!("{{{}}}", key_str.replace('-', "_")));
+    } else if key_str.contains('_') {
+        targets.push(format!("{{{}}}", key_str.replace('_', "-")));
+    }
+
+    for target in &targets {
+        let mut pos = 0;
+        while let Some(idx) = text[pos..].find(target) {
+            let abs_idx = pos + idx;
+            // Must not be preceded by `$`
+            if abs_idx == 0 || text.as_bytes().get(abs_idx - 1) != Some(&b'$') {
+                return true;
+            }
+            pos = abs_idx + target.len();
         }
-        pos = abs_idx + target.len();
     }
     false
 }
