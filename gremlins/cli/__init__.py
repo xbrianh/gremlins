@@ -24,11 +24,16 @@ from gremlins.cli.launch import launch_main
 from gremlins.cli.prompt_for_assistant import prompt_for_assistant_main
 from gremlins.cli.queue import queue_main
 from gremlins.cli.resume import resume_main
+from gremlins.cli.validate import validate_main
 
 _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "launch": ("Launch a background gremlin by pipeline name.", launch_main),
     "resume": ("Re-spawn an existing gremlin from its recorded stage.", resume_main),
     "stop": ("Send SIGTERM to a running gremlin and wait for it to exit.", stop_main),
+    "validate": (
+        "Load and validate a pipeline YAML file.",
+        validate_main,
+    ),
     "land": (
         "Land a finished gremlin onto the current branch, then clean up.",
         land_main,

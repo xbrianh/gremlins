@@ -95,6 +95,13 @@ fn serde_json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<Py
 // ---------------------------------------------------------------------------
 
 #[pyfunction]
+fn inject_sentinals() -> PyResult<()> {
+    config::inject_sentinals()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(())
+}
+
+#[pyfunction]
 fn overlay_dirname() -> &'static str {
     gremlins::config::overlay_dirname()
 }
@@ -225,6 +232,7 @@ pub fn register_config_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     config_mod.add_function(wrap_pyfunction!(init, &config_mod)?)?;
     config_mod.add_function(wrap_pyfunction!(get_config, &config_mod)?)?;
     config_mod.add_function(wrap_pyfunction!(clear, &config_mod)?)?;
+    config_mod.add_function(wrap_pyfunction!(inject_sentinals, &config_mod)?)?;
     config_mod.add_function(wrap_pyfunction!(state_root, &config_mod)?)?;
     config_mod.add_function(wrap_pyfunction!(work_root, &config_mod)?)?;
     config_mod.add_function(wrap_pyfunction!(user_config_root, &config_mod)?)?;

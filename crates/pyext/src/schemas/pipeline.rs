@@ -218,21 +218,37 @@ impl Pipeline {
         let launch_cmds_list = PyList::new(py, &launch_cmds)?;
         loader::check_unresolved_consumers(&stages_list, &launch_cmds_list, extra_out.as_ref())?;
 
-        // Handle default_client_override
+        // Resolve default_client: YAML field > CLI override > global config
         let default_client = match (default_client, default_client_override) {
+            (Some(dc), _) => Some(dc),
             (None, Some(override_str)) => {
                 let client_cls = py.import("_gremlins_core.clients")?.getattr("RustClient")?;
-                let client: Py<PyAny> = client_cls
-                    .call_method1("parse", (override_str,))?
-                    .extract()?;
-                Some(client)
+                Some(
+                    client_cls
+                        .call_method1("parse", (override_str,))?
+                        .extract()?,
+                )
             }
-            (dc, _) => dc,
+            (None, None) => {
+                let cfg_default = gremlins::config::global_config()
+                    .ok()
+                    .and_then(|cfg| cfg.default_client().map(String::from));
+                match cfg_default {
+                    Some(client_str) => {
+                        let client_cls =
+                            py.import("_gremlins_core.clients")?.getattr("RustClient")?;
+                        let client: Py<PyAny> =
+                            client_cls.call_method1("parse", (client_str,))?.extract()?;
+                        Some(client)
+                    }
+                    None => None,
+                }
+            }
         };
 
         if default_client.is_none() {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "pipeline is missing 'default_client' — set a 'default_client' in the pipeline YAML or pass --client on the command line",
+                "pipeline is missing 'default_client' — set a 'default_client' in the pipeline YAML, pass --client on the command line, or set 'default-client' in config.json",
             ));
         }
 

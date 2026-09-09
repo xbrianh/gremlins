@@ -399,7 +399,10 @@ def _gather_commit_inputs(
     _CONTENT_CAP = 4000  # chars; enough context without blowing up the prompt
 
     inputs["plan"] = registry.content("artifact://plan.md")[:_CONTENT_CAP]
-    inputs["spec"] = registry.content("artifact://spec.md")[:_CONTENT_CAP]
+    try:
+        inputs["spec"] = registry.content("artifact://spec.md")[:_CONTENT_CAP]
+    except MissingArtifact:
+        inputs["spec"] = ""
 
     inputs["git_log"] = "\n".join(
         _git.log_oneline(f"{merge_base}..{branch}", cwd=cwd).splitlines()[:100]

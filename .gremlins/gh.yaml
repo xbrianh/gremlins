@@ -80,7 +80,7 @@ stages:
       diff: "artifact://diff.txt"
     options:
       cmds:
-        - "git diff {base_sha}...HEAD > \"$GREMLINS_ARTIFACT_DIR/diff.txt\""
+        - "git diff {base_sha}...HEAD > {diff}"
 
   - parallel:
       - name: review-one
@@ -162,7 +162,7 @@ stages:
             echo "## Issue Comments"
             echo
             gh pr view "$PR_URL" --comments --json comments --jq '.comments[] | "### Comment by \(.author.login) (\(.createdAt))\n\n\(.body)\n\n---\n"'
-          } > "$GREMLINS_ARTIFACT_DIR/github-review-content.md"
+          } > {github_review_content}
   - name: github-address-pull-request-reviews
     type: agent
     interpolation:

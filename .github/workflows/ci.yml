@@ -32,6 +32,10 @@ jobs:
           rm -f target/wheels/gremlins_ai-*.whl
           maturin build --profile ci
           pip install --force-reinstall target/wheels/gremlins_ai-*.whl
+      - name: Validate pipeline overlays
+        run: |
+          source .venv/bin/activate
+          make validate-gremlin-overlays
       - name: Lint, format, type-check, clippy, rustfmt
         run: |
           source .venv/bin/activate

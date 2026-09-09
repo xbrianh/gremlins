@@ -69,7 +69,7 @@ stages:
       diff: "artifact://diff.txt"
     options:
       cmds:
-        - "git diff {base_sha}...HEAD > \"$GREMLINS_ARTIFACT_DIR/diff.txt\""
+        - "git diff {base_sha}...HEAD > {diff}"
   - parallel:
       - name: review-one
         type: agent
