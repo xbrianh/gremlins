@@ -209,11 +209,11 @@ stage-definitions:            # optional; reusable stage patterns
       cmds: ["ruff format . && ruff check --fix ."]
 
 land:                         # optional; exec stage run by `gremlins land`
-  in:
-    PR_URL: pr-url
+  interpolation:
+    PR_URL: content("artifact://pr-url.txt")
   options:
     cmds:
-      - gh pr merge --squash --delete-branch "$PR_URL"
+      - gh pr merge --squash --delete-branch "{PR_URL}"
 
 stages:
   - type: gremlins:plan
@@ -242,8 +242,8 @@ stages:
 | `prompt` | Path or list of paths. `gremlins:NAME` resolves from the bundled package prompts; a bare `NAME` resolves from the pipeline's `prompt_dir`. |
 | `options` | Free-form dict passed to the stage |
 | `skip_if_exists` | Artifact key; if this artifact is verified to exist, skip the stage |
-| `in` | Map of variable names to artifact registry keys (see [Artifact binding](#artifact-binding)) |
-| `out` | Map of artifact keys to URI strings (see [Artifact binding](#artifact-binding)) |
+| `interpolation` | Map of variable names to artifact registry keys (see [Artifact binding](#artifact-binding)) |
+| `bind` | Map of artifact keys to URI strings (see [Artifact binding](#artifact-binding)) |
 | `body` | List of child stages (for `loop` and `sequence` types) |
 | `max-iterations` | Max loop iterations (for `loop` type; also settable via `options.max_iterations`) |
 | `stop_when_exists` | Artifact key that terminates the loop when bound (for `loop` type) |
@@ -335,8 +335,8 @@ Five primitive stage types are built into the engine (`gremlins/pipeline/loader.
 
 | Type | Description |
 |---|---|
-| `agent` | Resolves `in:` artifacts, renders prompt, invokes the agent, verifies `out:` artifacts |
-| `exec` | Runs shell commands (`options.cmds` joined with `&&`) with `in:`/`out:` artifact bindings |
+| `agent` | Resolves `interpolation:` artifacts, renders prompt, invokes the agent, verifies `bind:` artifacts |
+| `exec` | Runs shell commands (`options.cmds` joined with `&&`) with `interpolation:`/`bind:` artifact bindings |
 | `loop` | Iterates `body` stages until `stop_when_exists` is bound or `max-iterations` is exhausted |
 | `parallel` | Fan-out/fan-in: runs `parallel:` children concurrently (up to `max_concurrent`) |
 | `sequence` | Runs `body` stages sequentially using child state |
@@ -403,11 +403,11 @@ The `land:` top-level key defines an `exec` stage run by `gremlins land`. It rep
 
 ```yaml
 land:
-  in:
-    PR_URL: pr-url
+  interpolation:
+    PR_URL: content("artifact://pr-url.txt")
   options:
     cmds:
-      - gh pr merge --squash --delete-branch "$PR_URL"
+      - gh pr merge --squash --delete-branch "{PR_URL}"
 ```
 
 When a pipeline declares `land:`, `gremlins land` runs this stage instead of the built-in merge logic. The stage runs in the project root (not the worktree).
@@ -472,7 +472,7 @@ stages:
   - { type: gremlins:implement,  prompt: [code-style, gremlins:implement_local.md] }
   - { type: verify,              options: { cmds: ["pytest"] }, prompt: verify }
   - { type: review-code }
-  - { name: address-code, type: agent, client: openai:gpt-4o, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md], in: {text: review-code} }
+  - { name: address-code, type: agent, client: openai:gpt-4o, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md], interpolation: {text: review-code} }
 ```
 
 Add a `prompt:` key to any stage to supply a custom prompt; paths are
@@ -498,7 +498,7 @@ stages:
         type: review-code
     max_concurrent: 2
 
-  - { name: address-code, type: agent, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md], in: {text: review-code} }
+  - { name: address-code, type: agent, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md], interpolation: {text: review-code} }
 ```
 
 ### Stage definitions
@@ -525,14 +525,14 @@ stages:
 
 Definitions provide base `type`, `options`, and `prompt`. Call-sites can override
 `prompt` and `options` via YAML anchors (as shown above) or via template placeholders
-in multi-stage recipes. Call-sites own the `name:`, `in:`, and `out:` keys;
-`out:` is forbidden inside a definition, but `in:` can be declared and will be
-merged with call-site `in:` values. For single-stage definitions, only `name`, `in`,
-and `out` keys can be safely overridden; to vary `prompt` or `options`, use anchors.
+in multi-stage recipes. Call-sites own the `name:`, `interpolation:`, and `bind:` keys;
+`bind:` is forbidden inside a definition, but `interpolation:` can be declared and will be
+merged with call-site `interpolation:` values. For single-stage definitions, only `name`, `interpolation`,
+and `bind` keys can be safely overridden; to vary `prompt` or `options`, use anchors.
 
 ### Artifact binding
 
-Stages can bind artifacts via `in:` and `out:` maps. These define what data
+Stages can bind artifacts via `interpolation:` and `bind:` maps. These define what data
 flows between stages in the pipeline:
 
 ```yaml
@@ -540,13 +540,13 @@ stages:
   - name: scan
     type: exec
     options:
-      cmds: ["python scan.py > $ARTIFACTS/report.json"]
-    out:
+      cmds: ["python scan.py > \"{report}\""]
+    bind:
       report: file://session/report
 
   - name: analyze
     type: agent
-    in:
+    interpolation:
       report: report
     prompt: |
       The scanning report is in {report}.
@@ -564,11 +564,10 @@ stages:
 - `git://range` — Special shorthand: the `exec` stage snapshots HEAD before running and binds the resulting range afterwards
 
 **Artifact binding semantics:**
-- `in:` values are registry key paths (e.g., `report` or `report.critical?default`) with optional dotted attribute access and `?default` fallback
-- `out:` values are URI strings that name what the stage produces; downstream stages reference the key name (not the URI) in their `in:` maps
-- Agent-stage prompt substitution uses `{var}` tokens; artifacts bound via `in:` become available for substitution
-- Exec-stage commands use `{read:key}` and `{artifact:key}` substitution tokens (distinct from agent-stage `{var}` substitution)
-- `in:` can be declared in a stage definition and will be merged with call-site `in:` values; `out:` cannot appear inside a definition
+- `interpolation:` values are registry key paths (e.g., `report` or `report.critical?default`) with optional dotted attribute access and `?default` fallback
+- `bind:` values are URI strings that name what the stage produces; downstream stages reference the key name (not the URI) in their `interpolation:` maps
+- Both agent and exec stages use `{var}` substitution from the `interpolation:` map and `bind:` output paths
+- `interpolation:` can be declared in a stage definition and will be merged with call-site `interpolation:` values; `bind:` cannot appear inside a definition
 
 ### Stage definitions and bundled recipes
 
