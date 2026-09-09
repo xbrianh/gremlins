@@ -114,10 +114,10 @@ def render_view(args: argparse.Namespace, here_root: str | None) -> None:
 
     if args.json:
         do_list_json(args, here_root=here_root)
-    elif args.text:
-        do_list(args, here_root=here_root)
     elif args.recent is not None:
         do_recent(args, here_root=here_root)
+    elif args.text:
+        do_list(args, here_root=here_root)
     else:
         do_list(args, here_root=here_root)
 
@@ -244,8 +244,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # --watch and positional drill-in are mutually exclusive.
     if args.watch is not None and args.id_prefix is not None:
-        print("error: --watch cannot be combined with a positional id argument")
-        sys.exit(0)
+        print(
+            "error: --watch cannot be combined with a positional id argument",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # --json/--text and --watch are mutually exclusive.
     if args.json and args.watch is not None:
