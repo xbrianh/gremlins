@@ -1,3 +1,4 @@
+pub mod agent_loop;
 pub mod backend;
 pub mod cmd_backend;
 pub mod config;

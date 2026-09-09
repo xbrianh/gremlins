@@ -659,7 +659,7 @@ The boss resumes from its child-spawn stage and proceeds with the next iteration
 |---|---|---|
 | `GREMLINS_REASONING_EFFORT` | *(unset)* | Reasoning effort for OpenAI-compatible backends (`openai`, `xai`, `openrouter`). One of `low`, `medium`, `high`. Unset disables reasoning entirely (no token cost). Only takes effect for models that support reasoning. Per-client `reasoning=` params override this default — see [Client specifier syntax](#client-specifier-syntax) below. |
 | `GREMLINS_STREAM_IDLE_TIMEOUT` | `600` | Stream idle timeout in seconds for OpenAI-compatible backends. If the model produces no output for this duration the stream is cancelled and the call is retried. |
-| `GREMLINS_OPENAI_AGENTS_MAX_TURNS` | `1000` | Maximum agent loop turns for OpenAI-compatible backends. Guards against runaway tool-call loops. |
+| `GREMLINS_AGENT_MAX_TURNS` | `1000` | Maximum agent loop turns. Guards against runaway tool-call loops. Falls back to `GREMLINS_OPENAI_AGENTS_MAX_TURNS` for backward compatibility. |
 | `GREMLINS_LOG_LEVEL` | `INFO` | Log level for gremlins output. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 
 ### Client specifier syntax
