@@ -36,7 +36,7 @@ pub fn resolve_interpolation_map(
             let json_path = caps.get(2).map(|m| m.as_str());
             match artifacts.content(&uri_str, json_path) {
                 Ok(val) => {
-                    log::debug!("resolve: {var} = content({uri_str}) -> {} chars", val.len());
+                    log::debug!("resolve: {var} = content({uri_str}) -> {} bytes", val.len());
                     result.insert(var.clone(), val);
                 }
                 Err(e) if optional && e.downcast_ref::<MissingArtifact>().is_some() => {
@@ -71,7 +71,7 @@ pub fn resolve_interpolation_map(
         match artifacts.data_uri(&key) {
             Ok(val) => {
                 result.insert(var.clone(), val.to_string());
-                log::debug!("resolve: {var} = {key} -> {}", val);
+                log::debug!("resolve: {var} = {key} -> {} bytes", val.len());
             }
             Err(_) if default.is_some() => {
                 result.insert(var.clone(), default.unwrap_or("").to_string());
