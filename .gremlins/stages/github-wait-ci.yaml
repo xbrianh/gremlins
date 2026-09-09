@@ -1,4 +1,4 @@
-# Loop body: poll → fix → push-fix → capture-head.
+# Loop body: await → poll → failure-log → fix → push-fix → capture-head.
 # Iteration-1 detection: fix-head absent means no prior fix push.
 # Post-fix SHA verification: fix-head present → wait for headRefOid to match.
 
@@ -10,29 +10,57 @@ stages:
     max-iterations: 3
     stop_when_exists: "artifact://{loop_iter}/done"
     body:
-      - name: poll
+      - name: ci-await
         type: exec
         interpolation:
           pr_url: content("artifact://pr-url.txt")
-          artifact_dir: "artifact://pr-url.txt"
+          fix_head: content("artifact://fix-head")?
         bind:
-          status?: "artifact://status"
           done?: "artifact://{loop_iter}/done"
-          bail: "artifact://{loop_iter}/bail"
-          ci_log: "artifact://ci_failure.txt"
+          bail?: "artifact://{loop_iter}/bail"
         options:
-          poll_timeout: "1200"
-          poll_interval: "30"
+          timeout: 180
           startup_grace_secs: "60"
-          timeout: "1380"
+          poll_interval: "30"
           cmds:
             - |
-              ARTIFACT_DIR="$(dirname "{artifact_dir}")"
-              gh_wait_ci "$ARTIFACT_DIR" "{pr_url}" {startup_grace_secs} {poll_timeout} {poll_interval}
-              rc=$?
-              [ -f "$ARTIFACT_DIR/ci_poll_done" ] && mv "$ARTIFACT_DIR/ci_poll_done" "{done}" || true
-              [ -f "$ARTIFACT_DIR/ci_bail" ] && mv "$ARTIFACT_DIR/ci_bail" "{bail}" || true
-              exit $rc
+              BAIL_MSG=$(gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} 2>&1) || { printf '%s' "$BAIL_MSG" > "{bail}"; exit 2; }
+              if [ "$BAIL_MSG" = "skipped" ]; then
+                touch "{done}"
+              fi
+
+      - name: ci-poll
+        type: exec
+        skip_if_exists: "artifact://{loop_iter}/done"
+        interpolation:
+          pr_url: content("artifact://pr-url.txt")
+        bind:
+          status: "artifact://status"
+          done?: "artifact://{loop_iter}/done"
+          bail?: "artifact://{loop_iter}/bail"
+        options:
+          timeout: 1260
+          poll_timeout: "1200"
+          poll_interval: "30"
+          cmds:
+            - |
+              BAIL_MSG=$(gh_ci_poll "{pr_url}" {poll_timeout} {poll_interval} 2>&1) || { printf '%s' "$BAIL_MSG" > "{bail}"; exit 2; }
+              printf '%s' "$BAIL_MSG" > "{status}"
+              if [ "$BAIL_MSG" = "passed" ]; then
+                touch "{done}"
+              fi
+
+      - name: ci-failure-log
+        type: exec
+        skip_if_exists: "artifact://{loop_iter}/done"
+        interpolation:
+          pr_url: content("artifact://pr-url.txt")
+        bind:
+          ci_log: "artifact://ci_failure.txt"
+        options:
+          timeout: 120
+          cmds:
+            - gh_ci_failure_log "{pr_url}" > "{ci_log}"
 
       - name: fix
         type: agent

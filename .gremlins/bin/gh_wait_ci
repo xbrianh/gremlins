@@ -32,62 +32,76 @@ done_file="$artifact_dir/ci_poll_done"
 bail_file="$artifact_dir/ci_bail"
 ci_log="$artifact_dir/ci_failure.txt"
 
-# fetch_status: call gh and pipe through python3 for all JSON extraction.
-# Prints three lines: review_decision, rollup_length, head_ref_oid
-fetch_status() {
-    gh pr view "$pr_url" --json statusCheckRollup,reviewDecision,headRefOid | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-rd = d.get('reviewDecision') or ''
-rollup = d.get('statusCheckRollup') or []
-oid = d.get('headRefOid') or ''
-print(rd)
-print(len(rollup))
-print(oid)
-"
+# --- helpers ---
+
+fetch_meta() {
+    gh pr view "$pr_url" --json statusCheckRollup,reviewDecision,headRefOid --jq '
+(.reviewDecision // ""),
+((.statusCheckRollup // []) | length),
+(.headRefOid // "")
+'
 }
 
-# all_checks_done: read rollup JSON from gh, return 'true' or 'false'
 all_checks_done() {
-    gh pr view "$pr_url" --json statusCheckRollup | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-rollup = d.get('statusCheckRollup') or []
-if len(rollup) == 0:
-    print('false')
-    sys.exit(0)
-for item in rollup:
-    if item.get('__typename') == 'StatusContext':
-        if item.get('state') in ('EXPECTED', 'PENDING'):
-            print('false')
-            sys.exit(0)
-    else:
-        if item.get('status') != 'COMPLETED':
-            print('false')
-            sys.exit(0)
-print('true')
-"
+    gh pr view "$pr_url" --json statusCheckRollup --jq '
+(.statusCheckRollup // []) as $r |
+if ($r | length) == 0 then
+    false
+else
+    ([$r[] |
+        if .__typename == "StatusContext" then
+            select(.state == "EXPECTED" or .state == "PENDING")
+        else
+            select(.status != "COMPLETED")
+        end
+    ] | length) == 0
+end
+'
 }
 
-# get_failed_checks: return JSON array of failed checks
-get_failed_checks() {
-    gh pr view "$pr_url" --json statusCheckRollup | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-rollup = d.get('statusCheckRollup') or []
-failed = []
-for item in rollup:
-    if item.get('__typename') == 'StatusContext':
-        if item.get('state') in ('FAILURE', 'ERROR'):
-            failed.append(item)
-    else:
-        if item.get('conclusion') in ('FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED'):
-            failed.append(item)
-print(len(failed))
-if failed:
-    print(json.dumps(failed))
-"
+get_failed_count() {
+    # Returns "count" on stdout, or "count<newline>json" when count > 0.
+    gh pr view "$pr_url" --json statusCheckRollup --jq '
+[.statusCheckRollup // [] | .[] |
+    if .__typename == "StatusContext" then
+        select(.state == "FAILURE" or .state == "ERROR")
+    else
+        select(.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+    end
+] as $failed |
+$failed | length,
+if ($failed | length) > 0 then $failed else empty end
+'
 }
+
+_FAILED_PRINT_FILTER='[.statusCheckRollup // [] | .[] |
+    if .__typename == "StatusContext" then
+        select(.state == "FAILURE" or .state == "ERROR")
+    else
+        select(.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+    end
+] | .[] |
+"\n## Check: \(.name // .context // "unknown")\n" +
+(
+    (.detailsUrl // .targetUrl // "") as $url |
+    if $url | test("actions/runs/[0-9]") then
+        "\n(gh run view " + ($url | capture("actions/runs/(?<id>[0-9]+)") | .id) + " --log-failed)\n"
+    else
+        "(no action run URL; details: " + $url + ")\n"
+    end
+)
+'
+
+_FAILED_RUN_FILTER='[.statusCheckRollup // [] | .[] |
+    if .__typename == "StatusContext" then
+        select(.state == "FAILURE" or .state == "ERROR")
+    else
+        select(.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+    end
+] | .[] |
+    (.detailsUrl // .targetUrl // "") |
+    capture("actions/runs/(?<id>[0-9]+)") | .id
+'
 
 check_bail_review_required() {
     local decision="$1"
@@ -97,20 +111,21 @@ check_bail_review_required() {
     fi
 }
 
-# Post-fix path: fix-head written by capture-head on prior iteration.
+# --- startup / SHA sync ---
+
 fix_head=""
 if [ -f "$artifact_dir/fix-head" ]; then
     fix_head=$(cat "$artifact_dir/fix-head")
 fi
 
-# Iteration 1 startup grace: wait for any check-runs to appear.
 if [ -z "$fix_head" ]; then
+    # Iteration 1: startup grace — wait for any check-runs to appear
     grace_deadline=$(( $(date +%s) + startup_grace_secs ))
     rollup_len=0
     while true; do
-        status_lines=$(fetch_status)
-        decision=$(printf '%s' "$status_lines" | sed -n '1p')
-        rollup_len=$(printf '%s' "$status_lines" | sed -n '2p')
+        meta=$(fetch_meta)
+        decision=$(printf '%s' "$meta" | sed -n '1p')
+        rollup_len=$(printf '%s' "$meta" | sed -n '2p')
         check_bail_review_required "$decision"
         if [ "$rollup_len" -gt 0 ] || [ "$(date +%s)" -ge "$grace_deadline" ]; then
             break
@@ -124,12 +139,12 @@ if [ -z "$fix_head" ]; then
         exit 0
     fi
 else
-    # Post-fix: wait for GitHub to reflect the pushed commit SHA.
+    # Post-fix: wait for GitHub to reflect the pushed commit SHA
     push_deadline=$(( $(date +%s) + poll_timeout ))
     while true; do
-        status_lines=$(fetch_status)
-        decision=$(printf '%s' "$status_lines" | sed -n '1p')
-        head_oid=$(printf '%s' "$status_lines" | sed -n '3p')
+        meta=$(fetch_meta)
+        decision=$(printf '%s' "$meta" | sed -n '1p')
+        head_oid=$(printf '%s' "$meta" | sed -n '3p')
         check_bail_review_required "$decision"
         if [ "$head_oid" = "$fix_head" ] || git merge-base --is-ancestor "$fix_head" "$head_oid" 2>/dev/null; then
             break
@@ -142,13 +157,14 @@ else
     done
 fi
 
-# Poll until all checks complete or timeout.
+# --- poll ---
+
 poll_deadline=$(( $(date +%s) + poll_timeout ))
 all_done_result="false"
 while true; do
     all_done_result=$(all_checks_done)
-    status_lines=$(fetch_status)
-    decision=$(printf '%s' "$status_lines" | sed -n '1p')
+    meta=$(fetch_meta)
+    decision=$(printf '%s' "$meta" | sed -n '1p')
     check_bail_review_required "$decision"
     if [ "$all_done_result" = "true" ]; then break; fi
     if [ "$(date +%s)" -ge "$poll_deadline" ]; then
@@ -163,10 +179,10 @@ if [ "$all_done_result" != "true" ]; then
     exit 2
 fi
 
-# Check for failures.
-failed_output=$(get_failed_checks)
+# --- result ---
+
+failed_output=$(get_failed_count)
 failed_count=$(printf '%s' "$failed_output" | head -1)
-failed_json_data=$(printf '%s' "$failed_output" | tail -n +2)
 
 if [ "$failed_count" -eq 0 ]; then
     info "ci-gate: all checks passed"
@@ -175,34 +191,12 @@ if [ "$failed_count" -eq 0 ]; then
     exit 0
 fi
 
-# Collect failure logs for the fix agent.
+# --- failure logs ---
+
 printf 'failed' > "$status_file"
 {
-    printf '%s' "$failed_json_data" | python3 -c "
-import sys, json, re
-failed = json.load(sys.stdin)
-for check in failed:
-    name = check.get('name') or check.get('context') or 'unknown'
-    url = check.get('detailsUrl') or check.get('targetUrl') or ''
-    print()
-    print(f'## Check: {name}')
-    print()
-    m = re.search(r'/actions/runs/(\d+)', url)
-    if m:
-        print(f'(gh run view {m.group(1)} --log-failed)')
-        print()
-    else:
-        print(f'(no action run URL; details: {url})')
-"
-    printf '%s' "$failed_json_data" | python3 -c "
-import sys, json, re
-failed = json.load(sys.stdin)
-for check in failed:
-    url = check.get('detailsUrl') or check.get('targetUrl') or ''
-    m = re.search(r'/actions/runs/(\d+)', url)
-    if m:
-        print(m.group(1))
-" | while IFS= read -r run_id; do
+    gh pr view "$pr_url" --json statusCheckRollup --jq "$_FAILED_PRINT_FILTER"
+    gh pr view "$pr_url" --json statusCheckRollup --jq "$_FAILED_RUN_FILTER" | while IFS= read -r run_id; do
         echo
         echo "--- run $run_id logs ---"
         timeout 30 gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \

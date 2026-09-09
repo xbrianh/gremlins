@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Wait for CI jobs to become available on a PR.
+# Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval]
+#
+# Phases:
+#   - No fix_head: startup grace — wait for check-runs to appear
+#   - fix_head:    SHA sync — wait for headRefOid to reflect the pushed commit
+#
+# Outputs:
+#   stdout: "skipped" if no check-runs after grace (exit 0)
+#           nothing otherwise (exit 0 when jobs are available)
+#   stderr: bail message on timeout / REVIEW_REQUIRED (exit 2)
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+pr_url="${1:-}"
+fix_head="${2:-}"
+startup_grace_secs="${3:-60}"
+poll_interval="${4:-30}"
+
+if [ -z "$pr_url" ]; then
+    die "Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval]"
+fi
+
+# --- helpers ---
+
+fetch_meta() {
+    gh pr view "$pr_url" --json statusCheckRollup,reviewDecision,headRefOid --jq '
+(.reviewDecision // ""),
+((.statusCheckRollup // []) | length),
+(.headRefOid // "")
+'
+}
+
+bail_review_required() {
+    local decision="$1"
+    if [ "$decision" = "REVIEW_REQUIRED" ]; then
+        printf 'ci-gate: PR blocked by required human review\n' >&2
+        exit 2
+    fi
+}
+
+# --- main ---
+
+if [ -z "$fix_head" ]; then
+    # Iteration 1: startup grace — wait for any check-runs to appear
+    grace_deadline=$(( $(date +%s) + startup_grace_secs ))
+    rollup_len=0
+    while true; do
+        meta=$(fetch_meta)
+        decision=$(printf '%s' "$meta" | sed -n '1p')
+        rollup_len=$(printf '%s' "$meta" | sed -n '2p')
+        bail_review_required "$decision"
+        if [ "$rollup_len" -gt 0 ] || [ "$(date +%s)" -ge "$grace_deadline" ]; then
+            break
+        fi
+        sleep "$poll_interval"
+    done
+    if [ "$rollup_len" -eq 0 ]; then
+        info "ci-gate: no check-runs after ${startup_grace_secs}s grace; skipping"
+        printf 'skipped\n'
+        exit 0
+    fi
+else
+    # Post-fix: wait for GitHub to reflect the pushed commit SHA
+    while true; do
+        meta=$(fetch_meta)
+        decision=$(printf '%s' "$meta" | sed -n '1p')
+        head_oid=$(printf '%s' "$meta" | sed -n '3p')
+        bail_review_required "$decision"
+        if [ "$head_oid" = "$fix_head" ] || git merge-base --is-ancestor "$fix_head" "$head_oid" 2>/dev/null; then
+            break
+        fi
+        sleep "$poll_interval"
+    done
+fi

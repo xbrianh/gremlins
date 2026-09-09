@@ -29,15 +29,17 @@ fi
 repo=$(printf '%s' "$first" | sed -n 's/^\([^/#]*\/[^#]*\)#.*/\1/p')
 num=$(printf '%s' "$first" | sed 's/.*#//')
 
-if [ -n "$repo" ]; then
-    data=$(gh issue view "$num" --repo "$repo" --json title,body,number)
-else
-    data=$(gh issue view "$num" --json title,body,number)
-fi
+_gh_view() {
+    if [ -n "$repo" ]; then
+        gh issue view "$num" --repo "$repo" --json title,body,number "$@"
+    else
+        gh issue view "$num" --json title,body,number "$@"
+    fi
+}
 
-title=$(printf '%s' "$data" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['title'])")
-body=$(printf '%s' "$data" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['body'])")
-number=$(printf '%s' "$data" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['number'])")
+title=$(_gh_view --jq '.title')
+body=$(_gh_view --jq '.body')
+number=$(_gh_view --jq '.number')
 
 case "$body" in
     '#'*) printf '%s\n' "$body" > "$plan_file" ;;

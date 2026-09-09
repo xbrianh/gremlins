@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Download failure logs for all failed CI checks on a PR.
+# Usage: gh_ci_failure_log <pr_url>
+#
+# Outputs formatted failure log to stdout.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+pr_url="${1:-}"
+
+if [ -z "$pr_url" ]; then
+    die "Usage: gh_ci_failure_log <pr_url>"
+fi
+
+# jq filter shared by both gh calls below: select failed checks.
+_FAILED_FILTER='
+[.statusCheckRollup // [] | .[] |
+    if .__typename == "StatusContext" then
+        select(.state == "FAILURE" or .state == "ERROR")
+    else
+        select(.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+    end
+]
+'
+
+# Print check headers with run URLs.
+gh pr view "$pr_url" --json statusCheckRollup --jq "
+${_FAILED_FILTER} | .[] |
+\"\n## Check: \(.name // .context // \"unknown\")\n\" +
+(
+    (.detailsUrl // .targetUrl // \"\") as \$url |
+    if \$url | test(\"actions/runs/[0-9]\") then
+        \"\n(gh run view \" + (\$url | capture(\"actions/runs/(?<id>[0-9]+)\") | .id) + \" --log-failed)\n\"
+    else
+        \"(no action run URL; details: \" + \$url + \")\n\"
+    end
+)
+"
+
+# Download logs for each failed run.
+gh pr view "$pr_url" --json statusCheckRollup --jq "
+${_FAILED_FILTER} | .[] |
+    (.detailsUrl // .targetUrl // \"\") |
+    capture(\"actions/runs/(?<id>[0-9]+)\") | .id
+" | while IFS= read -r run_id; do
+    echo
+    echo "--- run $run_id logs ---"
+    timeout 30 gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
+        || printf '(could not fetch run logs)\n'
+    echo "---"
+done

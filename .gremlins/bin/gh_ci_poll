@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Poll CI checks on a PR until all complete, then output status.
+# Usage: gh_ci_poll <pr_url> [poll_timeout] [poll_interval]
+#
+# Outputs:
+#   stdout: "passed" or "failed"
+#   stderr: bail message on timeout / REVIEW_REQUIRED (exit 2)
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+pr_url="${1:-}"
+poll_timeout="${2:-1200}"
+poll_interval="${3:-30}"
+
+if [ -z "$pr_url" ]; then
+    die "Usage: gh_ci_poll <pr_url> [poll_timeout] [poll_interval]"
+fi
+
+# --- helpers ---
+
+fetch_meta() {
+    gh pr view "$pr_url" --json statusCheckRollup,reviewDecision --jq '
+(.reviewDecision // ""),
+((.statusCheckRollup // []) | length)
+'
+}
+
+all_checks_done() {
+    gh pr view "$pr_url" --json statusCheckRollup --jq '
+(.statusCheckRollup // []) as $r |
+if ($r | length) == 0 then
+    false
+else
+    ([$r[] |
+        if .__typename == "StatusContext" then
+            select(.state == "EXPECTED" or .state == "PENDING")
+        else
+            select(.status != "COMPLETED")
+        end
+    ] | length) == 0
+end
+'
+}
+
+count_failed() {
+    gh pr view "$pr_url" --json statusCheckRollup --jq '
+[.statusCheckRollup // [] | .[] |
+    if .__typename == "StatusContext" then
+        select(.state == "FAILURE" or .state == "ERROR")
+    else
+        select(.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+    end
+] | length
+'
+}
+
+bail_review_required() {
+    local decision="$1"
+    if [ "$decision" = "REVIEW_REQUIRED" ]; then
+        printf 'ci-gate: PR blocked by required human review\n' >&2
+        exit 2
+    fi
+}
+
+# --- main ---
+
+poll_deadline=$(( $(date +%s) + poll_timeout ))
+
+while true; do
+    meta=$(fetch_meta)
+    decision=$(printf '%s' "$meta" | sed -n '1p')
+    bail_review_required "$decision"
+
+    if [ "$(all_checks_done)" = "true" ]; then
+        break
+    fi
+
+    if [ "$(date +%s)" -ge "$poll_deadline" ]; then
+        printf 'ci-gate: checks incomplete after %ss timeout\n' "$poll_timeout" >&2
+        exit 2
+    fi
+    sleep "$poll_interval"
+done
+
+failed_count=$(count_failed)
+if [ "$failed_count" -eq 0 ]; then
+    info "ci-gate: all checks passed"
+    printf 'passed\n'
+else
+    info "ci-gate: ${failed_count} check(s) failed"
+    printf 'failed\n'
+fi
