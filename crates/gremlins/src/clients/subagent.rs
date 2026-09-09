@@ -99,11 +99,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
             )
             .await;
 
-            eprintln!(
-                "{} {}subagent: end",
-                stream::ts_internal(),
-                sub_prefix,
-            );
+            eprintln!("{} {}subagent: end", stream::ts_internal(), sub_prefix,);
 
             match result {
                 Ok(completed) => completed.text_result.unwrap_or_default(),
