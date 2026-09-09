@@ -227,8 +227,9 @@ impl ArtifactRegistry {
             return false;
         }
         let value = &self.data[uri];
-        // Non-string values are considered existing
-        // For string values, resolve to filesystem path
+        // Non-file-backed values (e.g. git://range, opaque://, raw strings)
+        // are considered existing.  File-backed values are resolved to a
+        // filesystem path and checked for presence.
         let p = if value.starts_with("file://session/") {
             let name = value.strip_prefix("file://session/").unwrap_or(value);
             self.artifact_dir.join(name)
@@ -238,10 +239,7 @@ impl ArtifactRegistry {
             PathBuf::from(value)
         };
         if p.is_absolute() {
-            match fs::metadata(&p) {
-                Ok(m) => m.len() > 0,
-                Err(_) => false,
-            }
+            fs::metadata(&p).is_ok()
         } else {
             // Non-file values (e.g. git://range, opaque://, raw strings)
             true
@@ -498,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exists_false_for_empty_file() {
+    fn test_exists_true_for_empty_file() {
         let (_tmp, artifact_dir) = setup();
         let file_path = artifact_dir.join("empty.txt");
         fs::write(&file_path, "").unwrap();
@@ -507,7 +505,7 @@ mod tests {
             "artifact://empty.txt".to_string(),
             file_path.to_string_lossy().to_string(),
         );
-        assert!(!reg.exists("artifact://empty.txt"));
+        assert!(reg.exists("artifact://empty.txt"));
     }
 
     #[test]
