@@ -119,7 +119,7 @@ stages:
       github_review_content: "artifact://github-review-content.md"
     options:
       cmds:
-        - 'gh_gather_review_content "$pr" > "{github_review_content}"'
+        - 'gh_gather_review_content "{pr}" > "{github_review_content}"'
   - name: github-address-pull-request-reviews
     type: agent
     interpolation:

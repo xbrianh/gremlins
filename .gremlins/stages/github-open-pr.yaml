@@ -47,4 +47,4 @@ stages:
       pr_url:    "artifact://pr-url.txt"
     options:
       cmds:
-        - 'gh_create_pr "$base_ref_to_open_pr" "$pr_title" "$GREMLINS_ARTIFACT_DIR/pr-body.md" "{pr_number}" "{pr_url}"'
+        - 'gh_create_pr "{base_ref_to_open_pr}" "{pr_title}" "$GREMLINS_ARTIFACT_DIR/pr-body.md" "{pr_number}" "{pr_url}"'

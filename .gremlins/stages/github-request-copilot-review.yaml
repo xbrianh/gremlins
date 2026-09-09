@@ -7,4 +7,4 @@ stages:
       repo: content("artifact://repo.txt")
     options:
       cmds:
-        - 'gh_request_reviewer "$pr_number" "$repo"'
+        - 'gh_request_reviewer "{pr_number}" "{repo}"'
