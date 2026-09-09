@@ -4,10 +4,8 @@ import asyncio
 import logging
 import os
 import pathlib
-import signal
 import subprocess
 import sys
-import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -28,6 +26,9 @@ from _gremlins_core.utils.proc import (
 )
 from _gremlins_core.utils.proc import (
     run_quiet as _run_quiet,
+)
+from _gremlins_core.utils.proc import (
+    run_shell_async as _run_shell_async,
 )
 from _gremlins_core.utils.proc import (
     terminate_with_grace as _terminate_with_grace,
@@ -101,29 +102,11 @@ async def run_async(
     check: bool = False,
     text: bool = True,
     timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     return await _run_async(
-        cmd, cwd=_to_str(cwd), check=check, text=text, timeout=timeout
+        cmd, cwd=_to_str(cwd), check=check, text=text, timeout=timeout, env=env
     )
-
-
-def _capture_process_tree(pid: int) -> None:
-    """Log child PIDs of the given process before killing it."""
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "pid,ppid,command", "--ppid", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if result.stdout.strip():
-            logger.warning(
-                "run_shell_async: pid=%d child processes:\n%s",
-                pid,
-                result.stdout.rstrip(),
-            )
-    except Exception:
-        pass
 
 
 async def run_shell_async(
@@ -133,223 +116,12 @@ async def run_shell_async(
     env: dict[str, str] | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    _t0 = time.monotonic()
-    cwd_str = os.fspath(cwd) if cwd else None
-    _warn_at = timeout * 0.8 if timeout else None
+    """Run a shell command string asynchronously.
 
-    async def _timeout_monitor() -> None:
-        if _warn_at is None:
-            return
-        await asyncio.sleep(_warn_at)
-        logger.warning(
-            "run_shell_async: pid=%d approaching timeout (%.1fs elapsed of %.1fs)",
-            proc.pid,
-            time.monotonic() - _t0,
-            timeout,
-        )
-
-    logger.info(
-        "run_shell_async: starting pid=soon%s%s%s",
-        f" cwd={cwd_str}" if cwd_str else "",
-        f" timeout={timeout}s" if timeout is not None else "",
-        f" cmd={cmd.replace(chr(10), ' ')[:200]}"
-        if len(cmd) <= 200
-        else f" cmd={cmd.replace(chr(10), ' ')[:197]}...",
-    )
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-        start_new_session=True,
-    )
-    logger.info(
-        "run_shell_async: pid=%d spawned",
-        proc.pid,
-    )
-
-    async def _drain(
-        stream: asyncio.StreamReader, label: str, sink: list[bytes] | None = None
-    ) -> tuple[bytes, int]:
-        """Read stream until EOF. Returns (data, line_count).
-
-        Continuous pumping avoids pipe-buffer deadlock where a burst of output
-        fills the kernel pipe buffer before the event loop can schedule the
-        read handler.
-        """
-        chunks: list[bytes] = []
-        buf = b""
-        line_count = 0
-        debug_enabled = logger.isEnabledFor(logging.DEBUG)
-        while True:
-            chunk = await stream.read(65536)
-            if not chunk:
-                if buf and debug_enabled:
-                    logger.debug(
-                        "run_shell_async: pid=%d %s: %s",
-                        proc.pid,
-                        label,
-                        buf.decode("utf-8", "replace").rstrip(),
-                    )
-                break
-            chunks.append(chunk)
-            if sink is not None:
-                sink.append(chunk)
-            if debug_enabled:
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line_count += 1
-                    logger.debug(
-                        "run_shell_async: pid=%d %s: %s",
-                        proc.pid,
-                        label,
-                        line.decode("utf-8", "replace").rstrip(),
-                    )
-            else:
-                # Count lines even without DEBUG for the heartbeat
-                buf += chunk
-                while b"\n" in buf:
-                    _, buf = buf.split(b"\n", 1)
-                    line_count += 1
-        return b"".join(chunks), line_count
-
-    async def _heartbeat() -> None:
-        """Periodic progress log so hangs are visible without DEBUG."""
-        interval = 30.0
-        while True:
-            await asyncio.sleep(interval)
-            elapsed = time.monotonic() - _t0
-            stdout_bytes = sum(len(c) for c in _stdout_chunks)
-            stderr_bytes = sum(len(c) for c in _stderr_chunks)
-            logger.info(
-                "run_shell_async: pid=%d heartbeat elapsed=%.0fs stdout=%db stderr=%db",
-                proc.pid,
-                elapsed,
-                stdout_bytes,
-                stderr_bytes,
-            )
-
-    _stdout_chunks: list[bytes] = []
-    _stderr_chunks: list[bytes] = []
-
-    async def _drain_wrapper(
-        stream: asyncio.StreamReader, label: str, sink: list[bytes]
-    ) -> bytes:
-        data, _ = await _drain(stream, label, sink=sink)
-        return data
-
-    stdout_task = asyncio.create_task(
-        _drain_wrapper(proc.stdout, "stdout", _stdout_chunks)
-    )
-    stderr_task = asyncio.create_task(
-        _drain_wrapper(proc.stderr, "stderr", _stderr_chunks)
-    )
-    proc_task = asyncio.create_task(proc.wait())
-    monitor_task = asyncio.create_task(_timeout_monitor())
-    heartbeat_task = asyncio.create_task(_heartbeat())
-
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(proc_task, stdout_task, stderr_task),
-            timeout=timeout,
-        )
-        stdout_b = stdout_task.result()
-        stderr_b = stderr_task.result()
-    except TimeoutError:
-        elapsed = time.monotonic() - _t0
-        await asyncio.to_thread(_capture_process_tree, proc.pid)
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            stdout_b = await asyncio.wait_for(stdout_task, timeout=5.0)
-        except (TimeoutError, asyncio.CancelledError):
-            stdout_b = b""
-        try:
-            stderr_b = await asyncio.wait_for(stderr_task, timeout=5.0)
-        except (TimeoutError, asyncio.CancelledError):
-            stderr_b = b""
-        # Reap the killed process so it doesn't remain as a zombie.
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2.0)
-        except (TimeoutError, asyncio.CancelledError):
-            pass
-        logger.warning(
-            "run_shell_async: pid=%d timed out after %.2fs (timeout=%s) stdout_so_far=%db stderr_so_far=%db",
-            proc.pid,
-            elapsed,
-            timeout,
-            sum(len(c) for c in _stdout_chunks),
-            sum(len(c) for c in _stderr_chunks),
-        )
-        return subprocess.CompletedProcess(
-            cmd,
-            124,
-            stdout_b.decode(),
-            stderr_b.decode() + f"timed out after {timeout}s\n",
-        )
-    except asyncio.CancelledError:
-        elapsed = time.monotonic() - _t0
-        await asyncio.to_thread(_capture_process_tree, proc.pid)
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        # Reap the killed process so it doesn't remain as a zombie.
-        # (The gather already cancelled proc_task, so we call proc.wait() directly.)
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2.0)
-        except (TimeoutError, asyncio.CancelledError):
-            pass
-        # Collect whatever the drain tasks managed to read before cancellation.
-        # The gather already cancelled pending tasks, so no need for explicit .cancel().
-        stdout_b = (
-            stdout_task.result()
-            if stdout_task.done() and not stdout_task.cancelled()
-            else b""
-        )
-        stderr_b = (
-            stderr_task.result()
-            if stderr_task.done() and not stderr_task.cancelled()
-            else b""
-        )
-        logger.warning(
-            "run_shell_async: pid=%d cancelled after %.2fs stdout_so_far=%db stderr_so_far=%db%s%s",
-            proc.pid,
-            elapsed,
-            sum(len(c) for c in _stdout_chunks),
-            sum(len(c) for c in _stderr_chunks),
-            f" cwd={cwd_str}" if cwd_str else "",
-            f" timeout={timeout}s" if timeout is not None else "",
-        )
-        raise
-    finally:
-        heartbeat_task.cancel()
-        monitor_task.cancel()
-        try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            pass
-    elapsed = time.monotonic() - _t0
-    assert proc.returncode is not None
-    logger.debug(
-        "run_shell_async: pid=%d done in %.2fs rc=%d stdout=%d stderr=%d",
-        proc.pid,
-        elapsed,
-        proc.returncode,
-        len(stdout_b or b""),
-        len(stderr_b or b""),
-    )
-    return subprocess.CompletedProcess(
-        cmd, proc.returncode, stdout_b.decode(), stderr_b.decode()
-    )
+    Returns subprocess.CompletedProcess with decoded stdout and stderr.
+    On timeout, returns rc=124 with a timeout message appended to stderr.
+    """
+    return await _run_shell_async(cmd, cwd=_to_str(cwd), env=env, timeout=timeout)
 
 
 async def run_ok_async(

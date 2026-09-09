@@ -25,6 +25,10 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     proc.add_function(wrap_pyfunction!(python::utils::proc::run, &proc)?)?;
     proc.add_function(wrap_pyfunction!(python::utils::proc::run_async, &proc)?)?;
     proc.add_function(wrap_pyfunction!(
+        python::utils::proc::run_shell_async,
+        &proc
+    )?)?;
+    proc.add_function(wrap_pyfunction!(
         python::utils::proc::terminate_with_grace,
         &proc
     )?)?;

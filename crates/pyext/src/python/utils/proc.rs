@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyValueError};
@@ -159,7 +160,7 @@ pub fn terminate_with_grace(py: Python<'_>, pid: u32, grace_s: f64) -> PyResult<
 }
 
 #[pyfunction]
-#[pyo3(signature = (cmd, cwd=None, check=false, text=true, timeout=None))]
+#[pyo3(signature = (cmd, cwd=None, check=false, text=true, timeout=None, env=None))]
 pub fn run_async(
     py: Python<'_>,
     cmd: Vec<String>,
@@ -167,9 +168,11 @@ pub fn run_async(
     check: bool,
     text: bool,
     timeout: Option<f64>,
+    env: Option<HashMap<String, String>>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let result = proc::run_async(&cmd, cwd.as_deref(), check, timeout, text).await;
+        let result =
+            proc::run_async(&cmd, cwd.as_deref(), check, timeout, text, env.as_ref()).await;
         Python::attach(|py| match result {
             Ok(r) => {
                 let ty = subprocess_type(py, "CompletedProcess")?;
@@ -210,6 +213,46 @@ pub fn run_async(
             Err(proc::ProcError::InvalidTimeout(t)) => Err(PyValueError::new_err(format!(
                 "timeout must be a finite non-negative number, got {t}"
             ))),
+        })
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (cmd, cwd=None, env=None, timeout=None))]
+pub fn run_shell_async(
+    py: Python<'_>,
+    cmd: String,
+    cwd: Option<PathBuf>,
+    env: Option<HashMap<String, String>>,
+    timeout: Option<f64>,
+) -> PyResult<Bound<'_, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let result = proc::run_shell_async(&cmd, cwd.as_deref(), env.as_ref(), timeout).await;
+        Python::attach(|py| match result {
+            Ok(r) => {
+                let ty = subprocess_type(py, "CompletedProcess")?;
+                let stdout = String::from_utf8_lossy(&r.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&r.stderr).into_owned();
+                let obj = ty.call1((cmd.clone(), r.returncode, stdout, stderr))?;
+                Ok(obj.into_any().unbind())
+            }
+            Err(proc::ProcError::TimeoutExpired(t, stdout, stderr)) => {
+                let ty = subprocess_type(py, "CompletedProcess")?;
+                let stdout = String::from_utf8_lossy(&stdout).into_owned();
+                let stderr = format!(
+                    "{}timed out after {}s\n",
+                    String::from_utf8_lossy(&stderr),
+                    t
+                );
+                let obj = ty.call1((cmd.clone(), 124, stdout, stderr))?;
+                Ok(obj.into_any().unbind())
+            }
+            Err(proc::ProcError::Io(e)) => Err(map_io_error(e)),
+            Err(proc::ProcError::EmptyCommand) => Err(PyValueError::new_err("empty command")),
+            Err(proc::ProcError::InvalidTimeout(t)) => Err(PyValueError::new_err(format!(
+                "timeout must be a finite non-negative number, got {t}"
+            ))),
+            Err(_) => unreachable!(), // CalledProcessError never produced by run_shell_async
         })
     })
 }
