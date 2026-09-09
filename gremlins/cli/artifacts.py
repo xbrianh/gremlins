@@ -5,12 +5,11 @@ import pathlib
 import sys
 from typing import Any
 
-from _gremlins_core.artifacts import Uri
+from _gremlins_core.artifacts import ArtifactRegistry, Uri
 from _gremlins_core.config import scratch_root, state_root
 from _gremlins_core.discovery import resolve_pipeline_name
 from _gremlins_core.schemas import Pipeline
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.utils.yaml_io import YamlLoadError
 
 
@@ -93,7 +92,7 @@ def _print_live(reg: ArtifactRegistry) -> None:
     rpath = reg.registry_path
     print(f"live:{rpath}")
     for k in sorted(reg.keys()):
-        v = reg.data.get(k)
-        uri = Uri.parse_or_none(v) if isinstance(v, str) else None
+        v = reg.data_uri(k)
+        uri = Uri.parse_or_none(v)
         sch = uri.scheme if uri else "?"
         print(f"  {k} {v}({sch})")

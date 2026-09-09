@@ -188,8 +188,7 @@ async def _execute_bind_artifact(
             dest_path.write_text(value_str, encoding="utf-8")
 
     # Also register under the artifact_key so it can be looked up by name
-    gremlin.registry.data[artifact_key] = str(dest_path)
-    gremlin.registry._persist()
+    gremlin.registry._set(artifact_key, str(dest_path))
 
 
 _DSL_DISPATCH: dict[str, object] = {

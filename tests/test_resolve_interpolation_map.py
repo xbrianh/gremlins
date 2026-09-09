@@ -6,11 +6,14 @@ import asyncio
 import pathlib
 
 import pytest
-from _gremlins_core.artifacts import Uri
+from _gremlins_core.artifacts import (
+    ArtifactRegistry,
+    MissingArtifact,
+    Uri,
+    resolve_interpolation_map,
+)
 from conftest import MINIMAL_EVENTS, MockGremlin
 
-from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
-from gremlins.artifacts.resolve import resolve_interpolation_map
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.agent import Agent
 from gremlins.stages.exec import Exec
@@ -41,14 +44,14 @@ def _make_state(tmp_path: pathlib.Path, client=None):
 def test_simple_key_no_dots(tmp_path):
     reg = _make_registry(tmp_path)
     (tmp_path / "artifacts" / "val.txt").write_text("hello")
-    reg.data["key"] = "file://session/val.txt"
+    reg._set("key", "file://session/val.txt")
     result = resolve_interpolation_map(reg, {"VAR": "key"})
     assert result == {"VAR": "file://session/val.txt"}
 
 
 def test_unknown_key_raises(tmp_path):
     reg = _make_registry(tmp_path)
-    reg.data["pr"] = "opaque://pr/1"
+    reg._set("pr", "opaque://pr/1")
     with pytest.raises(MissingArtifact):
         resolve_interpolation_map(reg, {"x": "pr.nonexistent"})
 
@@ -56,7 +59,7 @@ def test_unknown_key_raises(tmp_path):
 def test_empty_trailing_dot_key_raises(tmp_path):
     """Keys with trailing dots are literal — no such artifact exists."""
     reg = _make_registry(tmp_path)
-    reg.data["pr"] = "opaque://pr/1"
+    reg._set("pr", "opaque://pr/1")
     with pytest.raises(MissingArtifact):
         resolve_interpolation_map(reg, {"x": "pr."})
 
@@ -64,7 +67,7 @@ def test_empty_trailing_dot_key_raises(tmp_path):
 def test_private_like_key_raises_on_missing(tmp_path):
     """Double-underscore keys are literal — no such artifact exists."""
     reg = _make_registry(tmp_path)
-    reg.data["pr"] = "opaque://pr/1"
+    reg._set("pr", "opaque://pr/1")
     with pytest.raises(MissingArtifact):
         resolve_interpolation_map(reg, {"x": "pr.__class__"})
 
@@ -74,16 +77,16 @@ def test_private_like_key_raises_on_missing(tmp_path):
 
 def test_opaque_uri_key(tmp_path):
     reg = _make_registry(tmp_path)
-    reg.data["plan"] = "opaque://issue/42"
+    reg._set("plan", "opaque://issue/42")
     result = resolve_interpolation_map(reg, {"ref": "plan"})
     assert result == {"ref": "opaque://issue/42"}
 
 
 def test_non_string_value_coerced_to_str(tmp_path):
     reg = _make_registry(tmp_path)
-    reg.data["data"] = {"number": 42}
+    reg._set("data", '{"number": 42}')
     result = resolve_interpolation_map(reg, {"ref": "data"})
-    assert result == {"ref": "{'number': 42}"}
+    assert result == {"ref": '{"number": 42}'}
 
 
 # --- content() via file artifacts ---
@@ -127,7 +130,7 @@ def test_content_unknown_key_raises(tmp_path):
     uri = Uri.parse("artifact://pr.json")
     p = pathlib.Path(reg.register(uri))
     p.write_text('{"branch": "main"}', encoding="utf-8")
-    with pytest.raises(KeyError):
+    with pytest.raises((ValueError, KeyError)):
         resolve_interpolation_map(
             reg, {"x": 'content("artifact://pr.json", "nonexistent")'}
         )

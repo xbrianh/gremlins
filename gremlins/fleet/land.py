@@ -10,13 +10,13 @@ import sys
 import time
 from typing import Any, cast
 
+from _gremlins_core.artifacts import ArtifactRegistry, MissingArtifact
 from _gremlins_core.clients import RustClient as Client
 from _gremlins_core.config import project_root as _project_root_fn
 from _gremlins_core.config import scratch_root as _scratch_root_fn
 from _gremlins_core.config import state_root as _state_root_fn
 
 import gremlins.utils.git as _git
-from gremlins.artifacts.registry import ArtifactRegistry, MissingArtifact
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import (
     liveness_of_state_file,

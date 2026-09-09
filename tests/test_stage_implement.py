@@ -16,10 +16,10 @@ import subprocess
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.schemas import Pipeline
 from conftest import MockGremlin
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec
 from gremlins.stages.outcome import Bail
@@ -33,7 +33,7 @@ def _make_state(project: pathlib.Path, base_sha: str):
     artifact_dir = project / "session"
     artifact_dir.mkdir(exist_ok=True)
     registry = ArtifactRegistry(artifact_dir)
-    registry.data["base_sha"] = base_sha
+    registry._set("base_sha", base_sha)
     return build_state(
         data=StateData(),
         client=FakeClient(),

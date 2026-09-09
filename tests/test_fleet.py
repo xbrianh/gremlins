@@ -589,8 +589,8 @@ def test_land_gh_removes_worktree_before_gh_merge(sandbox, tmp_path, monkeypatch
     (gr_dir / "state.json").write_text(json.dumps(state))
 
     monkeypatch.setattr(
-        "gremlins.artifacts.registry.ArtifactRegistry.content",
-        lambda self, key, json_path=None: pr_url,
+        "_gremlins_core.artifacts.ArtifactRegistry.content",
+        lambda self, uri_str, json_path=None: pr_url,
     )
     monkeypatch.setattr(_land, "_resolve_landing_cwd", lambda s: str(tmp_path))
 
@@ -984,7 +984,7 @@ def test_exec_land_stage_bail(capsys):
 
 def test_gather_commit_inputs_missing_spec_does_not_crash(tmp_path, monkeypatch):
     """When spec.md is missing, _gather_commit_inputs sets spec to '' without error."""
-    from gremlins.artifacts.registry import ArtifactRegistry
+    from _gremlins_core.artifacts import ArtifactRegistry, Uri
 
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
@@ -993,11 +993,7 @@ def test_gather_commit_inputs_missing_spec_does_not_crash(tmp_path, monkeypatch)
     plan_path.write_text("# Plan\n\nDo the thing.")
 
     registry = ArtifactRegistry(artifact_dir=artifact_dir)
-    registry.register(
-        __import__("_gremlins_core.artifacts", fromlist=["Uri"]).Uri.parse(
-            "artifact://plan.md"
-        )
-    )
+    registry.register(Uri.parse("artifact://plan.md"))
 
     monkeypatch.setattr(
         _land._git, "log_oneline", lambda *a, **kw: "abc123 Do the thing"
@@ -1021,7 +1017,7 @@ def test_gather_commit_inputs_missing_spec_does_not_crash(tmp_path, monkeypatch)
 
 def test_gather_commit_inputs_spec_present_reads_content(tmp_path, monkeypatch):
     """When spec.md exists, its content is included."""
-    from gremlins.artifacts.registry import ArtifactRegistry
+    from _gremlins_core.artifacts import ArtifactRegistry, Uri
 
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
@@ -1031,7 +1027,6 @@ def test_gather_commit_inputs_spec_present_reads_content(tmp_path, monkeypatch):
     spec_path = artifact_dir / "spec.md"
     spec_path.write_text("# Spec\n\nDo this.")
 
-    Uri = __import__("_gremlins_core.artifacts", fromlist=["Uri"]).Uri
     registry = ArtifactRegistry(artifact_dir=artifact_dir)
     registry.register(Uri.parse("artifact://plan.md"))
     registry.register(Uri.parse("artifact://spec.md"))

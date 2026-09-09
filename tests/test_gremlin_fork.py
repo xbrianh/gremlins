@@ -1,12 +1,13 @@
 """Tests for Gremlin.fork() method."""
 
 import asyncio
+import json
 import subprocess
 
 import pytest
+from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.schemas import Pipeline
 
-from gremlins.artifacts.registry import ArtifactRegistry
 from gremlins.executor.gremlin import Gremlin
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec
@@ -62,7 +63,7 @@ def test_fork_without_worktree(tmp_path, tmp_repo, monkeypatch):
         # Create some artifacts
         (artifact_dir / "spec.md").write_text("# Spec\n")
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        registry.data["spec"] = str(artifact_dir / "spec.md")
+        registry._set("spec", str(artifact_dir / "spec.md"))
 
         # Create state
         state_data = StateData(gremlin_id="gr-1")
@@ -126,7 +127,7 @@ def test_fork_with_worktree(tmp_path, tmp_repo, monkeypatch):
         # Create artifacts
         (artifact_dir / "spec.md").write_text("# Spec\n")
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        registry.data["spec"] = str(artifact_dir / "spec.md")
+        registry._set("spec", str(artifact_dir / "spec.md"))
 
         # Create state with worktree
         state_data = StateData(gremlin_id="gr-1")
@@ -214,10 +215,9 @@ def test_fork_preserves_registry(tmp_path, tmp_repo, monkeypatch):
 
         # Create registry with multiple bindings
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        registry.data["spec"] = str(artifact_dir / "spec.md")
-        registry.data["plan"] = str(artifact_dir / "plan.md")
-        registry.data["some_key"] = {"data": "value"}
-        registry._persist()
+        registry._set("spec", str(artifact_dir / "spec.md"))
+        registry._set("plan", str(artifact_dir / "plan.md"))
+        registry._set("some_key", json.dumps({"data": "value"}))
 
         # Create state
         state_data = StateData(gremlin_id="gr-1")
@@ -244,10 +244,10 @@ def test_fork_preserves_registry(tmp_path, tmp_repo, monkeypatch):
         forked = await gremlin.fork(state, "gr-2")
 
         # Verify registry is preserved
-        assert "spec" in forked.artifacts.data
-        assert "plan" in forked.artifacts.data
-        assert "some_key" in forked.artifacts.data
-        assert forked.artifacts.data_uri("some_key") == {"data": "value"}
+        assert forked.artifacts.is_registered("spec")
+        assert forked.artifacts.is_registered("plan")
+        assert forked.artifacts.is_registered("some_key")
+        assert forked.artifacts.data_uri("some_key") == json.dumps({"data": "value"})
 
     asyncio.run(_test())
 

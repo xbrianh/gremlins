@@ -6,9 +6,8 @@ import logging
 import pathlib
 from typing import TYPE_CHECKING, Any, cast
 
-from _gremlins_core.artifacts import Uri
+from _gremlins_core.artifacts import Uri, resolve_interpolation_map
 
-from gremlins.artifacts.resolve import resolve_interpolation_map
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.constants import FRAMEWORK_KEYS
