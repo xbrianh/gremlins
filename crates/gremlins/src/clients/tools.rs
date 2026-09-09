@@ -822,7 +822,7 @@ fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         .iter()
         .map(|(o, n)| (content.find(o).unwrap(), *o, *n))
         .collect();
-    indexed.sort_by(|a, b| b.0.cmp(&a.0));
+    indexed.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     let mut updated = content;
     for (pos, old_str, new_str) in &indexed {
