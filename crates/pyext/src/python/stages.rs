@@ -7,7 +7,7 @@ use pyo3::types::PyFrozenSet;
 
 // --- Done pyclass ---
 
-#[pyclass(name = "Done", module = "_gremlins_core.stages")]
+#[pyclass(name = "Done", module = "_gremlins_core.stages", skip_from_py_object)]
 #[derive(Clone)]
 struct Done(RustDone);
 
@@ -59,10 +59,16 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
 
     m.add_class::<Done>()?;
+    // Bail must be added explicitly (like artifacts.rs does for its exceptions)
+    // so it's available on the module before patch_bail tries to access _m.Bail.
+    m.add("Bail", m.py().get_type::<Bail>())?;
 
-    // create_exception! registers Bail in the module's namespace automatically
-    // so we just call it via a marker to trigger the macro.
-    // Bail is now in _gremlins_core.stages.Bail.
+    // Register in parent and sys.modules *before* patch_bail, which does
+    // `import _gremlins_core.stages` internally.
+    parent.add_submodule(&m)?;
+    let modules = py.import("sys")?.getattr("modules")?;
+    modules.set_item("_gremlins_core.stages", &m)?;
+
     patch_bail(py)?;
 
     m.add("Outcome", m.getattr("Done")?)?;
@@ -70,11 +76,6 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("_BAIL_KEY", BAIL_KEY)?;
     let keys: Vec<&str> = FRAMEWORK_KEYS.iter().copied().collect();
     m.add("FRAMEWORK_KEYS", PyFrozenSet::new(py, &keys)?)?;
-
-    parent.add_submodule(&m)?;
-
-    let modules = py.import("sys")?.getattr("modules")?;
-    modules.set_item("_gremlins_core.stages", &m)?;
 
     Ok(())
 }
