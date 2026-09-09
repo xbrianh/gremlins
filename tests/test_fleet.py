@@ -839,7 +839,10 @@ def test_do_drill_in_json_emits_json_object(sandbox, tmp_path, monkeypatch, caps
     assert obj["closed"] is False
     assert "state" in obj
     assert obj["state"]["kind"] == "localgremlin"
-    assert obj["artifact_paths"] == []
+    assert "dirs" in obj
+    assert obj["dirs"]["state_dir"] == str(gr_dir)
+    assert obj["dirs"]["artifact_paths"] == []
+    assert obj["dirs"]["worktree_dir"] is None
 
 
 def test_do_drill_in_json_no_match(sandbox, tmp_path, monkeypatch, capsys):
@@ -868,8 +871,8 @@ def test_do_drill_in_json_includes_log_path(sandbox, tmp_path, monkeypatch, caps
     _views.do_drill_in_json("test-id-log001")
     out = capsys.readouterr().out
     obj = json.loads(out)
-    assert obj["log_path"] is not None
-    assert obj["log_path"].endswith("log")
+    assert obj["dirs"]["log_path"] is not None
+    assert obj["dirs"]["log_path"].endswith("log")
 
 
 # ---------------------------------------------------------------------------
@@ -943,6 +946,54 @@ def test_cli_fleet_json_drill_in(sandbox, tmp_path, monkeypatch, capsys):
     obj = json.loads(capsys.readouterr().out)
     assert obj["id"] == "test-cli-drill01"
     assert isinstance(obj["liveness"], dict)
+    assert "dirs" in obj
+
+
+def test_cli_fleet_default_drill_in_is_json(sandbox, tmp_path, monkeypatch, capsys):
+    state_root = sandbox.state
+    gr_dir = state_root / "test-cli-drill01"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-cli-drill01",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "dead",
+            "exit_code": 0,
+            "started_at": "2024-01-01T00:00:00Z",
+        },
+        finished=True,
+    )
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["test-cli-drill01"])
+    assert exc.value.code == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["id"] == "test-cli-drill01"
+    assert "dirs" in obj
+
+
+def test_cli_fleet_drill_in_text(sandbox, tmp_path, monkeypatch, capsys):
+    state_root = sandbox.state
+    gr_dir = state_root / "test-cli-drill01"
+    _write_state(
+        gr_dir,
+        {
+            "id": "test-cli-drill01",
+            "kind": "localgremlin",
+            "stage": "implement",
+            "status": "dead",
+            "exit_code": 0,
+            "started_at": "2024-01-01T00:00:00Z",
+        },
+        finished=True,
+    )
+    with pytest.raises(SystemExit) as exc:
+        _main_impl(["test-cli-drill01", "--text"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("gremlin:")
+    assert "state directory:" in out
+    assert "dirs" not in out
 
 
 # ---------------------------------------------------------------------------

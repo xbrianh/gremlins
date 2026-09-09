@@ -89,10 +89,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=argparse.SUPPRESS,
     )
-    parser.add_argument(
+    json_text = parser.add_mutually_exclusive_group()
+    json_text.add_argument(
         "--json",
         action="store_true",
         help="Emit JSON instead of human-formatted output. Mutually exclusive with --watch.",
+    )
+    json_text.add_argument(
+        "--text",
+        action="store_true",
+        help="Emit human-readable output (drill-in default). Mutually exclusive with --json.",
     )
     return parser.parse_args(argv)
 
@@ -108,6 +114,8 @@ def render_view(args: argparse.Namespace, here_root: str | None) -> None:
 
     if args.json:
         do_list_json(args, here_root=here_root)
+    elif args.text:
+        do_list(args, here_root=here_root)
     elif args.recent is not None:
         do_recent(args, here_root=here_root)
     else:
@@ -239,9 +247,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
         print("error: --watch cannot be combined with a positional id argument")
         sys.exit(0)
 
-    # --json and --watch are mutually exclusive.
+    # --json/--text and --watch are mutually exclusive.
     if args.json and args.watch is not None:
         print("error: --json cannot be combined with --watch", file=sys.stderr)
+        sys.exit(1)
+    if args.text and args.watch is not None:
+        print("error: --text cannot be combined with --watch", file=sys.stderr)
         sys.exit(1)
 
     # Early exit if state root doesn't exist.
@@ -264,10 +275,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # Drill-in positional argument (no --watch).
     if args.id_prefix is not None:
-        if args.json:
-            do_drill_in_json(args.id_prefix)
-        else:
+        if args.text:
             do_drill_in(args.id_prefix)
+        else:
+            do_drill_in_json(args.id_prefix)
         sys.exit(0)
 
     # --watch loop.

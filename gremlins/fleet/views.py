@@ -414,10 +414,13 @@ def do_drill_in_json(target: str) -> None:
         "bail_class": bail_class or None,
         "bail_reason": bail_reason or None,
         "bail_detail": bail_detail or None,
-        "state_dir": wdir,
-        "scratch_dir": str(scratch) if scratch.is_dir() else None,
-        "log_path": log_path if os.path.isfile(log_path) else None,
-        "artifact_paths": artifact_paths,
+        "dirs": {
+            "state_dir": wdir,
+            "scratch_dir": str(scratch) if scratch.is_dir() else None,
+            "worktree_dir": state.get("workdir") or None,
+            "log_path": log_path if os.path.isfile(log_path) else None,
+            "artifact_paths": artifact_paths,
+        },
         "state": state,
     }
     print(json.dumps(obj, indent=2))
