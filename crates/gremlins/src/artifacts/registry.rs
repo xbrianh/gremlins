@@ -238,10 +238,7 @@ impl ArtifactRegistry {
             PathBuf::from(value)
         };
         if p.is_absolute() {
-            match fs::metadata(&p) {
-                Ok(_) => true,
-                Err(_) => false,
-            }
+            fs::metadata(&p).is_ok()
         } else {
             // Non-file values (e.g. git://range, opaque://, raw strings)
             true
