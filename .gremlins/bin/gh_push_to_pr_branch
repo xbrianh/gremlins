@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Push HEAD to a PR branch.
+# Usage: gh_push_to_pr_branch <branch>
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+source "$SCRIPT_DIR/lib/git.sh"
+
+branch="${1:-}"
+
+if [ -z "$branch" ]; then
+    die "Usage: gh_push_to_pr_branch <branch>"
+fi
+
+push_branch origin "$branch"

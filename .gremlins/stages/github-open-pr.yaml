@@ -20,22 +20,7 @@ stages:
       diff_summary: "artifact://diff-summary.txt"
     options:
       cmds:
-        - |
-          {
-            if git merge-base --is-ancestor "{base_ref_to_open_pr}" HEAD 2>/dev/null; then
-              RANGE="{base_ref_to_open_pr}..HEAD"
-            elif git rev-parse --verify HEAD~10 >/dev/null 2>&1; then
-              RANGE="HEAD~10..HEAD"
-            else
-              ROOT=$(git rev-list --max-parents=0 HEAD)
-              RANGE="${ROOT}..HEAD"
-            fi
-            echo "Commits:"
-            git log --oneline "$RANGE" 2>/dev/null || echo "(no commits)"
-            echo ""
-            echo "Files changed:"
-            git diff --stat "$RANGE" 2>/dev/null || echo "(no diff)"
-          } > "{diff_summary}"
+        - 'git_diff_summary "{base_ref_to_open_pr}" > "{diff_summary}"'
 
   - name: compose-pr
     type: agent
@@ -56,16 +41,11 @@ stages:
     type: exec
     interpolation:
       base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
-      pr_branch: content("artifact://pr-branch.txt")
       pr_title: content("artifact://pr-title.txt")
+      pr_body_file: "artifact://pr-body.md"
     bind:
       pr_number: "artifact://pr-number.txt"
       pr_url:    "artifact://pr-url.txt"
     options:
       cmds:
-        - |
-          BRANCH="$(printf '%s' "{pr_branch}")" &&
-          git push origin "HEAD:refs/heads/$BRANCH" &&
-          URL="$(gh pr create --head "$BRANCH" --base "{base_ref_to_open_pr}" --title "{pr_title}" --body-file "$GREMLINS_ARTIFACT_DIR/pr-body.md")" &&
-          printf "%s" "${URL##*/}" > "{pr_number}" &&
-          printf "%s" "$URL" > "{pr_url}"
+        - 'gh_create_pr "{base_ref_to_open_pr}" "{pr_title}" "{pr_body_file}" "{pr_number}" "{pr_url}"'

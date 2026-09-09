@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Request a Copilot review on a PR.
+# Usage: gh_request_reviewer <pr_number> <repo>
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+pr_number="${1:-}"
+repo="${2:-}"
+
+if [ -z "$pr_number" ] || [ -z "$repo" ]; then
+    die "Usage: gh_request_reviewer <pr_number> <repo>"
+fi
+
+gh pr edit "$pr_number" --repo "$repo" --add-reviewer copilot-pull-request-reviewer

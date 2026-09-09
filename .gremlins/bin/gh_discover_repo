@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Discover the GitHub repository name from the current directory.
+# Outputs "owner/repo" on stdout, no trailing newline.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+gh repo view --json nameWithOwner -q '.nameWithOwner' | tr -d '\n'

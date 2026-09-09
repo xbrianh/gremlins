@@ -1,4 +1,4 @@
-# Loop body: poll → fix → push-fix → capture-head.
+# Loop body: await → poll → failure-log → fix → push-fix → capture-head.
 # Iteration-1 detection: fix-head absent means no prior fix push.
 # Post-fix SHA verification: fix-head present → wait for headRefOid to match.
 
@@ -10,143 +10,58 @@ stages:
     max-iterations: 3
     stop_when_exists: "artifact://{loop_iter}/done"
     body:
-      - name: poll
+      - name: ci-await
         type: exec
         interpolation:
           pr_url: content("artifact://pr-url.txt")
+          fix_head: content("artifact://fix-head")?
         bind:
-          status?: "artifact://status"
           done?: "artifact://{loop_iter}/done"
-          bail: "artifact://{loop_iter}/bail"
-          ci_log: "artifact://ci_failure.txt"
+          bail?: "artifact://{loop_iter}/bail"
         options:
-          poll_timeout: "1200"
-          poll_interval: "30"
+          timeout: 180
           startup_grace_secs: "60"
-          timeout: "1380"
+          poll_interval: "30"
+          sync_timeout: "180"
           cmds:
             - |
-              set -eu
-
-              # Post-fix path: fix-head written by capture-head on prior iteration.
-              fix_head=""
-              if [ -f "$GREMLINS_ARTIFACT_DIR/fix-head" ]; then
-                  fix_head=$(cat "$GREMLINS_ARTIFACT_DIR/fix-head")
+              BAIL_MSG=$(gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2>&1) || { printf '%s' "$BAIL_MSG" > "{bail}"; exit 2; }
+              if [ "$BAIL_MSG" = "skipped" ]; then
+                touch "{done}"
               fi
 
-              fetch_status() {
-                  gh pr view "$pr_url" \
-                      --json statusCheckRollup,reviewDecision,headRefOid
-              }
-
-              check_bail_review_required() {
-                  local decision="$1"
-                  if [ "$decision" = "REVIEW_REQUIRED" ]; then
-                      printf 'ci-gate: PR blocked by required human review\n' \
-                          > "{bail}"
-                      exit 2
-                  fi
-              }
-
-              # Iteration 1 startup grace: wait for any check-runs to appear.
-              if [ -z "$fix_head" ]; then
-                  grace_deadline=$(( $(date +%s) + {startup_grace_secs} ))
-                  rollup_len=0
-                  while true; do
-                      status_json=$(fetch_status)
-                      decision=$(printf '%s' "$status_json" | jq -r '.reviewDecision // empty')
-                      check_bail_review_required "$decision"
-                      rollup_len=$(printf '%s' "$status_json" | jq '.statusCheckRollup // [] | length')
-                      if [ "$rollup_len" -gt 0 ] || [ "$(date +%s)" -ge "$grace_deadline" ]; then
-                          break
-                      fi
-                      sleep {poll_interval}
-                  done
-                  if [ "$rollup_len" -eq 0 ]; then
-                      printf 'ci-gate: no check-runs after %ss grace; skipping\n' {startup_grace_secs}
-                      printf 'skipped' > "{status}"
-                      printf 'passed' > "{done}"
-                      exit 0
-                  fi
-              else
-                  # Post-fix: wait for GitHub to reflect the pushed commit SHA.
-                  push_deadline=$(( $(date +%s) + {poll_timeout} ))
-                  while true; do
-                      status_json=$(fetch_status)
-                      decision=$(printf '%s' "$status_json" | jq -r '.reviewDecision // empty')
-                      check_bail_review_required "$decision"
-                      head_oid=$(printf '%s' "$status_json" | jq -r '.headRefOid // empty')
-                      if [ "$head_oid" = "$fix_head" ] || git merge-base --is-ancestor "$fix_head" "$head_oid" 2>/dev/null; then
-                          break
-                      fi
-                      if [ "$(date +%s)" -ge "$push_deadline" ]; then
-                          printf 'ci-gate: timed out waiting for GitHub to reflect pushed SHA\n' \
-                              > "{bail}"
-                          exit 2
-                      fi
-                      sleep {poll_interval}
-                  done
+      - name: ci-poll
+        type: exec
+        skip_if_exists: "artifact://{loop_iter}/done"
+        interpolation:
+          pr_url: content("artifact://pr-url.txt")
+        bind:
+          status: "artifact://status"
+          done?: "artifact://{loop_iter}/done"
+          bail?: "artifact://{loop_iter}/bail"
+        options:
+          timeout: 1260
+          poll_timeout: "1200"
+          poll_interval: "30"
+          cmds:
+            - |
+              BAIL_MSG=$(gh_ci_poll "{pr_url}" {poll_timeout} {poll_interval} 2>&1) || { printf '%s' "$BAIL_MSG" > "{bail}"; exit 2; }
+              printf '%s' "$BAIL_MSG" > "{status}"
+              if [ "$BAIL_MSG" = "passed" ]; then
+                touch "{done}"
               fi
 
-              # Poll until all checks complete or timeout.
-              poll_deadline=$(( $(date +%s) + {poll_timeout} ))
-              while true; do
-                  status_json=$(fetch_status)
-                  decision=$(printf '%s' "$status_json" | jq -r '.reviewDecision // empty')
-                  check_bail_review_required "$decision"
-
-                  all_done=$(printf '%s' "$status_json" | jq -r '
-                      (.statusCheckRollup // []) as $r |
-                      if ($r | length) == 0 then "false"
-                      elif ($r | map(if .__typename == "StatusContext"
-                                     then .state != "EXPECTED" and .state != "PENDING"
-                                     else .status == "COMPLETED" end) | all) then "true"
-                      else "false" end')
-                  if [ "$all_done" = "true" ]; then break; fi
-                  if [ "$(date +%s)" -ge "$poll_deadline" ]; then
-                      printf 'ci-gate: poll timed out after %ss\n' {poll_timeout} >&2
-                      break
-                  fi
-                  sleep {poll_interval}
-              done
-
-              if [ "$all_done" != "true" ]; then
-                  printf 'ci-gate: checks incomplete after timeout\n' > "{bail}"
-                  exit 2
-              fi
-
-              failed_json=$(printf '%s' "$status_json" | jq '[
-                  .statusCheckRollup // [] | .[] |
-                  select(if .__typename == "StatusContext"
-                         then .state == "FAILURE" or .state == "ERROR"
-                         else .conclusion == "FAILURE" or .conclusion == "ERROR"
-                              or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED"
-                         end)]')
-              failed_count=$(printf '%s' "$failed_json" | jq 'length')
-
-              if [ "$failed_count" -eq 0 ]; then
-                  printf 'ci-gate: all checks passed\n'
-                  printf 'passed' > "{status}"
-                  printf 'passed' > "{done}"
-                  exit 0
-              fi
-
-              # Collect failure logs for the fix agent.
-              printf 'failed' > "{status}"
-              printf '%s' "$failed_json" | jq -c '.[]' | while read -r check_json; do
-                  check_name=$(printf '%s' "$check_json" | jq -r '.name // .context // "unknown"')
-                  details_url=$(printf '%s' "$check_json" | jq -r '.detailsUrl // .targetUrl // empty')
-                  printf '\n## Check: %s\n\n' "$check_name"
-                  run_id=$(printf '%s' "$details_url" \
-                      | sed -n 's|.*/actions/runs/\([0-9]*\).*|\1|p')
-                  if [ -n "$run_id" ]; then
-                      timeout 30 gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
-                          || printf '(could not fetch run logs)\n'
-                  else
-                      printf '(no action run URL; details: %s)\n' "$details_url"
-                  fi
-              done > "{ci_log}" 2>&1
-              exit 1
+      - name: ci-failure-log
+        type: exec
+        skip_if_exists: "artifact://{loop_iter}/done"
+        interpolation:
+          pr_url: content("artifact://pr-url.txt")
+        bind:
+          ci_log: "artifact://ci_failure.txt"
+        options:
+          timeout: 120
+          cmds:
+            - gh_ci_failure_log "{pr_url}" > "{ci_log}"
 
       - name: fix
         type: agent
@@ -172,4 +87,4 @@ stages:
           fix_head: "artifact://fix-head"
         options:
           cmds:
-            - 'git rev-parse HEAD > "$GREMLINS_ARTIFACT_DIR/fix-head"'
+            - 'git rev-parse HEAD > "{fix_head}"'

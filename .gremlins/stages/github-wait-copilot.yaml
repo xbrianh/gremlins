@@ -20,9 +20,4 @@ stages:
         options:
           timeout: 30
           cmds:
-            - |
-              review=$(gh api "repos/{repo}/pulls/{pr_number}/reviews" \
-                --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")')
-              if [ -n "$review" ]; then
-                printf '%s' "$review" > "{status}"
-              fi
+            - 'gh_wait_copilot "{pr_number}" "{repo}" > "{status}" 2>/dev/null'

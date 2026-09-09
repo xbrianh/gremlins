@@ -24,7 +24,7 @@ bootstrap:
     fi
     export VIRTUAL_ENV="${GREMLINS_WORKTREE_PATH}/.venv"
     export UV_PROJECT_ENVIRONMENT="${GREMLINS_WORKTREE_PATH}/.venv"
-    export PATH="${GREMLINS_WORKTREE_PATH}/.venv/bin:${PATH}"
+    export PATH="${GREMLINS_WORKTREE_PATH}/.venv/bin:${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"
 
 land:
   interpolation:
@@ -119,50 +119,7 @@ stages:
       github_review_content: "artifact://github-review-content.md"
     options:
       cmds:
-        - |
-          set -e
-          set -o pipefail
-          PR_URL="{pr}"
-          {
-            IFS= read -r -d '' PR_NUMBER
-            IFS= read -r -d '' PR_TITLE
-            IFS= read -r -d '' PR_BODY
-            IFS= read -r -d '' PR_AUTHOR
-            IFS= read -r -d '' PR_HEAD_REF
-            IFS= read -r -d '' PR_BASE_REF
-          } < <(gh pr view "$PR_URL" --json number,title,body,author,headRefName,baseRefName --jq '
-            .number, "\u0000",
-            .title, "\u0000",
-            .body, "\u0000",
-            .author.login, "\u0000",
-            .headRefName, "\u0000",
-            .baseRefName, "\u0000"
-          ')
-          OWNER_REPO="$(echo "$PR_URL" | sed 's|https://github.com/||; s|/pull/.*||')"
-          {
-            echo "# PR Review Comments"
-            echo
-            echo "**PR:** $PR_URL"
-            echo "**Number:** #$PR_NUMBER"
-            echo "**Title:** $PR_TITLE"
-            echo "**Author:** $PR_AUTHOR"
-            echo "**Branch:** $PR_HEAD_REF → $PR_BASE_REF"
-            echo "**Owner/Repo:** $OWNER_REPO"
-            echo
-            if [ -n "$PR_BODY" ] && [ "$PR_BODY" != "null" ]; then
-              echo "## PR Description"
-              echo
-              echo "$PR_BODY"
-              echo
-            fi
-            echo "## Review Comments"
-            echo
-            gh api "repos/$OWNER_REPO/pulls/$PR_NUMBER/comments" --paginate --jq '.[] | "### Comment \(.id) by \(.user.login)\n\n\(.body)\n\n_File: `\(.path):\(.line // .original_line)`_\n\n---\n"'
-            echo
-            echo "## Issue Comments"
-            echo
-            gh pr view "$PR_URL" --comments --json comments --jq '.comments[] | "### Comment by \(.author.login) (\(.createdAt))\n\n\(.body)\n\n---\n"'
-          } > {github_review_content}
+        - 'gh_gather_review_content "{pr}" > "{github_review_content}"'
   - name: github-address-pull-request-reviews
     type: agent
     interpolation:

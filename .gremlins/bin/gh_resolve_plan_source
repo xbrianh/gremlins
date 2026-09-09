@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Resolve a plan source reference (owner/repo#N or #N) and rewrite plan.md.
+# Usage: gh_resolve_plan_source <plan_file> [issue_number_output_file]
+#
+# If the first line of plan_file matches owner/repo#N or #N:
+#   - Fetches the issue from GitHub
+#   - Rewrites plan_file with the issue title/body
+#   - Outputs the issue number (to stdout or issue_number_output_file)
+# If the first line doesn't match, exits 0 with no changes.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+plan_file="${1:-}"
+issue_number_file="${2:-}"
+
+if [ -z "$plan_file" ]; then
+    die "Usage: gh_resolve_plan_source <plan_file> [issue_number_output_file]"
+fi
+
+first=$(head -1 "$plan_file" 2>/dev/null) || exit 0
+
+# Check if the first line matches owner/repo#N or #N
+if ! printf '%s' "$first" | grep -qE '^([^/#]+/[^#]+)?#[0-9]+$'; then
+    exit 0
+fi
+
+repo=$(printf '%s' "$first" | sed -n 's/^\([^/#]*\/[^#]*\)#.*/\1/p')
+num=$(printf '%s' "$first" | sed 's/.*#//')
+
+_gh_view() {
+    if [ -n "$repo" ]; then
+        gh issue view "$num" --repo "$repo" --json title,body,number "$@"
+    else
+        gh issue view "$num" --json title,body,number "$@"
+    fi
+}
+
+issue_data=$(_gh_view --jq '[.title, .body, .number] | @tsv')
+title=$(printf '%s' "$issue_data" | cut -f1)
+body=$(printf '%s' "$issue_data" | cut -f2)
+number=$(printf '%s' "$issue_data" | cut -f3)
+
+case "$body" in
+    '#'*) printf '%s\n' "$body" > "$plan_file" ;;
+    *)   printf '# %s\n\n%s\n' "$title" "$body" > "$plan_file" ;;
+esac
+
+if [ -n "$issue_number_file" ]; then
+    printf '%s' "$number" > "$issue_number_file"
+else
+    printf '%s' "$number"
+fi

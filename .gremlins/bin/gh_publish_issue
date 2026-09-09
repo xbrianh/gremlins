@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Publish a plan markdown file as a GitHub issue.
+# Usage: gh_publish_issue <plan_file>
+# Outputs the issue number (digits only) to stdout.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+plan_file="${1:-}"
+
+if [ -z "$plan_file" ]; then
+    die "Usage: gh_publish_issue <plan_file>"
+fi
+
+if ! [ -s "$plan_file" ]; then
+    die "publish-as-issue: plan file is empty or missing"
+fi
+
+# Extract the first H1 heading, strip the leading "# " and trim to 80 chars.
+title=$(awk '/^# /{sub(/^#+ */,""); print; exit}' "$plan_file" | cut -c1-80)
+
+if [ -z "$title" ]; then
+    die "publish-as-issue: plan file has no H1 title"
+fi
+
+url=$(gh issue create --body-file "$plan_file" --title "$title")
+
+# Extract the issue number from the URL (last path component).
+printf '%s' "${url##*/}"
