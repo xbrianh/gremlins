@@ -6,7 +6,7 @@ TEST_FILES := $(wildcard tests/test_*.py)
 
 .PHONY: lint format format-write autoformat typecheck test check \
         rust-test rust-fmt rust-fmt-check rust-clippy install release \
-        validate-gremlin-overlays \
+        validate-gremlin-overlays test-github-integration-scripts \
         $(TEST_FILES)
 
 lint:
