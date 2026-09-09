@@ -113,20 +113,20 @@ In the original monolithic `gh_wait_ci`, the post-fix SHA sync loop had a `push_
 
 ---
 
-### 5. `gh_wait_copilot` hardcoded as one-shot in pipeline
+### 5. `gh_wait_copilot` called one-shot via outer loop
 
 **File:** `.gremlins/stages/github-wait-copilot.yaml`
 
 ```yaml
 cmds:
-  - 'gh_wait_copilot "{pr_number}" "{repo}" 1 0 > "{status}" 2>/dev/null'
+  - 'output=$(gh_wait_copilot "{pr_number}" "{repo}" 2>/dev/null); if [ -n "$output" ]; then printf "%s\n" "$output" > "{status}"; fi'
 ```
 
-The script is called with `max_iterations=1` and `interval=0` — a one-shot check. The retry loop is handled by the outer `loop` stage. This works, but it means the script's internal retry capability is dead code when called from this pipeline. The `gh_wait_copilot` script's `--help`/usage doesn't reflect that the pipeline intentionally bypasses its retry loop.
+The `gh_wait_copilot` script has been simplified to a one-shot check that takes only two arguments (`pr_number`, `repo`). The retry loop is handled by the outer `loop` stage. The script has no internal retry capability, so there is no dead code.
 
-**Severity:** Low. Functional but confusing if someone reads the script and expects it to handle retries.
+**Severity:** N/A — the script and pipeline are aligned.
 
-**Recommendation:** Either simplify `gh_wait_copilot` to remove the retry loop (since it's always called one-shot), or document that the outer loop handles retries.
+**Recommendation:** None.
 
 ---
 
