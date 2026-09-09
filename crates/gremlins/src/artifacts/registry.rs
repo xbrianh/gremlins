@@ -63,6 +63,11 @@ impl ArtifactRegistry {
         } else {
             HashMap::new()
         };
+        log::info!(
+            "registry ready: {} entries from {}",
+            data.len(),
+            registry_path.display(),
+        );
         ArtifactRegistry {
             artifact_dir,
             registry_path,
@@ -82,6 +87,11 @@ impl ArtifactRegistry {
         } else {
             HashMap::new()
         };
+        log::info!(
+            "registry ready: {} entries from {}",
+            data.len(),
+            registry_path.display(),
+        );
         Ok(ArtifactRegistry {
             artifact_dir,
             registry_path,
@@ -146,6 +156,7 @@ impl ArtifactRegistry {
         }
         let path_str = resolved.to_string_lossy().to_string();
         self.data.insert(key.clone(), path_str.clone());
+        log::debug!("register: {:?} -> {:?}", key, path_str);
         self.persist()?;
         Ok(path_str)
     }
@@ -188,6 +199,7 @@ impl ArtifactRegistry {
             );
             return Ok(raw.to_string());
         };
+        log::debug!("content({:?}) read {} bytes", uri_str, text.len());
         if let Some(jp) = json_path {
             let mut data: serde_json::Value = serde_json::from_str(&text)?;
             for segment in jp.split('.') {
@@ -255,6 +267,7 @@ impl ArtifactRegistry {
             Some(k) => Box::new(k.iter()),
             None => Box::new(other.data.keys()),
         };
+        let mut merged = 0u64;
         for key in iter {
             let uri_str = match other.data.get(key) {
                 Some(v) => v,
@@ -300,11 +313,14 @@ impl ArtifactRegistry {
                 self.data
                     .insert(parent_key.clone(), dest_path.to_string_lossy().to_string());
                 self.persist()?;
+                merged += 1;
             } else {
                 self.data.insert(parent_key.clone(), uri_str.clone());
                 self.persist()?;
+                merged += 1;
             }
         }
+        log::info!("merge_from: merged {} entries", merged);
         Ok(())
     }
 
@@ -318,6 +334,11 @@ impl ArtifactRegistry {
             let content = fs::read_to_string(path)?;
             registry.data = serde_json::from_str(&content)?;
             registry.persist()?;
+            log::info!(
+                "loaded custom registry from {} ({} entries)",
+                path.display(),
+                registry.data.len(),
+            );
         }
         Ok(registry)
     }
@@ -342,6 +363,11 @@ impl ArtifactRegistry {
         let json = serde_json::to_string(&self.data)?;
         fs::write(&tmp_path, &json)?;
         fs::rename(&tmp_path, &self.registry_path)?;
+        log::debug!(
+            "persist: wrote {} entries to {}",
+            self.data.len(),
+            self.registry_path.display(),
+        );
         Ok(())
     }
 }
