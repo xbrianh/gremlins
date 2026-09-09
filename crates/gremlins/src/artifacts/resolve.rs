@@ -41,7 +41,9 @@ pub fn resolve_interpolation_map(
                 }
                 Err(e) if optional && e.downcast_ref::<MissingArtifact>().is_some() => {
                     result.insert(var.clone(), String::new());
-                    log::debug!("resolve: {var} = content({uri_str})? -> (empty, artifact not bound)");
+                    log::debug!(
+                        "resolve: {var} = content({uri_str})? -> (empty, artifact not bound)"
+                    );
                 }
                 Err(e) if optional => {
                     return Err(ResolveError::Other(e));
