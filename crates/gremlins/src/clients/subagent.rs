@@ -73,12 +73,15 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
 
             // Inject a child runner one level deeper so a nested subagent can
             // recurse again, bounded by MAX_DEPTH along this call chain.
+            // Pass the original `prefix` (not `sub_prefix`) so prefixes don't
+            // stack across nesting levels — each depth computes its own notation
+            // from the same base prefix.
             sub_ctx.subagent_fn = Some(make_runner_at_depth(
                 model.clone(),
                 tool_filter.clone(),
                 cancel.clone(),
                 sub_ctx.clone(),
-                sub_prefix.clone(),
+                prefix.clone(),
                 idle_timeout,
                 max_turns,
                 depth + 1,

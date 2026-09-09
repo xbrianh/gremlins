@@ -181,8 +181,10 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     .await
 }
 
-/// Nested agent loop — same logic as the parent loop but without stream
-/// emissions, raw file writes, or event capture. Used by the subagent tool.
+/// Nested agent loop — same logic as the parent loop but without raw transcript
+/// writes, captured-event pushes, or final/summary stream emissions.
+/// Stream events (think, text, tool, result, turn metrics) are emitted.
+/// Used by the subagent tool.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: &M,
@@ -224,7 +226,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         0,
     )
     .await;
-    eprintln!("{} {}subagent: end", stream::ts_internal(), prefix,);
+    eprintln!("{} {}subagent: end", stream::ts_internal(), prefix);
     result
 }
 
