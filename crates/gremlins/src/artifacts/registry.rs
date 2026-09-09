@@ -64,9 +64,9 @@ impl ArtifactRegistry {
             HashMap::new()
         };
         log::info!(
-            "loaded registry from {} ({} entries)",
-            registry_path.display(),
+            "registry ready: {} entries from {}",
             data.len(),
+            registry_path.display(),
         );
         ArtifactRegistry {
             artifact_dir,
@@ -88,9 +88,9 @@ impl ArtifactRegistry {
             HashMap::new()
         };
         log::info!(
-            "loaded registry from {} ({} entries)",
-            registry_path.display(),
+            "registry ready: {} entries from {}",
             data.len(),
+            registry_path.display(),
         );
         Ok(ArtifactRegistry {
             artifact_dir,
@@ -156,7 +156,7 @@ impl ArtifactRegistry {
         }
         let path_str = resolved.to_string_lossy().to_string();
         self.data.insert(key.clone(), path_str.clone());
-        log::debug!("register: {} -> {}", key, path_str);
+        log::debug!("register: {:?} -> {:?}", key, path_str);
         self.persist()?;
         Ok(path_str)
     }
@@ -199,7 +199,7 @@ impl ArtifactRegistry {
             );
             return Ok(raw.to_string());
         };
-        log::debug!("content({}) read {} bytes", uri_str, text.len());
+        log::debug!("content({:?}) read {} bytes", uri_str, text.len());
         if let Some(jp) = json_path {
             let mut data: serde_json::Value = serde_json::from_str(&text)?;
             for segment in jp.split('.') {
