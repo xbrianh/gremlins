@@ -306,8 +306,8 @@ pub fn parse_default(raw: &str) -> serde_yaml::Value {
 }
 
 /// Validate that every key declared in each stage's `bind:` or `interpolation:`
-/// map is actually referenced as `{KEY}`, `$KEY`, or `${KEY}` somewhere in the
-/// stage's prompts or commands. Also catches keys declared in both maps.
+/// map is actually referenced as `{KEY}` somewhere in the stage's prompts or
+/// commands. Also catches keys declared in both maps.
 ///
 /// By the time this runs, all bundled recipe call-sites have already been
 /// inlined by `_expand_stage_def`, so the validator only ever sees fully
@@ -455,35 +455,17 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
     }
 }
 
-/// Check whether a key appears in the stage's text as `{KEY}`, `$KEY`, or `${KEY}`.
+/// Check whether a key appears in the stage's text as `{KEY}` (not `${KEY}`).
 fn key_referenced_in_text(key_str: &str, text: &str) -> bool {
-    // Check for {KEY}
-    let brace_form = format!("{{{key_str}}}");
-    if text.contains(&brace_form) {
-        return true;
-    }
-    // Check for ${KEY}
-    let dollar_brace_form = String::from("${") + key_str;
-    if text.contains(&dollar_brace_form) {
-        return true;
-    }
-    // Check $KEY — must not be followed by an identifier-continuation character
-    let dollar_form = format!("${key_str}");
-    if text.contains(&dollar_form) {
-        let mut pos = 0;
-        while let Some(idx) = text[pos..].find(&dollar_form) {
-            let abs_idx = pos + idx;
-            let after = abs_idx + dollar_form.len();
-            if after >= text.len()
-                || !text
-                    .as_bytes()
-                    .get(after)
-                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
-            {
-                return true;
-            }
-            pos = after;
+    let target = format!("{{{key_str}}}");
+    let mut pos = 0;
+    while let Some(idx) = text[pos..].find(&target) {
+        let abs_idx = pos + idx;
+        // Must not be preceded by `$`
+        if abs_idx == 0 || text.as_bytes().get(abs_idx - 1) != Some(&b'$') {
+            return true;
         }
+        pos = abs_idx + target.len();
     }
     false
 }
@@ -1345,7 +1327,7 @@ stages:
       bar: content(...)
     options:
       cmds:
-        - "echo ${bar}"
+        - "echo {bar}"
 "#,
         )
         .unwrap();
@@ -1444,7 +1426,8 @@ stages:
     }
 
     #[test]
-    fn test_bind_key_referenced_as_dollar_key() {
+    fn test_bind_key_referenced_as_dollar_not_detected() {
+        // $foo / ${foo} are no longer valid delivery mechanisms — only {foo} works.
         let yaml = serde_yaml::from_str::<serde_yaml::Value>(
             r#"
 stages:
@@ -1457,7 +1440,15 @@ stages:
 "#,
         )
         .unwrap();
-        assert!(validate_stage_keys(&yaml).is_ok());
+        let errs = validate_stage_keys(&yaml).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        match &errs[0] {
+            SchemaError::UnusedStageKey { key, map, .. } => {
+                assert_eq!(key, "foo");
+                assert_eq!(map, "bind");
+            }
+            _ => panic!("expected UnusedStageKey"),
+        }
     }
 
     #[test]

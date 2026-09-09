@@ -76,7 +76,7 @@ stages:
     Pipeline.from_yaml(path)
 
 
-def test_key_in_shell_dollar_form_passes(tmp_path: Path):
+def test_key_in_shell_dollar_form_is_rejected_as_unused(tmp_path: Path):
     yaml_content = f"""
 default_client: {CLIENT}
 stages:
@@ -91,10 +91,11 @@ stages:
       plan: artifact.plan
 """
     path = _write_pipeline(tmp_path, yaml_content)
-    Pipeline.from_yaml(path)
+    with pytest.raises(ValueError, match="not referenced"):
+        Pipeline.from_yaml(path)
 
 
-def test_key_in_shell_dollar_brace_form_passes(tmp_path: Path):
+def test_key_in_shell_dollar_brace_form_is_rejected_as_unused(tmp_path: Path):
     yaml_content = f"""
 default_client: {CLIENT}
 stages:
@@ -109,7 +110,8 @@ stages:
       plan: artifact.plan
 """
     path = _write_pipeline(tmp_path, yaml_content)
-    Pipeline.from_yaml(path)
+    with pytest.raises(ValueError, match="not referenced"):
+        Pipeline.from_yaml(path)
 
 
 def test_multiple_keys_one_unused_raises(tmp_path: Path):
