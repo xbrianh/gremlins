@@ -230,6 +230,17 @@ def _patch_common(
             else cmd
         )
         if isinstance(cmd, str):
+            # Handle custom gremlins scripts that aren't gh subcommands.
+            if "gh_resolve_plan_source" in cmd:
+                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
+            if "gh_publish_issue" in cmd:
+                # Write plan-issue-number.txt so verify_produced passes.
+                m_pub = re.search(r'"([^"]+/plan-issue-number\.txt)"', cmd_resolved)
+                if m_pub:
+                    p = pathlib.Path(m_pub.group(1))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text("42\n")
+                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
             if cmd.lstrip().startswith("gh "):
                 # If gh repo view, write repo.txt so discover stage passes
                 if "gh repo view" in cmd:
@@ -282,6 +293,18 @@ def _patch_common(
                 p = pathlib.Path(m4.group(1))
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text("# PR Review Comments\n\nFake review content.\n")
+                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
+        # Gremlins custom scripts (gh_*, git_*): the test doesn't have them on
+        # PATH and doesn't need them to actually run — the artifacts they
+        # produce are already pre-populated by _patch_common.
+        if isinstance(cmd, str):
+            if cmd.lstrip().startswith("gh_") or "git_diff_summary" in cmd:
+                # Handle any > redirections so the output file is created.
+                for m_redir in re.finditer(r'>\s*"([^"]+)"', cmd_resolved):
+                    p = pathlib.Path(m_redir.group(1))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    if not p.exists():
+                        p.write_text("")
                 return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
         return await _orig_shell(cmd, cwd=cwd, env=env, timeout=timeout)
 
@@ -1703,8 +1726,8 @@ def test_publish_as_issue_runs_when_no_source_bound(tmp_path, monkeypatch):
     )
     assert result == 0
 
-    assert any("gh issue create" in cmd for cmd in shell_cmds), (
-        "publish-as-issue should have run gh issue create"
+    assert any("gh_publish_issue" in cmd for cmd in shell_cmds), (
+        "publish-as-issue should have run gh_publish_issue"
     )
     assert (artifact_dir / "plan-issue-number.txt").exists(), (
         "publish-as-issue should have written plan-issue-number.txt"
