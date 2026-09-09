@@ -6,4 +6,4 @@ stages:
       repo: "artifact://repo.txt"
     options:
       cmds:
-        - 'gh repo view --json nameWithOwner -q ".nameWithOwner" | tr -d "\n" > "{repo}"'
+        - 'gh_discover_repo > "{repo}"'

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Gather all review content from a GitHub PR into markdown.
+# Usage: gh_gather_review_content <pr_url>
+# Outputs formatted markdown to stdout.
+set -euo pipefail
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+PR_URL="${1:-}"
+
+if [ -z "$PR_URL" ]; then
+    die "Usage: gh_gather_review_content <pr_url>"
+fi
+
+gh pr view "$PR_URL" --json number,title,body,author,headRefName,baseRefName --jq '
+  .number, "\u0000",
+  .title, "\u0000",
+  .body, "\u0000",
+  .author.login, "\u0000",
+  .headRefName, "\u0000",
+  .baseRefName, "\u0000"
+' | {
+    IFS= read -r -d '' PR_NUMBER
+    IFS= read -r -d '' PR_TITLE
+    IFS= read -r -d '' PR_BODY
+    IFS= read -r -d '' PR_AUTHOR
+    IFS= read -r -d '' PR_HEAD_REF
+    IFS= read -r -d '' PR_BASE_REF
+
+    PR_NUMBER="$(printf '%s' "$PR_NUMBER" | tr -d '\n')"
+    OWNER_REPO="$(echo "$PR_URL" | sed 's|https://github.com/||; s|/pull/.*||')"
+
+    echo "# PR Review Comments"
+    echo
+    echo "**PR:** $PR_URL"
+    echo "**Number:** #$PR_NUMBER"
+    echo "**Title:** $PR_TITLE"
+    echo "**Author:** $PR_AUTHOR"
+    echo "**Branch:** $PR_HEAD_REF → $PR_BASE_REF"
+    echo "**Owner/Repo:** $OWNER_REPO"
+    echo
+    if [ -n "$PR_BODY" ] && [ "$PR_BODY" != "null" ]; then
+        echo "## PR Description"
+        echo
+        echo "$PR_BODY"
+        echo
+    fi
+    echo "## Review Comments"
+    echo
+    gh api "repos/$OWNER_REPO/pulls/$PR_NUMBER/comments" --paginate --jq '.[] | "### Comment \(.id) by \(.user.login)\n\n\(.body)\n\n_File: `\(.path):\(.line // .original_line)`_\n\n---\n"'
+    echo
+    echo "## Issue Comments"
+    echo
+    gh pr view "$PR_URL" --comments --json comments --jq '.comments[] | "### Comment by \(.author.login) (\(.createdAt))\n\n\(.body)\n\n---\n"'
+}

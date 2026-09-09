@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Create a GitHub PR from the current branch.
+# Usage: gh_create_pr <base_ref> <pr_title> <pr_body_file> <pr_number_file> <pr_url_file>
+#
+# Creates a unique branch name with a random slug, pushes, opens a PR,
+# and writes the PR number and URL to the specified output files.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+base_ref="${1:-}"
+pr_title="${2:-}"
+pr_body_file="${3:-}"
+pr_number_file="${4:-}"
+pr_url_file="${5:-}"
+
+if [ -z "$base_ref" ] || [ -z "$pr_title" ] || [ -z "$pr_body_file" ] || [ -z "$pr_number_file" ] || [ -z "$pr_url_file" ]; then
+    die "Usage: gh_create_pr <base_ref> <pr_title> <pr_body_file> <pr_number_file> <pr_url_file>"
+fi
+
+# Generate a unique branch name with a random 4-char slug.
+SLUG="$(python3 -c "import random,string; print(''.join(random.choices(string.ascii_lowercase+string.digits,k=4)))")"
+BRANCH="$(printf '%s' "$pr_title" | sed 's/[^a-zA-Z0-9]/-/g' | tr '[:upper:]' '[:lower:]' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')"
+BRANCH="${BRANCH}-${SLUG}"
+
+git push origin "HEAD:refs/heads/$BRANCH"
+
+URL="$(gh pr create \
+    --head "$BRANCH" \
+    --base "$base_ref" \
+    --title "$pr_title" \
+    --body-file "$pr_body_file")"
+
+printf "%s" "${URL##*/}" > "$pr_number_file"
+printf "%s" "$URL" > "$pr_url_file"
+
+info "PR created: $URL"

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Compute a diff summary between a base ref and HEAD.
+# Usage: git_diff_summary <base_ref>
+# Outputs commit log and file change stats to stdout.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+base_ref="${1:-}"
+
+if [ -z "$base_ref" ]; then
+    die "Usage: git_diff_summary <base_ref>"
+fi
+
+# Determine the range: base_ref..HEAD, or fall back to HEAD~10..HEAD, or root..HEAD.
+if git merge-base --is-ancestor "$base_ref" HEAD 2>/dev/null; then
+    RANGE="$base_ref..HEAD"
+elif git rev-parse --verify HEAD~10 >/dev/null 2>&1; then
+    RANGE="HEAD~10..HEAD"
+else
+    ROOT=$(git rev-list --max-parents=0 HEAD)
+    RANGE="${ROOT}..HEAD"
+fi
+
+{
+    echo "Commits:"
+    git log --oneline "$RANGE" 2>/dev/null || echo "(no commits)"
+    echo ""
+    echo "Files changed:"
+    git diff --stat "$RANGE" 2>/dev/null || echo "(no diff)"
+}
