@@ -65,8 +65,17 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 return format!("Error: subagent max depth ({MAX_DEPTH}) exceeded");
             }
 
+            let sub_prefix = if depth == 0 {
+                format!("{}[sub] ", prefix)
+            } else {
+                format!("{}[sub{depth}] ", prefix)
+            };
+
             // Inject a child runner one level deeper so a nested subagent can
             // recurse again, bounded by MAX_DEPTH along this call chain.
+            // Pass the original `prefix` (not `sub_prefix`) so prefixes don't
+            // stack across nesting levels — each depth computes its own notation
+            // from the same base prefix.
             sub_ctx.subagent_fn = Some(make_runner_at_depth(
                 model.clone(),
                 tool_filter.clone(),
@@ -84,7 +93,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 &sub_ctx,
                 &cancel,
                 tool_filter.as_deref(),
-                &prefix,
+                &sub_prefix,
                 idle_timeout,
                 max_turns,
             )
