@@ -704,6 +704,47 @@ pub async fn edit_invoke(ctx: &ToolContext, args_json: &str) -> String {
     blocking_string(move || edit_sync(cwd.as_deref(), &roots, &args_json)).await
 }
 
+fn edit_not_found_diagnostic(
+    content: &str,
+    file_path: &str,
+    old_str: &str,
+    edit_num: usize,
+) -> String {
+    let first_line = old_str.lines().next().unwrap_or("").trim();
+    let needle: &str = if first_line.is_empty() {
+        return format!(
+            "Error: old_string not found in {file_path} (edit {edit_num}) — first line is empty or whitespace-only"
+        );
+    } else if first_line.chars().count() > 80 {
+        let byte_idx = first_line
+            .char_indices()
+            .nth(80)
+            .map(|(i, _)| i)
+            .unwrap_or(first_line.len());
+        &first_line[..byte_idx]
+    } else {
+        first_line
+    };
+    let hint = if let Some(pos) = content.find(needle) {
+        let line_no = content[..pos].lines().count() + 1;
+        let context_start = content[..pos].rfind('\n').map_or(0, |n| n + 1);
+        let context_end = content[pos..].find('\n').map_or(content.len(), |n| pos + n);
+        let cap_byte = content[context_start..]
+            .char_indices()
+            .nth(200)
+            .map(|(i, _)| context_start + i)
+            .unwrap_or(content.len());
+        let context_end = context_end.min(cap_byte);
+        let context = &content[context_start..context_end];
+        format!(" — did you mean to match near line {line_no}? Found:\n{context}")
+    } else {
+        String::new()
+    };
+    format!(
+        "Error: old_string not found in {file_path} (edit {edit_num}) — first line: {needle:?}{hint}"
+    )
+}
+
 fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
@@ -713,14 +754,14 @@ fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let old = match req_str(&args, "old_string") {
-        Ok(s) => s,
-        Err(e) => return e,
+    let edits_arr = match args.get("edits").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return "Error: missing 'edits'".into(),
     };
-    let new = match req_str(&args, "new_string") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
+    if edits_arr.is_empty() {
+        return "Error: no edits provided".into();
+    }
+
     let path = resolve(file_path, cwd);
     if let Some(err) = io_enforce(&path, roots) {
         return err;
@@ -729,51 +770,74 @@ fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
-    if old.is_empty() {
-        return format!("Error: old_string is empty in {file_path}");
+
+    // Collect old/new pairs with validation.
+    let mut edits: Vec<(&str, &str)> = Vec::with_capacity(edits_arr.len());
+    for (i, e) in edits_arr.iter().enumerate() {
+        let obj = match e.as_object() {
+            Some(o) => o,
+            None => return format!("Error: edit {} is not an object in {file_path}", i + 1),
+        };
+        let old_str = match obj.get("old_string").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return format!("Error: edit {} missing 'old_string' in {file_path}", i + 1),
+        };
+        let new_str = match obj.get("new_string").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return format!("Error: edit {} missing 'new_string' in {file_path}", i + 1),
+        };
+        edits.push((old_str, new_str));
     }
-    if !content.contains(old) {
-        let first_line = old.lines().next().unwrap_or("").trim();
-        // Char-boundary-safe truncation to 80 characters.
-        let needle: &str = if first_line.is_empty() {
-            // Don't use an empty needle — find() matches everywhere.
+
+    // Validate all against original content.
+    for (i, (old_str, _)) in edits.iter().enumerate() {
+        if old_str.is_empty() {
+            return format!("Error: old_string is empty in {file_path} (edit {})", i + 1);
+        }
+        if !content.contains(old_str) {
+            return edit_not_found_diagnostic(&content, file_path, old_str, i + 1);
+        }
+        if content.matches(old_str).count() > 1 {
             return format!(
-                "Error: old_string not found in {file_path} — first line is empty or whitespace-only"
+                "Error: old_string is not unique in {file_path} (edit {})",
+                i + 1
             );
-        } else if first_line.chars().count() > 80 {
-            let byte_idx = first_line
-                .char_indices()
-                .nth(80)
-                .map(|(i, _)| i)
-                .unwrap_or(first_line.len());
-            &first_line[..byte_idx]
-        } else {
-            first_line
-        };
-        let hint = if let Some(pos) = content.find(needle) {
-            let line_no = content[..pos].lines().count() + 1;
-            let context_start = content[..pos].rfind('\n').map_or(0, |n| n + 1);
-            let context_end = content[pos..].find('\n').map_or(content.len(), |n| pos + n);
-            // Context capped at 200 chars, clamped to a char boundary.
-            let cap_byte = content[context_start..]
-                .char_indices()
-                .nth(200)
-                .map(|(i, _)| context_start + i)
-                .unwrap_or(content.len());
-            let context_end = context_end.min(cap_byte);
-            let context = &content[context_start..context_end];
-            format!(" — did you mean to match near line {line_no}? Found:\n{context}")
-        } else {
-            String::new()
-        };
-        return format!(
-            "Error: old_string not found in {file_path} — first line: {needle:?}{hint}"
-        );
+        }
     }
-    if content.matches(old).count() > 1 {
-        return format!("Error: old_string is not unique in {file_path}");
+
+    // Validate non-overlapping.
+    let ranges: Vec<(usize, usize)> = edits
+        .iter()
+        .map(|(o, _)| {
+            let pos = content.find(o).unwrap();
+            (pos, pos + o.len())
+        })
+        .collect();
+    for i in 0..ranges.len() {
+        for j in (i + 1)..ranges.len() {
+            if ranges[i].0 < ranges[j].1 && ranges[j].0 < ranges[i].1 {
+                return format!(
+                    "Error: edits {} and {} overlap in {file_path}",
+                    i + 1,
+                    j + 1
+                );
+            }
+        }
     }
-    let updated = content.replacen(old, new, 1);
+
+    // Apply in reverse byte-order.
+    let mut indexed: Vec<(usize, &str, &str)> = edits
+        .iter()
+        .map(|(o, n)| (content.find(o).unwrap(), *o, *n))
+        .collect();
+    indexed.sort_by_key(|a| std::cmp::Reverse(a.0));
+
+    let mut updated = content;
+    for (pos, old_str, new_str) in &indexed {
+        let end = *pos + old_str.len();
+        updated.replace_range(*pos..end, new_str);
+    }
+
     if let Err(e) = std::fs::write(&path, updated) {
         return format!("Error: {e}");
     }
@@ -1165,15 +1229,26 @@ pub fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Edit".into(),
-            description: "Replace old_string with new_string in a file (requires unique match). When editing a file with duplicate substrings, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file.".into(),
+            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match). Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string"},
-                    "old_string": {"type": "string"},
-                    "new_string": {"type": "string"}
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": {"type": "string"},
+                                "new_string": {"type": "string"}
+                            },
+                            "required": ["old_string", "new_string"],
+                            "additionalProperties": false
+                        }
+                    }
                 },
-                "required": ["file_path", "old_string", "new_string"],
+                "required": ["file_path", "edits"],
                 "additionalProperties": false
             }),
         },
@@ -1320,13 +1395,15 @@ mod tests {
         let c = ctx(&dir);
         std::fs::write(dir.join("b.txt"), "foo bar foo").unwrap();
         let dup = serde_json::json!({
-            "file_path": "b.txt", "old_string": "foo", "new_string": "baz"
+            "file_path": "b.txt",
+            "edits": [{"old_string": "foo", "new_string": "baz"}]
         })
         .to_string();
         assert!(edit_invoke(&c, &dup).await.contains("not unique"));
         std::fs::write(dir.join("b.txt"), "foo bar").unwrap();
         let ok = serde_json::json!({
-            "file_path": "b.txt", "old_string": "foo", "new_string": "baz"
+            "file_path": "b.txt",
+            "edits": [{"old_string": "foo", "new_string": "baz"}]
         })
         .to_string();
         assert_eq!(edit_invoke(&c, &ok).await, "OK");
@@ -2011,8 +2088,7 @@ mod tests {
         std::fs::write(dir.join("f.txt"), "hello\nworld\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "old_string": "fn alpha() {}",
-            "new_string": ""
+            "edits": [{"old_string": "fn alpha() {}", "new_string": ""}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
@@ -2026,8 +2102,7 @@ mod tests {
         std::fs::write(dir.join("f.txt"), "hello world\nfn alpha() {}\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "old_string": "fn alpha() {\n  x = 1\n}",
-            "new_string": ""
+            "edits": [{"old_string": "fn alpha() {\n  x = 1\n}", "new_string": ""}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
@@ -2041,8 +2116,7 @@ mod tests {
         std::fs::write(dir.join("f.txt"), "hello\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "old_string": "",
-            "new_string": ""
+            "edits": [{"old_string": "", "new_string": ""}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
@@ -2056,8 +2130,7 @@ mod tests {
         // old_string starts with a blank line, so first_line trims to empty.
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "old_string": "\n  fn alpha() {}",
-            "new_string": ""
+            "edits": [{"old_string": "\n  fn alpha() {}", "new_string": ""}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
@@ -2073,8 +2146,7 @@ mod tests {
         let old = format!("{long_line}\nbody");
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "old_string": old,
-            "new_string": ""
+            "edits": [{"old_string": old, "new_string": ""}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
@@ -2092,13 +2164,69 @@ mod tests {
         std::fs::write(dir.join("f.txt"), &content).unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "old_string": "fn alpha() {\n  x = 1\n}",
-            "new_string": ""
+            "edits": [{"old_string": "fn alpha() {\n  x = 1\n}", "new_string": ""}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
         assert!(result.contains("did you mean to match"));
         // Must not panic on byte-slice boundary.
+    }
+
+    #[test]
+    fn edit_batch_three_non_overlapping() {
+        let dir = tmp();
+        std::fs::write(dir.join("x.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "x.txt",
+            "edits": [
+                {"old_string": "alpha", "new_string": "A"},
+                {"old_string": "gamma", "new_string": "C"},
+                {"old_string": "delta", "new_string": "D"}
+            ]
+        })
+        .to_string();
+        assert_eq!(
+            edit_sync(Some(&dir), std::slice::from_ref(&dir), &args),
+            "OK"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("x.txt")).unwrap(),
+            "A\nbeta\nC\nD\n"
+        );
+    }
+
+    #[test]
+    fn edit_batch_overlap_rejected() {
+        let dir = tmp();
+        std::fs::write(dir.join("x.txt"), "hello world\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "x.txt",
+            "edits": [
+                {"old_string": "hello", "new_string": "hi"},
+                {"old_string": "hello world", "new_string": "hi earth"}
+            ]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        assert!(result.contains("overlap"));
+    }
+
+    #[test]
+    fn edit_batch_empty_rejected() {
+        let dir = tmp();
+        std::fs::write(dir.join("x.txt"), "x\n").unwrap();
+        let args = serde_json::json!({"file_path": "x.txt", "edits": []}).to_string();
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        assert!(result.contains("no edits provided"));
+    }
+
+    #[test]
+    fn edit_batch_missing_edits_key() {
+        let dir = tmp();
+        std::fs::write(dir.join("x.txt"), "x\n").unwrap();
+        let args = serde_json::json!({"file_path": "x.txt"}).to_string();
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        assert!(result.contains("missing 'edits'"));
     }
 
     // --- Part 3: Subagent tests ---
