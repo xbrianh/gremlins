@@ -36,10 +36,11 @@ impl Done {
 create_exception!(_gremlins_core.stages, Bail, PyException);
 
 // Patch .reason onto the class at module init time.
-fn patch_bail(py: Python<'_>) -> PyResult<()> {
+fn patch_bail(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let globals = pyo3::types::PyDict::new(py);
+    globals.set_item("_m", m)?;
     py.run(
         c"\
-import _gremlins_core.stages as _m
 def _reason(self):
     return self.args[0] if self.args else ''
 def _str(self):
@@ -47,7 +48,7 @@ def _str(self):
 _m.Bail.reason = property(_reason)
 _m.Bail.__str__ = _str
 ",
-        None,
+        Some(&globals),
         None,
     )
 }
@@ -63,13 +64,12 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     // so it's available on the module before patch_bail tries to access _m.Bail.
     m.add("Bail", m.py().get_type::<Bail>())?;
 
-    // Register in parent and sys.modules *before* patch_bail, which does
-    // `import _gremlins_core.stages` internally.
+    // Register in parent and sys.modules before patch_bail so _m.Bail is findable.
     parent.add_submodule(&m)?;
     let modules = py.import("sys")?.getattr("modules")?;
     modules.set_item("_gremlins_core.stages", &m)?;
 
-    patch_bail(py)?;
+    patch_bail(py, &m)?;
 
     m.add("Outcome", m.getattr("Done")?)?;
 
