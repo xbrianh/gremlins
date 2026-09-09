@@ -348,12 +348,14 @@ async fn run_agent_loop_core<M: CompletionModel>(
             break;
         }
 
+        if !reasoning.is_empty() {
+            stream::emit_think(prefix, &reasoning);
+        }
+        if !text.is_empty() {
+            stream::emit_text(prefix, &text);
+        }
         if !nested {
-            if !reasoning.is_empty() {
-                stream::emit_think(prefix, &reasoning);
-            }
             if !text.is_empty() {
-                stream::emit_text(prefix, &text);
                 write_raw(raw, &assistant_text_event(&text));
                 if let Some(evts) = captured.as_mut() {
                     evts.push(assistant_text_event(&text));
@@ -364,19 +366,17 @@ async fn run_agent_loop_core<M: CompletionModel>(
             final_text = text.clone();
         }
 
-        if !nested {
-            stream::emit_turn_metrics(
-                prefix,
-                turn_num,
-                first_token,
-                last_token,
-                turn_start,
-                &reasoning,
-                &text,
-                &tool_calls,
-                turn_usage.as_ref(),
-            );
-        }
+        stream::emit_turn_metrics(
+            prefix,
+            turn_num,
+            first_token,
+            last_token,
+            turn_start,
+            &reasoning,
+            &text,
+            &tool_calls,
+            turn_usage.as_ref(),
+        );
 
         if let Some(ref u) = turn_usage {
             total_prompt_tokens += u.input_tokens;
@@ -484,8 +484,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
         for tc in &tool_calls {
             let args_json =
                 serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".into());
+            stream::emit_tool(prefix, &tc.function.name, &key_arg(&tc.function.arguments));
             if !nested {
-                stream::emit_tool(prefix, &tc.function.name, &key_arg(&tc.function.arguments));
                 let tool_evt = tool_use_event(&tc.id, &tc.function.name, &tc.function.arguments);
                 write_raw(raw, &tool_evt);
                 if let Some(evts) = captured.as_mut() {
@@ -507,8 +507,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // Phase 3: emit results in order
         let mut result_msgs = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
+            stream::emit_result(prefix, &output, false);
             if !nested {
-                stream::emit_result(prefix, &output, false);
                 let result_evt = tool_result_event(&job.id, &output);
                 write_raw(raw, &result_evt);
                 if let Some(evts) = captured.as_mut() {
@@ -522,9 +522,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             ));
         }
         turns += tool_calls.len();
-        if !nested {
-            stream::flush();
-        }
+        stream::flush();
         next_prompt = result_msgs.pop().unwrap_or_else(|| Message::user(""));
         history.extend(result_msgs);
     }

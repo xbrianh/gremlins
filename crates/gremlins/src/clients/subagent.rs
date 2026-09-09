@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use rig_core::completion::CompletionModel;
 
+use super::stream;
 use super::tools::{self, ToolContext};
 
 const MAX_DEPTH: u32 = 3;
@@ -65,6 +66,14 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 return format!("Error: subagent max depth ({MAX_DEPTH}) exceeded");
             }
 
+            let sub_prefix = format!("{}[sub] ", prefix);
+            eprintln!(
+                "{} {}subagent: begin (max_turns={})",
+                stream::ts_internal(),
+                sub_prefix,
+                max_turns
+            );
+
             // Inject a child runner one level deeper so a nested subagent can
             // recurse again, bounded by MAX_DEPTH along this call chain.
             sub_ctx.subagent_fn = Some(make_runner_at_depth(
@@ -84,11 +93,17 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 &sub_ctx,
                 &cancel,
                 tool_filter.as_deref(),
-                &prefix,
+                &sub_prefix,
                 idle_timeout,
                 max_turns,
             )
             .await;
+
+            eprintln!(
+                "{} {}subagent: end",
+                stream::ts_internal(),
+                sub_prefix,
+            );
 
             match result {
                 Ok(completed) => completed.text_result.unwrap_or_default(),
