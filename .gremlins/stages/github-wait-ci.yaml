@@ -163,7 +163,7 @@ stages:
           pr_branch: content("artifact://pr-branch.txt")
         options:
           cmds:
-            - git push origin "HEAD:$pr_branch"
+            - git push origin "HEAD:{pr_branch}"
 
       - name: capture-head
         type: exec

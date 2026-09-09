@@ -31,7 +31,7 @@ land:
     PR_URL: content("artifact://pr-url.txt")
   options:
     cmds:
-      - gh pr merge --squash --delete-branch "$PR_URL"
+      - gh pr merge --squash --delete-branch "{PR_URL}"
       - git fetch origin
       - git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main
 

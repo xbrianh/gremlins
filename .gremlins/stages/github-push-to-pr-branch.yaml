@@ -5,4 +5,4 @@ stages:
       branch: content("artifact://pr-branch.txt")
     options:
       cmds:
-        - 'git push origin HEAD:"$branch"'
+        - 'git push origin HEAD:"{branch}"'

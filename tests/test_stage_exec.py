@@ -67,14 +67,14 @@ def test_no_cmds_returns_done(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_interpolation_map_injects_env_var(tmp_path):
+def test_interpolation_map_substitutes_in_cmds(tmp_path):
     state = _make_state(tmp_path)
     (state.artifact_dir / "value.txt").write_text("hello")
     state.artifacts.register(Uri.parse("artifact://value.txt"))
 
     out_file = tmp_path / "captured.txt"
     stage = _exec(
-        cmds=[f'echo "$MY_VAR" > {out_file}'],
+        cmds=[f'echo "{{MY_VAR}}" > {out_file}'],
         interpolation_map={"MY_VAR": 'content("artifact://value.txt")'},
     )
     asyncio.run(stage.run(MockGremlin(state=state)))
