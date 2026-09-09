@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::io::Read;
 use std::path::Path;
@@ -279,6 +280,7 @@ pub async fn run_async(
     check: bool,
     timeout: Option<f64>,
     _text: bool,
+    env: Option<&HashMap<String, String>>,
 ) -> Result<ProcResult, ProcError> {
     if cmd.is_empty() {
         return Err(ProcError::EmptyCommand);
@@ -301,6 +303,10 @@ pub async fn run_async(
     }
     if let Some(dir) = cwd {
         command.current_dir(dir);
+    }
+    if let Some(e) = env {
+        command.env_clear();
+        command.envs(e.iter());
     }
 
     let mut child = command.spawn().map_err(ProcError::Io)?;
@@ -351,10 +357,19 @@ pub async fn run_async(
         None => child.wait().await.map_err(ProcError::Io),
     };
 
-    let status = wait_result?;
     cancel.disarm();
-    let stdout_buf = stdout_handle.await.unwrap_or_default();
-    let stderr_buf = stderr_handle.await.unwrap_or_default();
+
+    let status = wait_result?;
+
+    let drain = async {
+        let stdout_buf = stdout_handle.await.unwrap_or_default();
+        let stderr_buf = stderr_handle.await.unwrap_or_default();
+        (stdout_buf, stderr_buf)
+    };
+    let (stdout_buf, stderr_buf): (Vec<u8>, Vec<u8>) =
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .unwrap_or_default();
 
     let rc = exit_code(&status);
     let result = ProcResult {
@@ -372,6 +387,166 @@ pub async fn run_async(
     } else {
         Ok(result)
     }
+}
+
+pub async fn run_shell_async(
+    shell_cmd: &str,
+    cwd: Option<&Path>,
+    env: Option<&HashMap<String, String>>,
+    timeout: Option<f64>,
+) -> Result<ProcResult, ProcError> {
+    if shell_cmd.is_empty() {
+        return Err(ProcError::EmptyCommand);
+    }
+    if let Some(t) = timeout {
+        if !t.is_finite() || t < 0.0 {
+            return Err(ProcError::InvalidTimeout(t));
+        }
+    }
+
+    let mut command = tokio::process::Command::new("sh");
+    command.arg("-c");
+    command.arg(shell_cmd);
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    command.kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    if let Some(e) = env {
+        command.env_clear();
+        command.envs(e.iter());
+    }
+
+    let t0 = Instant::now();
+    log::info!(
+        "run_shell_async: starting pid=soon cwd={cwd:?} timeout={timeout:?}s cmd={:.200}",
+        shell_cmd
+    );
+
+    let mut child = command.spawn().map_err(ProcError::Io)?;
+    let pid = child
+        .id()
+        .ok_or_else(|| ProcError::Io(io::Error::other("child process has no pid")))?;
+    let mut cancel = CancelToken::new(pid);
+
+    log::info!("run_shell_async: pid={pid} spawned");
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+
+    let stdout_handle = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf).await;
+        buf
+    });
+
+    let stderr_handle = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf).await;
+        buf
+    });
+
+    let heartbeat_handle = {
+        let h = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                log::info!(
+                    "run_shell_async: pid={pid} heartbeat elapsed={:.0}s",
+                    t0.elapsed().as_secs_f64()
+                );
+            }
+        });
+        h
+    };
+
+    let timeout_warning_handle = timeout.map(|t| {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs_f64(t * 0.8)).await;
+            log::warn!(
+                "run_shell_async: pid={pid} approaching timeout ({:.1}s elapsed of {:.1}s)",
+                t0.elapsed().as_secs_f64(),
+                t
+            );
+        })
+    });
+
+    let wait_result = match timeout {
+        Some(t) => match tokio::time::timeout(Duration::from_secs_f64(t), child.wait()).await {
+            Ok(result) => result.map_err(ProcError::Io),
+            Err(_elapsed) => {
+                let elapsed = t0.elapsed().as_secs_f64();
+                #[cfg(unix)]
+                unsafe {
+                    libc::killpg(pid as i32, libc::SIGKILL);
+                }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+
+                heartbeat_handle.abort();
+                if let Some(h) = timeout_warning_handle {
+                    h.abort();
+                }
+
+                let drain = async {
+                    let stdout_buf = stdout_handle.await.unwrap_or_default();
+                    let stderr_buf = stderr_handle.await.unwrap_or_default();
+                    (stdout_buf, stderr_buf)
+                };
+                let (stdout_buf, stderr_buf): (Vec<u8>, Vec<u8>) =
+                    tokio::time::timeout(Duration::from_secs(5), drain)
+                        .await
+                        .unwrap_or_default();
+
+                log::warn!(
+                    "run_shell_async: pid={pid} timed out after {elapsed:.2}s (timeout={t}) stdout_so_far={} stderr_so_far={}",
+                    stdout_buf.len(),
+                    stderr_buf.len(),
+                );
+
+                cancel.disarm();
+                return Err(ProcError::TimeoutExpired(t, stdout_buf, stderr_buf));
+            }
+        },
+        None => child.wait().await.map_err(ProcError::Io),
+    };
+
+    cancel.disarm();
+    heartbeat_handle.abort();
+    if let Some(h) = timeout_warning_handle {
+        h.abort();
+    }
+
+    let status = wait_result?;
+
+    let drain = async {
+        let stdout_buf = stdout_handle.await.unwrap_or_default();
+        let stderr_buf = stderr_handle.await.unwrap_or_default();
+        (stdout_buf, stderr_buf)
+    };
+    let (stdout_buf, stderr_buf): (Vec<u8>, Vec<u8>) =
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .unwrap_or_default();
+    let rc = exit_code(&status);
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    log::info!(
+        "run_shell_async: pid={pid} done in {elapsed:.2}s rc={rc} stdout={} stderr={}",
+        stdout_buf.len(),
+        stderr_buf.len(),
+    );
+
+    Ok(ProcResult {
+        returncode: rc,
+        stdout: stdout_buf,
+        stderr: stderr_buf,
+    })
 }
 
 /// Poll whether a process with the given PID is still alive, without reaping it.
@@ -782,7 +957,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_success() {
-        let r = run_async(&["true".to_string()], None, false, None, true)
+        let r = run_async(&["true".to_string()], None, false, None, true, None)
             .await
             .unwrap();
         assert_eq!(r.returncode, 0);
@@ -790,7 +965,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_nonzero_exit() {
-        let r = run_async(&["false".to_string()], None, false, None, true)
+        let r = run_async(&["false".to_string()], None, false, None, true, None)
             .await
             .unwrap();
         assert_ne!(r.returncode, 0);
@@ -798,7 +973,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_check_raises() {
-        let err = run_async(&["false".to_string()], None, true, None, true)
+        let err = run_async(&["false".to_string()], None, true, None, true, None)
             .await
             .unwrap_err();
         match err {
@@ -815,6 +990,7 @@ mod tests {
             false,
             None,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -833,6 +1009,7 @@ mod tests {
             false,
             None,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -847,6 +1024,7 @@ mod tests {
             false,
             Some(0.05),
             true,
+            None,
         )
         .await
         .unwrap_err();
@@ -858,7 +1036,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_empty_cmd() {
-        let err = run_async(&[], None, false, None, true).await.unwrap_err();
+        let err = run_async(&[], None, false, None, true, None)
+            .await
+            .unwrap_err();
         match err {
             ProcError::EmptyCommand => {}
             _ => panic!("expected EmptyCommand, got {err}"),
@@ -867,7 +1047,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_invalid_timeout() {
-        let err = run_async(&["true".to_string()], None, false, Some(-1.0), true)
+        let err = run_async(&["true".to_string()], None, false, Some(-1.0), true, None)
             .await
             .unwrap_err();
         match err {
@@ -878,9 +1058,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_async_invalid_timeout_nan() {
-        let err = run_async(&["true".to_string()], None, false, Some(f64::NAN), true)
-            .await
-            .unwrap_err();
+        let err = run_async(
+            &["true".to_string()],
+            None,
+            false,
+            Some(f64::NAN),
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
         match err {
             ProcError::InvalidTimeout(_) => {}
             _ => panic!("expected InvalidTimeout, got {err}"),
@@ -895,6 +1082,7 @@ mod tests {
             false,
             Some(f64::INFINITY),
             true,
+            None,
         )
         .await
         .unwrap_err();
@@ -916,6 +1104,7 @@ mod tests {
             false,
             Some(0.1),
             true,
+            None,
         )
         .await
         .unwrap_err();
@@ -943,6 +1132,7 @@ mod tests {
             false,
             Some(0.2),
             true,
+            None,
         )
         .await
         .unwrap_err();
@@ -962,6 +1152,7 @@ mod tests {
             false,
             None,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -976,6 +1167,7 @@ mod tests {
             false,
             None,
             true,
+            None,
         )
         .await
         .unwrap_err();
@@ -997,6 +1189,7 @@ mod tests {
                 false,
                 None,
                 true,
+                None,
             )
             .await
         });
@@ -1019,6 +1212,7 @@ mod tests {
                 false,
                 None,
                 true,
+                None,
             )
             .await
         });
@@ -1036,6 +1230,7 @@ mod tests {
             false,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1054,6 +1249,7 @@ mod tests {
             true,
             None,
             true,
+            None,
         )
         .await
         .unwrap_err();
@@ -1145,5 +1341,92 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!status.success());
+    }
+
+    // -- run_shell_async tests --
+
+    #[tokio::test]
+    async fn test_run_shell_async_success() {
+        let r = run_shell_async("true", None, None, None).await.unwrap();
+        assert_eq!(r.returncode, 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_async_captures_stdout() {
+        let r = run_shell_async("echo hello", None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_async_timeout() {
+        let err = run_shell_async("sleep 10", None, None, Some(0.05))
+            .await
+            .unwrap_err();
+        match err {
+            ProcError::TimeoutExpired(..) => {}
+            _ => panic!("expected TimeoutExpired, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_async_timeout_kills_grandchildren() {
+        let err = run_shell_async("sleep 60 & sleep 60", None, None, Some(0.1))
+            .await
+            .unwrap_err();
+        match err {
+            ProcError::TimeoutExpired(..) => {}
+            _ => panic!("expected TimeoutExpired, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_async_large_output() {
+        let err = run_shell_async(
+            "dd if=/dev/zero bs=131072 count=1 2>/dev/null; sleep 10",
+            None,
+            None,
+            Some(0.2),
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ProcError::TimeoutExpired(_, stdout, _) => {
+                assert!(!stdout.is_empty(), "large output should not block");
+            }
+            _ => panic!("expected TimeoutExpired, got {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_async_cancel_kills_process_group() {
+        let handle = tokio::spawn(async { run_shell_async("sleep 10", None, None, None).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.abort();
+        let result = handle.await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_async_with_env() {
+        let r = run_shell_async(
+            "echo $FOO",
+            None,
+            Some(&HashMap::from([("FOO".to_string(), "bar".to_string())])),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "bar");
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_async_empty_cmd() {
+        let err = run_shell_async("", None, None, None).await.unwrap_err();
+        match err {
+            ProcError::EmptyCommand => {}
+            _ => panic!("expected EmptyCommand, got {err}"),
+        }
     }
 }
