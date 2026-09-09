@@ -19,7 +19,10 @@ def test_validate_valid_yaml_returns_zero(tmp_path):
     mock_pipeline = MagicMock()
     mock_pipeline.from_yaml = MagicMock()
 
-    with patch("_gremlins_core.schemas.Pipeline", mock_pipeline):
+    with (
+        patch("_gremlins_core.config.inject_sentinals"),
+        patch("_gremlins_core.schemas.Pipeline", mock_pipeline),
+    ):
         rc = validate_mod.validate_main([str(yaml_file)])
 
     assert rc == 0
@@ -33,7 +36,10 @@ def test_validate_valid_yml_extension_returns_zero(tmp_path):
     mock_pipeline = MagicMock()
     mock_pipeline.from_yaml = MagicMock()
 
-    with patch("_gremlins_core.schemas.Pipeline", mock_pipeline):
+    with (
+        patch("_gremlins_core.config.inject_sentinals"),
+        patch("_gremlins_core.schemas.Pipeline", mock_pipeline),
+    ):
         rc = validate_mod.validate_main([str(yaml_file)])
 
     assert rc == 0
@@ -67,7 +73,10 @@ def test_validate_pipeline_parse_error_returns_one(tmp_path):
         side_effect=ValueError("pipeline is missing 'default_client'")
     )
 
-    with patch("_gremlins_core.schemas.Pipeline", mock_pipeline):
+    with (
+        patch("_gremlins_core.config.inject_sentinals"),
+        patch("_gremlins_core.schemas.Pipeline", mock_pipeline),
+    ):
         rc = validate_mod.validate_main([str(yaml_file)])
 
     assert rc == 1
@@ -87,7 +96,10 @@ def test_validate_resolves_relative_path(tmp_path):
         import os
 
         os.chdir(tmp_path)
-        with patch("_gremlins_core.schemas.Pipeline", mock_pipeline):
+        with (
+            patch("_gremlins_core.config.inject_sentinals"),
+            patch("_gremlins_core.schemas.Pipeline", mock_pipeline),
+        ):
             rc = validate_mod.validate_main(["subdir/pipeline.yaml"])
         assert rc == 0
     finally:

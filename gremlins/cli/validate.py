@@ -29,7 +29,12 @@ def validate_main(argv: list[str]) -> int:
         sys.stderr.write(f"error: not a YAML file: {path}\n")
         return 1
 
+    from _gremlins_core.config import inject_sentinals
     from _gremlins_core.schemas import Pipeline
+
+    # inject_sentinals ensures the global config has a default-client so
+    # structural validation never fails on a missing client.
+    inject_sentinals()
 
     try:
         Pipeline.from_yaml(path)

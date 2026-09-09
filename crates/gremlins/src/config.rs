@@ -213,6 +213,29 @@ pub fn clear_global() {
     *GLOBAL_CONFIG.lock().unwrap() = None;
 }
 
+/// Ensure the global config has a non-None default_client.  If a real
+/// default-client is already set, does nothing.  Otherwise injects the
+/// sentinel `cmd:true` so structural validation never fails on a missing
+/// client.  Used by `gremlins validate`.
+pub fn inject_sentinals() -> Result<(), ConfigError> {
+    let mut guard = GLOBAL_CONFIG.lock().unwrap();
+    let empty = guard.is_none();
+    if empty {
+        // No config at all — seed one from disk (or default).
+        *guard = Some(Arc::new(Config::load().unwrap_or_default()));
+    }
+    let cfg = Arc::get_mut(guard.as_mut().unwrap()).expect("inject_sentinals: unique reference");
+    if cfg.default_client.is_some() {
+        return Ok(());
+    }
+    cfg.raw.insert(
+        "default-client".to_string(),
+        serde_json::Value::String("cmd:true".to_string()),
+    );
+    cfg.default_client = Some("cmd:true".to_string());
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Env-var helpers
 // ---------------------------------------------------------------------------
