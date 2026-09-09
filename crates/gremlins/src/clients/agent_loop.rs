@@ -194,6 +194,37 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     idle_timeout: f64,
     max_turns: usize,
 ) -> Result<CompletedRun, ClientError> {
+    eprintln!(
+        "{} {}subagent: begin (max_turns={})",
+        stream::ts_internal(),
+        prefix,
+        max_turns
+    );
+    let result = run_agent_loop_nested_impl(
+        model,
+        prompt,
+        tool_ctx,
+        cancel,
+        tool_filter,
+        prefix,
+        idle_timeout,
+        max_turns,
+    )
+    .await;
+    eprintln!("{} {}subagent: end", stream::ts_internal(), prefix,);
+    result
+}
+
+async fn run_agent_loop_nested_impl<M: CompletionModel + Clone + Send + Sync + 'static>(
+    model: &M,
+    prompt: &str,
+    tool_ctx: &ToolContext,
+    cancel: &CancelToken,
+    tool_filter: Option<&[String]>,
+    prefix: &str,
+    idle_timeout: f64,
+    max_turns: usize,
+) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
         extra: None,
         tool_filter,
