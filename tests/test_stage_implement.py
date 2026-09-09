@@ -65,8 +65,8 @@ def _make_commit(project: pathlib.Path, filename: str, content: str, message: st
 
 def _require_impl_progress_exec() -> Exec:
     cmds = [
-        'git merge-base --is-ancestor "$base_sha" HEAD || { echo "implement diverged from $base_sha; expected fast-forward" >&2; exit 1; }',
-        'test "$(git rev-list --count "$base_sha"..HEAD)" -gt 0 || { echo "implement produced no commits since $base_sha" >&2; exit 1; }',
+        'git merge-base --is-ancestor "{base_sha}" HEAD || { echo "implement diverged from {base_sha}; expected fast-forward" >&2; exit 1; }',
+        'test "$(git rev-list --count "{base_sha}"..HEAD)" -gt 0 || { echo "implement produced no commits since {base_sha}" >&2; exit 1; }',
     ]
     return Exec(
         "require-impl-progress",
