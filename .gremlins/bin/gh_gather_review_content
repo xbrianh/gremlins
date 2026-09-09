@@ -3,7 +3,6 @@
 # Usage: gh_gather_review_content <pr_url>
 # Outputs formatted markdown to stdout.
 set -euo pipefail
-set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/logging.sh"

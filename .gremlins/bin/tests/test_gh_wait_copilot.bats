@@ -35,12 +35,12 @@ teardown() {
     [ "$output" = "APPROVED" ]
 }
 
-@test "dies on timeout" {
+@test "exits 0 when no review found (one-shot check)" {
     mock_gh 'api.*repos/owner/repo/pulls/42/reviews' ''
     mock_gh 'api.*repos/owner/repo/pulls/42/reviews' ''
     run bash "$SCRIPT" 42 "owner/repo" 2 0
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"timed out"* ]]
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 @test "dies without arguments" {

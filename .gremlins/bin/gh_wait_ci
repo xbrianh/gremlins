@@ -177,8 +177,9 @@ fi
 
 # Collect failure logs for the fix agent.
 printf 'failed' > "$status_file"
-printf '%s' "$failed_json_data" | python3 -c "
-import sys, json
+{
+    printf '%s' "$failed_json_data" | python3 -c "
+import sys, json, re
 failed = json.load(sys.stdin)
 for check in failed:
     name = check.get('name') or check.get('context') or 'unknown'
@@ -186,13 +187,27 @@ for check in failed:
     print()
     print(f'## Check: {name}')
     print()
-    run_id = ''
-    import re
     m = re.search(r'/actions/runs/(\d+)', url)
     if m:
-        run_id = m.group(1)
-        print(f'(gh run view {run_id} --log-failed)')
+        print(f'(gh run view {m.group(1)} --log-failed)')
+        print()
     else:
         print(f'(no action run URL; details: {url})')
-" > "$ci_log" 2>&1
+"
+    printf '%s' "$failed_json_data" | python3 -c "
+import sys, json, re
+failed = json.load(sys.stdin)
+for check in failed:
+    url = check.get('detailsUrl') or check.get('targetUrl') or ''
+    m = re.search(r'/actions/runs/(\d+)', url)
+    if m:
+        print(m.group(1))
+" | while IFS= read -r run_id; do
+        echo
+        echo "--- run $run_id logs ---"
+        timeout 30 gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
+            || printf '(could not fetch run logs)\n'
+        echo "---"
+    done
+} > "$ci_log" 2>&1
 exit 1

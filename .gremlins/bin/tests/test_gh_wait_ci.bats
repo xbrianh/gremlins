@@ -87,8 +87,12 @@ mock_get_failed_checks() {
     mock_fetch_status "$FAIL_JSON" $'\n1\nabc1234'
     # After loop: get_failed_checks → 1 failure
     mock_get_failed_checks "$FAIL_JSON" $'1\n[{"name":"test","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/2"}]'
-    # Failure log formatting
+    # Failure log formatting (first python3: prints check info)
     mock_cmd 'python3' 'failed = json.load' $'\n## Check: test\n\n(gh run view 2 --log-failed)\n'
+    # Extract run IDs (second python3 call)
+    mock_cmd 'python3' 'failed = json.load' $'2'
+    # Fetch actual logs
+    mock_gh 'run view 2 --log-failed' 'FAILURE: test failed: expected 42, got 0'
 
     run bash "$SCRIPT" "$ARTIFACT_DIR" "$PR_URL" 0 30 1
     [ "$status" -eq 1 ]

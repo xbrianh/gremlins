@@ -20,4 +20,4 @@ stages:
         options:
           timeout: 30
           cmds:
-            - 'gh_wait_copilot "$pr_number" "$repo" 1 0 > "{status}" 2>/dev/null || true'
+            - 'gh_wait_copilot "{pr_number}" "{repo}" 1 0 > "{status}" 2>/dev/null'

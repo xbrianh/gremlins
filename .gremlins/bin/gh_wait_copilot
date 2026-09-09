@@ -9,7 +9,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/logging.sh"
-source "$SCRIPT_DIR/lib/polling.sh"
 
 pr_number="${1:-}"
 repo="${2:-}"
@@ -36,4 +35,4 @@ while [ "$iteration" -lt "$max_iterations" ]; do
     fi
 done
 
-die "gh_wait_copilot: timed out after $max_iterations iterations"
+exit 0
