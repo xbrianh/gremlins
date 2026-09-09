@@ -242,8 +242,8 @@ stages:
 | `prompt` | Path or list of paths. `gremlins:NAME` resolves from the bundled package prompts; a bare `NAME` resolves from the pipeline's `prompt_dir`. |
 | `options` | Free-form dict passed to the stage |
 | `skip_if_exists` | Artifact key; if this artifact is verified to exist, skip the stage |
-| `interpolation` | Map of variable names to artifact registry keys (see [Artifact binding](#artifact-binding)) |
-| `bind` | Map of artifact keys to URI strings (see [Artifact binding](#artifact-binding)) |
+| `interpolation` | Map of variable names to registry key lookups: URI strings, `content("URI")` expressions, and optional `?default` fallbacks (see [Artifact binding](#artifact-binding)) |
+| `bind` | Map of local variable names to URI strings; bound files are registered under the URI and the key is available for `{var}` substitution within the same stage (see [Artifact binding](#artifact-binding)) |
 | `body` | List of child stages (for `loop` and `sequence` types) |
 | `max-iterations` | Max loop iterations (for `loop` type; also settable via `options.max_iterations`) |
 | `stop_when_exists` | Artifact key that terminates the loop when bound (for `loop` type) |
@@ -547,9 +547,11 @@ stages:
   - name: analyze
     type: agent
     interpolation:
-      report: report
+      report: content("file://session/report")
     prompt: |
-      The scanning report is in {report}.
+      The scanning report:
+      {report}
+
       Propose fixes.
 ```
 
@@ -564,9 +566,9 @@ stages:
 - `git://range` — Special shorthand: the `exec` stage snapshots HEAD before running and binds the resulting range afterwards
 
 **Artifact binding semantics:**
-- `interpolation:` values are registry key paths (e.g., `report` or `report.critical?default`) with optional dotted attribute access and `?default` fallback
-- `bind:` values are URI strings that name what the stage produces; downstream stages reference the key name (not the URI) in their `interpolation:` maps
-- Both agent and exec stages use `{var}` substitution from the `interpolation:` map and `bind:` output paths
+- `interpolation:` values are registry key lookups: a URI string (e.g., `file://session/report`), an optional `?default` fallback (e.g., `mykey?fallback`), or a `content("URI")` expression that reads and inlines file contents
+- `bind:` values are URI strings naming what the stage produces; the bind map key is a local variable name for `{var}` substitution within the same stage's templates (prompts, cmds)
+- After a stage completes, bound artifacts are registered under their URI strings; downstream stages reference those URI strings in their `interpolation:` maps
 - `interpolation:` can be declared in a stage definition and will be merged with call-site `interpolation:` values; `bind:` cannot appear inside a definition
 
 ### Stage definitions and bundled recipes
