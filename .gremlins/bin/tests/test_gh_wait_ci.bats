@@ -15,42 +15,34 @@ teardown() {
 
 PR_URL="https://github.com/owner/repo/pull/1"
 
-# Helper: add a mock for fetch_status (gh pr view + python3 pipe).
+# Helper: add a mock for fetch_meta (gh pr view --jq).
 # Returns the decision, rollup_len, and headRefOid as 3 newline-separated values.
-mock_fetch_status() {
-    local json="$1"
-    local output="$2"
-    mock_gh 'pr view.*statusCheckRollup,reviewDecision,headRefOid' "$json"
-    mock_cmd 'python3' 'print.*len.*rollup' "$output"
+mock_fetch_meta() {
+    local output="$1"
+    mock_gh 'pr view.*statusCheckRollup,reviewDecision,headRefOid' "$output"
 }
 
-# Helper: add a mock for all_checks_done (gh pr view + python3 pipe).
+# Helper: add a mock for all_checks_done (gh pr view --jq).
 mock_all_checks_done() {
-    local json="$1"
-    local output="$2"
-    mock_gh 'pr view.*--json statusCheckRollup$' "$json"
-    mock_cmd 'python3' 'for item in rollup' "$output"
+    local output="$1"
+    mock_gh 'pr view.*--json statusCheckRollup' "$output"
 }
 
-# Helper: add a mock for get_failed_checks.
-mock_get_failed_checks() {
-    local json="$1"
-    local output="$2"
-    mock_gh 'pr view.*--json statusCheckRollup$' "$json"
-    mock_cmd 'python3' 'FAILURE.*ERROR.*TIMED_OUT.*CANCELLED' "$output"
+# Helper: add a mock for get_failed_count (gh pr view --jq).
+mock_get_failed_count() {
+    local output="$1"
+    mock_gh 'pr view.*--json statusCheckRollup' "$output"
 }
 
 @test "all checks passed writes passed to status and done" {
-    PASS_JSON='{"statusCheckRollup":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}],"reviewDecision":null,"headRefOid":"abc1234"}'
-
-    # Grace period: fetch_status
-    mock_fetch_status "$PASS_JSON" $'\n1\nabc1234'
+    # Grace period: fetch_meta
+    mock_fetch_meta $'\n1\nabc1234'
     # Poll loop: all_checks_done → "true"
-    mock_all_checks_done "$PASS_JSON" 'true'
-    # Poll loop: fetch_status (called before break check in loop body)
-    mock_fetch_status "$PASS_JSON" $'\n1\nabc1234'
-    # After loop: get_failed_checks
-    mock_get_failed_checks "$PASS_JSON" $'0\n'
+    mock_all_checks_done 'true'
+    # Poll loop: fetch_meta (called before break check in loop body)
+    mock_fetch_meta $'\n1\nabc1234'
+    # After loop: get_failed_count → 0
+    mock_get_failed_count $'0\n'
 
     run bash "$SCRIPT" "$ARTIFACT_DIR" "$PR_URL" 0 30 1
     [ "$status" -eq 0 ]
@@ -59,8 +51,7 @@ mock_get_failed_checks() {
 }
 
 @test "skipped when no check-runs after grace period" {
-    EMPTY_JSON='{"statusCheckRollup":[],"reviewDecision":null,"headRefOid":"abc1234"}'
-    mock_fetch_status "$EMPTY_JSON" $'\n0\nabc1234'
+    mock_fetch_meta $'\n0\nabc1234'
 
     run bash "$SCRIPT" "$ARTIFACT_DIR" "$PR_URL" 0 30 1
     [ "$status" -eq 0 ]
@@ -68,8 +59,7 @@ mock_get_failed_checks() {
 }
 
 @test "bails on REVIEW_REQUIRED" {
-    RR_JSON='{"statusCheckRollup":[],"reviewDecision":"REVIEW_REQUIRED","headRefOid":"abc1234"}'
-    mock_fetch_status "$RR_JSON" $'REVIEW_REQUIRED\n0\nabc1234'
+    mock_fetch_meta $'REVIEW_REQUIRED\n0\nabc1234'
 
     run bash "$SCRIPT" "$ARTIFACT_DIR" "$PR_URL" 0 30 1
     [ "$status" -eq 2 ]
@@ -77,20 +67,20 @@ mock_get_failed_checks() {
 }
 
 @test "failure collects logs and exits 1" {
-    FAIL_JSON='{"statusCheckRollup":[{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/2"}],"reviewDecision":null,"headRefOid":"abc1234"}'
+    FAILED_CHECKS_JSON='[{"name":"test","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/2"}]'
 
-    # Grace period: fetch_status
-    mock_fetch_status "$FAIL_JSON" $'\n1\nabc1234'
+    # Grace period: fetch_meta
+    mock_fetch_meta $'\n1\nabc1234'
     # Poll loop: all_checks_done → "true"
-    mock_all_checks_done "$FAIL_JSON" 'true'
-    # Poll loop: fetch_status
-    mock_fetch_status "$FAIL_JSON" $'\n1\nabc1234'
-    # After loop: get_failed_checks → 1 failure
-    mock_get_failed_checks "$FAIL_JSON" $'1\n[{"name":"test","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/2"}]'
-    # Failure log formatting (first python3: prints check info)
-    mock_cmd 'python3' 'failed = json.load' $'\n## Check: test\n\n(gh run view 2 --log-failed)\n'
-    # Extract run IDs (second python3 call)
-    mock_cmd 'python3' 'failed = json.load' $'2'
+    mock_all_checks_done 'true'
+    # Poll loop: fetch_meta
+    mock_fetch_meta $'\n1\nabc1234'
+    # After loop: get_failed_count → 1 failure + json
+    mock_get_failed_count $'1\n[{"name":"test","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/2"}]'
+    # Failure log formatting: gh pr view --jq _FAILED_PRINT_FILTER
+    mock_gh 'pr view.*--json statusCheckRollup' $'\n## Check: test\n\n(gh run view 2 --log-failed)\n'
+    # Failure log formatting: gh pr view --jq _FAILED_RUN_FILTER → run ID
+    mock_gh 'pr view.*--json statusCheckRollup' $'2\n'
     # Fetch actual logs
     mock_gh 'run view 2 --log-failed' 'FAILURE: test failed: expected 42, got 0'
 

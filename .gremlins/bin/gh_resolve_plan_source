@@ -37,9 +37,10 @@ _gh_view() {
     fi
 }
 
-title=$(_gh_view --jq '.title')
-body=$(_gh_view --jq '.body')
-number=$(_gh_view --jq '.number')
+issue_data=$(_gh_view --jq '[.title, .body, .number] | @tsv')
+title=$(printf '%s' "$issue_data" | cut -f1)
+body=$(printf '%s' "$issue_data" | cut -f2)
+number=$(printf '%s' "$issue_data" | cut -f3)
 
 case "$body" in
     '#'*) printf '%s\n' "$body" > "$plan_file" ;;
