@@ -823,32 +823,24 @@ mod tests {
     }
 
     #[test]
-    fn test_global_init_clear() {
+    fn test_global_singleton() {
+        // Init / clear
         clear_global();
         assert!(get_global().is_none());
         init_global().unwrap();
         assert!(get_global().is_some());
         clear_global();
         assert!(get_global().is_none());
-    }
 
-    #[test]
-    fn test_global_lazy_load() {
-        clear_global();
-        let cfg1 = global_config().unwrap();
-        let cfg2 = global_config().unwrap();
         // Lazy load only happens once — values are identical
-        assert_eq!(cfg1.raw(), cfg2.raw());
-    }
-
-    #[test]
-    fn test_global_after_clear_reloads() {
-        clear_global();
         let cfg1 = global_config().unwrap();
-        clear_global();
         let cfg2 = global_config().unwrap();
+        assert_eq!(cfg1.raw(), cfg2.raw());
+
         // After clear, a new Arc is created
-        assert!(!Arc::ptr_eq(&cfg1, &cfg2));
+        clear_global();
+        let cfg3 = global_config().unwrap();
+        assert!(!Arc::ptr_eq(&cfg1, &cfg3));
     }
 
     // -----------------------------------------------------------------------
