@@ -771,15 +771,33 @@ fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         Err(e) => return format!("Error: {e}"),
     };
 
-    // Collect old/new pairs.
-    let edits: Vec<(&str, &str)> = edits_arr
-        .iter()
-        .map(|e| {
-            let o = e.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let n = e.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-            (o, n)
-        })
-        .collect();
+    // Collect old/new pairs with validation.
+    let mut edits: Vec<(&str, &str)> = Vec::with_capacity(edits_arr.len());
+    for (i, e) in edits_arr.iter().enumerate() {
+        let obj = match e.as_object() {
+            Some(o) => o,
+            None => return format!("Error: edit {} is not an object in {file_path}", i + 1),
+        };
+        let old_str = match obj.get("old_string").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                return format!(
+                    "Error: edit {} missing 'old_string' in {file_path}",
+                    i + 1
+                )
+            }
+        };
+        let new_str = match obj.get("new_string").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                return format!(
+                    "Error: edit {} missing 'new_string' in {file_path}",
+                    i + 1
+                )
+            }
+        };
+        edits.push((old_str, new_str));
+    }
 
     // Validate all against original content.
     for (i, (old_str, _)) in edits.iter().enumerate() {
@@ -1228,6 +1246,7 @@ pub fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition> {
                     "file_path": {"type": "string"},
                     "edits": {
                         "type": "array",
+                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "properties": {
