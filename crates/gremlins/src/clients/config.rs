@@ -21,9 +21,14 @@ pub fn validate_max_retries(max_retries: usize) -> Result<(), String> {
 }
 
 pub fn max_agent_turns() -> usize {
-    env::var("GREMLINS_OPENAI_AGENTS_MAX_TURNS")
+    env::var("GREMLINS_AGENT_MAX_TURNS")
         .ok()
         .and_then(|v| v.parse().ok())
+        .or_else(|| {
+            env::var("GREMLINS_OPENAI_AGENTS_MAX_TURNS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
         .unwrap_or(1000)
 }
 
