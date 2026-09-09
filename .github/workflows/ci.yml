@@ -44,3 +44,7 @@ jobs:
         run: |
           source .venv/bin/activate
           make test
+      - name: Test GitHub integration scripts
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bats
+          make test-github-integration-scripts
