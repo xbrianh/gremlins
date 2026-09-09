@@ -1016,7 +1016,7 @@ def test_exec_land_stage_success():
 def test_exec_land_stage_bail(capsys):
     from unittest.mock import MagicMock
 
-    from gremlins.stages.outcome import Bail
+    from _gremlins_core.stages import Bail
 
     class _BailStage:
         async def run(self, gremlin):  # type: ignore[no-untyped-def]

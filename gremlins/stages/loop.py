@@ -9,11 +9,10 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from _gremlins_core.artifacts import ArtifactRegistry
+from _gremlins_core.stages import _BAIL_KEY, Bail, Done, Outcome
 
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
-from gremlins.stages.constants import _BAIL_KEY
-from gremlins.stages.outcome import Bail, Done, Outcome
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin

@@ -8,6 +8,7 @@ import pathlib
 from typing import Any
 
 import pytest
+from _gremlins_core.stages import Done, Outcome
 from conftest import MockGremlin
 
 from gremlins.executor.state import State, StateData, build_state
@@ -15,7 +16,6 @@ from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
 from gremlins.stages.base import Stage
 from gremlins.stages.loop import LoopStage
-from gremlins.stages.outcome import Done, Outcome
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.sequence import SequenceStage
 from tests.fake_client import FakeClient

@@ -7,10 +7,9 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from _gremlins_core.artifacts import Uri, resolve_interpolation_map
+from _gremlins_core.stages import _BAIL_KEY, FRAMEWORK_KEYS, Bail, Done, Outcome
 
 from gremlins.stages.base import Stage
-from gremlins.stages.constants import _BAIL_KEY, FRAMEWORK_KEYS
-from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import proc as _proc
 
 logger = logging.getLogger(__name__)

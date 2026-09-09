@@ -7,12 +7,12 @@ import json
 import pathlib
 
 import pytest
+from _gremlins_core.stages import Bail
 from conftest import MINIMAL_EVENTS
 
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.agent_runner import run_agent
-from gremlins.stages.outcome import Bail
 from tests.fake_client import FakeClient
 
 

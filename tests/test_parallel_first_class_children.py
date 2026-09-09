@@ -45,8 +45,9 @@ def test_parallel_run_cleans_up_child_state_dirs(sandbox) -> None:
     gremlin_id = "parent-gremlin-abc"
     parent = _make_parent_state(sandbox, gremlin_id)
 
+    from _gremlins_core.stages import Done, Outcome
+
     from gremlins.stages.base import Stage
-    from gremlins.stages.outcome import Done, Outcome
 
     class _NoopStage(Stage):
         type = "_test_noop_v2"
@@ -80,8 +81,9 @@ def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:
         artifact_dir=artifact_dir,
     )
 
+    from _gremlins_core.stages import Done, Outcome
+
     from gremlins.stages.base import Stage
-    from gremlins.stages.outcome import Done, Outcome
 
     class _NoopStage(Stage):
         type = "_test_noop_v3"

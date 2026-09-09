@@ -5,9 +5,9 @@ import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from _gremlins_core.clients import RustClient as Client
+from _gremlins_core.stages import Outcome
 
 from gremlins.protocols import GremlinProtocol
-from gremlins.stages.outcome import Outcome
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin, State

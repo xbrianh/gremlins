@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.clients import RustClient as Client
 from _gremlins_core.config import project_root, scratch_root, state_root
+from _gremlins_core.stages import FRAMEWORK_KEYS, Done
 
-from gremlins.stages.constants import FRAMEWORK_KEYS
 from gremlins.utils.state_file import locked_update
 
 if TYPE_CHECKING:
@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
 
 from gremlins.protocols import StageProtocol
-from gremlins.stages.outcome import Done
 
 logger = logging.getLogger(__name__)
 

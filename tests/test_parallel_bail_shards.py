@@ -19,12 +19,12 @@ import subprocess
 import threading
 
 import pytest
+from _gremlins_core.stages import Bail
 from conftest import make_parent_state
 
 import gremlins.executor.state as state_mod
 from gremlins.executor.gremlin import run_stages
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.outcome import Bail
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils.state_file import locked_update as _state_locked_update
 from tests.fake_client import FakeClient

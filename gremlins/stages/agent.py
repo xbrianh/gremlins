@@ -7,11 +7,10 @@ import pathlib
 from typing import TYPE_CHECKING, Any, cast
 
 from _gremlins_core.artifacts import Uri, resolve_interpolation_map
+from _gremlins_core.stages import FRAMEWORK_KEYS, Bail, Done, Outcome
 
 from gremlins.stages.agent_runner import run_agent
 from gremlins.stages.base import Stage, get_client_from_dict
-from gremlins.stages.constants import FRAMEWORK_KEYS
-from gremlins.stages.outcome import Bail, Done, Outcome
 
 logger = logging.getLogger(__name__)
 
