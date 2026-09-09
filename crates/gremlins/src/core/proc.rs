@@ -357,9 +357,8 @@ pub async fn run_async(
         None => child.wait().await.map_err(ProcError::Io),
     };
 
-    cancel.disarm();
-
     let status = wait_result?;
+    cancel.disarm();
 
     let drain = async {
         let stdout_buf = stdout_handle.await.unwrap_or_default();
@@ -399,7 +398,7 @@ pub async fn run_shell_async(
         return Err(ProcError::EmptyCommand);
     }
     if let Some(t) = timeout {
-        if !t.is_finite() || t < 0.0 {
+        if !t.is_finite() || t < 0.0 || t > Duration::MAX.as_secs_f64() {
             return Err(ProcError::InvalidTimeout(t));
         }
     }
@@ -516,13 +515,13 @@ pub async fn run_shell_async(
         None => child.wait().await.map_err(ProcError::Io),
     };
 
-    cancel.disarm();
     heartbeat_handle.abort();
     if let Some(h) = timeout_warning_handle {
         h.abort();
     }
 
     let status = wait_result?;
+    cancel.disarm();
 
     let drain = async {
         let stdout_buf = stdout_handle.await.unwrap_or_default();
@@ -1400,7 +1399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_shell_async_cancel_kills_process_group() {
+    async fn test_run_shell_async_cancel() {
         let handle = tokio::spawn(async { run_shell_async("sleep 10", None, None, None).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.abort();
