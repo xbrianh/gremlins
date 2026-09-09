@@ -239,7 +239,7 @@ impl ArtifactRegistry {
         };
         if p.is_absolute() {
             match fs::metadata(&p) {
-                Ok(m) => m.len() > 0,
+                Ok(_) => true,
                 Err(_) => false,
             }
         } else {
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exists_false_for_empty_file() {
+    fn test_exists_true_for_empty_file() {
         let (_tmp, artifact_dir) = setup();
         let file_path = artifact_dir.join("empty.txt");
         fs::write(&file_path, "").unwrap();
@@ -507,7 +507,7 @@ mod tests {
             "artifact://empty.txt".to_string(),
             file_path.to_string_lossy().to_string(),
         );
-        assert!(!reg.exists("artifact://empty.txt"));
+        assert!(reg.exists("artifact://empty.txt"));
     }
 
     #[test]
