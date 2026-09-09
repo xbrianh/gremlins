@@ -20,7 +20,7 @@ pub fn validate_max_retries(max_retries: usize) -> Result<(), String> {
     }
 }
 
-pub fn openai_agents_max_turns() -> usize {
+pub fn max_agent_turns() -> usize {
     env::var("GREMLINS_OPENAI_AGENTS_MAX_TURNS")
         .ok()
         .and_then(|v| v.parse().ok())

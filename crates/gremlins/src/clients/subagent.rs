@@ -20,7 +20,7 @@ const MAX_DEPTH: u32 = 3;
 pub(crate) fn make_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: M,
     tool_filter: Option<Vec<String>>,
-    cancel: Arc<super::openai_backend::CancelToken>,
+    cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
     prefix: String,
     idle_timeout: f64,
@@ -42,7 +42,7 @@ pub(crate) fn make_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
 fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: M,
     tool_filter: Option<Vec<String>>,
-    cancel: Arc<super::openai_backend::CancelToken>,
+    cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
     prefix: String,
     idle_timeout: f64,
@@ -78,7 +78,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 depth + 1,
             ));
 
-            let result = crate::clients::openai_backend::run_agent_loop_nested(
+            let result = crate::clients::agent_loop::run_agent_loop_nested(
                 &model,
                 &task,
                 &sub_ctx,
@@ -130,7 +130,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
 
-        let cancel = super::super::openai_backend::CancelToken::new();
+        let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_runner(model, None, cancel, ctx, String::new(), 5.0, 10);
 
         // First invocation: depth 0 < 3, should succeed.
@@ -208,7 +208,7 @@ mod tests {
         let ctx = depth_test_ctx();
         // Hangs forever so all siblings overlap in time.
         let model = PendingModel;
-        let cancel = super::super::openai_backend::CancelToken::new();
+        let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_runner(model, None, cancel, ctx, String::new(), 0.2, 10);
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
@@ -231,7 +231,7 @@ mod tests {
     async fn make_runner_rejects_at_max_depth() {
         let ctx = depth_test_ctx();
         let model = PendingModel;
-        let cancel = super::super::openai_backend::CancelToken::new();
+        let cancel = super::super::agent_loop::CancelToken::new();
         let runner =
             make_runner_at_depth(model, None, cancel, ctx, String::new(), 0.2, 10, MAX_DEPTH);
 
