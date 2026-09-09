@@ -18,10 +18,11 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.schemas import Pipeline
-from _gremlins_core.stages import Bail, Exec
+from _gremlins_core.stages import Bail
 from conftest import MockGremlin
 
 from gremlins.executor.state import StateData, build_state
+from gremlins.stages.exec import Exec
 from tests.fake_client import FakeClient
 
 if TYPE_CHECKING:

@@ -262,7 +262,7 @@ impl PyExec {
 
         // Extract all data from Python objects while holding GIL.
         let artifacts_py: Py<PyAny> = state_obj.getattr("artifacts")?.unbind();
-        let loop_iter: String = state_obj.call_method0("loop_iter")?.extract()?;
+        let loop_iter: String = state_obj.getattr("loop_iter")?.extract()?;
         let cwd: PathBuf = state_obj.getattr("cwd")?.extract()?;
         let artifact_dir: PathBuf = state_obj.getattr("artifact_dir")?.extract()?;
         let state_dir: PathBuf = gremlin.getattr("state_dir")?.extract()?;
