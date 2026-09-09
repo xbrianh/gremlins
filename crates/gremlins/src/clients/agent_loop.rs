@@ -200,31 +200,6 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         prefix,
         max_turns
     );
-    let result = run_agent_loop_nested_impl(
-        model,
-        prompt,
-        tool_ctx,
-        cancel,
-        tool_filter,
-        prefix,
-        idle_timeout,
-        max_turns,
-    )
-    .await;
-    eprintln!("{} {}subagent: end", stream::ts_internal(), prefix,);
-    result
-}
-
-async fn run_agent_loop_nested_impl<M: CompletionModel + Clone + Send + Sync + 'static>(
-    model: &M,
-    prompt: &str,
-    tool_ctx: &ToolContext,
-    cancel: &CancelToken,
-    tool_filter: Option<&[String]>,
-    prefix: &str,
-    idle_timeout: f64,
-    max_turns: usize,
-) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
         extra: None,
         tool_filter,
@@ -232,7 +207,7 @@ async fn run_agent_loop_nested_impl<M: CompletionModel + Clone + Send + Sync + '
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
-    run_agent_loop_core(
+    let result = run_agent_loop_core(
         model,
         prompt,
         tool_ctx,
@@ -248,7 +223,9 @@ async fn run_agent_loop_nested_impl<M: CompletionModel + Clone + Send + Sync + '
         &[],
         0,
     )
-    .await
+    .await;
+    eprintln!("{} {}subagent: end", stream::ts_internal(), prefix,);
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
