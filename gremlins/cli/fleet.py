@@ -89,16 +89,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=argparse.SUPPRESS,
     )
-    json_text = parser.add_mutually_exclusive_group()
-    json_text.add_argument(
+    format_group = parser.add_mutually_exclusive_group()
+    format_group.add_argument(
         "--json",
         action="store_true",
-        help="Emit JSON instead of human-formatted output. Mutually exclusive with --watch.",
+        help="Emit JSON instead of human-formatted output. Mutually exclusive with --text and --watch.",
     )
-    json_text.add_argument(
+    format_group.add_argument(
         "--text",
         action="store_true",
-        help="Emit human-readable output (drill-in default). Mutually exclusive with --json.",
+        help="Emit human-readable output (default is JSON for drill-in). Mutually exclusive with --json and --watch.",
     )
     return parser.parse_args(argv)
 
