@@ -64,7 +64,7 @@ impl ArtifactRegistry {
             HashMap::new()
         };
         log::info!(
-            "loaded registry from {} ({} entries)",
+            "new registry from {} ({} entries)",
             registry_path.display(),
             data.len(),
         );
@@ -317,6 +317,10 @@ impl ArtifactRegistry {
                 self.persist()?;
             }
         }
+        log::debug!(
+            "merge_from completed ({} entries in registry)",
+            self.data.len(),
+        );
         Ok(())
     }
 
@@ -329,6 +333,11 @@ impl ArtifactRegistry {
         if path != registry.registry_path && path.exists() {
             let content = fs::read_to_string(path)?;
             registry.data = serde_json::from_str(&content)?;
+            log::debug!(
+                "from_registry_file: loaded {} entries from {}",
+                registry.data.len(),
+                path.display(),
+            );
             registry.persist()?;
         }
         Ok(registry)
@@ -354,6 +363,11 @@ impl ArtifactRegistry {
         let json = serde_json::to_string(&self.data)?;
         fs::write(&tmp_path, &json)?;
         fs::rename(&tmp_path, &self.registry_path)?;
+        log::debug!(
+            "persisted registry to {} ({} entries)",
+            self.registry_path.display(),
+            self.data.len(),
+        );
         Ok(())
     }
 }
