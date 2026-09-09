@@ -26,7 +26,7 @@ stages:
           cmds:
             - |
               BAIL_MSG=$(gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2>&1) || { printf '%s' "$BAIL_MSG" > "{bail}"; exit 2; }
-              if [ "$BAIL_MSG" = "skipped" ]; then
+              if [ "$(printf '%s' "$BAIL_MSG" | tail -n 1)" = "skipped" ]; then
                 touch "{done}"
               fi
 

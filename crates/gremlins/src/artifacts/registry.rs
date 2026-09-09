@@ -227,8 +227,9 @@ impl ArtifactRegistry {
             return false;
         }
         let value = &self.data[uri];
-        // Non-string values are considered existing
-        // For string values, resolve to filesystem path
+        // Non-file-backed values (e.g. git://range, opaque://, raw strings)
+        // are considered existing.  File-backed values are resolved to a
+        // filesystem path and checked for presence.
         let p = if value.starts_with("file://session/") {
             let name = value.strip_prefix("file://session/").unwrap_or(value);
             self.artifact_dir.join(name)
