@@ -41,10 +41,27 @@ impl ArtifactRegistry {
             .unwrap_or(&artifact_dir)
             .join("registry.json");
         let data = if registry_path.exists() {
-            fs::read_to_string(&registry_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default()
+            match fs::read_to_string(&registry_path) {
+                Ok(content) => {
+                    match serde_json::from_str::<HashMap<String, String>>(&content) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            log::error!(
+                                "failed to parse registry.json at {}: {e} — starting with empty registry",
+                                registry_path.display(),
+                            );
+                            HashMap::new()
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!(
+                        "failed to read registry.json at {}: {e} — starting with empty registry",
+                        registry_path.display(),
+                    );
+                    HashMap::new()
+                }
+            }
         } else {
             HashMap::new()
         };
