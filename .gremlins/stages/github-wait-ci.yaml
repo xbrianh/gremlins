@@ -14,6 +14,7 @@ stages:
         type: exec
         interpolation:
           pr_url: content("artifact://pr-url.txt")
+          artifact_dir: "artifact://pr-url.txt"
         bind:
           status?: "artifact://status"
           done?: "artifact://{loop_iter}/done"
@@ -26,10 +27,11 @@ stages:
           timeout: "1380"
           cmds:
             - |
-              gh_wait_ci "$GREMLINS_ARTIFACT_DIR" "$pr_url" {startup_grace_secs} {poll_timeout} {poll_interval}
+              ARTIFACT_DIR="$(dirname "{artifact_dir}")"
+              gh_wait_ci "$ARTIFACT_DIR" "{pr_url}" {startup_grace_secs} {poll_timeout} {poll_interval}
               rc=$?
-              [ -f "$GREMLINS_ARTIFACT_DIR/ci_poll_done" ] && mv "$GREMLINS_ARTIFACT_DIR/ci_poll_done" "{done}" || true
-              [ -f "$GREMLINS_ARTIFACT_DIR/ci_bail" ] && mv "$GREMLINS_ARTIFACT_DIR/ci_bail" "{bail}" || true
+              [ -f "$ARTIFACT_DIR/ci_poll_done" ] && mv "$ARTIFACT_DIR/ci_poll_done" "{done}" || true
+              [ -f "$ARTIFACT_DIR/ci_bail" ] && mv "$ARTIFACT_DIR/ci_bail" "{bail}" || true
               exit $rc
 
       - name: fix
@@ -56,4 +58,4 @@ stages:
           fix_head: "artifact://fix-head"
         options:
           cmds:
-            - 'git rev-parse HEAD > "$GREMLINS_ARTIFACT_DIR/fix-head"'
+            - 'git rev-parse HEAD > "{fix_head}"'
