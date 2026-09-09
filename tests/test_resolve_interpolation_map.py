@@ -17,7 +17,7 @@ from conftest import MINIMAL_EVENTS, MockGremlin
 
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.agent import Agent
-from gremlins.stages.exec import Exec
+from _gremlins_core.stages import Exec
 from tests.fake_client import FakeClient
 
 

@@ -10,7 +10,7 @@ from _gremlins_core.schemas import Pipeline
 
 from gremlins.executor.gremlin import Gremlin
 from gremlins.executor.state import StateData, build_state
-from gremlins.stages.exec import Exec
+from _gremlins_core.stages import Exec
 from tests.fake_client import FakeClient
 
 
