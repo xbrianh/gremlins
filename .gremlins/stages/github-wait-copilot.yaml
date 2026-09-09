@@ -1,5 +1,6 @@
-# Stops when the status file is written (via stop_when_exists: status) — only use
-# in pipeline positions where HEAD does not move between poll iterations.
+# Status file is only written when Copilot posts a non-PENDING review.
+# The loop polls until that happens (or max_iterations exhausted).
+# Only use in pipeline positions where HEAD does not move between poll iterations.
 
 stages:
   - { type: github-discover-repo }
@@ -20,4 +21,4 @@ stages:
         options:
           timeout: 30
           cmds:
-            - 'gh_wait_copilot "{pr_number}" "{repo}" > "{status}" 2>/dev/null'
+            - 'output=$(gh_wait_copilot "{pr_number}" "{repo}" 2>/dev/null); [ -n "$output" ] && printf "%s\n" "$output" > "{status}"'
