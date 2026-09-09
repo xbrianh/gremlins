@@ -18,7 +18,6 @@ teardown() {
 }
 
 @test "creates PR and writes number and URL files" {
-    mock_cmd 'python3' '.*random.*choices.*' 'abcd'
     mock_git 'push origin.*HEAD:refs/heads/' '' 0
     mock_gh 'pr create' 'https://github.com/owner/repo/pull/99'
     run bash "$SCRIPT" "main" "My PR Title" "$BODY_FILE" "$NUMBER_FILE" "$URL_FILE"
@@ -34,7 +33,6 @@ teardown() {
 }
 
 @test "dies when git push fails" {
-    mock_cmd 'python3' '.*random.*choices.*' 'abcd'
     mock_git 'push origin.*HEAD:refs/heads/' 'fatal: remote rejected' 1
     run bash "$SCRIPT" "main" "My PR Title" "$BODY_FILE" "$NUMBER_FILE" "$URL_FILE"
     [ "$status" -eq 1 ]

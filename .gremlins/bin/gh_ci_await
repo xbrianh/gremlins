@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Wait for CI jobs to become available on a PR.
-# Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval]
+# Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval] [sync_timeout]
 #
 # Phases:
 #   - No fix_head: startup grace — wait for check-runs to appear
 #   - fix_head:    SHA sync — wait for headRefOid to reflect the pushed commit
+#   - sync_timeout: max seconds to wait for SHA sync (default 180)
 #
 # Outputs:
 #   stdout: "skipped" if no check-runs after grace (exit 0)
@@ -19,9 +20,10 @@ pr_url="${1:-}"
 fix_head="${2:-}"
 startup_grace_secs="${3:-60}"
 poll_interval="${4:-30}"
+sync_timeout="${5:-180}"
 
 if [ -z "$pr_url" ]; then
-    die "Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval]"
+    die "Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval] [sync_timeout]"
 fi
 
 # --- helpers ---
@@ -65,6 +67,7 @@ if [ -z "$fix_head" ]; then
     fi
 else
     # Post-fix: wait for GitHub to reflect the pushed commit SHA
+    sync_deadline=$(( $(date +%s) + sync_timeout ))
     while true; do
         meta=$(fetch_meta)
         decision=$(printf '%s' "$meta" | sed -n '1p')
@@ -72,6 +75,10 @@ else
         bail_review_required "$decision"
         if [ "$head_oid" = "$fix_head" ] || git merge-base --is-ancestor "$fix_head" "$head_oid" 2>/dev/null; then
             break
+        fi
+        if [ "$(date +%s)" -ge "$sync_deadline" ]; then
+            printf 'ci-gate: timed out waiting for GitHub to reflect pushed SHA\n' >&2
+            exit 2
         fi
         sleep "$poll_interval"
     done

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Wait for Copilot review to complete (non-PENDING state).
-# Usage: gh_wait_copilot <pr_number> <repo> [max_iterations] [interval_secs]
+# Check Copilot review status (one-shot).
+# Usage: gh_wait_copilot <pr_number> <repo>
 #
-# Polls gh api until Copilot's review is no longer PENDING.
+# The retry loop is handled by the outer loop stage in the pipeline YAML;
+# this script does a single check and outputs the review state or nothing.
 # Outputs the final review state (APPROVED, CHANGES_REQUESTED, etc.) to stdout.
-# Exit 0 on completion, 1 on timeout.
+# Exit 0 on completion or if no non-PENDING review found yet.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,27 +13,16 @@ source "$SCRIPT_DIR/lib/logging.sh"
 
 pr_number="${1:-}"
 repo="${2:-}"
-max_iterations="${3:-40}"
-interval="${4:-20}"
 
 if [ -z "$pr_number" ] || [ -z "$repo" ]; then
-    die "Usage: gh_wait_copilot <pr_number> <repo> [max_iterations] [interval_secs]"
+    die "Usage: gh_wait_copilot <pr_number> <repo>"
 fi
 
-iteration=0
-while [ "$iteration" -lt "$max_iterations" ]; do
-    review=$(gh api "repos/$repo/pulls/$pr_number/reviews" \
-        --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' 2>/dev/null || true)
+review=$(gh api "repos/$repo/pulls/$pr_number/reviews" \
+    --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' 2>/dev/null || true)
 
-    if [ -n "$review" ]; then
-        printf '%s' "$review"
-        exit 0
-    fi
-
-    iteration=$((iteration + 1))
-    if [ "$iteration" -lt "$max_iterations" ]; then
-        sleep "$interval"
-    fi
-done
+if [ -n "$review" ]; then
+    printf '%s' "$review"
+fi
 
 exit 0

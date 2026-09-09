@@ -22,9 +22,10 @@ stages:
           timeout: 180
           startup_grace_secs: "60"
           poll_interval: "30"
+          sync_timeout: "180"
           cmds:
             - |
-              BAIL_MSG=$(gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} 2>&1) || { printf '%s' "$BAIL_MSG" > "{bail}"; exit 2; }
+              BAIL_MSG=$(gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2>&1) || { printf '%s' "$BAIL_MSG" > "{bail}"; exit 2; }
               if [ "$BAIL_MSG" = "skipped" ]; then
                 touch "{done}"
               fi

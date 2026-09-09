@@ -20,27 +20,26 @@ fi
 
 # --- helpers ---
 
+# Fetches metadata and checks-completed status in a single gh pr view call.
+# Outputs three lines: decision, checks_done ("true"/"false"), rollup_len.
 fetch_meta() {
     gh pr view "$pr_url" --json statusCheckRollup,reviewDecision --jq '
 (.reviewDecision // ""),
+(
+    (.statusCheckRollup // []) as $r |
+    if ($r | length) == 0 then
+        "false"
+    else
+        ([$r[] |
+            if .__typename == "StatusContext" then
+                select(.state == "EXPECTED" or .state == "PENDING")
+            else
+                select(.status != "COMPLETED")
+            end
+        ] | length) == 0
+    end
+),
 ((.statusCheckRollup // []) | length)
-'
-}
-
-all_checks_done() {
-    gh pr view "$pr_url" --json statusCheckRollup --jq '
-(.statusCheckRollup // []) as $r |
-if ($r | length) == 0 then
-    false
-else
-    ([$r[] |
-        if .__typename == "StatusContext" then
-            select(.state == "EXPECTED" or .state == "PENDING")
-        else
-            select(.status != "COMPLETED")
-        end
-    ] | length) == 0
-end
 '
 }
 
@@ -71,9 +70,10 @@ poll_deadline=$(( $(date +%s) + poll_timeout ))
 while true; do
     meta=$(fetch_meta)
     decision=$(printf '%s' "$meta" | sed -n '1p')
+    checks_done=$(printf '%s' "$meta" | sed -n '2p')
     bail_review_required "$decision"
 
-    if [ "$(all_checks_done)" = "true" ]; then
+    if [ "$checks_done" = "true" ]; then
         break
     fi
 
