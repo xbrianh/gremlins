@@ -40,7 +40,9 @@ pub fn resolve_interpolation_map(
                         "resolve: {} = content({}{}) -> {} bytes",
                         var,
                         uri_str,
-                        json_path.map(|j| format!(", \"{}\"", j)).unwrap_or_default(),
+                        json_path
+                            .map(|j| format!(", \"{}\"", j))
+                            .unwrap_or_default(),
                         val.len(),
                     );
                     result.insert(var.clone(), val);
