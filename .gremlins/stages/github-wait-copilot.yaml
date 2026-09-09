@@ -21,7 +21,7 @@ stages:
           timeout: 30
           cmds:
             - |
-              review=$(gh api "repos/$repo/pulls/$pr_number/reviews" \
+              review=$(gh api "repos/{repo}/pulls/{pr_number}/reviews" \
                 --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")')
               if [ -n "$review" ]; then
                 printf '%s' "$review" > "{status}"

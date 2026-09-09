@@ -148,7 +148,7 @@ def test_content_optional_returns_empty(tmp_path):
 # --- exec integration: content() interpolation ---
 
 
-def test_exec_content_injects_env_var(tmp_path):
+def test_exec_content_substitutes_brace_var(tmp_path):
     state = _make_state(tmp_path)
     uri = Uri.parse("artifact://pr.json")
     p = pathlib.Path(state.artifacts.register(uri))
@@ -160,7 +160,7 @@ def test_exec_content_injects_env_var(tmp_path):
     out_file = tmp_path / "branch.txt"
     stage = Exec(
         "push",
-        {"cmds": [f'echo "$branch" > {out_file}']},
+        {"cmds": [f'echo "{{branch}}" > {out_file}']},
         interpolation_map={"branch": 'content("artifact://pr.json", "branch")'},
     )
     gremlin = MockGremlin(state=state)

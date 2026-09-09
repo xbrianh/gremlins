@@ -21,7 +21,7 @@ land:
     PR_URL: content("artifact://pr-url.txt")
   options:
     cmds:
-      - gh pr merge --squash --delete-branch "$PR_URL"
+      - gh pr merge --squash --delete-branch "{PR_URL}"
 
 prompts:
   code-style: gremlins:code_style.md
