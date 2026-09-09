@@ -27,7 +27,8 @@ fn extract_json_value_dict(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, s
         let k: String = key.extract()?;
         // Serialize Python value to JSON string, then parse back to serde_json::Value
         let json_str: String = json_mod.call_method1("dumps", (val,))?.extract()?;
-        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
+        let v: serde_json::Value =
+            serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
         map.insert(k, v);
     }
     Ok(map)
@@ -240,9 +241,8 @@ impl PyExec {
         let extra_map: HashMap<String, String> = extra
             .map(|d| d.extract().unwrap_or_default())
             .unwrap_or_default();
-        let fw: HashMap<String, String> = state
-            .call_method1("framework_subs", (slf,))?
-            .extract()?;
+        let fw: HashMap<String, String> =
+            state.call_method1("framework_subs", (slf,))?.extract()?;
         Ok(substitute_vars(text, &str_opts, &extra_map, &fw))
     }
 
@@ -266,8 +266,9 @@ impl PyExec {
         let cwd: PathBuf = state_obj.getattr("cwd")?.extract()?;
         let artifact_dir: PathBuf = state_obj.getattr("artifact_dir")?.extract()?;
         let state_dir: PathBuf = gremlin.getattr("state_dir")?.extract()?;
-        let fw: HashMap<String, String> =
-            state_obj.call_method1("framework_subs", (&slf,))?.extract()?;
+        let fw: HashMap<String, String> = state_obj
+            .call_method1("framework_subs", (&slf,))?
+            .extract()?;
 
         let name = exec.name.clone();
         let str_opts = string_options(&exec.options);
@@ -278,9 +279,7 @@ impl PyExec {
             let arts_inner = arts.extract::<PyRef<'_, ArtifactRegistry>>()?;
             let inner = arts_inner.inner.lock().unwrap();
             resolve_interpolation_map(&inner, &exec.interpolation_map, &loop_iter)
-                .map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!("exec {name}: {e}"))
-                })?
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("exec {name}: {e}")))?
         };
 
         // Register bind URIs (needs GIL for registry)
@@ -292,13 +291,14 @@ impl PyExec {
             for (raw_key, raw_uri_str) in &exec.bind_map {
                 let key = substitute_vars(raw_key, &str_opts, &interpolation_map, &fw);
                 let key = key.trim_end_matches('?').to_string();
-                let mut uri_str =
-                    substitute_vars(raw_uri_str, &str_opts, &interpolation_map, &fw);
+                let mut uri_str = substitute_vars(raw_uri_str, &str_opts, &interpolation_map, &fw);
                 if !loop_iter.is_empty() {
                     uri_str = uri_str.replace("{loop_iter}", &loop_iter);
                 }
                 let uri = Uri::parse(&uri_str).map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!("exec {name}: invalid URI: {e}"))
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "exec {name}: invalid URI: {e}"
+                    ))
                 })?;
                 let path = inner.register(&uri, true).map_err(|e| {
                     pyo3::exceptions::PyValueError::new_err(format!("exec {name}: {e}"))
@@ -369,7 +369,11 @@ impl PyExec {
                 let _ = std::fs::write(&log_path, &log_content);
 
                 let bail_triggered = if shell_rc != 0 {
-                    if exec.bind_map.values().any(|v| rust_exec::is_bail_uri(v, &loop_iter)) {
+                    if exec
+                        .bind_map
+                        .values()
+                        .any(|v| rust_exec::is_bail_uri(v, &loop_iter))
+                    {
                         true
                     } else {
                         return Err(Bail::new_err(format!("exec {name}: exited {shell_rc}")));

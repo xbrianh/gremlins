@@ -11,8 +11,7 @@ use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_shell_async, ProcError, ProcResult};
 use crate::stages::constants::BAIL_KEY;
 
-static VAR_SUB_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\{([-\w]+)\}").unwrap());
+static VAR_SUB_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([-\w]+)\}").unwrap());
 
 #[derive(Debug, Clone)]
 pub struct Exec {
@@ -99,9 +98,7 @@ pub fn substitute_vars(
         .to_string()
 }
 
-fn string_options(
-    options: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, String> {
+fn string_options(options: &HashMap<String, serde_json::Value>) -> HashMap<String, String> {
     options
         .iter()
         .filter_map(|(k, v)| {
@@ -128,11 +125,12 @@ pub async fn run_exec_stage(
 
     // Resolve interpolation vars
     let interpolation_map =
-        resolve_interpolation_map(artifacts, &exec.interpolation_map, loop_iter)
-            .map_err(|e| ExecError::Generic {
+        resolve_interpolation_map(artifacts, &exec.interpolation_map, loop_iter).map_err(|e| {
+            ExecError::Generic {
                 name: name.clone(),
                 detail: e.to_string(),
-            })?;
+            }
+        })?;
 
     // Register bind URIs and collect output paths
     let mut bind_paths: HashMap<String, String> = HashMap::new();
@@ -149,10 +147,12 @@ pub async fn run_exec_stage(
             name: name.clone(),
             detail: e.to_string(),
         })?;
-        let path = artifacts.register(&uri, true).map_err(|e| ExecError::Generic {
-            name: name.clone(),
-            detail: e.to_string(),
-        })?;
+        let path = artifacts
+            .register(&uri, true)
+            .map_err(|e| ExecError::Generic {
+                name: name.clone(),
+                detail: e.to_string(),
+            })?;
         if optional {
             bind_paths.insert(format!("{key}?"), path);
         } else {
@@ -380,10 +380,7 @@ mod tests {
 
         let exec = Exec {
             name: "test".to_string(),
-            options: HashMap::from([(
-                "cmds".to_string(),
-                serde_json::json!(["echo hello"]),
-            )]),
+            options: HashMap::from([("cmds".to_string(), serde_json::json!(["echo hello"]))]),
             interpolation_map: HashMap::new(),
             bind_map: HashMap::new(),
         };
@@ -416,10 +413,7 @@ mod tests {
         let exec = Exec {
             name: "test".to_string(),
             options: HashMap::from([
-                (
-                    "cmds".to_string(),
-                    serde_json::json!(["sleep 10"]),
-                ),
+                ("cmds".to_string(), serde_json::json!(["sleep 10"])),
                 ("timeout".to_string(), serde_json::json!(0.05)),
             ]),
             interpolation_map: HashMap::new(),
@@ -438,7 +432,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, ExecError::Proc(ProcError::TimeoutExpired(..))));
+        assert!(matches!(
+            err,
+            ExecError::Proc(ProcError::TimeoutExpired(..))
+        ));
     }
 
     #[tokio::test]
@@ -458,10 +455,7 @@ mod tests {
 
         let exec = Exec {
             name: "test".to_string(),
-            options: HashMap::from([(
-                "cmds".to_string(),
-                serde_json::json!(["exit 2"]),
-            )]),
+            options: HashMap::from([("cmds".to_string(), serde_json::json!(["exit 2"]))]),
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([("bail".to_string(), BAIL_KEY.to_string())]),
         };
