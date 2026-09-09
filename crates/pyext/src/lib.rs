@@ -59,6 +59,11 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // _gremlins_core.config.
     python::config::register_config_module(m)?;
 
+    // stages submodule — must be registered before schemas because
+    // register_schemas_module imports gremlins.stages.agent which imports
+    // _gremlins_core.stages.
+    python::stages::register_stages_module(m)?;
+
     // schemas submodule
     python::schemas::register_schemas_module(m)?;
 

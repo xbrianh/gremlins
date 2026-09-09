@@ -18,11 +18,11 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.schemas import Pipeline
+from _gremlins_core.stages import Bail
 from conftest import MockGremlin
 
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.exec import Exec
-from gremlins.stages.outcome import Bail
 from tests.fake_client import FakeClient
 
 if TYPE_CHECKING:
@@ -105,7 +105,7 @@ def test_validator_passes_when_commits_exist(sandbox: Any) -> None:
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
     result = asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
-    from gremlins.stages.outcome import Done
+    from _gremlins_core.stages import Done
 
     assert isinstance(result, Done)
 
@@ -167,6 +167,6 @@ def test_validator_passes_on_resume_with_prior_commits(sandbox: Any) -> None:
     state = _make_state(sandbox.project, base_sha)
     stage = _require_impl_progress_exec()
     result = asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
-    from gremlins.stages.outcome import Done
+    from _gremlins_core.stages import Done
 
     assert isinstance(result, Done)

@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from _gremlins_core.artifacts import Uri
+from _gremlins_core.stages import Bail, Done
 from conftest import MockGremlin, _make_gremlin_wrapper
 
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
 from gremlins.stages.loop import LoopStage
-from gremlins.stages.outcome import Bail, Done
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin

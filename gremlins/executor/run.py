@@ -24,13 +24,13 @@ from _gremlins_core.config import (
     scratch_root,
     state_root,
 )
+from _gremlins_core.stages import Bail
 
 from gremlins.env_file import source_env_string
 from gremlins.errors import die
 from gremlins.executor.gremlin import Gremlin
 from gremlins.logging_setup import configure_logging
 from gremlins.protocols import StageProtocol
-from gremlins.stages.outcome import Bail
 from gremlins.utils.git import (
     has_commits,
     has_dirty_worktree,

@@ -7,10 +7,10 @@ import json
 import pathlib
 
 import pytest
+from _gremlins_core.stages import Bail
 from conftest import make_parent_state
 
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.outcome import Bail
 from gremlins.stages.parallel import ParallelStage
 from tests.fake_client import FakeClient
 

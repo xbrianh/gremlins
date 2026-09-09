@@ -8,8 +8,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from _gremlins_core.clients import PyCompletedRun as CompletedRun
-
-from gremlins.stages.outcome import Bail
+from _gremlins_core.stages import Bail
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import State

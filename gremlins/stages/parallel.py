@@ -24,9 +24,10 @@ if TYPE_CHECKING:
     from _gremlins_core.schemas import Pipeline
 
     from gremlins.executor.gremlin import Gremlin, State
+from _gremlins_core.stages import Bail, Done, Outcome
+
 from gremlins.stages.base import Stage
 from gremlins.stages.composite import child_state as _child_state
-from gremlins.stages.outcome import Bail, Done, Outcome
 from gremlins.utils import git, parallel_bail, proc
 
 _CHILD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")

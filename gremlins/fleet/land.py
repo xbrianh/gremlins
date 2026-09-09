@@ -930,7 +930,7 @@ def _exec_land_stage(land_stage: Any, gremlin: Any) -> bool:
     """Run an exec land stage against the given gremlin. Returns True on success."""
     import asyncio
 
-    from gremlins.stages.outcome import Bail
+    from _gremlins_core.stages import Bail
 
     try:
         asyncio.run(land_stage.run(gremlin))

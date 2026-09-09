@@ -11,12 +11,12 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from _gremlins_core.stages import Done, Outcome
 from conftest import make_parent_state
 
 from gremlins.executor.state import State, StateData, build_state, write_state
 from gremlins.stages import parallel as _parallel_mod
 from gremlins.stages.base import Stage
-from gremlins.stages.outcome import Done, Outcome
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils import proc as _proc_mod
 from tests.fake_client import FakeClient

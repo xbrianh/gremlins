@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from _gremlins_core.stages import Done, Outcome
+
 from gremlins.stages.base import Stage, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
-from gremlins.stages.outcome import Done, Outcome
 
 logger = logging.getLogger(__name__)
 

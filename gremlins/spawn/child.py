@@ -41,10 +41,10 @@ import traceback
 from typing import Any, cast
 
 from _gremlins_core.schemas import parse_stage
+from _gremlins_core.stages import Bail
 
 from gremlins.executor.gremlin import Gremlin
 from gremlins.logging_setup import configure_logging
-from gremlins.stages.outcome import Bail
 
 logger = logging.getLogger(__name__)
 

@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from _gremlins_core.artifacts import ArtifactRegistry, MissingArtifact, Uri
+from _gremlins_core.stages import Bail, Done
 from conftest import MINIMAL_EVENTS, MockGremlin
 
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.agent import Agent
-from gremlins.stages.outcome import Bail, Done
 from tests.fake_client import FakeClient
 
 if TYPE_CHECKING:

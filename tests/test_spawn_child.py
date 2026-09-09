@@ -12,10 +12,10 @@ from typing import Any
 import pytest
 from _gremlins_core.clients import CLIENT_FACTORIES
 from _gremlins_core.schemas import STAGE_TYPES
+from _gremlins_core.stages import Bail, Done, Outcome
 
 import gremlins.spawn.child as _rc
 from gremlins.stages.base import Stage
-from gremlins.stages.outcome import Bail, Done, Outcome
 from tests.fake_client import FakeClient
 
 
