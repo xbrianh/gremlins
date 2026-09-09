@@ -780,21 +780,11 @@ fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         };
         let old_str = match obj.get("old_string").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => {
-                return format!(
-                    "Error: edit {} missing 'old_string' in {file_path}",
-                    i + 1
-                )
-            }
+            None => return format!("Error: edit {} missing 'old_string' in {file_path}", i + 1),
         };
         let new_str = match obj.get("new_string").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => {
-                return format!(
-                    "Error: edit {} missing 'new_string' in {file_path}",
-                    i + 1
-                )
-            }
+            None => return format!("Error: edit {} missing 'new_string' in {file_path}", i + 1),
         };
         edits.push((old_str, new_str));
     }
