@@ -191,7 +191,7 @@ bootstrap:                    # optional; CLI contract and setup commands
       type: [filepath, string]
       optional: true
   launch_cmds:
-    - gremlins:bind_artifact(plan, plan, file://session/plan.md)
+    - gremlins:bind_artifact("artifact://plan.md", plan)
   cmds:
     - "uv sync"
   cli_out:
@@ -379,7 +379,7 @@ bootstrap:
       type: string
       optional: true
   launch_cmds:
-    - gremlins:bind_artifact(plan, plan, file://session/plan.md)
+    - gremlins:bind_artifact("artifact://plan.md", plan)
   cmds:
     - "uv sync"
   cli_out:
@@ -389,7 +389,7 @@ bootstrap:
 | Key | Description |
 |---|---|
 | `source` | Declares CLI flags. Each key becomes a `--<key>` flag (required unless `optional: true`). Supported types: `filepath`, `string`. |
-| `launch_cmds` | Shell commands run once at launch. Supports the `gremlins:bind_artifact(source_key, artifact_key, uri)` DSL for resolving source values into artifacts. |
+| `launch_cmds` | Shell commands run once at launch. Supports the `gremlins:bind_artifact(uri, source_key)` DSL for resolving source values into artifacts. |
 | `cmds` | Shell commands run in every worktree (e.g. `uv sync` to set up the dev environment). |
 | `cli_out` | Artifact bindings computed at launch from source values (e.g. binding an `opaque://pr/{read:pr-num}` URI from a `--pr-num` flag). |
 

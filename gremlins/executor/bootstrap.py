@@ -4,7 +4,7 @@ Used at gremlin launch and in parallel child subprocesses so that
 every fresh worktree gets its dev environment (venv, etc.) set up.
 
 Supports gremlins: DSL commands in launch_cmds:
-  gremlins:bind_artifact(<source_key>, <artifact_key>, <uri_template>)
+  gremlins:bind_artifact(<uri>, <source_key>)
     Resolves a bootstrap source value (filepath or inline text)
     and binds it as an artifact in the registry.
 """
@@ -104,52 +104,30 @@ def _split_dsl_args(args_raw: str) -> list[str]:
     return parts
 
 
-def _parse_bind_artifact_args(
-    args: list[str],
-) -> tuple[str, str, str]:
+def _parse_bind_artifact_args(args: list[str]) -> tuple[str, str]:
     """Validate and unpack bind_artifact arguments.
 
-    Returns (source_key, artifact_key, uri).
-
-    Accepts either 2 or 3 arguments:
-      - 2-arg form (current): bind_artifact(uri, source_key)
-        Artifact key is derived from the URI.
-      - 3-arg form (legacy): bind_artifact(source_key, artifact_key, uri)
+    Returns (source_key, uri).  The artifact key is the URI itself.
     """
-    if len(args) == 2:
-        uri_str, source_key = args
-        if not uri_str:
-            raise ValueError("bind_artifact: uri must be non-empty")
-        if not source_key:
-            raise ValueError("bind_artifact: source_key must be non-empty")
-        if "://" not in uri_str:
-            raise ValueError(
-                f"bind_artifact: first argument {uri_str!r} does not look like a URI "
-                f"(expected 'artifact://...'); use the 2-arg form: "
-                f"bind_artifact(uri, source_key) or the 3-arg form: "
-                f"bind_artifact(source_key, artifact_key, uri)"
-            )
-        return source_key, uri_str, uri_str
-    if len(args) != 3:
+    if len(args) != 2:
         raise ValueError(
-            f"bind_artifact requires 2 or 3 arguments (uri, source_key) "
-            f"or (source_key, artifact_key, uri), got {len(args)}"
+            f"bind_artifact requires 2 arguments (uri, source_key), got {len(args)}"
         )
-    source_key = args[0]
-    artifact_key = args[1]
-    uri = args[2]
+    uri_str, source_key = args
+    if not uri_str:
+        raise ValueError("bind_artifact: uri must be non-empty")
     if not source_key:
         raise ValueError("bind_artifact: source_key must be non-empty")
-    if not artifact_key:
-        raise ValueError("bind_artifact: artifact_key must be non-empty")
-    if not uri:
-        raise ValueError("bind_artifact: uri must be non-empty")
-    return source_key, artifact_key, uri
+    if "://" not in uri_str:
+        raise ValueError(
+            f"bind_artifact: first argument {uri_str!r} does not look like a URI "
+            f"(expected 'artifact://...'); use bind_artifact(uri, source_key)"
+        )
+    return source_key, uri_str
 
 
 async def _execute_bind_artifact(
     source_key: str,
-    artifact_key: str,
     uri_str: str,
     *,
     stage_inputs: Mapping[str, Any],
@@ -183,9 +161,6 @@ async def _execute_bind_artifact(
         else:
             dest_path.write_text(value_str, encoding="utf-8")
 
-    # Also register under the artifact_key so it can be looked up by name
-    gremlin.registry._set(artifact_key, str(dest_path))
-
 
 _DSL_DISPATCH: dict[str, object] = {
     "bind_artifact": _execute_bind_artifact,
@@ -207,10 +182,9 @@ async def _run_dsl_command(
             f"known: {', '.join(sorted(_DSL_DISPATCH))}"
         )
     if cmd_name == "bind_artifact":
-        source_key, artifact_key, uri_str = _parse_bind_artifact_args(args)
+        source_key, uri_str = _parse_bind_artifact_args(args)
         await _execute_bind_artifact(
             source_key,
-            artifact_key,
             uri_str,
             stage_inputs=stage_inputs,
             gremlin=gremlin,

@@ -97,10 +97,9 @@ impl ArtifactRegistry {
         }
     }
 
-    #[pyo3(signature = (uri, overwrite = true))]
-    fn register(&self, uri: &Uri, overwrite: bool) -> PyResult<String> {
+    fn register(&self, uri: &Uri) -> PyResult<String> {
         let inner = &mut *self.inner.lock().unwrap();
-        match inner.register(&uri.inner, overwrite) {
+        match inner.register(&uri.inner) {
             Ok(p) => Ok(p),
             Err(e) => {
                 if let Some(dup) = e.downcast_ref::<rust_registry::DuplicateArtifact>() {
@@ -156,7 +155,7 @@ impl ArtifactRegistry {
     }
 
     fn keys(&self) -> Vec<String> {
-        self.inner.lock().unwrap().data.keys().cloned().collect()
+        self.inner.lock().unwrap().keys().cloned().collect()
     }
 
     #[pyo3(signature = (other, key_map = None, copy_files = false, keys = None))]
@@ -191,16 +190,6 @@ impl ArtifactRegistry {
     #[getter]
     fn get_registry_path(&self) -> PathBuf {
         self.inner.lock().unwrap().registry_path.clone()
-    }
-
-    /// Low-level set: insert a raw key/value into the registry dict and persist.
-    /// Used by bootstrap to bind paths computed externally.
-    fn _set(&self, key: String, value: String) -> PyResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.data.insert(key, value);
-        inner
-            .persist()
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 }
 

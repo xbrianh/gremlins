@@ -8,6 +8,7 @@ import pathlib
 from typing import Any
 
 import pytest
+from _gremlins_core.artifacts import Uri
 from _gremlins_core.stages import Done, Outcome
 from conftest import MockGremlin
 
@@ -87,12 +88,17 @@ def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
         async def run(self, gremlin: Any) -> Outcome:
             captured.append(_read_state(tmp_path).get("active_children"))
 
-            gremlin.state.artifacts._set("done", "registered")
+            uri = Uri.parse("artifact://done.txt")
+            path = pathlib.Path(gremlin.state.artifacts.register(uri))
+            path.write_text("registered", encoding="utf-8")
             return Done()
 
     # Set stop_when_exists so the loop doesn't exhaust
     loop = LoopStage(
-        "lp", body=[_Spy("body-stage")], max_iterations=1, stop_when_exists="done"
+        "lp",
+        body=[_Spy("body-stage")],
+        max_iterations=1,
+        stop_when_exists="artifact://done.txt",
     )
     asyncio.run(loop.run(gremlin))
 

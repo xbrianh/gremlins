@@ -104,12 +104,10 @@ pub fn prepare_agent(
             name: name.clone(),
             detail: e.to_string(),
         })?;
-        let path = artifacts
-            .register(&uri, true)
-            .map_err(|e| AgentError::Generic {
-                name: name.clone(),
-                detail: e.to_string(),
-            })?;
+        let path = artifacts.register(&uri).map_err(|e| AgentError::Generic {
+            name: name.clone(),
+            detail: e.to_string(),
+        })?;
         bind_paths.insert(key.clone(), path);
         bind_uris.push((key, uri_str, optional));
     }
@@ -414,6 +412,13 @@ mod tests {
         ArtifactRegistry::new(artifact_dir)
     }
 
+    fn register_file(reg: &mut ArtifactRegistry, name: &str, content: &str) -> String {
+        let uri = Uri::parse(&format!("artifact://{name}")).unwrap();
+        let path = reg.register(&uri).unwrap();
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
     fn ensure_artifact_dir(tmp: &tempfile::TempDir) -> PathBuf {
         let ad = tmp.path().join("artifacts");
         std::fs::create_dir_all(&ad).unwrap();
@@ -425,13 +430,15 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let mut reg = make_registry(ad);
-        reg.data
-            .insert("world".to_string(), "world-value".to_string());
+        register_file(&mut reg, "world", "world-value");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["Hello {var}".to_string()],
             options: HashMap::new(),
-            interpolation_map: HashMap::from([("var".to_string(), "world".to_string())]),
+            interpolation_map: HashMap::from([(
+                "var".to_string(),
+                r#"content("artifact://world")"#.to_string(),
+            )]),
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
@@ -444,13 +451,15 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let mut reg = make_registry(ad);
-        reg.data
-            .insert("from-interp".to_string(), "from-interp".to_string());
+        register_file(&mut reg, "interp-src", "from-interp");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["Hello {name}".to_string()],
             options: HashMap::new(),
-            interpolation_map: HashMap::from([("name".to_string(), "from-interp".to_string())]),
+            interpolation_map: HashMap::from([(
+                "name".to_string(),
+                r#"content("artifact://interp-src")"#.to_string(),
+            )]),
             bind_map: HashMap::new(),
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
@@ -464,13 +473,15 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let mut reg = make_registry(ad.clone());
-        reg.data
-            .insert("interp-val".to_string(), "interp-val".to_string());
+        register_file(&mut reg, "interp-val", "interp-val");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{key}".to_string()],
             options: HashMap::new(),
-            interpolation_map: HashMap::from([("key".to_string(), "interp-val".to_string())]),
+            interpolation_map: HashMap::from([(
+                "key".to_string(),
+                r#"content("artifact://interp-val")"#.to_string(),
+            )]),
             bind_map: HashMap::from([("key".to_string(), "file://session/out.md".to_string())]),
         };
         let fw = HashMap::new();
@@ -527,13 +538,9 @@ mod tests {
         let ad = ensure_artifact_dir(&tmp);
         let mut reg = make_registry(ad.clone());
         // Pre-register the artifact that content() will look up
-        let plan_dir = ad.join("my-agent~2");
-        std::fs::create_dir_all(&plan_dir).unwrap();
-        std::fs::write(plan_dir.join("plan.md"), "# Plan").unwrap();
-        reg.data.insert(
-            "artifact://my-agent~2/plan.md".to_string(),
-            plan_dir.join("plan.md").to_string_lossy().to_string(),
-        );
+        let plan_uri = Uri::parse("artifact://my-agent~2/plan.md").unwrap();
+        let plan_path = reg.register(&plan_uri).unwrap();
+        std::fs::write(&plan_path, "# Plan").unwrap();
         // Register bind for the output so verify doesn't fail
         let agent = Agent {
             name: "test".to_string(),
@@ -573,7 +580,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let mut reg = make_registry(ad);
-        reg.data.insert("openai".to_string(), "openai".to_string());
+        register_file(&mut reg, "openai", "openai");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -581,7 +588,10 @@ mod tests {
                 "model".to_string(),
                 serde_json::Value::String("{provider}:{variant}".to_string()),
             )]),
-            interpolation_map: HashMap::from([("provider".to_string(), "openai".to_string())]),
+            interpolation_map: HashMap::from([(
+                "provider".to_string(),
+                r#"content("artifact://openai")"#.to_string(),
+            )]),
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
@@ -719,12 +729,15 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let mut reg = make_registry(ad);
-        reg.data.insert("value".to_string(), "value".to_string());
+        register_file(&mut reg, "value", "value");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{child-plan}".to_string()],
             options: HashMap::new(),
-            interpolation_map: HashMap::from([("child_plan".to_string(), "value".to_string())]),
+            interpolation_map: HashMap::from([(
+                "child_plan".to_string(),
+                "artifact://value".to_string(),
+            )]),
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();

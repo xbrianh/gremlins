@@ -121,12 +121,10 @@ pub fn prepare_exec(
             name: name.clone(),
             detail: e.to_string(),
         })?;
-        let path = artifacts
-            .register(&uri, true)
-            .map_err(|e| ExecError::Generic {
-                name: name.clone(),
-                detail: e.to_string(),
-            })?;
+        let path = artifacts.register(&uri).map_err(|e| ExecError::Generic {
+            name: name.clone(),
+            detail: e.to_string(),
+        })?;
         bind_paths.insert(key.clone(), path);
         bind_uris.push((key, uri_str, optional));
     }

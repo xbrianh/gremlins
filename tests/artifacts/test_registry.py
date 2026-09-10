@@ -46,12 +46,12 @@ def test_keys_returns_registered_keys(tmp_path: pathlib.Path) -> None:
     assert set(r.keys()) == {"artifact://a.md", "artifact://b.md"}
 
 
-def test_register_duplicate_no_overwrite_raises(tmp_path: pathlib.Path) -> None:
+def test_register_duplicate_raises(tmp_path: pathlib.Path) -> None:
     r = make_registry(tmp_path)
     uri = Uri.parse("artifact://x.md")
-    r.register(uri, overwrite=False)
+    r.register(uri)
     with pytest.raises(DuplicateArtifact) as exc_info:
-        r.register(uri, overwrite=False)
+        r.register(uri)
     assert str(uri) in str(exc_info.value)
 
 

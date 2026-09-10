@@ -95,13 +95,19 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn setup_registry(data: HashMap<String, String>) -> (TempDir, ArtifactRegistry) {
+    fn setup_registry() -> (TempDir, ArtifactRegistry) {
         let tmp = TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut reg = ArtifactRegistry::new(artifact_dir);
-        reg.data = data;
+        let reg = ArtifactRegistry::new(artifact_dir);
         (tmp, reg)
+    }
+
+    fn register_file(reg: &mut ArtifactRegistry, name: &str, content: &str) -> String {
+        let uri = crate::artifacts::uri::Uri::parse(&format!("artifact://{name}")).unwrap();
+        let path = reg.register(&uri).unwrap();
+        fs::write(&path, content).unwrap();
+        path
     }
 
     fn unwrap_result<T>(r: Result<T, ResolveError>) -> T {
@@ -113,21 +119,19 @@ mod tests {
 
     #[test]
     fn test_resolve_bound_key() {
-        let mut data = HashMap::new();
-        data.insert("mykey".to_string(), "myval".to_string());
-        let (_tmp, reg) = setup_registry(data);
+        let (_tmp, mut reg) = setup_registry();
+        let path = register_file(&mut reg, "mykey", "myval");
 
         let mut map = HashMap::new();
-        map.insert("var".to_string(), "mykey".to_string());
+        map.insert("var".to_string(), "artifact://mykey".to_string());
 
         let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
-        assert_eq!(result.get("var").unwrap(), "myval");
+        assert_eq!(result.get("var").unwrap(), &path);
     }
 
     #[test]
     fn test_resolve_default_fallback() {
-        let data = HashMap::new();
-        let (_tmp, reg) = setup_registry(data);
+        let (_tmp, reg) = setup_registry();
 
         let mut map = HashMap::new();
         map.insert("var".to_string(), "missing?default_val".to_string());
@@ -138,8 +142,7 @@ mod tests {
 
     #[test]
     fn test_resolve_optional_content() {
-        let data = HashMap::new();
-        let (_tmp, reg) = setup_registry(data);
+        let (_tmp, reg) = setup_registry();
 
         let mut map = HashMap::new();
         map.insert("var".to_string(), r#"content("missing.txt")?"#.to_string());
@@ -150,16 +153,8 @@ mod tests {
 
     #[test]
     fn test_resolve_content_with_json_path() {
-        let tmp = TempDir::new().unwrap();
-        let artifact_dir = tmp.path().join("artifacts");
-        fs::create_dir_all(&artifact_dir).unwrap();
-        let file_path = artifact_dir.join("data.json");
-        fs::write(&file_path, r#"{"x":{"y":"z"}}"#).unwrap();
-        let mut reg = ArtifactRegistry::new(artifact_dir.clone());
-        reg.data.insert(
-            "artifact://data.json".to_string(),
-            file_path.to_string_lossy().to_string(),
-        );
+        let (_tmp, mut reg) = setup_registry();
+        register_file(&mut reg, "data.json", r#"{"x":{"y":"z"}}"#);
         let mut map = HashMap::new();
         map.insert(
             "var".to_string(),
@@ -167,20 +162,18 @@ mod tests {
         );
         let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
         assert_eq!(result.get("var").unwrap(), "z");
-        let _ = tmp;
     }
 
     #[test]
     fn test_resolve_loop_iter_substitution() {
-        let mut data = HashMap::new();
-        data.insert("key_0".to_string(), "val0".to_string());
-        data.insert("key_1".to_string(), "val1".to_string());
-        let (_tmp, reg) = setup_registry(data);
+        let (_tmp, mut reg) = setup_registry();
+        register_file(&mut reg, "key_0", "val0");
+        let path_1 = register_file(&mut reg, "key_1", "val1");
 
         let mut map = HashMap::new();
-        map.insert("var".to_string(), "key_{loop_iter}".to_string());
+        map.insert("var".to_string(), "artifact://key_{loop_iter}".to_string());
 
         let result = unwrap_result(resolve_interpolation_map(&reg, &map, "1"));
-        assert_eq!(result.get("var").unwrap(), "val1");
+        assert_eq!(result.get("var").unwrap(), &path_1);
     }
 }

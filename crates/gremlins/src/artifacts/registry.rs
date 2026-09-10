@@ -31,7 +31,7 @@ pub struct DuplicateArtifact {
 pub struct ArtifactRegistry {
     pub artifact_dir: PathBuf,
     pub registry_path: PathBuf,
-    pub data: HashMap<String, String>,
+    data: HashMap<String, String>,
 }
 
 impl ArtifactRegistry {
@@ -108,11 +108,7 @@ impl ArtifactRegistry {
             })
     }
 
-    pub fn register(
-        &mut self,
-        uri: &Uri,
-        overwrite: bool,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn register(&mut self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>> {
         let key = uri.to_string();
         if uri.scheme != "artifact" {
             log::warn!(
@@ -121,7 +117,7 @@ impl ArtifactRegistry {
                 uri.scheme,
             );
         }
-        if self.data.contains_key(&key) && !overwrite {
+        if self.data.contains_key(&key) {
             return Err(Box::new(DuplicateArtifact {
                 key: key.clone(),
                 existing: self.data[&key].clone(),
@@ -167,38 +163,20 @@ impl ArtifactRegistry {
         json_path: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let raw = self.data_uri(uri_str)?;
-        let text = if raw.starts_with("file://session/") {
+        let p = if raw.starts_with("file://session/") {
             let name = raw.strip_prefix("file://session/").unwrap_or(raw);
-            let p = self.artifact_dir.join(name);
-            if !p.exists() {
-                return Err(Box::new(MissingArtifact {
-                    key: uri_str.to_string(),
-                }));
-            }
-            fs::read_to_string(&p)?
-        } else if raw.starts_with("file://") {
-            let p = PathBuf::from(raw.strip_prefix("file://").unwrap_or(raw));
-            if !p.exists() {
-                return Err(Box::new(MissingArtifact {
-                    key: uri_str.to_string(),
-                }));
-            }
-            fs::read_to_string(&p)?
-        } else if raw.starts_with('/') {
-            let p = PathBuf::from(raw);
-            if !p.exists() {
-                return Err(Box::new(MissingArtifact {
-                    key: uri_str.to_string(),
-                }));
-            }
-            fs::read_to_string(&p)?
+            self.artifact_dir.join(name)
+        } else if let Some(stripped) = raw.strip_prefix("file://") {
+            PathBuf::from(stripped)
         } else {
-            log::warn!(
-                "content({:?}): returning raw registry value as-is (not a file path)",
-                uri_str,
-            );
-            return Ok(raw.to_string());
+            PathBuf::from(raw)
         };
+        if !p.exists() {
+            return Err(Box::new(MissingArtifact {
+                key: uri_str.to_string(),
+            }));
+        }
+        let text = fs::read_to_string(&p)?;
         log::debug!("content({:?}) read {} bytes", uri_str, text.len());
         if let Some(jp) = json_path {
             let mut data: serde_json::Value = serde_json::from_str(&text)?;
@@ -341,7 +319,7 @@ impl ArtifactRegistry {
         Ok(registry)
     }
 
-    pub fn persist(&self) -> Result<(), Box<dyn std::error::Error>> {
+    fn persist(&self) -> Result<(), Box<dyn std::error::Error>> {
         let pid = std::process::id();
         let count = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_name = format!(".{}.{}.tmp", pid, count);
@@ -399,7 +377,7 @@ mod tests {
         let (_tmp, artifact_dir) = setup();
         let mut reg = ArtifactRegistry::new(artifact_dir.clone());
         let uri = Uri::new("artifact".to_string(), "foo.txt".to_string());
-        let path = reg.register(&uri, true).unwrap();
+        let path = reg.register(&uri).unwrap();
         assert!(path.contains("foo.txt"));
 
         // Reload from disk
@@ -408,23 +386,13 @@ mod tests {
     }
 
     #[test]
-    fn test_register_duplicate_no_overwrite_raises() {
+    fn test_register_duplicate_raises() {
         let (_tmp, artifact_dir) = setup();
         let mut reg = ArtifactRegistry::new(artifact_dir);
         let uri = Uri::new("artifact".to_string(), "a.txt".to_string());
-        reg.register(&uri, true).unwrap();
-        let err = reg.register(&uri, false).unwrap_err();
+        reg.register(&uri).unwrap();
+        let err = reg.register(&uri).unwrap_err();
         assert!(err.to_string().contains("duplicate artifact"));
-    }
-
-    #[test]
-    fn test_register_duplicate_with_overwrite_succeeds() {
-        let (_tmp, artifact_dir) = setup();
-        let mut reg = ArtifactRegistry::new(artifact_dir);
-        let uri = Uri::new("artifact".to_string(), "a.txt".to_string());
-        reg.register(&uri, true).unwrap();
-        let path = reg.register(&uri, true).unwrap();
-        assert!(path.contains("a.txt"));
     }
 
     #[test]
@@ -432,49 +400,42 @@ mod tests {
         let (_tmp, artifact_dir) = setup();
         let mut reg = ArtifactRegistry::new(artifact_dir);
         let uri = Uri::new("artifact".to_string(), "../bad.txt".to_string());
-        let err = reg.register(&uri, true);
+        let err = reg.register(&uri);
         assert!(err.is_err());
     }
 
     #[test]
     fn test_content_reads_file() {
         let (_tmp, artifact_dir) = setup();
-        // Manually set up a file and register it
-        let file_path = artifact_dir.join("hello.txt");
-        fs::write(&file_path, "world").unwrap();
         let mut reg = ArtifactRegistry::new(artifact_dir.clone());
-        reg.data.insert(
-            "file://session/hello.txt".to_string(),
-            file_path.to_string_lossy().to_string(),
-        );
-        let content = reg.content("file://session/hello.txt", None).unwrap();
-        assert_eq!(content, "world");
+        let uri = Uri::parse("artifact://hello.txt").unwrap();
+        let path = reg.register(&uri).unwrap();
+        fs::write(&path, "world").unwrap();
+        assert_eq!(reg.content("artifact://hello.txt", None).unwrap(), "world");
     }
 
     #[test]
     fn test_content_with_json_path() {
         let (_tmp, artifact_dir) = setup();
-        let file_path = artifact_dir.join("data.json");
-        fs::write(&file_path, r#"{"a":{"b":"c"}}"#).unwrap();
         let mut reg = ArtifactRegistry::new(artifact_dir);
-        reg.data.insert(
-            "test://data.json".to_string(),
-            file_path.to_string_lossy().to_string(),
-        );
-        let content = reg.content("test://data.json", Some("a.b")).unwrap();
+        let uri = Uri::parse("artifact://data.json").unwrap();
+        let path = reg.register(&uri).unwrap();
+        fs::write(&path, r#"{"a":{"b":"c"}}"#).unwrap();
+        let content = reg.content("artifact://data.json", Some("a.b")).unwrap();
         assert_eq!(content, "c");
     }
 
     #[test]
-    fn test_content_raw_non_file_value() {
+    fn test_content_reads_file_containing_uri_text() {
         let (_tmp, artifact_dir) = setup();
         let mut reg = ArtifactRegistry::new(artifact_dir);
-        reg.data.insert(
-            "git://range/abc..def".to_string(),
-            "git://range/abc..def".to_string(),
+        let uri = Uri::parse("artifact://range").unwrap();
+        let path = reg.register(&uri).unwrap();
+        fs::write(&path, "git://range/abc..def").unwrap();
+        assert_eq!(
+            reg.content("artifact://range", None).unwrap(),
+            "git://range/abc..def",
         );
-        let content = reg.content("git://range/abc..def", None).unwrap();
-        assert_eq!(content, "git://range/abc..def");
     }
 
     #[test]
@@ -488,36 +449,28 @@ mod tests {
     fn test_exists_false_for_missing_file() {
         let (_tmp, artifact_dir) = setup();
         let mut reg = ArtifactRegistry::new(artifact_dir);
-        reg.data.insert(
-            "artifact://missing.txt".to_string(),
-            "/nonexistent/path/file.txt".to_string(),
-        );
+        let uri = Uri::parse("artifact://missing.txt").unwrap();
+        reg.register(&uri).unwrap();
         assert!(!reg.exists("artifact://missing.txt"));
     }
 
     #[test]
     fn test_exists_true_for_empty_file() {
         let (_tmp, artifact_dir) = setup();
-        let file_path = artifact_dir.join("empty.txt");
-        fs::write(&file_path, "").unwrap();
         let mut reg = ArtifactRegistry::new(artifact_dir);
-        reg.data.insert(
-            "artifact://empty.txt".to_string(),
-            file_path.to_string_lossy().to_string(),
-        );
+        let uri = Uri::parse("artifact://empty.txt").unwrap();
+        let path = reg.register(&uri).unwrap();
+        fs::write(&path, "").unwrap();
         assert!(reg.exists("artifact://empty.txt"));
     }
 
     #[test]
     fn test_exists_true_for_non_empty_file() {
         let (_tmp, artifact_dir) = setup();
-        let file_path = artifact_dir.join("stuff.txt");
-        fs::write(&file_path, "data").unwrap();
         let mut reg = ArtifactRegistry::new(artifact_dir);
-        reg.data.insert(
-            "artifact://stuff.txt".to_string(),
-            file_path.to_string_lossy().to_string(),
-        );
+        let uri = Uri::parse("artifact://stuff.txt").unwrap();
+        let path = reg.register(&uri).unwrap();
+        fs::write(&path, "data").unwrap();
         assert!(reg.exists("artifact://stuff.txt"));
     }
 
@@ -525,11 +478,11 @@ mod tests {
     fn test_keys_returns_registered_keys() {
         let (_tmp, artifact_dir) = setup();
         let mut reg = ArtifactRegistry::new(artifact_dir);
-        reg.data.insert("a".to_string(), "1".to_string());
-        reg.data.insert("b".to_string(), "2".to_string());
+        reg.register(&Uri::parse("artifact://a").unwrap()).unwrap();
+        reg.register(&Uri::parse("artifact://b").unwrap()).unwrap();
         let mut keys: Vec<&String> = reg.keys().collect();
         keys.sort();
-        assert_eq!(keys, vec!["a", "b"]);
+        assert_eq!(keys, vec!["artifact://a", "artifact://b"]);
     }
 
     #[test]
@@ -538,11 +491,16 @@ mod tests {
         let (_, other_dir) = setup();
 
         let mut other = ArtifactRegistry::new(other_dir);
-        other.data.insert("k1".to_string(), "v1".to_string());
+        other
+            .register(&Uri::parse("artifact://k1").unwrap())
+            .unwrap();
 
         let mut reg = ArtifactRegistry::new(artifact_dir);
         reg.merge_from(&other, None, false, None).unwrap();
-        assert_eq!(reg.data_uri("k1").unwrap(), "v1");
+        assert_eq!(
+            reg.data_uri("artifact://k1").unwrap(),
+            other.data_uri("artifact://k1").unwrap(),
+        );
     }
 
     #[test]
@@ -552,38 +510,37 @@ mod tests {
 
         let mut other = ArtifactRegistry::new(other_dir);
         other
-            .data
-            .insert("child".to_string(), "child_val".to_string());
+            .register(&Uri::parse("artifact://child").unwrap())
+            .unwrap();
 
         let mut key_map = HashMap::new();
-        key_map.insert("child".to_string(), "parent".to_string());
+        key_map.insert("artifact://child".to_string(), "parent".to_string());
 
         let mut reg = ArtifactRegistry::new(artifact_dir);
         reg.merge_from(&other, Some(&key_map), false, None).unwrap();
-        assert_eq!(reg.data_uri("parent").unwrap(), "child_val");
+        assert_eq!(
+            reg.data_uri("parent").unwrap(),
+            other.data_uri("artifact://child").unwrap(),
+        );
     }
 
     #[test]
     fn test_merge_from_with_file_copy() {
         let (_tmp, artifact_dir) = setup();
         let (tmp2, other_dir) = setup();
-
-        // Create a file in other's artifact_dir
-        let src_file = other_dir.join("note.txt");
-        fs::write(&src_file, "hello").unwrap();
+        let _ = &tmp2;
 
         let mut other = ArtifactRegistry::new(other_dir);
-        other
-            .data
-            .insert("note".to_string(), src_file.to_string_lossy().to_string());
+        let uri = Uri::parse("artifact://note.txt").unwrap();
+        let src_file = other.register(&uri).unwrap();
+        fs::write(&src_file, "hello").unwrap();
 
         let mut reg = ArtifactRegistry::new(artifact_dir);
         reg.merge_from(&other, None, true, None).unwrap();
-        let stored = reg.data_uri("note").unwrap();
+        let stored = reg.data_uri("artifact://note.txt").unwrap();
         let p = PathBuf::from(stored);
         assert!(p.exists());
         assert_eq!(fs::read_to_string(&p).unwrap(), "hello");
-        let _ = tmp2;
     }
 
     #[test]

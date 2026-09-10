@@ -36,22 +36,22 @@ stages:
         interpolation:
           plan_text: content("artifact://rolling-plan.md")
           spec_section: content("artifact://boss-spec.md")?
+          rolling_plan: artifact://rolling-plan.md
         bind:
-          rolling_plan: "artifact://rolling-plan.md"
-          child_plan:   "artifact://child-plan.md"
-          signal:       "artifact://signal.json"
+          child_plan:   "artifact://{loop_iter}/child-plan.md"
+          signal:       "artifact://{loop_iter}/signal.json"
         options:
           idle_timeout: 3600
 
       - name: translate-signal
         type: exec
         interpolation:
-          signal: artifact://signal.json
+          signal: artifact://{loop_iter}/signal.json
           rolling_plan: artifact://rolling-plan.md
-          child_plan: artifact://child-plan.md
+          child_plan: artifact://{loop_iter}/child-plan.md
         bind:
-          bail?: "artifact://bail"
-          done?: "artifact://done"
+          bail?: "artifact://{loop_iter}/bail"
+          done?: "artifact://{loop_iter}/done"
         options:
           cmds:
             - |
@@ -102,10 +102,9 @@ stages:
           - "gremlins:code_style.md"
         interpolation:
           rolling_plan_text: content("artifact://rolling-plan.md")
+          rolling_plan: artifact://rolling-plan.md
         options:
           model: haiku
-        bind:
-          rolling_plan: "artifact://rolling-plan.md"
 
       - name: restore-rolling-plan
         type: exec
