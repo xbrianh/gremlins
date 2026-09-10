@@ -74,11 +74,11 @@ class _SignalClient(FakeClient):
                 ad + r"/[0-9]+" + re.escape("/rolling-plan.md") + r"\b", prompt
             )
             if not m:
-                m = re.search(
-                    ad + re.escape("/rolling-plan.md") + r"\b", prompt
-                )
+                m = re.search(ad + re.escape("/rolling-plan.md") + r"\b", prompt)
             if not m:
-                m = re.search(ad + r"/[a-f0-9]+" + re.escape("_rolling-plan.md"), prompt)
+                m = re.search(
+                    ad + r"/[a-f0-9]+" + re.escape("_rolling-plan.md"), prompt
+                )
             if m:
                 target = pathlib.Path(m.group(0))
                 target.parent.mkdir(parents=True, exist_ok=True)
