@@ -268,6 +268,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         call_id: Option<String>,
         name: String,
         args: String,
+        key: String,
     }
 
     for _ in 0..max_turns {
@@ -491,7 +492,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         // Phase 1: emit tool-start events, collect owned data for concurrent execution
         let mut jobs: Vec<Job> = Vec::new();
-        let mut ledger_entries: Vec<(String, String)> = Vec::new();
         for tc in &tool_calls {
             let args_json =
                 serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".into());
@@ -503,15 +503,12 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     evts.push(tool_evt);
                 }
             }
-            ledger_entries.push((
-                tc.function.name.clone(),
-                ledger_key_arg(&tc.function.arguments),
-            ));
             jobs.push(Job {
                 id: tc.id.clone(),
                 call_id: tc.call_id.clone(),
                 name: tc.function.name.clone(),
                 args: args_json,
+                key: ledger_key_arg(&tc.function.arguments),
             });
         }
 
@@ -521,6 +518,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         // Phase 3: emit results in order
         let mut result_msgs = Vec::new();
+        let mut ledger = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
             stream::emit_result(prefix, &output, false);
             if !nested {
@@ -530,6 +528,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     evts.push(result_evt);
                 }
             }
+            ledger.push(ledger_line(&job.name, &job.key, &output));
             result_msgs.push(Message::tool_result_with_call_id(
                 job.id,
                 job.call_id,
@@ -538,25 +537,11 @@ async fn run_agent_loop_core<M: CompletionModel>(
         }
         turns += tool_calls.len();
         stream::flush();
-        next_prompt = result_msgs.pop().unwrap_or_else(|| Message::user(""));
+        // Every tool result lands in history so the results stay adjacent to the
+        // assistant tool_calls message; the ledger becomes the next turn's prompt,
+        // trailing the complete result block instead of splitting it.
         history.extend(result_msgs);
-
-        if !ledger_entries.is_empty() {
-            let lines: Vec<String> = ledger_entries
-                .iter()
-                .map(|(name, key)| {
-                    if key.is_empty() {
-                        format!("- {name}")
-                    } else {
-                        format!("- {name} {key}")
-                    }
-                })
-                .collect();
-            history.push(Message::user(format!(
-                "Actions taken this turn:\n{}\n",
-                lines.join("\n")
-            )));
-        }
+        next_prompt = Message::user(ledger_message(&ledger));
     }
 
     if !nested {
@@ -663,11 +648,38 @@ pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
     String::new()
 }
 
+/// One ledger bullet: tool name, its most informative argument, and whether the
+/// call actually ran.
+fn ledger_line(name: &str, key: &str, output: &str) -> String {
+    let label = if key.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {key}")
+    };
+    let note = if output.starts_with("Error: unknown tool") {
+        " (not run: unknown tool)"
+    } else if tools::result_status(output) == "error" {
+        " (failed)"
+    } else {
+        ""
+    };
+    format!("- {label}{note}")
+}
+
+fn ledger_message(lines: &[String]) -> String {
+    format!("Actions taken this turn:\n{}\n", lines.join("\n"))
+}
+
 fn truncate_ledger_value(v: &str) -> String {
     const MAX: usize = 80;
+    // Collapse embedded line breaks so one action is always one ledger line.
+    let v: String = v
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
     let chars: Vec<char> = v.chars().collect();
     if chars.len() <= MAX {
-        return v.to_string();
+        return v;
     }
     let head: String = chars[..40].iter().collect();
     let tail: String = chars[chars.len() - 39..].iter().collect();
@@ -729,6 +741,7 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::message::UserContent;
 
     #[test]
     fn event_shapes() {
@@ -775,6 +788,30 @@ mod tests {
             "file_path": format!("{}/deep/path.txt", "d".repeat(200))
         }))
         .ends_with("path.txt"));
+
+        // Multiline commands must stay on one ledger line.
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"command": "a\nb\r\nc"})),
+            "a b  c"
+        );
+    }
+
+    #[test]
+    fn ledger_line_flags_denied_and_failed_calls() {
+        assert_eq!(ledger_line("Read", "/tmp/x", "content"), "- Read /tmp/x");
+        assert_eq!(ledger_line("Read", "", "content"), "- Read");
+        assert_eq!(
+            ledger_line("Write", "/tmp/x", "Error: unknown tool Write"),
+            "- Write /tmp/x (not run: unknown tool)"
+        );
+        assert_eq!(
+            ledger_line("Bash", "cargo test", "Error: timed out"),
+            "- Bash cargo test (failed)"
+        );
+        assert_eq!(
+            ledger_line("Bash", "false", "[exit 1]\n"),
+            "- Bash false (failed)"
+        );
     }
 
     #[tokio::test]
@@ -1025,6 +1062,12 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(content.contains("unknown tool"));
+        let reqs = model.requests();
+        let ledger = format!("{:?}", reqs[1].chat_history);
+        assert!(
+            ledger.contains("Write ") && ledger.contains("(not run: unknown tool)"),
+            "denied call must be marked as not run in the ledger: {ledger}"
+        );
     }
 
     #[tokio::test]
@@ -1311,16 +1354,79 @@ mod tests {
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
         let expected = Message::user(format!("Actions taken this turn:\n- Read {key}\n"));
-        let positions: Vec<usize> = history
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| **m == &expected)
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(positions.len(), 1, "ledger must appear exactly once");
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
-        let idx = positions[0];
-        assert!(matches!(history[idx - 1], Message::Assistant { .. }));
+        assert_eq!(history.len(), 4, "unexpected history: {history:#?}");
+        assert!(matches!(history[1], Message::Assistant { .. }));
+        assert_eq!(
+            message_kind(history[2]),
+            "result",
+            "tool result must follow the assistant tool_calls message: {:?}",
+            history[2]
+        );
+        assert_eq!(history[3], &expected, "ledger must trail all tool results");
+    }
+
+    fn message_kind(m: &Message) -> &'static str {
+        match m {
+            Message::User { content } if content.iter().any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("Actions taken this turn:"))) => "ledger",
+            Message::User { content } if content
+                .iter()
+                .any(|c| matches!(c, UserContent::ToolResult(_))) => "result",
+            Message::Assistant { .. } => "assistant",
+            _ => "other",
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_ledger_follows_all_tool_results() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-ledger-multi-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f1 = dir.join("a.txt");
+        let f2 = dir.join("b.txt");
+        std::fs::write(&f1, "alpha").unwrap();
+        std::fs::write(&f2, "beta").unwrap();
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({"file_path": f1.to_str().unwrap()}),
+                ),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c2",
+                    "Read",
+                    serde_json::json!({"file_path": f2.to_str().unwrap()}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        run_agent_loop(&model, "read both", &ctx, CancelToken::new(), loop_opts(None))
+            .await
+            .unwrap();
+
+        let reqs = model.requests();
+        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
+        let kinds: Vec<&str> = history.iter().map(|m| message_kind(m)).collect();
+        assert_eq!(kinds, vec!["other", "assistant", "result", "result", "ledger"]);
+        let ledger = format!("{:?}", history[4]);
+        assert!(
+            ledger.contains("a.txt") && ledger.contains("b.txt"),
+            "ledger must list both actions: {ledger}"
+        );
     }
 
     #[tokio::test]
