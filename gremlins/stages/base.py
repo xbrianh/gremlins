@@ -96,8 +96,3 @@ class Stage(abc.ABC):
         raise NotImplementedError
 
 
-# PyExec is a Rust pyclass and cannot inherit from Python's Stage.
-# Register it as a virtual subclass so isinstance(Exec(...), Stage) works.
-from _gremlins_core.stages import Exec  # noqa: E402
-
-Stage.register(Exec)  # type: ignore[arg-type]
