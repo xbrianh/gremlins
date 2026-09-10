@@ -43,7 +43,7 @@ def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
     )
 
     assert len(gremlin.stages) > 0
-    assert all(hasattr(s, 'run') for s in gremlin.stages)
+    assert all(hasattr(s, "run") for s in gremlin.stages)
     stage_names = [s.name for s in gremlin.stages]
     assert "plan" in stage_names
     assert "implement" in stage_names
@@ -62,7 +62,7 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
     )
 
     assert len(gremlin.stages) > 0
-    assert all(hasattr(s, 'run') for s in gremlin.stages)
+    assert all(hasattr(s, "run") for s in gremlin.stages)
     stage_names = [s.name for s in gremlin.stages]
     assert "plan" in stage_names
     assert "implement" in stage_names

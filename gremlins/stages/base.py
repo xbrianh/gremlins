@@ -94,5 +94,3 @@ class Stage(abc.ABC):
 
     async def run(self, gremlin: Gremlin) -> Outcome:  # noqa: ARG002
         raise NotImplementedError
-
-
