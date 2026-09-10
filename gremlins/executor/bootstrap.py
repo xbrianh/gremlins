@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any
 from _gremlins_core.artifacts import Uri
 from _gremlins_core.schemas import (
     Bootstrap,
-    source_env,
     substitute_bootstrap_vars,
 )
 
@@ -44,7 +43,6 @@ _GREMLINS_CMD_RE = re.compile(r"gremlins:([a-z_]+)\(([^)]*)\)")
 async def run_bootstrap(
     cmds: list[str],
     cwd: pathlib.Path,
-    extra_env: dict[str, str] | None = None,
 ) -> None:
     """Run shell commands in cwd. Non-zero exit raises RuntimeError."""
     cmds = [c.rstrip() for c in cmds if c.strip()]
@@ -52,8 +50,6 @@ async def run_bootstrap(
         return
     env = dict(os.environ)
     env["GREMLINS_BOOTSTRAP_CWD"] = str(cwd)
-    if extra_env:
-        env.update(extra_env)
     result = await proc.run_shell_async(" && ".join(cmds), cwd=cwd, env=env)
     if result.returncode != 0:
         err = (result.stderr or result.stdout).strip()
@@ -242,7 +238,11 @@ async def run_pipeline_bootstrap(
         return
     if bootstrap.launch_cmds:
         logger.info("running %d launch command(s)", len(bootstrap.launch_cmds))
-        env = source_env(bootstrap.source, stage_inputs)
+        # Build source values for template substitution
+        values: dict[str, str] = {}
+        for key, val in stage_inputs.items():
+            if val is not None and val != "":
+                values[key] = str(val)
         shell_cmds: list[str] = []
         for c in bootstrap.launch_cmds:
             parsed = _parse_gremlins_command(c)
@@ -256,9 +256,9 @@ async def run_pipeline_bootstrap(
                     gremlin=gremlin,
                 )
             else:
-                shell_cmds.append(substitute_bootstrap_vars(c, cwd=cwd))
+                shell_cmds.append(substitute_bootstrap_vars(c, cwd, values))
         if shell_cmds:
-            await run_bootstrap(shell_cmds, cwd, extra_env=env)
+            await run_bootstrap(shell_cmds, cwd)
     if bootstrap.cli_out:
         from _gremlins_core.stages import Exec
 

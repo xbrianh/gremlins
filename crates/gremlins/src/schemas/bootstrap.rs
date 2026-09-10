@@ -254,22 +254,6 @@ fn string_list(raw: Option<&serde_yaml::Value>, label: &str) -> Result<Vec<Strin
     }
 }
 
-/// Build env vars for launch_cmds: source key → value. Omitted optionals are absent.
-pub fn source_env(
-    source: &InputSources,
-    values: &HashMap<String, String>,
-) -> HashMap<String, String> {
-    let mut env = HashMap::new();
-    for key in source.sources.keys() {
-        if let Some(value) = values.get(key) {
-            if !value.is_empty() {
-                env.insert(key.clone(), value.clone());
-            }
-        }
-    }
-    env
-}
-
 /// Validate CLI/source values. filepath-only requires an existing file.
 pub fn validate_source_values(
     source: &InputSources,
@@ -307,9 +291,18 @@ pub fn validate_source_values(
     Ok(())
 }
 
-/// Substitute {cwd} placeholder in a command string.
-pub fn substitute_bootstrap_vars(cmd: &str, cwd: &Path) -> String {
-    cmd.replace("{cwd}", &cwd.to_string_lossy())
+/// Substitute {cwd} and {key} placeholders in a command string.
+pub fn substitute_bootstrap_vars(
+    cmd: &str,
+    cwd: &Path,
+    values: &HashMap<String, String>,
+) -> String {
+    let mut result = cmd.replace("{cwd}", &cwd.to_string_lossy());
+    for (key, value) in values {
+        let placeholder = format!("{{{}}}", key);
+        result = result.replace(&placeholder, value);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -373,21 +366,6 @@ mod tests {
     }
 
     #[test]
-    fn test_source_env() {
-        let src = InputSources::new(
-            vec![(
-                "key".to_string(),
-                InputSource::new("key".to_string(), vec!["string".to_string()], false).unwrap(),
-            )]
-            .into_iter()
-            .collect(),
-        );
-        let values = HashMap::from([("key".to_string(), "val".to_string())]);
-        let env = source_env(&src, &values);
-        assert_eq!(env.get("key").unwrap(), "val");
-    }
-
-    #[test]
     fn test_validate_source_values_missing_required() {
         let src = InputSources::new(
             vec![(
@@ -403,8 +381,17 @@ mod tests {
     }
 
     #[test]
-    fn test_substitute_bootstrap_vars() {
-        let result = substitute_bootstrap_vars("echo {cwd}", Path::new("/tmp/cwd"));
+    fn test_substitute_bootstrap_vars_cwd() {
+        let result =
+            substitute_bootstrap_vars("echo {cwd}", Path::new("/tmp/cwd"), &HashMap::new());
         assert_eq!(result, "echo /tmp/cwd");
+    }
+
+    #[test]
+    fn test_substitute_bootstrap_vars_values() {
+        let values = HashMap::from([("instructions".to_string(), "do the thing".to_string())]);
+        let result =
+            substitute_bootstrap_vars("test -n '{instructions}'", Path::new("/tmp"), &values);
+        assert_eq!(result, "test -n 'do the thing'");
     }
 }

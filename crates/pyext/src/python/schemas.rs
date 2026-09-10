@@ -61,10 +61,6 @@ pub fn register_schemas_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     schemas_mod.add_function(wrap_pyfunction!(check_duplicate_producers, &schemas_mod)?)?;
     schemas_mod.add_function(wrap_pyfunction!(expand_pipeline, &schemas_mod)?)?;
     schemas_mod.add_function(wrap_pyfunction!(
-        schemas::bootstrap::source_env,
-        &schemas_mod
-    )?)?;
-    schemas_mod.add_function(wrap_pyfunction!(
         schemas::bootstrap::validate_source_values,
         &schemas_mod
     )?)?;

@@ -66,7 +66,7 @@ def test_launch_cmds_see_source_env(tmp_path: pathlib.Path) -> None:
         source=InputSources(
             {"plan": InputSource(name="plan", types=["string"], optional=True)}
         ),
-        launch_cmds=[f'printf "%s" "$plan" > "{marker}"'],
+        launch_cmds=[f'printf "%s" "{{plan}}" > "{marker}"'],
     )
     gremlin = _gremlin(tmp_path)
     assert gremlin.state is not None
