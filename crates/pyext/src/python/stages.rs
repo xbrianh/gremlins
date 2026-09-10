@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use gremlins::core::proc::ProcResult;
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec::{self as rust_exec, substitute_vars};
 use gremlins::stages::outcome::Done as RustDone;
@@ -32,6 +33,18 @@ fn extract_json_value_dict(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, s
         map.insert(k, v);
     }
     Ok(map)
+}
+
+/// Extract a ProcResult from a Python subprocess.CompletedProcess object.
+fn extract_proc_result(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<ProcResult> {
+    let returncode: i32 = obj.getattr("returncode")?.extract()?;
+    let stdout: String = obj.getattr("stdout")?.extract()?;
+    let stderr: String = obj.getattr("stderr")?.extract()?;
+    Ok(ProcResult {
+        returncode,
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
+    })
 }
 
 /// Convert a serde_json::Value to a Python object using json module
