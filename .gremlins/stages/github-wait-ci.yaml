@@ -36,7 +36,7 @@ stages:
         interpolation:
           pr_url: content("artifact://pr-url.txt")
         bind:
-          status: "artifact://status"
+          status: "artifact://{loop_iter}/status"
           done?: "artifact://{loop_iter}/done"
           bail?: "artifact://{loop_iter}/bail"
         options:
@@ -57,7 +57,7 @@ stages:
         interpolation:
           pr_url: content("artifact://pr-url.txt")
         bind:
-          ci_log: "artifact://ci_failure.txt"
+          ci_log: "artifact://{loop_iter}/ci_failure.txt"
         options:
           timeout: 120
           cmds:
@@ -69,7 +69,7 @@ stages:
         prompt:
           - "{{prompt}}"
         interpolation:
-          failure_output: content("artifact://ci_failure.txt")
+          failure_output: content("artifact://{loop_iter}/ci_failure.txt")
 
       - name: push-fix
         type: exec
