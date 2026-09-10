@@ -1,17 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
-use regex::Regex;
 use thiserror::Error;
 
 use crate::artifacts::registry::ArtifactRegistry;
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_shell_async, ProcError, ProcResult};
+use crate::stages::base;
 use crate::stages::constants::BAIL_KEY;
-
-static VAR_SUB_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([-\w]+)\}").unwrap());
 
 #[derive(Debug, Clone)]
 pub struct Exec {
@@ -63,67 +60,6 @@ pub fn is_bail_uri(uri_str: &str, loop_iter: &str) -> bool {
     uri_str == expected || uri_str == "artifact://{loop_iter}/bail"
 }
 
-/// Substitute `{var}` tokens in `text` using the same resolution order:
-/// string options → extra (bind/interpolation) → framework_subs.
-/// Framework subs win on collision. Hyphen-normalized variants are added
-/// for underscore keys.
-pub fn substitute_vars(
-    text: &str,
-    string_options: &HashMap<String, String>,
-    extra: &HashMap<String, String>,
-    framework_subs: &HashMap<String, String>,
-) -> String {
-    let mut subs: HashMap<String, String> = HashMap::new();
-    subs.extend(string_options.iter().map(|(k, v)| (k.clone(), v.clone())));
-    subs.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-    subs.extend(framework_subs.iter().map(|(k, v)| (k.clone(), v.clone())));
-
-    let hyphenated: Vec<(String, String)> = subs
-        .iter()
-        .filter_map(|(k, v)| {
-            if k.contains('_') {
-                Some((k.replace('_', "-"), v.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-    for (hk, hv) in hyphenated {
-        subs.entry(hk).or_insert(hv);
-    }
-
-    VAR_SUB_RE
-        .replace_all(text, |caps: &regex::Captures| {
-            let start = caps.get(0).unwrap().start();
-            if start > 0 && text.as_bytes()[start - 1] == b'$' {
-                return caps.get(0).unwrap().as_str().to_string();
-            }
-            let key = caps.get(1).unwrap().as_str();
-            if let Some(val) = subs.get(key) {
-                return val.clone();
-            }
-            let alt = key.replace('-', "_");
-            if let Some(val) = subs.get(&alt) {
-                return val.clone();
-            }
-            caps.get(0).unwrap().as_str().to_string()
-        })
-        .to_string()
-}
-
-fn string_options(options: &HashMap<String, serde_json::Value>) -> HashMap<String, String> {
-    options
-        .iter()
-        .filter_map(|(k, v)| {
-            if let serde_json::Value::String(s) = v {
-                Some((k.clone(), s.clone()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 // --- Phased execution model ---
 
 pub struct ShellResult {
@@ -160,7 +96,7 @@ pub fn prepare_exec(
     framework_subs: &HashMap<String, String>,
 ) -> Result<ExecPrepared, ExecError> {
     let name = &exec.name;
-    let str_opts = string_options(&exec.options);
+    let str_opts = base::string_options(&exec.options);
 
     let interpolation_map =
         resolve_interpolation_map(artifacts, &exec.interpolation_map, loop_iter).map_err(|e| {
@@ -173,11 +109,11 @@ pub fn prepare_exec(
     let mut bind_paths: HashMap<String, String> = HashMap::new();
     let mut bind_uris: Vec<(String, String, bool)> = Vec::new();
     for (raw_key, raw_uri_str) in &exec.bind_map {
-        let k = substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
+        let k = base::substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
         let optional = k.ends_with('?');
         let key = k.trim_end_matches('?').to_string();
         let mut uri_str =
-            substitute_vars(raw_uri_str, &str_opts, &interpolation_map, framework_subs);
+            base::substitute_vars(raw_uri_str, &str_opts, &interpolation_map, framework_subs);
         if !loop_iter.is_empty() {
             uri_str = uri_str.replace("{loop_iter}", loop_iter);
         }
@@ -216,7 +152,7 @@ pub fn prepare_exec(
 
     let cmds: Vec<String> = raw_cmds
         .iter()
-        .map(|c| substitute_vars(c, &str_opts, &subst_vars, framework_subs))
+        .map(|c| base::substitute_vars(c, &str_opts, &subst_vars, framework_subs))
         .collect();
 
     let timeout: Option<f64> = exec.options.get("timeout").and_then(|v| v.as_f64());
@@ -371,11 +307,88 @@ pub async fn run_exec_stage(
     })
 }
 
+impl crate::stages::base::Stage for Exec {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn stage_type(&self) -> &str {
+        "exec"
+    }
+
+    fn path(&self) -> &str {
+        ""
+    }
+
+    fn set_path(&mut self, _path: &str) {}
+
+    fn client(&self) -> Option<&str> {
+        None
+    }
+
+    fn set_client(&mut self, _client: Option<String>) {}
+
+    fn client_explicit(&self) -> bool {
+        false
+    }
+
+    fn set_client_explicit(&mut self, _explicit: bool) {}
+
+    fn body(&self) -> &[Box<dyn crate::stages::base::Stage>] {
+        &[]
+    }
+
+    fn bind_map(&self) -> &HashMap<String, String> {
+        &self.bind_map
+    }
+
+    fn options(&self) -> &HashMap<String, serde_json::Value> {
+        &self.options
+    }
+
+    fn skip_if_exists(&self) -> &str {
+        ""
+    }
+
+    fn set_skip_if_exists(&mut self, _skip: String) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn test_exec_implements_stage_trait() {
+        let exec = Exec {
+            name: "test-exec".to_string(),
+            options: HashMap::from([(
+                "greeting".to_string(),
+                serde_json::Value::String("hi".to_string()),
+            )]),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("key".to_string(), "value".to_string())]),
+        };
+
+        let stage: &dyn crate::stages::base::Stage = &exec;
+        assert_eq!(stage.name(), "test-exec");
+        assert_eq!(stage.stage_type(), "exec");
+        assert_eq!(stage.path(), "");
+        assert!(stage.client().is_none());
+        assert!(!stage.client_explicit());
+        assert!(stage.body().is_empty());
+        assert_eq!(stage.bind_map().get("key").unwrap(), "value");
+        assert_eq!(
+            stage.options().get("greeting").unwrap(),
+            &serde_json::Value::String("hi".to_string())
+        );
+        assert_eq!(stage.skip_if_exists(), "");
+
+        let extra = HashMap::new();
+        let fw = HashMap::new();
+        let result = stage.substitute_vars("{greeting}", &extra, &fw);
+        assert_eq!(result, "hi");
+    }
     #[test]
     fn test_is_bail_uri_bail_key() {
         assert!(is_bail_uri(BAIL_KEY, ""));
@@ -398,60 +411,6 @@ mod tests {
     fn test_is_bail_uri_no_match() {
         assert!(!is_bail_uri("artifact://stuff", ""));
         assert!(!is_bail_uri("artifact://stuff", "loop~1"));
-    }
-
-    #[test]
-    fn test_substitute_vars_basic() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("var".to_string(), "world".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("hello {var}", &opts, &extra, &fw);
-        assert_eq!(result, "hello world");
-    }
-
-    #[test]
-    fn test_substitute_vars_hyphen_normalization() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("child_plan".to_string(), "value".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("{child-plan}", &opts, &extra, &fw);
-        assert_eq!(result, "value");
-    }
-
-    #[test]
-    fn test_substitute_vars_framework_overrides() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("name".to_string(), "extra".to_string())]);
-        let fw = HashMap::from([("name".to_string(), "fw".to_string())]);
-        let result = substitute_vars("{name}", &opts, &extra, &fw);
-        assert_eq!(result, "fw");
-    }
-
-    #[test]
-    fn test_substitute_vars_unknown_token() {
-        let opts = HashMap::new();
-        let extra = HashMap::new();
-        let fw = HashMap::new();
-        let result = substitute_vars("hello {unknown}", &opts, &extra, &fw);
-        assert_eq!(result, "hello {unknown}");
-    }
-
-    #[test]
-    fn test_substitute_vars_escaped_brace() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("x".to_string(), "y".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("\\${x}", &opts, &extra, &fw);
-        assert_eq!(result, "\\${x}");
-    }
-
-    #[test]
-    fn test_substitute_vars_string_opts() {
-        let opts = HashMap::from([("foo".to_string(), "opt".to_string())]);
-        let extra = HashMap::from([("foo".to_string(), "extra".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("{foo}", &opts, &extra, &fw);
-        assert_eq!(result, "extra");
     }
 
     #[tokio::test]

@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Mutex;
 
+use gremlins::stages::base;
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
-use gremlins::stages::exec::{self as rust_exec, substitute_vars};
+use gremlins::stages::exec as rust_exec;
 use gremlins::stages::outcome::Done as RustDone;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -335,13 +336,13 @@ impl PyExec {
         state: &Bound<'_, PyAny>,
         extra: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<String> {
-        let str_opts = string_options(&slf.inner.options);
+        let str_opts = base::string_options(&slf.inner.options);
         let extra_map: HashMap<String, String> = extra
             .map(|d| d.extract().unwrap_or_default())
             .unwrap_or_default();
         let fw: HashMap<String, String> =
             state.call_method1("framework_subs", (slf,))?.extract()?;
-        Ok(substitute_vars(text, &str_opts, &extra_map, &fw))
+        Ok(base::substitute_vars(text, &str_opts, &extra_map, &fw))
     }
 
     fn _run_impl<'py>(
@@ -500,25 +501,23 @@ impl PyExec {
     }
 }
 
-fn string_options(options: &HashMap<String, serde_json::Value>) -> HashMap<String, String> {
-    options
-        .iter()
-        .filter_map(|(k, v)| {
-            if let serde_json::Value::String(s) = v {
-                Some((k.clone(), s.clone()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 // --- Free functions ---
 
 #[pyfunction]
 #[pyo3(signature = (uri_str, loop_iter = ""))]
 fn _is_bail_uri(uri_str: &str, loop_iter: &str) -> bool {
     rust_exec::is_bail_uri(uri_str, loop_iter)
+}
+
+#[pyfunction]
+#[pyo3(name = "substitute_vars", signature = (text, string_options, extra, framework_subs))]
+fn substitute_vars_py(
+    text: &str,
+    string_options: HashMap<String, String>,
+    extra: HashMap<String, String>,
+    framework_subs: HashMap<String, String>,
+) -> String {
+    base::substitute_vars(text, &string_options, &extra, &framework_subs)
 }
 
 // --- Module registration ---
@@ -555,6 +554,7 @@ async def _exec_run_async(stage, gremlin):\n    return await stage._run_impl(gre
     m.add("FRAMEWORK_KEYS", PyFrozenSet::new(py, &keys)?)?;
     m.add_function(wrap_pyfunction!(_is_bail_uri, &m)?)?;
     m.add_function(wrap_pyfunction!(_set_exec_shell_hook, &m)?)?;
+    m.add_function(wrap_pyfunction!(substitute_vars_py, &m)?)?;
 
     Ok(())
 }
