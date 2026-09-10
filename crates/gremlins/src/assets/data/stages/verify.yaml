@@ -11,7 +11,7 @@ stages:
       - name: cmd
         type: exec
         bind:
-          verify_log?: "artifact://verify_output.txt"
+          verify_log?: "artifact://{loop_iter}/verify_output.txt"
           done?: "artifact://{loop_iter}/done"
         options:
           timeout: "{{options.timeout | default(900)}}"
@@ -23,4 +23,4 @@ stages:
         prompt:
           - "{{prompt}}"
         interpolation:
-          verify_output: content("artifact://verify_output.txt")
+          verify_output: content("artifact://{loop_iter}/verify_output.txt")
