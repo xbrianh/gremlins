@@ -10,6 +10,7 @@ bootstrap:
       type: filepath
       optional: true
   launch_cmds:
+    - '[ -n "$instructions" ] || [ -n "$plan" ] || { echo "ERROR: at least one of --instructions or --plan is required" >&2; exit 1; }'
     - gremlins:bind_artifact("artifact://plan.md", plan)
     - gremlins:bind_artifact("artifact://instructions.txt", instructions)
   cmds:
