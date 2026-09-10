@@ -28,7 +28,7 @@ typecheck:
 test: rust-test $(TEST_FILES)
 
 $(TEST_FILES): install
-	$(PYTHON) -m pytest -q --tb=short $@ || { code=$$?; [ $$code -eq 5 ] && exit 0 || exit $$code; }
+	$(PYTHON) -m pytest -q --tb=short $@
 
 # --- Rust ---
 
