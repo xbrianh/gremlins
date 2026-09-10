@@ -491,6 +491,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         // Phase 1: emit tool-start events, collect owned data for concurrent execution
         let mut jobs: Vec<Job> = Vec::new();
+        let mut ledger_entries: Vec<(String, String)> = Vec::new();
         for tc in &tool_calls {
             let args_json =
                 serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".into());
@@ -502,6 +503,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     evts.push(tool_evt);
                 }
             }
+            ledger_entries.push((
+                tc.function.name.clone(),
+                ledger_key_arg(&tc.function.arguments),
+            ));
             jobs.push(Job {
                 id: tc.id.clone(),
                 call_id: tc.call_id.clone(),
@@ -535,6 +540,23 @@ async fn run_agent_loop_core<M: CompletionModel>(
         stream::flush();
         next_prompt = result_msgs.pop().unwrap_or_else(|| Message::user(""));
         history.extend(result_msgs);
+
+        if !ledger_entries.is_empty() {
+            let lines: Vec<String> = ledger_entries
+                .iter()
+                .map(|(name, key)| {
+                    if key.is_empty() {
+                        format!("- {name}")
+                    } else {
+                        format!("- {name} {key}")
+                    }
+                })
+                .collect();
+            history.push(Message::user(format!(
+                "Actions taken this turn:\n{}\n",
+                lines.join("\n")
+            )));
+        }
     }
 
     if !nested {
@@ -617,6 +639,39 @@ pub(crate) fn key_arg(args: &serde_json::Value) -> String {
         }
     }
     String::new()
+}
+
+/// Compact label for a tool call in the per-turn action ledger.
+pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
+    if let Some(obj) = args.as_object() {
+        for k in [
+            "file_path",
+            "command",
+            "pattern",
+            "path",
+            "task",
+            "url",
+            "output_file",
+        ] {
+            if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    return truncate_ledger_value(v);
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn truncate_ledger_value(v: &str) -> String {
+    const MAX: usize = 80;
+    let chars: Vec<char> = v.chars().collect();
+    if chars.len() <= MAX {
+        return v.to_string();
+    }
+    let head: String = chars[..40].iter().collect();
+    let tail: String = chars[chars.len() - 39..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 pub(crate) fn assistant_text_event(text: &str) -> serde_json::Value {
@@ -703,6 +758,23 @@ mod tests {
             "echo hi"
         );
         assert_eq!(key_arg(&serde_json::json!({})), "");
+    }
+
+    #[test]
+    fn ledger_key_arg_covers_extra_fields_and_truncates() {
+        assert_eq!(ledger_key_arg(&serde_json::json!({"path": "/tmp"})), "/tmp");
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"task": "fix it"})),
+            "fix it"
+        );
+        assert_eq!(ledger_key_arg(&serde_json::json!({"pattern": ""})), "");
+        let long = ledger_key_arg(&serde_json::json!({"command": "x".repeat(200)}));
+        assert_eq!(long.chars().count(), 80);
+        assert!(long.contains('…'));
+        assert!(ledger_key_arg(&serde_json::json!({
+            "file_path": format!("{}/deep/path.txt", "d".repeat(200))
+        }))
+        .ends_with("path.txt"));
     }
 
     #[tokio::test]
@@ -1196,6 +1268,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn loop_ledger_injected_into_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-ledger-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "content").unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({"file_path": f.to_str().unwrap()}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        run_agent_loop(&model, "read", &ctx, cancel, loop_opts(None))
+            .await
+            .unwrap();
+
+        let reqs = model.requests();
+        assert_eq!(reqs.len(), 2);
+        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
+        let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
+        let expected = Message::user(format!("Actions taken this turn:\n- Read {key}\n"));
+        let positions: Vec<usize> = history
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| **m == &expected)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(positions.len(), 1, "ledger must appear exactly once");
+        assert!(key.contains("x.txt"), "ledger must name the file: {key}");
+        let idx = positions[0];
+        assert!(matches!(history[idx - 1], Message::Assistant { .. }));
     }
 
     #[tokio::test]
