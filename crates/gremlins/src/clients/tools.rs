@@ -1403,7 +1403,7 @@ pub fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition> {
     // Parallel is always available, even when a tool filter is set.
     all.push(ToolDefinition {
         name: "parallel".into(),
-        description: format!("Run multiple independent subagent tasks in parallel (at most {PARALLEL_MAX_TASKS}). Use this aggressively: whenever you have two or more tasks that don't depend on each other, batch them into a single parallel call. All tasks execute concurrently before results are returned. Each task gets an isolated conversation context but shares the worktree and tools. Each task's output is truncated to {PARALLEL_OUTPUT_LIMIT} characters and marked with …[truncated] when cut.").into(),
+        description: format!("Run multiple independent subagent tasks in parallel (at most {PARALLEL_MAX_TASKS}). Use this aggressively: whenever you have two or more tasks that don't depend on each other, batch them into a single parallel call. All tasks execute concurrently before results are returned. Each task gets an isolated conversation context but shares the worktree and tools. Each task's output is truncated to {PARALLEL_OUTPUT_LIMIT} characters and marked with …[truncated] when cut."),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
