@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 import logging
 import re
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -51,7 +52,7 @@ class StageInput(NamedTuple):
     help: str
 
 
-class Stage:
+class Stage(abc.ABC):
     type: str = ""
     body: list[Stage] = []
     skip_if_exists: str = ""
@@ -118,3 +119,10 @@ class Stage:
 
     async def run(self, gremlin: Gremlin) -> Outcome:  # noqa: ARG002
         raise NotImplementedError
+
+
+# PyExec is a Rust pyclass and cannot inherit from Python's Stage.
+# Register it as a virtual subclass so isinstance(Exec(...), Stage) works.
+from _gremlins_core.stages import Exec  # noqa: E402
+
+Stage.register(Exec)  # type: ignore[arg-type]
