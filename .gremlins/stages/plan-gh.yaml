@@ -7,7 +7,7 @@ stages:
     prompt:
       - "{{prompt}}"
     interpolation:
-      instructions: "artifact://instructions.md?"
+      instructions: "artifact://instructions.txt?"
     bind:
       plan: "artifact://plan.md"
     options:
