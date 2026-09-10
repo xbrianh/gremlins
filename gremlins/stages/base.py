@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import abc
 import logging
-import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from _gremlins_core.clients import RustClient as Client
@@ -12,21 +11,6 @@ from gremlins.protocols import GremlinProtocol
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin, State
-
-_VAR_SUB = re.compile(r"(?<!\$)\{([-\w]+)\}")
-
-
-# Also try underscore-normalized keys for hyphenated template variables
-# so that {child-plan} matches bind key child_plan, etc.
-def _sub_var(m: re.Match[str], subs: dict[str, str]) -> str:
-    key = m.group(1)
-    if key in subs:
-        return subs[key]
-    # Try underscore version
-    alt_key = key.replace("-", "_")
-    if alt_key in subs:
-        return subs[alt_key]
-    return m.group(0)
 
 
 logger = logging.getLogger(__name__)
@@ -74,25 +58,16 @@ class Stage(abc.ABC):
         self, text: str, state: State, extra: dict[str, str] | None = None
     ) -> str:
         """Replace {var} tokens with framework subs, resolved in: vars, and
-        string options (framework wins on conflict). Unknown tokens and
-        non-word braces (shell ${x}, {read:k}, brace expansion) are left as-is."""
+        string options (framework wins on conflict)."""
+        from _gremlins_core.stages import substitute_vars as _rust_sub_vars
+
         string_opts = {k: str(v) for k, v in self.options.items() if isinstance(v, str)}
-        subs = {**string_opts, **(extra or {}), **state.framework_subs(self)}  # type: ignore[arg-type]
-        # Also add hyphen-normalized variants for underscore keys so that
-        # template references like {child-plan} match bind keys like child_plan
-        for k, v in list(subs.items()):
-            if "_" in k:
-                subs.setdefault(k.replace("_", "-"), v)
-        result = _VAR_SUB.sub(lambda m: _sub_var(m, subs), text)
-        if result != text:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "stage %s: substitution map has %d entries (len=%d)",
-                    self.name,
-                    len(subs),
-                    len(text),
-                )
-        return result
+        return _rust_sub_vars(
+            text,
+            string_opts,
+            extra or {},
+            state.framework_subs(self),
+        )
 
     @property
     def path(self) -> str:
