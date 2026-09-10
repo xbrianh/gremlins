@@ -1,6 +1,7 @@
 """Land, rm subcommands and all land helpers."""
 
 import json
+import logging
 import os
 import pathlib
 import re
@@ -23,6 +24,8 @@ from gremlins.fleet.state import (
     load_state,
 )
 from gremlins.utils import proc
+
+logger = logging.getLogger(__name__)
 
 
 def landable_shape(state: dict[str, Any]) -> str:
@@ -167,6 +170,7 @@ def _remove_worktree(wdir: str, state: dict[str, Any], cwd: str | None) -> None:
                 print(f"warning: could not remove worktree {workdir}: {e}")
         if not os.path.exists(workdir):
             print(f"removed worktree {workdir}")
+            logger.info("cleanup: removing worktree %s", workdir)
 
 
 def _remove_scratch(gremlin_id: str) -> None:
@@ -176,6 +180,7 @@ def _remove_scratch(gremlin_id: str) -> None:
         try:
             shutil.rmtree(scratch)
             print(f"removed scratch directory {scratch}")
+            logger.info("cleanup: removing scratch dir for %s", gremlin_id)
         except OSError as e:
             print(f"warning: could not remove scratch directory {scratch}: {e}")
 
@@ -193,6 +198,7 @@ def _finalize_cleanup(
         try:
             shutil.rmtree(wdir)
             print(f"removed state directory {wdir}")
+            logger.info("cleanup: removing state dir %s", wdir)
         except OSError as e:
             print(f"warning: could not remove state directory {wdir}: {e}")
 
@@ -520,6 +526,17 @@ def _build_commit_message(
     """Return (subject, body, cost_usd) using AI synthesis with fallback to regex extraction."""
     inputs = _gather_commit_inputs(registry, state, branch, merge_base, cwd)
 
+    logger.debug("_build_commit_message: branch=%s merge_base=%s", branch, merge_base)
+    logger.debug(
+        "_build_commit_message: plan len=%d spec len=%d",
+        len(inputs.get("plan") or ""),
+        len(inputs.get("spec") or ""),
+    )
+    logger.debug(
+        "_build_commit_message: git_log lines=%d",
+        len(inputs.get("git_log") or ""),
+    )
+
     print("Composing commit message...", flush=True)
     try:
         subject, body, cost = _synthesize_commit_message_ai(inputs, client)
@@ -599,6 +616,8 @@ def _squash_land(
     except _git.GitError:
         print(f"error: could not count commits between merge-base and {source_label}")
         return False
+
+    logger.debug("_squash_land: merge-base=%s commit_count=%d", base, commit_count)
     if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
         cleanup_gremlin(
@@ -611,6 +630,11 @@ def _squash_land(
         return True
 
     pre_merge_untracked = _git.ls_others(cwd=cwd)
+
+    logger.debug(
+        "_squash_land: pre_merge_untracked=%s",
+        pre_merge_untracked[:100] if pre_merge_untracked else "(none)",
+    )
 
     print(f"Squash-merging {source_label} onto {current}...")
     try:
@@ -631,6 +655,7 @@ def _squash_land(
     subject, body, land_cost = _build_commit_message(
         _registry_for_gremlin(gremlin_id), state, source_ref, base, cwd, client
     )
+    logger.debug("_squash_land: commit_message subject=%r", subject)
     commit_msg = f"{subject}\n\n{body}" if body else subject
 
     try:
@@ -663,7 +688,9 @@ def _ff_land(
     current: str,
 ) -> bool:
     """Fast-forward the caller's branch to `source_ref`. Hard fail if ff is not possible."""
-    if not _git.is_ancestor("HEAD", source_ref, cwd=cwd):
+    is_ancestor = _git.is_ancestor("HEAD", source_ref, cwd=cwd)
+    logger.debug("_ff_land: is_ancestor(HEAD, %s)=%s", source_ref, is_ancestor)
+    if not is_ancestor:
         print(
             f"error: cannot fast-forward — {current} has diverged from {source_label}. "
             f"Re-run with --squash to condense the chain into one commit, or rebase manually."
@@ -675,6 +702,8 @@ def _ff_land(
     except _git.GitError:
         print(f"error: could not count commits between HEAD and {source_label}")
         return False
+
+    logger.debug("_ff_land: commit_count=%d", commit_count)
     if commit_count < 1:
         print(f"{current} is already up to date with {source_label}.")
         cleanup_gremlin(
@@ -728,6 +757,8 @@ def _land_boss(
         print(f"error: could not resolve HEAD in boss worktree {workdir}")
         return False
 
+    logger.info("_land_boss: boss_head=%s mode=%s", boss_head[:12], mode)
+
     project_root = state.get("project_root") or ""
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
@@ -735,8 +766,11 @@ def _land_boss(
     if not ok:
         return False
 
+    logger.info("_land_boss: current=%s tracked_changes=%d", current, 0)
+
     label = f"boss {gremlin_id} ({boss_head[:12]})"
     if mode == "squash":
+        logger.info("_land_boss: squash-merging %s onto %s", label, current)
         return _squash_land(
             gremlin_id,
             sf,
@@ -748,6 +782,7 @@ def _land_boss(
             current,
             client,
         )
+    logger.info("_land_boss: fast-forwarding %s to %s (%d commits)", current, label, 0)
     return _ff_land(gremlin_id, wdir, state, cwd, boss_head, label, current)
 
 
@@ -775,6 +810,8 @@ def _land_gh(
         return False
     pr_url = pr_url.strip()
 
+    logger.info("_land_gh: cwd=%s pr_url=%s", cwd or ".", pr_url)
+
     print(f"Checking PR: {pr_url}")
     r = proc.run(
         [
@@ -801,6 +838,17 @@ def _land_gh(
     mergeable = pr_info.get("mergeable", "")
     review_decision = pr_info.get("reviewDecision") or ""
     checks: list[Any] = pr_info.get("statusCheckRollup") or []
+
+    logger.info(
+        "_land_gh: PR state=%s mergeable=%s review=%s",
+        pr_state,
+        mergeable,
+        review_decision,
+    )
+    logger.debug(
+        "_land_gh: CI checks=%s",
+        [(c.get("name"), c.get("conclusion")) for c in checks],
+    )
 
     if pr_state == "MERGED":
         print("PR already merged.")
@@ -864,6 +912,7 @@ def _land_gh(
         return False
 
     print(f"Merging: {pr_url}")
+    logger.info("_land_gh: merging %s", pr_url)
     _remove_worktree(wdir, state, cwd)
     r = proc.run(["gh", "pr", "merge", pr_url, "--squash", "--delete-branch"], cwd=cwd)
     if r.returncode != 0:
@@ -874,6 +923,9 @@ def _land_gh(
             # tries to switch off the deleted branch and fails on a detached
             # HEAD cwd) even though the PR did merge. Re-verify before bailing.
             err = r.stderr.strip() or r.stdout.strip()
+            logger.debug(
+                "_land_gh: gh pr merge exited %d; re-verifying...", r.returncode
+            )
             v = proc.run(["gh", "pr", "view", pr_url, "--json", "state"], cwd=cwd)
             verified_merged = False
             verify_err = ""
@@ -901,6 +953,8 @@ def _land_gh(
                 return False
     else:
         print("PR merged.")
+
+    logger.info("_land_gh: merged — fast-forwarding main in %s", cwd)
 
     _fast_forward_main(cwd)
     _remove_scratch(gremlin_id)
@@ -964,10 +1018,13 @@ def _land_with_stage(
     gremlin.state = gremlin.build_state_with_cwd(cwd or "")
     _remove_worktree(wdir, state, cwd)
 
+    logger.info("_land_with_stage: cwd=%s land_stage=%s", cwd or ".", land_stage.name)
+
     if not _exec_land_stage(land_stage, gremlin):
         return False
 
     print("Landed.")
+    logger.info("_land_with_stage: done — setup_kind=%s", state.get("setup_kind", ""))
     _print_cost(state)
 
     setup_kind = state.get("setup_kind", "")
@@ -992,6 +1049,8 @@ def do_land(
         print(f"error: could not read state for {gremlin_id}")
         return False
 
+    logger.info("land: resolved %s -> %s", target, gremlin_id)
+
     live = liveness_of_state_file(sf, state)
     if live == "running" or live.startswith("stalled:"):
         print(
@@ -999,7 +1058,19 @@ def do_land(
         )
         return False
 
+    logger.info("land: liveness=%s", live)
+
     shape = landable_shape(state)
+
+    logger.debug(
+        "land: state loaded — client=%s setup_kind=%s project_root=%s pipeline=%s",
+        state.get("client") or "",
+        state.get("setup_kind") or "",
+        state.get("project_root") or "",
+        state.get("pipeline_path") or "",
+    )
+
+    logger.info("land: shape=%s", shape)
 
     # Source env from the persisted pipeline's bootstrap block.
     raw: object | None = state.get("project_root")
@@ -1042,6 +1113,8 @@ def do_land(
         except Exception as exc:
             print(f"warning: could not source bootstrap env: {exc}", flush=True)
 
+    logger.debug("land: bootstrap env sourced (%d chars)", len(env_script))
+
     # Resolve the model client this gremlin used so commit-message synthesis
     # goes through the same backend as the pipeline stages.
     client_str: str = str(state.get("client") or "")
@@ -1056,15 +1129,22 @@ def do_land(
         print(f"error: cannot parse client from state.json: {exc}")
         return False
 
+    logger.info("land: client=%s", client_str)
+
     if shape in ("empty", "one_branch"):
         artifact_dir = pathlib.Path(_scratch_root_fn(gremlin_id)) / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
+        logger.debug(
+            "land: registry check — exists(artifact://pr)=%s",
+            registry.exists("artifact://pr"),
+        )
         if registry.exists("artifact://pr"):
             shape = "one_pr"
 
     if shape == "many_prs":
         print("error: stacked PR series — merge in order on GitHub")
+        logger.info("land: many_prs — error (stacked PR series)")
         return False
 
     if shape == "one_pr":
@@ -1075,9 +1155,11 @@ def do_land(
             return False
         land_stage = _load_pipeline_land_stage(cast(dict[str, Any], state))
         if land_stage is not None:
+            logger.info("land: dispatching to _land_with_stage (one_pr + land stage)")
             return _land_with_stage(
                 gremlin_id, wdir, cast(dict[str, Any], state), land_stage
             )
+        logger.info("land: dispatching to _land_gh (one_pr)")
         return _land_gh(gremlin_id, wdir, state, force=force)
 
     # shape == "empty": only boss gremlins (worktree-detached) have commits to land
@@ -1087,4 +1169,5 @@ def do_land(
     if live != "finished":
         print(f"gremlin {gremlin_id} is not finished (liveness: {live})")
         return False
+    logger.info("land: dispatching to _land_boss mode=%s (empty)", mode or "ff")
     return _land_boss(gremlin_id, sf, wdir, state, mode or "ff", client)
