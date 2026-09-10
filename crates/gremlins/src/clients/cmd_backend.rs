@@ -521,7 +521,7 @@ impl Backend for CmdBackend {
 
         let active_prompt = prompt.clone();
 
-        let result = retry::with_retry(
+        let result = with_retry(
             backoff,
             |e: &ClientError| {
                 matches!(
