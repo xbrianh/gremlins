@@ -52,7 +52,7 @@ class _SignalClient(FakeClient):
         if label == "handoff":
             for fname in ("signal.json", "child-plan.md"):
                 # Scoped form: <artifact_dir>/<loop_iter>/<fname>
-                m = re.search(ad + r"/[0-9]+" + re.escape("/" + fname) + r"\b", prompt)
+                m = re.search(ad + r"/[-\w~]+" + re.escape("/" + fname) + r"\b", prompt)
                 if not m:
                     # Non-scoped: <artifact_dir>/<fname>
                     m = re.search(ad + re.escape("/" + fname) + r"\b", prompt)
@@ -71,7 +71,7 @@ class _SignalClient(FakeClient):
                                 target.write_text(src.read_text(encoding="utf-8"))
         elif label == "sanitize":
             m = re.search(
-                ad + r"/[0-9]+" + re.escape("/rolling-plan.md") + r"\b", prompt
+                ad + r"/[-\w~]+" + re.escape("/rolling-plan.md") + r"\b", prompt
             )
             if not m:
                 m = re.search(ad + re.escape("/rolling-plan.md") + r"\b", prompt)
@@ -132,7 +132,7 @@ def test_boss_chain_done_exits_loop(sandbox, tmp_path):
     }
     gremlin, loop = _make_loop(tmp_path, sandbox.project, signal)
     asyncio.run(loop.run(gremlin))
-    assert gremlin.state.artifacts.exists("artifact://1/done")
+    assert gremlin.state.artifacts.exists("artifact://chain~1/done")
 
 
 def test_boss_next_plan_needs_fix_and_plan_swap(sandbox, tmp_path):
@@ -162,4 +162,4 @@ def test_boss_bail_raises_with_reason(sandbox, tmp_path):
     gremlin, loop = _make_loop(tmp_path, sandbox.project, signal)
     with pytest.raises(Bail, match="bad state"):
         asyncio.run(loop.run(gremlin))
-    assert gremlin.state.artifacts.exists("artifact://1/bail")
+    assert gremlin.state.artifacts.exists("artifact://chain~1/bail")
