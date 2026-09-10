@@ -620,7 +620,7 @@ fn audit_write(log: &Path, line: &str) {
         });
 }
 
-fn result_status(res: &str) -> &'static str {
+pub(crate) fn result_status(res: &str) -> &'static str {
     if res.starts_with("Error:") || res.starts_with("[exit") || res.starts_with("[timeout]") {
         "error"
     } else {
