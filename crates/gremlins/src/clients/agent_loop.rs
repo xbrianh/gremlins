@@ -1414,14 +1414,23 @@ mod tests {
         let mut ctx = test_ctx(Some(dir.clone()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
-        run_agent_loop(&model, "read both", &ctx, CancelToken::new(), loop_opts(None))
-            .await
-            .unwrap();
+        run_agent_loop(
+            &model,
+            "read both",
+            &ctx,
+            CancelToken::new(),
+            loop_opts(None),
+        )
+        .await
+        .unwrap();
 
         let reqs = model.requests();
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let kinds: Vec<&str> = history.iter().map(|m| message_kind(m)).collect();
-        assert_eq!(kinds, vec!["other", "assistant", "result", "result", "ledger"]);
+        assert_eq!(
+            kinds,
+            vec!["other", "assistant", "result", "result", "ledger"]
+        );
         let ledger = format!("{:?}", history[4]);
         assert!(
             ledger.contains("a.txt") && ledger.contains("b.txt"),
