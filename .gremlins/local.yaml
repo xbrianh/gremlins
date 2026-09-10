@@ -60,7 +60,7 @@ stage-definitions:
 
 stages:
   - { type: gremlins:plan,      prompt: [style_guide.md, gremlins:plan.md] }
-  - { type: gremlins:implement,  prompt: [style_guide.md, dev-env-howto.md, gremlins:implement_local.md] }
+  - { type: gremlins:implement,  prompt: [style_guide.md, dev-env-howto.md, implement.md] }
   - { type: check-and-fix }
   - name: compute-diff
     type: exec
