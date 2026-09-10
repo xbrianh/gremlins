@@ -159,6 +159,12 @@ pub fn within_worktree(p: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
+fn roots_suffix(roots: &[PathBuf]) -> String {
+    let mut parts: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    parts.sort();
+    format!("\n→ sandbox roots: {}", parts.join(", "))
+}
+
 /// Lexical-leaf containment for [`bash_check`] ONLY.
 ///
 /// Resolves symlinked ancestor *directories* (so `/var` -> `/private/var` and
@@ -209,7 +215,10 @@ fn expand_user(s: &str) -> String {
 pub fn enforce(roots: &[PathBuf], pth: &str, cwd: Option<&Path>) -> Option<String> {
     let p = resolve(pth, cwd);
     if !within_worktree(&p, roots) {
-        return Some(format!("Error: path outside sandbox: {pth}"));
+        return Some(format!(
+            "Error: path outside sandbox: {pth}{}",
+            roots_suffix(roots)
+        ));
     }
     None
 }
@@ -239,8 +248,9 @@ pub fn io_enforce(path: &Path, roots: &[PathBuf]) -> Option<String> {
     }
     if !allowed {
         return Some(format!(
-            "Error: path outside sandbox (resolved): {}",
-            real.display()
+            "Error: path outside sandbox (resolved): {}{}",
+            real.display(),
+            roots_suffix(roots)
         ));
     }
     None
@@ -310,7 +320,11 @@ fn check_cd(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> 
         let expanded = expand_user(&arg.value);
         let p = resolve(&expanded, cwd);
         if !within_worktree(&p, roots) {
-            return Some(format!("Error: cd target outside sandbox: {}", arg.value));
+            return Some(format!(
+                "Error: cd target outside sandbox: {}{}",
+                arg.value,
+                roots_suffix(roots)
+            ));
         }
     }
     None
@@ -543,8 +557,10 @@ pub fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<St
         // within_worktree_lexical for the rationale and the anti-regression note.
         if !within_worktree_lexical(&p, &canonical_roots) {
             return Some(format!(
-                "Error: path outside sandbox (from {}): {}",
-                tok.raw, tok.value
+                "Error: path outside sandbox (from {}): {}{}",
+                tok.raw,
+                tok.value,
+                roots_suffix(roots)
             ));
         }
     }
