@@ -248,31 +248,6 @@ impl Bootstrap {
 
 #[pyfunction]
 #[pyo3(signature = (source, values))]
-pub fn source_env(
-    source: Option<&InputSources>,
-    values: &Bound<'_, PyDict>,
-) -> PyResult<HashMap<String, String>> {
-    let src = match source {
-        Some(s) => &s.inner,
-        None => return Ok(HashMap::new()),
-    };
-    let mut vals = HashMap::new();
-    for (k, v) in values.iter() {
-        let k_str: String = k.extract()?;
-        if v.is_none() {
-            continue;
-        }
-        let v_str: String = v.extract()?;
-        if v_str.is_empty() {
-            continue;
-        }
-        vals.insert(k_str, v_str);
-    }
-    Ok(rust_bootstrap::source_env(src, &vals))
-}
-
-#[pyfunction]
-#[pyo3(signature = (source, values))]
 pub fn validate_source_values(
     source: Option<&InputSources>,
     values: &Bound<'_, PyDict>,
@@ -298,7 +273,11 @@ pub fn validate_source_values(
 }
 
 #[pyfunction]
-#[pyo3(signature = (cmd, *, cwd))]
-pub fn substitute_bootstrap_vars(cmd: String, cwd: PathBuf) -> String {
-    rust_bootstrap::substitute_bootstrap_vars(&cmd, &cwd)
+#[pyo3(signature = (cmd, *, cwd, values))]
+pub fn substitute_bootstrap_vars(
+    cmd: String,
+    cwd: PathBuf,
+    values: HashMap<String, String>,
+) -> String {
+    rust_bootstrap::substitute_bootstrap_vars(&cmd, &cwd, &values)
 }
