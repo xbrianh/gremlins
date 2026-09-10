@@ -2,6 +2,10 @@
 
 A Python virtual environment is available at `.venv` in the working directory.
 
+## WHen in Doubt
+
+run `make install`. This refreshes the .so files. Do this first if you cannot resolve an error.
+
 ## Makefile recipes
 
 Always use `make` targets rather than raw commands. The Makefile handles
