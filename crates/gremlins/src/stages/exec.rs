@@ -247,7 +247,7 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
     }
 
     let joined = prepared.cmds.join(" && ");
-    let mut env = HashMap::new();
+    let mut env: HashMap<String, String> = std::env::vars().collect();
     env.insert(
         "GREMLINS_ARTIFACT_DIR".to_string(),
         prepared.artifact_dir.to_string_lossy().to_string(),

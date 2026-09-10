@@ -201,6 +201,20 @@ impl PyExec {
             }
         }
 
+        let raw_client: Option<String> = d
+            .get_item("client")?
+            .and_then(|v| v.extract::<String>().ok());
+        let (client, client_explicit) = if let Some(raw) = raw_client {
+            let py = _cls.py();
+            let parsed = py
+                .import("_gremlins_core.clients")?
+                .getattr("RustClient")?
+                .call_method1("parse", (raw,))?;
+            (Some(parsed.unbind()), true)
+        } else {
+            (None, false)
+        };
+
         Ok(PyExec {
             inner: rust_exec::Exec {
                 name,
@@ -210,8 +224,8 @@ impl PyExec {
             },
             raw_dict: None,
             gremlin: None,
-            client: None,
-            client_explicit: false,
+            client,
+            client_explicit,
             skip_if_exists: String::new(),
         })
     }
@@ -327,7 +341,7 @@ impl PyExec {
         Ok(substitute_vars(text, &str_opts, &extra_map, &fw))
     }
 
-    fn run<'py>(
+    fn _run_impl<'py>(
         slf: PyRef<'_, Self>,
         py: Python<'py>,
         gremlin: Bound<'py, PyAny>,
@@ -403,31 +417,34 @@ impl PyExec {
             return asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs));
         }
 
-        // Non-empty commands: run the shell asynchronously via future_into_py
-        // so the caller can await this coroutine and we never nest event loops.
-        // Call through Python's _gremlins_core.utils.proc.run_shell_async so
-        // tests can monkeypatch it.
+        // Non-empty commands: wrap everything in an async block via
+        // future_into_py. future_into_py creates a Python coroutine without
+        // needing a running event loop — the async work only begins when
+        // the coroutine is awaited. We call through Python's
+        // _gremlins_core.utils.proc.run_shell_async so tests can monkeypatch
+        // it, and defer into_future into the async block so the event loop is
+        // active when it runs.
         let joined = prepared.cmds.join(" && ");
         let shell_cwd = prepared.cwd.clone();
         let shell_timeout = prepared.timeout;
-        let mut shell_env = HashMap::new();
+        let mut shell_env: HashMap<String, String> = std::env::vars().collect();
         shell_env.insert(
             "GREMLINS_ARTIFACT_DIR".to_string(),
             prepared.artifact_dir.to_string_lossy().to_string(),
         );
-        let proc_mod = py.import("_gremlins_core.utils.proc")?;
-        let py_cwd: Option<PathBuf> = Some(shell_cwd);
-        let py_env: Option<HashMap<String, String>> = Some(shell_env);
-        let py_timeout: Option<f64> = shell_timeout;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("cwd", py_cwd)?;
-        kwargs.set_item("env", py_env)?;
-        kwargs.set_item("timeout", py_timeout)?;
-        let py_coro = proc_mod.call_method("run_shell_async", (joined,), Some(&kwargs))?;
-        // Convert the Python coroutine to a Rust future while we hold the GIL.
-        let shell_future = pyo3_async_runtimes::tokio::into_future(py_coro)?;
 
         pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
+            let shell_future = Python::attach(|py| -> PyResult<_> {
+                let proc_mod = py.import("_gremlins_core.utils.proc")?;
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("cwd", Some(&shell_cwd))?;
+                kwargs.set_item("env", Some(&shell_env))?;
+                kwargs.set_item("timeout", shell_timeout)?;
+                let py_coro =
+                    proc_mod.call_method("run_shell_async", (&joined,), Some(&kwargs))?;
+                Ok(pyo3_async_runtimes::tokio::into_future(py_coro)?)
+            })?;
+
             let py_result = shell_future.await?;
 
             Python::attach(|py| {
@@ -485,6 +502,18 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     modules.set_item("_gremlins_core.stages", &m)?;
 
     patch_bail(py, &m)?;
+
+    // Python async wrapper so that stage.run(gremlin) returns a coroutine
+    // without needing a running event loop. The actual async work (_run_impl)
+    // is deferred until the coroutine is awaited.
+    let globals = PyDict::new(py);
+    globals.set_item("_m", &m)?;
+    py.run(
+        c"\
+async def _exec_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Exec.run = _exec_run_async\n",
+        Some(&globals),
+        None,
+    )?;
 
     m.add("Outcome", m.getattr("Done")?)?;
     m.add("_BAIL_KEY", BAIL_KEY)?;
