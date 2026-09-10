@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use gremlins::core::proc::ProcResult;
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec::{self as rust_exec, substitute_vars};
 use gremlins::stages::outcome::Done as RustDone;
@@ -33,18 +32,6 @@ fn extract_json_value_dict(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, s
         map.insert(k, v);
     }
     Ok(map)
-}
-
-/// Extract a ProcResult from a Python subprocess.CompletedProcess object.
-fn extract_proc_result(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<ProcResult> {
-    let returncode: i32 = obj.getattr("returncode")?.extract()?;
-    let stdout: String = obj.getattr("stdout")?.extract()?;
-    let stderr: String = obj.getattr("stderr")?.extract()?;
-    Ok(ProcResult {
-        returncode,
-        stdout: stdout.into_bytes(),
-        stderr: stderr.into_bytes(),
-    })
 }
 
 /// Convert a serde_json::Value to a Python object using json module
@@ -408,41 +395,14 @@ impl PyExec {
             return asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs));
         }
 
-        // Non-empty commands: wrap everything in an async block via
-        // future_into_py. future_into_py creates a Python coroutine without
-        // needing a running event loop — the async work only begins when
-        // the coroutine is awaited. We call through Python's
-        // _gremlins_core.utils.proc.run_shell_async so tests can monkeypatch
-        // it, and defer into_future into the async block so the event loop is
-        // active when it runs.
-        let joined = prepared.cmds.join(" && ");
-        let shell_cwd = prepared.cwd.clone();
-        let shell_timeout = prepared.timeout;
-        let mut shell_env: HashMap<String, String> = std::env::vars().collect();
-        shell_env.insert(
-            "GREMLINS_ARTIFACT_DIR".to_string(),
-            prepared.artifact_dir.to_string_lossy().to_string(),
-        );
-
+        // Non-empty commands: call rust_exec::run_shell directly, avoiding
+        // a Python round-trip that would cause an event-loop deadlock.
         pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
-            let shell_future = Python::attach(|py| -> PyResult<_> {
-                let proc_mod = py.import("_gremlins_core.utils.proc")?;
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("cwd", Some(&shell_cwd))?;
-                kwargs.set_item("env", Some(&shell_env))?;
-                kwargs.set_item("timeout", shell_timeout)?;
-                let py_coro = proc_mod.call_method("run_shell_async", (&joined,), Some(&kwargs))?;
-                pyo3_async_runtimes::tokio::into_future(py_coro)
-            })?;
-
-            let py_result = shell_future.await?;
+            let shell_result = rust_exec::run_shell(&prepared)
+                .await
+                .map_err(|e| Bail::new_err(e.to_string()))?;
 
             Python::attach(|py| {
-                let proc_result = extract_proc_result(py, py_result.bind(py))?;
-
-                let shell_result = rust_exec::process_shell_result(&prepared, proc_result)
-                    .map_err(|e| Bail::new_err(e.to_string()))?;
-
                 let arts_ref = artifacts.bind(py);
                 let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
                 let inner = arts_inner.inner.lock().unwrap();

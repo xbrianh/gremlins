@@ -23,7 +23,7 @@ pub fn run_ok(cmd: Vec<String>, cwd: Option<PathBuf>) -> PyResult<bool> {
     proc::run_ok(&cmd, cwd.as_deref()).map_err(map_io_error)
 }
 
-pub(crate) fn subprocess_type<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyType>> {
+pub fn subprocess_type<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyType>> {
     let ty = py.import("subprocess")?.getattr(name)?;
     Ok(ty.cast::<PyType>()?.clone())
 }
