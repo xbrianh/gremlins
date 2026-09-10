@@ -545,6 +545,16 @@ fn audit_key_arg(args_json: &str) -> String {
         return String::new();
     };
     if let Some(obj) = d.as_object() {
+        // parallel: use first task description as the key arg
+        if let Some(tasks) = obj.get("tasks").and_then(|v| v.as_array()) {
+            if let Some(first) = tasks.first() {
+                if let Some(task) = first.get("task").and_then(|v| v.as_str()) {
+                    if !task.is_empty() {
+                        return task.to_string();
+                    }
+                }
+            }
+        }
         for k in ["file_path", "command", "pattern", "path"] {
             if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
@@ -634,6 +644,7 @@ fn check_tool(name: &str, ctx: &ToolContext, args: &serde_json::Value) -> Option
             args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
             ctx.cwd.as_deref(),
         ),
+        "parallel" => None,
         _ => None,
     }
 }
@@ -1140,10 +1151,58 @@ fn glob_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     }
 }
 
+pub async fn parallel_invoke(ctx: &ToolContext, args_json: &str) -> String {
+    let Some(f) = &ctx.subagent_fn else {
+        return "Error: subagent not available for this backend".to_string();
+    };
+    let args = match parse_args(args_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(tasks) = args.get("tasks").and_then(|v| v.as_array()) else {
+        return "Error: 'tasks' array required".to_string();
+    };
+    if tasks.is_empty() {
+        return "Error: 'tasks' must not be empty".to_string();
+    }
+
+    let handles: Vec<_> = tasks
+        .iter()
+        .map(|t| {
+            let task = t
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cwd = t.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
+            let f = f.clone();
+            tokio::task::spawn(async move { f(task, cwd).await })
+        })
+        .collect();
+
+    let mut out = String::new();
+    for (handle, t) in futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .zip(tasks)
+    {
+        let label = t.get("task").and_then(|v| v.as_str()).unwrap_or("?");
+        let body = match handle {
+            Ok(output) => match output.char_indices().nth(2000) {
+                Some((i, _)) => format!("{}…[truncated]", &output[..i]),
+                None => output,
+            },
+            Err(e) => format!("Error: join error: {e}"),
+        };
+        out.push_str(&format!("# {label}\n\n{body}\n\n"));
+    }
+    out
+}
+
 pub async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> String {
     if let Some(allowed) = &ctx.allowed_tools {
-        // subagent is always permitted regardless of tool filter.
-        if name != "subagent" && !allowed.iter().any(|n| n == name) {
+        // subagent and parallel are always permitted regardless of tool filter.
+        if name != "subagent" && name != "parallel" && !allowed.iter().any(|n| n == name) {
             return format!("Error: unknown tool {name}");
         }
     }
@@ -1190,6 +1249,7 @@ pub async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> String {
                 "Error: subagent not available for this backend".to_string()
             }
         }
+        "parallel" => parallel_invoke(ctx, args_json).await,
         other => format!("Error: unknown tool {other}"),
     };
     audit(
@@ -1311,7 +1371,7 @@ pub fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition> {
     // Subagent is always available, even when a tool filter is set.
     all.push(ToolDefinition {
         name: "subagent".into(),
-        description: "Delegate a single task to a nested agent that runs with a clean conversation context but the same worktree and tools as you. Provide the task in `task`. The subagent inherits your working directory by default; pass `cwd` to run it elsewhere within the worktree. Returns the subagent's final text output.".into(),
+        description: "Delegate a single self-contained task to a worker with a clean conversation context. Use subagents aggressively: whenever a piece of work can be described in one instruction and doesn't need results from another subagent, delegate it. Multiple subagent calls in the same message run concurrently before results are returned. Pass `cwd` to run in a different working directory within the worktree. Returns the subagent's final text output.".into(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1328,10 +1388,43 @@ pub fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition> {
             "additionalProperties": false
         }),
     });
+    // Parallel is always available, even when a tool filter is set.
+    all.push(ToolDefinition {
+        name: "parallel".into(),
+        description: "Run multiple independent subagent tasks in parallel. Use this aggressively: whenever you have two or more tasks that don't depend on each other, batch them into a single parallel call. All tasks execute concurrently before results are returned. Each task gets an isolated conversation context but shares the worktree and tools.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "Task description for this subagent"
+                            },
+                            "cwd": {
+                                "type": "string",
+                                "description": "Optional working directory override"
+                            }
+                        },
+                        "required": ["task"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["tasks"],
+            "additionalProperties": false
+        }),
+    });
     match filter {
         Some(names) => all
             .into_iter()
-            .filter(|t| t.name == "subagent" || names.iter().any(|n| n == &t.name))
+            .filter(|t| {
+                t.name == "subagent" || t.name == "parallel" || names.iter().any(|n| n == &t.name)
+            })
             .collect(),
         None => all,
     }
@@ -1557,10 +1650,11 @@ mod tests {
     #[test]
     fn tool_definitions_filter() {
         let all = tool_definitions(None);
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 8);
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, ["Read", "Bash", "subagent"]);
+        // subagent and parallel are always available regardless of the filter.
+        assert_eq!(names, ["Read", "Bash", "subagent", "parallel"]);
     }
 
     #[test]
@@ -2293,6 +2387,49 @@ mod tests {
         let args2 = serde_json::json!({}).to_string();
         let result2 = invoke("subagent", &c, &args2).await;
         assert!(result2.contains("subagent task is required"));
+    }
+
+    // --- Part 3b: Parallel tests ---
+
+    #[tokio::test]
+    async fn parallel_invoke_runs_multiple_tasks() {
+        let dir = tmp();
+        let subagent_fn: SubagentFn =
+            Arc::new(|task, _cwd| Box::pin(async move { format!("done: {task}") }));
+        let c = ToolContext {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            allowed_roots: vec![dir.clone()],
+            audit_log: None,
+            allowed_tools: None,
+            subagent_fn: Some(subagent_fn),
+            audit_lock: None,
+        };
+        let args = serde_json::json!({
+            "tasks": [{"task": "alpha"}, {"task": "beta"}, {"task": "gamma"}]
+        })
+        .to_string();
+        let result = parallel_invoke(&c, &args).await;
+        assert!(result.contains("done: alpha"));
+        assert!(result.contains("done: beta"));
+        assert!(result.contains("done: gamma"));
+    }
+
+    #[tokio::test]
+    async fn parallel_invoke_no_subagent_fn() {
+        let dir = tmp();
+        let c = ToolContext {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            allowed_roots: vec![dir.clone()],
+            audit_log: None,
+            allowed_tools: None,
+            subagent_fn: None,
+            audit_lock: None,
+        };
+        let args = serde_json::json!({"tasks": [{"task": "a"}]}).to_string();
+        let result = parallel_invoke(&c, &args).await;
+        assert!(result.contains("subagent not available"));
     }
 
     // --- Part 4: IO containment tests (symlink-aware) ---
