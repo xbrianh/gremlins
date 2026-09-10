@@ -1,9 +1,6 @@
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
-use regex::Regex;
-
-static VAR_SUB_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([-\w]+)\}").unwrap());
+use crate::schemas::interpolation;
 
 /// Extract string-valued entries from an options map, filtering out
 /// non-string JSON values (numbers, booleans, arrays, etc.).
@@ -22,8 +19,7 @@ pub fn string_options(options: &HashMap<String, serde_json::Value>) -> HashMap<S
 
 /// Substitute `{var}` tokens in `text` using the same resolution order:
 /// string options → extra (bind/interpolation) → framework_subs.
-/// Framework subs win on collision. Hyphen-normalized variants are added
-/// for underscore keys.
+/// Framework subs win on collision.
 pub fn substitute_vars(
     text: &str,
     string_options: &HashMap<String, String>,
@@ -34,38 +30,7 @@ pub fn substitute_vars(
     subs.extend(string_options.iter().map(|(k, v)| (k.clone(), v.clone())));
     subs.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
     subs.extend(framework_subs.iter().map(|(k, v)| (k.clone(), v.clone())));
-
-    let hyphenated: Vec<(String, String)> = subs
-        .iter()
-        .filter_map(|(k, v)| {
-            if k.contains('_') {
-                Some((k.replace('_', "-"), v.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-    for (hk, hv) in hyphenated {
-        subs.entry(hk).or_insert(hv);
-    }
-
-    VAR_SUB_RE
-        .replace_all(text, |caps: &regex::Captures| {
-            let start = caps.get(0).unwrap().start();
-            if start > 0 && text.as_bytes()[start - 1] == b'$' {
-                return caps.get(0).unwrap().as_str().to_string();
-            }
-            let key = caps.get(1).unwrap().as_str();
-            if let Some(val) = subs.get(key) {
-                return val.clone();
-            }
-            let alt = key.replace('-', "_");
-            if let Some(val) = subs.get(&alt) {
-                return val.clone();
-            }
-            caps.get(0).unwrap().as_str().to_string()
-        })
-        .to_string()
+    interpolation::substitute_vars(text, &subs)
 }
 
 /// Trait representing the contract every Rust stage implements.

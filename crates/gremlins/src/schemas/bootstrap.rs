@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::schemas::error::SchemaError;
+use crate::schemas::interpolation;
 
 const VALID_SOURCE_TYPES: [&str; 2] = ["filepath", "string"];
 const BOOTSTRAP_KEYS: [&str; 5] = ["source", "launch_cmds", "cmds", "cli_out", "env"];
@@ -291,25 +292,17 @@ pub fn validate_source_values(
     Ok(())
 }
 
-/// Substitute {cwd} and {key} placeholders in a command string.
-/// Values are shell-escaped (wrapped in single quotes with internal quotes escaped)
-/// so that user-controlled source values cannot inject shell metacharacters.
+/// Substitute `{cwd}` and `{key}` placeholders in a command string.
+/// Values are shell-escaped so that user-controlled source values cannot
+/// inject shell metacharacters.
 pub fn substitute_bootstrap_vars(
     cmd: &str,
     cwd: &Path,
     values: &HashMap<String, String>,
 ) -> String {
-    let mut result = cmd.replace("{cwd}", &shell_quote(&cwd.to_string_lossy()));
-    for (key, value) in values {
-        let placeholder = format!("{{{}}}", key);
-        result = result.replace(&placeholder, &shell_quote(value));
-    }
-    result
-}
-
-/// Wrap in single quotes, escaping any internal single quotes.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    let mut all = values.clone();
+    all.insert("cwd".to_string(), cwd.to_string_lossy().to_string());
+    interpolation::substitute_vars_into_shell(cmd, &all)
 }
 
 #[cfg(test)]
@@ -400,12 +393,5 @@ mod tests {
         let result =
             substitute_bootstrap_vars("test -n {instructions}", Path::new("/tmp"), &values);
         assert_eq!(result, "test -n 'do the thing'");
-    }
-
-    #[test]
-    fn test_substitute_bootstrap_vars_shell_escape() {
-        let values = HashMap::from([("x".to_string(), "'; rm -rf /; echo 'pwned".to_string())]);
-        let result = substitute_bootstrap_vars("echo {x}", Path::new("/tmp"), &values);
-        assert_eq!(result, "echo ''\\''; rm -rf /; echo '\\''pwned'");
     }
 }
