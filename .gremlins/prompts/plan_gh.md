@@ -1,4 +1,3 @@
-<!-- placeholders: base_ref, instructions, plan -->
 You are creating an implementation plan.
 
 ## Where to write
