@@ -453,9 +453,22 @@ fn parse_api_keys(path: &Path) -> Result<HashMap<String, String>, ApiKeysError> 
     let obj = value.as_object().ok_or(ApiKeysError::NotAnObject)?;
     let mut keys = HashMap::new();
     for (k, v) in obj {
-        if let Some(s) = v.as_str() {
-            if !s.trim().is_empty() {
-                keys.insert(k.clone(), s.to_string());
+        match v.as_object() {
+            Some(obj) => {
+                if let Some(api_key) = obj.get("api-key").and_then(|v| v.as_str()) {
+                    if !api_key.trim().is_empty() {
+                        keys.insert(k.clone(), api_key.to_string());
+                    }
+                } else {
+                    warn!(
+                        "providers.json entry {k:?} missing string \"api-key\" field — skipping"
+                    );
+                }
+            }
+            None => {
+                warn!(
+                    "providers.json entry {k:?} value must be an object with \"api-key\" — skipping"
+                );
             }
         }
     }
@@ -867,7 +880,7 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("providers.json"),
-            r#"{"openai": "sk-test", "xai": "xai-test"}"#,
+            r#"{"openai": {"api-key": "sk-test"}, "xai": {"api-key": "xai-test"}}"#,
         )
         .unwrap();
         std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
@@ -878,13 +891,13 @@ mod tests {
     }
 
     #[test]
-    fn test_api_keys_empty_string_ignored() {
+    fn test_api_keys_object_empty_api_key_ignored() {
         let _guard = ENV_MUTEX.lock().unwrap();
         clear_sandbox_env();
         let dir = tempfile::tempdir().unwrap();
         let config_dir = dir.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("providers.json"), r#"{"openai": ""}"#).unwrap();
+        std::fs::write(config_dir.join("providers.json"), r#"{"openai": {"api-key": ""}}"#).unwrap();
         std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
@@ -892,13 +905,13 @@ mod tests {
     }
 
     #[test]
-    fn test_api_keys_whitespace_ignored() {
+    fn test_api_keys_object_whitespace_api_key_ignored() {
         let _guard = ENV_MUTEX.lock().unwrap();
         clear_sandbox_env();
         let dir = tempfile::tempdir().unwrap();
         let config_dir = dir.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("providers.json"), r#"{"openai": "   "}"#).unwrap();
+        std::fs::write(config_dir.join("providers.json"), r#"{"openai": {"api-key": "   "}}"#).unwrap();
         std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
@@ -906,13 +919,13 @@ mod tests {
     }
 
     #[test]
-    fn test_api_keys_non_string_ignored() {
+    fn test_api_keys_object_non_string_api_key_ignored() {
         let _guard = ENV_MUTEX.lock().unwrap();
         clear_sandbox_env();
         let dir = tempfile::tempdir().unwrap();
         let config_dir = dir.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("providers.json"), r#"{"openai": 42}"#).unwrap();
+        std::fs::write(config_dir.join("providers.json"), r#"{"openai": {"api-key": 42}}"#).unwrap();
         std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
@@ -941,6 +954,34 @@ mod tests {
         let config_dir = dir.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(config_dir.join("providers.json"), "[1, 2, 3]").unwrap();
+        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let keys = ApiKeys::load();
+        assert!(keys.get("openai").is_none());
+        clear_sandbox_env();
+    }
+
+    #[test]
+    fn test_api_keys_string_value_ignored() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_sandbox_env();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("providers.json"), r#"{"openai": "sk-test"}"#).unwrap();
+        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let keys = ApiKeys::load();
+        assert!(keys.get("openai").is_none());
+        clear_sandbox_env();
+    }
+
+    #[test]
+    fn test_api_keys_object_missing_api_key() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_sandbox_env();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("providers.json"), r#"{"openai": {}}"#).unwrap();
         std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
