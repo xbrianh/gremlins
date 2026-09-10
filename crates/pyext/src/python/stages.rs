@@ -24,21 +24,14 @@ fn extract_json_value_dict(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, s
         let k: String = key.extract()?;
         // Serialize Python value to JSON string, then parse back to serde_json::Value
         let json_str: String = json_mod.call_method1("dumps", (val,))?.extract()?;
-        let v: serde_json::Value =
-            serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
+        let v: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "option {k:?}: value cannot be represented as JSON: {e}"
+            ))
+        })?;
         map.insert(k, v);
     }
     Ok(map)
-}
-
-/// Try to convert a Python value to a serde_json::Value dict using json module
-fn maybe_extract_json_value_dict(
-    obj: &Bound<'_, PyAny>,
-) -> Option<HashMap<String, serde_json::Value>> {
-    if obj.cast::<PyDict>().is_err() {
-        return None;
-    }
-    extract_json_value_dict(obj).ok()
 }
 
 /// Convert a serde_json::Value to a Python object using json module
@@ -186,12 +179,14 @@ impl PyExec {
             None => HashMap::new(),
         };
 
-        let options: HashMap<String, serde_json::Value> = d
-            .get_item("options")
-            .ok()
-            .flatten()
-            .and_then(|v| maybe_extract_json_value_dict(&v))
-            .unwrap_or_default();
+        let options: HashMap<String, serde_json::Value> = match d.get_item("options")? {
+            Some(v) => extract_json_value_dict(&v).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "stage {name:?}: 'options' must be a mapping of string keys to JSON-serializable values"
+                ))
+            })?,
+            None => HashMap::new(),
+        };
 
         for k in options.keys() {
             if FRAMEWORK_KEYS.contains(k.as_str()) {
@@ -365,8 +360,6 @@ impl PyExec {
             .call_method1("framework_subs", (&slf,))?
             .extract()?;
 
-        let name = exec.name.clone();
-
         // Phase 1: prepare (needs &mut ArtifactRegistry).
         // Lock the registry, call prepare_exec, then drop the lock before
         // entering async so the guard (which is !Send) does not cross an
@@ -408,7 +401,7 @@ impl PyExec {
                 bail_triggered: false,
             };
             rust_exec::verify_exec(&prepared, &inner, &shell_result)
-                .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?;
+                .map_err(|e| Bail::new_err(e.to_string()))?;
 
             let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
             let asyncio_mod = py.import("asyncio")?;
@@ -450,13 +443,13 @@ impl PyExec {
                 let proc_result = extract_proc_result(py, py_result.bind(py))?;
 
                 let shell_result = rust_exec::process_shell_result(&prepared, proc_result)
-                    .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?;
+                    .map_err(|e| Bail::new_err(e.to_string()))?;
 
                 let arts_ref = artifacts.bind(py);
                 let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
                 let inner = arts_inner.inner.lock().unwrap();
                 rust_exec::verify_exec(&prepared, &inner, &shell_result)
-                    .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?;
+                    .map_err(|e| Bail::new_err(e.to_string()))?;
 
                 let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
                 Ok(done_obj.into_any())

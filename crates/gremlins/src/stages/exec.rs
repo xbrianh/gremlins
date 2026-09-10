@@ -324,7 +324,7 @@ pub fn process_shell_result(
 pub fn verify_exec(
     prepared: &ExecPrepared,
     artifacts: &ArtifactRegistry,
-    shell_result: &ShellResult,
+    _shell_result: &ShellResult,
 ) -> Result<(), ExecError> {
     let name = &prepared.name;
 
@@ -333,7 +333,7 @@ pub fn verify_exec(
             if *optional {
                 continue;
             }
-            if is_bail_uri(uri_str, &prepared.loop_iter) && shell_result.bail_triggered {
+            if is_bail_uri(uri_str, &prepared.loop_iter) {
                 continue;
             }
             return Err(ExecError::MissingArtifact {
