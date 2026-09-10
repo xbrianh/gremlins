@@ -342,7 +342,7 @@ impl PyExec {
         }
 
         // Extract all data from Python objects while holding GIL.
-        let artifacts_py: Py<PyAny> = state_obj.getattr("artifacts")?.unbind();
+        let artifacts: Py<ArtifactRegistry> = state_obj.getattr("artifacts")?.extract()?;
         let loop_iter_str: String = state_obj.getattr("loop_iter")?.extract()?;
         let cwd: PathBuf = state_obj.getattr("cwd")?.extract()?;
         let artifact_dir: PathBuf = state_obj.getattr("artifact_dir")?.extract()?;
@@ -353,76 +353,99 @@ impl PyExec {
 
         let name = exec.name.clone();
 
-        // Phase 1: prepare (needs &mut ArtifactRegistry)
-        let arts = artifacts_py.bind(py);
-        let arts_inner = arts.extract::<PyRef<'_, ArtifactRegistry>>()?;
-        let mut inner = arts_inner.inner.lock().unwrap();
-        let mut prepared = match rust_exec::prepare_exec(&exec, &mut inner, &loop_iter_str, &fw) {
-            Ok(p) => p,
-            Err(rust_exec::ExecError::Resolve {
-                source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
-                ..
-            }) => {
-                let exc_type = py
-                    .import("_gremlins_core.artifacts")?
-                    .getattr("MissingArtifact")?;
-                let args = (key.clone(),);
-                let exc = exc_type.call1(args)?;
-                return Err(PyErr::from_value(exc));
-            }
-            Err(e) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(e.to_string()));
+        // Phase 1: prepare (needs &mut ArtifactRegistry).
+        // Lock the registry, call prepare_exec, then drop the lock before
+        // entering async so the guard (which is !Send) does not cross an
+        // await point.
+        let mut prepared = {
+            let arts_ref = artifacts.bind(py);
+            let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
+            let mut inner = arts_inner.inner.lock().unwrap();
+            match rust_exec::prepare_exec(&exec, &mut inner, &loop_iter_str, &fw) {
+                Ok(p) => p,
+                Err(rust_exec::ExecError::Resolve {
+                    source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
+                    ..
+                }) => {
+                    let exc_type = py
+                        .import("_gremlins_core.artifacts")?
+                        .getattr("MissingArtifact")?;
+                    let args = (key.clone(),);
+                    let exc = exc_type.call1(args)?;
+                    return Err(PyErr::from_value(exc));
+                }
+                Err(e) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(e.to_string()));
+                }
             }
         };
         prepared.cwd = cwd;
         prepared.artifact_dir = artifact_dir;
         prepared.state_dir = state_dir;
 
-        let is_empty_cmds = prepared.cmds.is_empty();
-
-        let shell_result = if is_empty_cmds {
-            rust_exec::ShellResult {
+        if prepared.cmds.is_empty() {
+            // Empty commands: everything is synchronous — lock, verify, return.
+            let arts_ref = artifacts.bind(py);
+            let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
+            let inner = arts_inner.inner.lock().unwrap();
+            let shell_result = rust_exec::ShellResult {
                 output: String::new(),
                 rc: 0,
                 bail_triggered: false,
-            }
-        } else {
-            // Call through Python's _gremlins_core.utils.proc.run_shell_async so
-            // tests can monkeypatch it.
-            let joined = prepared.cmds.join(" && ");
-            let proc_mod = py.import("_gremlins_core.utils.proc")?;
-            let py_cwd: Option<PathBuf> = Some(prepared.cwd.clone());
-            let mut env = HashMap::new();
-            env.insert(
-                "GREMLINS_ARTIFACT_DIR".to_string(),
-                prepared.artifact_dir.to_string_lossy().to_string(),
-            );
-            let py_env: Option<HashMap<String, String>> = Some(env);
-            let py_timeout: Option<f64> = prepared.timeout;
-            let py_coro = proc_mod.call_method(
-                "run_shell_async",
-                (joined, py_cwd, py_env, py_timeout),
-                None,
-            )?;
-            // Use asyncio.run to execute the coroutine synchronously.
-            // This creates a fresh event loop, avoiding "no running event loop"
-            // errors when called outside a running Python event loop.
+            };
+            rust_exec::verify_exec(&prepared, &inner, &shell_result)
+                .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?;
+
+            let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
             let asyncio_mod = py.import("asyncio")?;
-            let py_result = asyncio_mod.call_method1("run", (py_coro,))?;
-            let proc_result = extract_proc_result(py, &py_result)?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("result", done_obj)?;
+            return asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs));
+        }
 
-            rust_exec::process_shell_result(&prepared, proc_result)
-                .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?
-        };
-
-        rust_exec::verify_exec(&prepared, &inner, &shell_result)
-            .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?;
-
-        let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
-        let asyncio_mod = py.import("asyncio")?;
+        // Non-empty commands: run the shell asynchronously via future_into_py
+        // so the caller can await this coroutine and we never nest event loops.
+        // Call through Python's _gremlins_core.utils.proc.run_shell_async so
+        // tests can monkeypatch it.
+        let joined = prepared.cmds.join(" && ");
+        let shell_cwd = prepared.cwd.clone();
+        let shell_timeout = prepared.timeout;
+        let mut shell_env = HashMap::new();
+        shell_env.insert(
+            "GREMLINS_ARTIFACT_DIR".to_string(),
+            prepared.artifact_dir.to_string_lossy().to_string(),
+        );
+        let proc_mod = py.import("_gremlins_core.utils.proc")?;
+        let py_cwd: Option<PathBuf> = Some(shell_cwd);
+        let py_env: Option<HashMap<String, String>> = Some(shell_env);
+        let py_timeout: Option<f64> = shell_timeout;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("result", done_obj)?;
-        asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs))
+        kwargs.set_item("cwd", py_cwd)?;
+        kwargs.set_item("env", py_env)?;
+        kwargs.set_item("timeout", py_timeout)?;
+        let py_coro = proc_mod.call_method("run_shell_async", (joined,), Some(&kwargs))?;
+        // Convert the Python coroutine to a Rust future while we hold the GIL.
+        let shell_future = pyo3_async_runtimes::tokio::into_future(py_coro)?;
+
+        pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
+            let py_result = shell_future.await?;
+
+            Python::attach(|py| {
+                let proc_result = extract_proc_result(py, py_result.bind(py))?;
+
+                let shell_result = rust_exec::process_shell_result(&prepared, proc_result)
+                    .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?;
+
+                let arts_ref = artifacts.bind(py);
+                let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
+                let inner = arts_inner.inner.lock().unwrap();
+                rust_exec::verify_exec(&prepared, &inner, &shell_result)
+                    .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?;
+
+                let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
+                Ok(done_obj.into_any())
+            })
+        })
     }
 }
 
