@@ -786,7 +786,12 @@ def _land_boss(
         commit_count = _git.rev_list_count(f"{current}..{boss_head}", cwd=cwd)
     except _git.GitError:
         commit_count = 0
-    logger.info("_land_boss: fast-forwarding %s to %s (%d commits)", current, label, commit_count)
+    logger.info(
+        "_land_boss: fast-forwarding %s to %s (%d commits)",
+        current,
+        label,
+        commit_count,
+    )
     return _ff_land(gremlin_id, wdir, state, cwd, boss_head, label, current)
 
 
