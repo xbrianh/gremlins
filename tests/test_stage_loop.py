@@ -380,7 +380,9 @@ def test_loop_iter_scoping_with_exec_isolates_iterations(tmp_path, monkeypatch):
                     p.write_text("done")
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    monkeypatch.setattr("_gremlins_core.utils.proc.run_shell_async", controlled_shell)
+    from _gremlins_core.stages import _set_exec_shell_hook
+
+    _set_exec_shell_hook(controlled_shell)
 
     exec_stage = Exec(
         "cmd",

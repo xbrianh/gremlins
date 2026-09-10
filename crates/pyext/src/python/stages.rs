@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Mutex;
 
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec::{self as rust_exec, substitute_vars};
@@ -100,6 +101,17 @@ _m.Bail.__str__ = _str
 
 // --- Exec pyclass ---
 
+/// Module-level shell hook for tests that can't access individual Exec instances.
+static SHELL_HOOK: Mutex<Option<Py<PyAny>>> = Mutex::new(None);
+
+#[pyfunction]
+fn _set_exec_shell_hook(hook: Option<Py<PyAny>>) -> PyResult<()> {
+    *SHELL_HOOK
+        .lock()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? = hook;
+    Ok(())
+}
+
 #[pyclass(name = "Exec", module = "_gremlins_core.stages", skip_from_py_object)]
 struct PyExec {
     inner: rust_exec::Exec,
@@ -108,6 +120,8 @@ struct PyExec {
     client: Option<Py<PyAny>>,
     client_explicit: bool,
     skip_if_exists: String,
+    #[pyo3(get, set)]
+    _shell_fn: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -133,6 +147,7 @@ impl PyExec {
             client: None,
             client_explicit: false,
             skip_if_exists: String::new(),
+            _shell_fn: None,
         })
     }
 
@@ -214,6 +229,7 @@ impl PyExec {
             client,
             client_explicit,
             skip_if_exists: String::new(),
+            _shell_fn: None,
         })
     }
 
@@ -402,56 +418,73 @@ impl PyExec {
             return asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs));
         }
 
-        // Non-empty commands: call Python's run_shell_async so monkeypatches
-        // applied to _gremlins_core.utils.proc.run_shell_async are respected.
+        // Resolve shell hook: per-instance overrides module-level (test seam).
+        let module_hook: Option<Py<PyAny>> =
+            SHELL_HOOK.lock().unwrap().as_ref().map(|f| f.clone_ref(py));
+        let shell_fn = slf
+            ._shell_fn
+            .as_ref()
+            .map(|f| f.clone_ref(py))
+            .or(module_hook);
+
+        // Non-empty commands: production path calls Rust directly (no nested
+        // future_into_py, no Python round-trip). Test path uses a Python hook
+        // set via _shell_fn or _set_exec_shell_hook.
         pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
-            let joined = prepared.cmds.join(" && ");
-            let mut env_map: HashMap<String, String> = std::env::vars().collect();
-            env_map.insert(
-                "GREMLINS_ARTIFACT_DIR".to_string(),
-                prepared.artifact_dir.to_string_lossy().to_string(),
-            );
+            let shell_result = if let Some(shell_fn) = shell_fn {
+                // Test path: call the Python hook (async function returning
+                // a CompletedProcess-like object).
+                let joined = prepared.cmds.join(" && ");
+                let mut env_map: HashMap<String, String> = std::env::vars().collect();
+                env_map.insert(
+                    "GREMLINS_ARTIFACT_DIR".to_string(),
+                    prepared.artifact_dir.to_string_lossy().to_string(),
+                );
 
-            // Call Python's run_shell_async (which may be monkeypatched) and
-            // convert the returned coroutine into a Rust future.
-            let proc_fut = Python::attach(|py| -> PyResult<PyAwaitable> {
-                let proc_mod = py.import("_gremlins_core.utils.proc")?;
-                let run_fn = proc_mod.getattr("run_shell_async")?;
-                let cwd_str = prepared.cwd.to_string_lossy().to_string();
-                let py_env = PyDict::new(py);
-                for (k, v) in &env_map {
-                    py_env.set_item(k.as_str(), v.as_str())?;
-                }
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("cwd", cwd_str)?;
-                kwargs.set_item("env", py_env)?;
-                if let Some(t) = prepared.timeout {
-                    kwargs.set_item("timeout", t)?;
-                }
-                let coro = run_fn.call((joined.as_str(),), Some(&kwargs))?;
-                let fut = pyo3_async_runtimes::tokio::into_future(coro)?;
-                Ok(Box::pin(fut))
-            })?;
+                let proc_fut = Python::attach(|py| -> PyResult<PyAwaitable> {
+                    let cwd_str = prepared.cwd.to_string_lossy().to_string();
+                    let py_env = PyDict::new(py);
+                    for (k, v) in &env_map {
+                        py_env.set_item(k.as_str(), v.as_str())?;
+                    }
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("cwd", cwd_str)?;
+                    kwargs.set_item("env", py_env)?;
+                    if let Some(t) = prepared.timeout {
+                        kwargs.set_item("timeout", t)?;
+                    }
+                    let coro = shell_fn.bind(py).call((joined.as_str(),), Some(&kwargs))?;
+                    let fut = pyo3_async_runtimes::tokio::into_future(coro)?;
+                    Ok(Box::pin(fut))
+                })?;
 
-            let proc_result: Py<PyAny> = proc_fut
-                .await
-                .map_err(|e| Bail::new_err(format!("exec stage python error: {e}")))?;
+                let proc_result: Py<PyAny> = proc_fut
+                    .await
+                    .map_err(|e| Bail::new_err(format!("exec stage python error: {e}")))?;
 
-            let (rc, stdout, stderr) = Python::attach(|py| -> PyResult<(i32, String, String)> {
-                let obj = proc_result.bind(py);
-                let rc: i32 = obj.getattr("returncode")?.extract()?;
-                let stdout: String = obj.getattr("stdout")?.extract()?;
-                let stderr: String = obj.getattr("stderr")?.extract()?;
-                Ok((rc, stdout, stderr))
-            })?;
+                let (rc, stdout, stderr) =
+                    Python::attach(|py| -> PyResult<(i32, String, String)> {
+                        let obj = proc_result.bind(py);
+                        let rc: i32 = obj.getattr("returncode")?.extract()?;
+                        let stdout: String = obj.getattr("stdout")?.extract()?;
+                        let stderr: String = obj.getattr("stderr")?.extract()?;
+                        Ok((rc, stdout, stderr))
+                    })?;
 
-            let raw_result = gremlins::core::proc::ProcResult {
-                returncode: rc,
-                stdout: stdout.into_bytes(),
-                stderr: stderr.into_bytes(),
+                let raw_result = gremlins::core::proc::ProcResult {
+                    returncode: rc,
+                    stdout: stdout.into_bytes(),
+                    stderr: stderr.into_bytes(),
+                };
+                rust_exec::process_shell_result(&prepared, raw_result)
+                    .map_err(|e| Bail::new_err(e.to_string()))?
+            } else {
+                // Production path: call Rust directly.
+                // No Python round-trip, no nested future_into_py.
+                rust_exec::run_shell(&prepared)
+                    .await
+                    .map_err(|e| Bail::new_err(e.to_string()))?
             };
-            let shell_result = rust_exec::process_shell_result(&prepared, raw_result)
-                .map_err(|e| Bail::new_err(e.to_string()))?;
 
             Python::attach(|py| {
                 let arts_ref = artifacts.bind(py);
@@ -521,6 +554,7 @@ async def _exec_run_async(stage, gremlin):\n    return await stage._run_impl(gre
     let keys: Vec<&str> = FRAMEWORK_KEYS.iter().copied().collect();
     m.add("FRAMEWORK_KEYS", PyFrozenSet::new(py, &keys)?)?;
     m.add_function(wrap_pyfunction!(_is_bail_uri, &m)?)?;
+    m.add_function(wrap_pyfunction!(_set_exec_shell_hook, &m)?)?;
 
     Ok(())
 }
