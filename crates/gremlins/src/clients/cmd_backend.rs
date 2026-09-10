@@ -11,9 +11,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 use super::backend::{Backend, ClientError, RunParams};
-use super::config::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use super::protocol::CompletedRun;
 use super::retry;
+use super::retry::{validate_max_retries, STREAM_IDLE_BACKOFF};
 use super::stream;
 use super::stream_json::{self, StreamState};
 
@@ -456,7 +456,7 @@ impl Backend for CmdBackend {
 
         let idle_timeout = params
             .idle_timeout
-            .unwrap_or_else(config::stream_idle_timeout);
+            .unwrap_or_else(crate::config::stream_idle_timeout);
         let prefix = if params.label.is_empty() {
             String::new()
         } else {

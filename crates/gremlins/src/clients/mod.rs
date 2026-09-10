@@ -1,7 +1,6 @@
 pub mod agent_loop;
 pub mod backend;
 pub mod cmd_backend;
-pub mod config;
 pub mod openai_backend;
 pub mod protocol;
 pub mod retry;

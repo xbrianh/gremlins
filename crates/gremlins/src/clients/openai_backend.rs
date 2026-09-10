@@ -8,9 +8,8 @@ use rig_core::providers::openai;
 
 use super::agent_loop::{run_agent_loop, CancelToken, LoopOpts, RunContext};
 use super::backend::{Backend, ClientError, RunParams};
-use super::config::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use super::protocol::CompletedRun;
-use super::retry;
+use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use super::stream;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +139,7 @@ fn build_extra_params(client_params: &HashMap<String, String>) -> Option<serde_j
     let effort = client_params
         .get("reasoning")
         .cloned()
-        .or_else(config::reasoning_effort);
+        .or_else(crate::config::reasoning_effort);
     if let Some(effort) = effort {
         params.insert(
             "reasoning".into(),
@@ -193,7 +192,7 @@ impl Backend for OpenAiBackend {
 
         let idle_timeout = params
             .idle_timeout
-            .unwrap_or_else(config::stream_idle_timeout);
+            .unwrap_or_else(crate::config::stream_idle_timeout);
         let prefix = if params.label.is_empty() {
             String::new()
         } else {
@@ -373,11 +372,11 @@ mod tests {
 
     #[test]
     fn transient_classifier() {
-        assert!(config::is_transient_stream_error(
+        assert!(retry::is_transient_stream_error(
             "The model is currently at capacity"
         ));
-        assert!(config::is_transient_stream_error("rate limit exceeded"));
-        assert!(!config::is_transient_stream_error("Invalid API key"));
+        assert!(retry::is_transient_stream_error("rate limit exceeded"));
+        assert!(!retry::is_transient_stream_error("Invalid API key"));
         assert!(matches!(
             map_stream_error("rate limit exceeded".into()),
             ClientError::ApiServerError { .. }
@@ -386,10 +385,10 @@ mod tests {
             map_stream_error("Invalid API key".into()),
             ClientError::Runtime { .. }
         ));
-        assert!(config::is_transient_stream_error(
+        assert!(retry::is_transient_stream_error(
             "Http client error: error sending request for url (https://openrouter.ai/v1/chat/completions)"
         ));
-        assert!(config::is_transient_stream_error(
+        assert!(retry::is_transient_stream_error(
             "Http client error: error decoding response body"
         ));
         assert!(matches!(

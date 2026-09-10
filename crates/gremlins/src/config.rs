@@ -259,6 +259,68 @@ fn overlay_dir_env_override() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime / behavior env-var accessors
+// ---------------------------------------------------------------------------
+
+/// GREMLINS_STREAM_IDLE_TIMEOUT in seconds. Default 600.0.
+pub fn stream_idle_timeout() -> f64 {
+    std::env::var("GREMLINS_STREAM_IDLE_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600.0)
+}
+
+/// GREMLINS_AGENT_MAX_TURNS, with GREMLINS_OPENAI_AGENTS_MAX_TURNS as fallback.
+/// Default 1000.
+pub fn max_agent_turns() -> usize {
+    std::env::var("GREMLINS_AGENT_MAX_TURNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or_else(|| {
+            std::env::var("GREMLINS_OPENAI_AGENTS_MAX_TURNS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(1000)
+}
+
+/// GREMLINS_REASONING_EFFORT override. None means use provider default.
+pub fn reasoning_effort() -> Option<String> {
+    std::env::var("GREMLINS_REASONING_EFFORT").ok()
+}
+
+/// GREMLINS_TELEMETRY — "1" or "true" enables per-turn telemetry logging.
+pub fn telemetry_enabled() -> bool {
+    std::env::var("GREMLINS_TELEMETRY")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+}
+
+/// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
+pub fn scratch_dir(gremlin_id: Option<&str>) -> Option<PathBuf> {
+    let path: PathBuf = std::env::var("GREMLINS_SCRATCH_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())?
+        .into();
+    let p = if let Some(id) = gremlin_id {
+        path.join(id)
+    } else {
+        path
+    };
+    std::fs::create_dir_all(&p).ok()?;
+    Some(p)
+}
+
+/// HOME directory with platform fallback.
+pub fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+// ---------------------------------------------------------------------------
 // Internal path resolvers — pure, no global dependency
 // ---------------------------------------------------------------------------
 
@@ -481,6 +543,17 @@ pub enum ApiKeysError {
     Json(#[from] serde_json::Error),
     #[error("providers.json must contain a JSON object")]
     NotAnObject,
+}
+
+/// Resolve an API key for `provider`. Checks the named env var first,
+/// then falls back to `providers.json`. Returns None if neither is set.
+pub fn api_key(env_var_name: &str, provider_name: &str) -> Option<String> {
+    if let Ok(key) = std::env::var(env_var_name) {
+        if !key.trim().is_empty() {
+            return Some(key);
+        }
+    }
+    ApiKeys::load().get(provider_name).map(|s| s.to_string())
 }
 
 // ---------------------------------------------------------------------------
