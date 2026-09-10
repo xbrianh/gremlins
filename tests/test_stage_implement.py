@@ -16,7 +16,7 @@ import subprocess
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from _gremlins_core.artifacts import ArtifactRegistry
+from _gremlins_core.artifacts import ArtifactRegistry, Uri
 from _gremlins_core.schemas import Pipeline
 from _gremlins_core.stages import Bail, Exec
 from conftest import MockGremlin
@@ -32,7 +32,8 @@ def _make_state(project: pathlib.Path, base_sha: str):
     artifact_dir = project / "session"
     artifact_dir.mkdir(exist_ok=True)
     registry = ArtifactRegistry(artifact_dir)
-    registry._set("base_sha", base_sha)
+    uri = Uri.parse("artifact://base_sha")
+    pathlib.Path(registry.register(uri)).write_text(base_sha, encoding="utf-8")
     return build_state(
         data=StateData(),
         client=FakeClient(),
@@ -70,7 +71,7 @@ def _require_impl_progress_exec() -> Exec:
     return Exec(
         "require-impl-progress",
         {"cmds": cmds},
-        interpolation_map={"base_sha": "base_sha"},
+        interpolation_map={"base_sha": 'content("artifact://base_sha")'},
     )
 
 

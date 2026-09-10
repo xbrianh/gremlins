@@ -270,7 +270,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
 
 
 def test_loop_registers_artifacts_across_iterations(tmp_path):
-    """register across iterations — overwrite=True ensures clean re-registration."""
+    """register distinct URIs across iterations — each iteration binds a new key."""
     from _gremlins_core.stages import Exec
 
     (tmp_path / "artifacts").mkdir(exist_ok=True)

@@ -25,6 +25,13 @@ def _make_registry(tmp_path: pathlib.Path) -> ArtifactRegistry:
     return ArtifactRegistry(artifact_dir)
 
 
+def _register_text(reg: ArtifactRegistry, uri: str, text: str) -> str:
+    path = pathlib.Path(reg.register(Uri.parse(uri)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
 def _make_state(tmp_path: pathlib.Path, client=None):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir(exist_ok=True)
@@ -39,52 +46,51 @@ def _make_state(tmp_path: pathlib.Path, client=None):
 # --- resolve_interpolation_map unit tests ---
 
 
-def test_simple_key_no_dots(tmp_path):
+def test_simple_key_resolves_to_file_path(tmp_path):
     reg = _make_registry(tmp_path)
-    (tmp_path / "artifacts" / "val.txt").write_text("hello")
-    reg._set("key", "file://session/val.txt")
-    result = resolve_interpolation_map(reg, {"VAR": "key"})
-    assert result == {"VAR": "file://session/val.txt"}
+    path = _register_text(reg, "artifact://key", "hello")
+    result = resolve_interpolation_map(reg, {"VAR": "artifact://key"})
+    assert result == {"VAR": path}
 
 
 def test_unknown_key_raises(tmp_path):
     reg = _make_registry(tmp_path)
-    reg._set("pr", "opaque://pr/1")
+    _register_text(reg, "artifact://pr", "opaque://pr/1")
     with pytest.raises(MissingArtifact):
-        resolve_interpolation_map(reg, {"x": "pr.nonexistent"})
+        resolve_interpolation_map(reg, {"x": "artifact://pr.nonexistent"})
 
 
 def test_empty_trailing_dot_key_raises(tmp_path):
     """Keys with trailing dots are literal — no such artifact exists."""
     reg = _make_registry(tmp_path)
-    reg._set("pr", "opaque://pr/1")
+    _register_text(reg, "artifact://pr", "opaque://pr/1")
     with pytest.raises(MissingArtifact):
-        resolve_interpolation_map(reg, {"x": "pr."})
+        resolve_interpolation_map(reg, {"x": "artifact://pr."})
 
 
 def test_private_like_key_raises_on_missing(tmp_path):
     """Double-underscore keys are literal — no such artifact exists."""
     reg = _make_registry(tmp_path)
-    reg._set("pr", "opaque://pr/1")
+    _register_text(reg, "artifact://pr", "opaque://pr/1")
     with pytest.raises(MissingArtifact):
-        resolve_interpolation_map(reg, {"x": "pr.__class__"})
+        resolve_interpolation_map(reg, {"x": "artifact://pr.__class__"})
 
 
-# --- opaque:// opaque URI ---
+# --- file-backed values ---
 
 
-def test_opaque_uri_key(tmp_path):
+def test_file_backed_key_resolves_to_path(tmp_path):
     reg = _make_registry(tmp_path)
-    reg._set("plan", "opaque://issue/42")
-    result = resolve_interpolation_map(reg, {"ref": "plan"})
-    assert result == {"ref": "opaque://issue/42"}
+    path = _register_text(reg, "artifact://plan", "opaque://issue/42")
+    result = resolve_interpolation_map(reg, {"ref": "artifact://plan"})
+    assert result == {"ref": path}
 
 
-def test_non_string_value_coerced_to_str(tmp_path):
+def test_file_backed_json_value(tmp_path):
     reg = _make_registry(tmp_path)
-    reg._set("data", '{"number": 42}')
-    result = resolve_interpolation_map(reg, {"ref": "data"})
-    assert result == {"ref": '{"number": 42}'}
+    path = _register_text(reg, "artifact://data.json", '{"number": 42}')
+    result = resolve_interpolation_map(reg, {"ref": "artifact://data.json"})
+    assert result == {"ref": path}
 
 
 # --- content() via file artifacts ---

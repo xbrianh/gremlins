@@ -262,16 +262,12 @@ def _patch_common(
     # base_ref_sha is now stored in registry.json, not state.json
     # plan is always a local file; plan-source-issue-number is bound when
     # the plan originated from a GitHub issue.
+    # Only keys whose producing stage is skipped via skip_if_exists are
+    # pre-registered. Keys the pipeline itself binds are merely pre-created on
+    # disk — registering them here would now collide with the stage's bind.
     registry_data: dict = {
         "artifact://spec.md": "file://session/spec.md",
         "artifact://plan.md": "file://session/plan.md",
-        "artifact://plan-source-issue-number.txt": "file://session/plan-source-issue-number.txt",
-        "artifact://pr-url.txt": "file://session/pr-url.txt",
-        "artifact://pr-number.txt": "file://session/pr-number.txt",
-        "artifact://pr-title.txt": "file://session/pr-title.txt",
-        "artifact://pr-body.md": "file://session/pr-body.md",
-        "artifact://diff-summary.txt": "file://session/diff-summary.txt",
-        "artifact://pr-base-ref.txt": "file://session/pr-base-ref.txt",
         "artifact://repo.txt": "file://session/repo.txt",
     }
     if base_ref_sha:
@@ -955,11 +951,14 @@ def test_resume_from_github_review_pull_request(tmp_path, monkeypatch):
         monkeypatch, tmp_path, fake_pr_number="200"
     )
 
-    # Pre-populate diff.txt and bind pr-diff artifact so the review stage
-    # can resolve artifact.pr-diff (fetch-pr-diff is skipped on resume).
+    # Pre-populate pr-url.txt and diff.txt and register them so the review
+    # stage can resolve them (fetch-pr-diff and push-and-open are skipped on
+    # resume, so nothing binds these on this run).
+    (artifact_dir / "pr-url.txt").write_text("https://github.com/owner/repo/pull/200\n")
     (artifact_dir / "diff.txt").write_text("diff --git a/f b/f\n")
     registry_path = tmp_path / "scratch" / "gr-test" / "registry.json"
     reg = json.loads(registry_path.read_text())
+    reg["artifact://pr-url.txt"] = "file://session/pr-url.txt"
     reg["artifact://diff.txt"] = "file://session/diff.txt"
     registry_path.write_text(json.dumps(reg))
 
@@ -1156,6 +1155,15 @@ def test_resume_from_open_pr(tmp_path, monkeypatch):
     )
 
     artifact_dir, state_file = _patch_common(monkeypatch, tmp_path)
+
+    # plan-source-issue-number.txt is bound by resolve-plan-source, which is
+    # skipped on this resume — register it directly so compose-pr resolves it.
+    registry_path = tmp_path / "scratch" / "gr-test" / "registry.json"
+    reg = json.loads(registry_path.read_text())
+    reg["artifact://plan-source-issue-number.txt"] = (
+        "file://session/plan-source-issue-number.txt"
+    )
+    registry_path.write_text(json.dumps(reg))
 
     data = json.loads(state_file.read_text())
     data["issue_url"] = "https://github.com/owner/repo/issues/42"
@@ -1712,6 +1720,8 @@ def test_publish_as_issue_runs_when_no_source_bound(tmp_path, monkeypatch):
 
     # Remove plan.md so the plan agent runs instead of skipping.
     (artifact_dir / "plan.md").unlink(missing_ok=True)
+    reg.pop("artifact://plan.md", None)
+    registry_path.write_text(json.dumps(reg))
 
     shell_cmds: list[str] = []
     from _gremlins_core.stages import _set_exec_shell_hook
