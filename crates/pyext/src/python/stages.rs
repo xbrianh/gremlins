@@ -44,21 +44,6 @@ fn json_value_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>
     Ok(py_obj.unbind())
 }
 
-/// Extract a ProcResult from a Python subprocess.CompletedProcess.
-fn extract_proc_result(
-    _py: Python<'_>,
-    obj: &Bound<'_, PyAny>,
-) -> PyResult<gremlins::core::proc::ProcResult> {
-    let rc: i32 = obj.getattr("returncode")?.extract()?;
-    let stdout: String = obj.getattr("stdout")?.extract()?;
-    let stderr: String = obj.getattr("stderr")?.extract()?;
-    Ok(gremlins::core::proc::ProcResult {
-        returncode: rc,
-        stdout: stdout.into_bytes(),
-        stderr: stderr.into_bytes(),
-    })
-}
-
 // --- Done pyclass ---
 
 #[pyclass(name = "Done", module = "_gremlins_core.stages", skip_from_py_object)]
