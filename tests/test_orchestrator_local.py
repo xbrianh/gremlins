@@ -271,7 +271,7 @@ def test_local_main_env_file_vars_reach_verify(tmp_path, monkeypatch):
         write_done_from_shell_cmd(cmd)
         return _subprocess.CompletedProcess(cmd, 0, "(noop)\n", "")
 
-    monkeypatch.setattr("gremlins.stages.exec._proc.run_shell_async", _capturing_shell)
+    monkeypatch.setattr("_gremlins_core.utils.proc.run_shell_async", _capturing_shell)
 
     client = _ReviewCreatingClient(
         fixtures={
@@ -335,7 +335,7 @@ def test_local_main_env_file_sourced_with_overlay_dir_set(tmp_path, monkeypatch)
         write_done_from_shell_cmd(cmd)
         return _subprocess.CompletedProcess(cmd, 0, "(noop)\n", "")
 
-    monkeypatch.setattr("gremlins.stages.exec._proc.run_shell_async", _capturing_shell)
+    monkeypatch.setattr("_gremlins_core.utils.proc.run_shell_async", _capturing_shell)
 
     client = _ReviewCreatingClient(
         fixtures={

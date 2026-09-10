@@ -214,7 +214,7 @@ def _patch_common(
 
     import subprocess as _subprocess_mod
 
-    from gremlins.utils import proc as _proc_mod
+    from _gremlins_core.utils import proc as _proc_mod
 
     _orig_shell = _proc_mod.run_shell_async
 
@@ -593,7 +593,7 @@ def test_publish_as_issue_skip_when_source_bound(tmp_path, monkeypatch):
     # and writes plan.md — both skips fire automatically.
 
     shell_cmds: list[str] = []
-    from gremlins.utils import proc as _proc_mod
+    from _gremlins_core.utils import proc as _proc_mod
 
     _orig_shell = _proc_mod.run_shell_async
 
@@ -1689,7 +1689,7 @@ def test_publish_as_issue_runs_when_no_source_bound(tmp_path, monkeypatch):
     (artifact_dir / "plan.md").unlink(missing_ok=True)
 
     shell_cmds: list[str] = []
-    from gremlins.utils import proc as _proc_mod
+    from _gremlins_core.utils import proc as _proc_mod
 
     _orig_shell = _proc_mod.run_shell_async
 

@@ -51,6 +51,21 @@ fn json_value_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>
     Ok(py_obj.unbind())
 }
 
+/// Extract a ProcResult from a Python subprocess.CompletedProcess.
+fn extract_proc_result(
+    _py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<gremlins::core::proc::ProcResult> {
+    let rc: i32 = obj.getattr("returncode")?.extract()?;
+    let stdout: String = obj.getattr("stdout")?.extract()?;
+    let stderr: String = obj.getattr("stderr")?.extract()?;
+    Ok(gremlins::core::proc::ProcResult {
+        returncode: rc,
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
+    })
+}
+
 // --- Done pyclass ---
 
 #[pyclass(name = "Done", module = "_gremlins_core.stages", skip_from_py_object)]
@@ -339,13 +354,10 @@ impl PyExec {
         let name = exec.name.clone();
 
         // Phase 1: prepare (needs &mut ArtifactRegistry)
-        let prepared_result = {
-            let arts = artifacts_py.bind(py);
-            let arts_inner = arts.extract::<PyRef<'_, ArtifactRegistry>>()?;
-            let mut inner = arts_inner.inner.lock().unwrap();
-            rust_exec::prepare_exec(&exec, &mut inner, &loop_iter_str, &fw)
-        };
-        let mut prepared = match prepared_result {
+        let arts = artifacts_py.bind(py);
+        let arts_inner = arts.extract::<PyRef<'_, ArtifactRegistry>>()?;
+        let mut inner = arts_inner.inner.lock().unwrap();
+        let mut prepared = match rust_exec::prepare_exec(&exec, &mut inner, &loop_iter_str, &fw) {
             Ok(p) => p,
             Err(rust_exec::ExecError::Resolve {
                 source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
@@ -368,15 +380,6 @@ impl PyExec {
 
         let is_empty_cmds = prepared.cmds.is_empty();
 
-        // Run the exec stage synchronously via a temporary tokio runtime,
-        // then wrap the result in a Python coroutine for asyncio.run().
-        // This avoids the "no running event loop" error from future_into_py
-        // when called outside a running Python event loop.
-        let rt = tokio::runtime::Runtime::new().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "exec {name}: failed to create tokio runtime: {e}"
-            ))
-        })?;
         let shell_result = if is_empty_cmds {
             rust_exec::ShellResult {
                 output: String::new(),
@@ -384,18 +387,38 @@ impl PyExec {
                 bail_triggered: false,
             }
         } else {
-            rt.block_on(rust_exec::run_shell(&prepared))
+            // Call through Python's _gremlins_core.utils.proc.run_shell_async so
+            // tests can monkeypatch it.
+            let joined = prepared.cmds.join(" && ");
+            let proc_mod = py.import("_gremlins_core.utils.proc")?;
+            let py_cwd: Option<PathBuf> = Some(prepared.cwd.clone());
+            let mut env = HashMap::new();
+            env.insert(
+                "GREMLINS_ARTIFACT_DIR".to_string(),
+                prepared.artifact_dir.to_string_lossy().to_string(),
+            );
+            let py_env: Option<HashMap<String, String>> = Some(env);
+            let py_timeout: Option<f64> = prepared.timeout;
+            let py_coro = proc_mod.call_method(
+                "run_shell_async",
+                (joined, py_cwd, py_env, py_timeout),
+                None,
+            )?;
+            // Use asyncio.run to execute the coroutine synchronously.
+            // This creates a fresh event loop, avoiding "no running event loop"
+            // errors when called outside a running Python event loop.
+            let asyncio_mod = py.import("asyncio")?;
+            let py_result = asyncio_mod.call_method1("run", (py_coro,))?;
+            let proc_result = extract_proc_result(py, &py_result)?;
+
+            rust_exec::process_shell_result(&prepared, proc_result)
                 .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?
         };
 
-        let arts = artifacts_py.bind(py);
-        let arts_inner = arts.extract::<PyRef<'_, ArtifactRegistry>>()?;
-        let inner = arts_inner.inner.lock().unwrap();
         rust_exec::verify_exec(&prepared, &inner, &shell_result)
             .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?;
 
         let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
-        // Wrap in a coroutine so asyncio.run() can await it.
         let asyncio_mod = py.import("asyncio")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("result", done_obj)?;

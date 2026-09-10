@@ -238,8 +238,6 @@ pub fn prepare_exec(
 
 /// Phase 2: run the shell commands. Uses only the prepared data; no registry access.
 pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError> {
-    let name = &prepared.name;
-
     if prepared.cmds.is_empty() {
         return Ok(ShellResult {
             output: String::new(),
@@ -257,6 +255,16 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
 
     let result =
         run_shell_async(&joined, Some(&prepared.cwd), Some(&env), prepared.timeout).await?;
+
+    process_shell_result(prepared, result)
+}
+
+/// Post-process a ProcResult into a ShellResult (log writing, bail detection).
+pub fn process_shell_result(
+    prepared: &ExecPrepared,
+    result: ProcResult,
+) -> Result<ShellResult, ExecError> {
+    let name = &prepared.name;
 
     let raw_output = {
         let mut buf = result.stdout.clone();
