@@ -13,13 +13,13 @@ use rig_core::OneOrMany;
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
-use super::config;
 use super::protocol::{CompletedRun, UsageStats};
+use super::retry;
 use super::stream;
 use super::tools::{self, ToolContext};
 
 pub(crate) fn map_stream_error(msg: String) -> ClientError {
-    if config::is_transient_stream_error(&msg) {
+    if retry::is_transient_stream_error(&msg) {
         ClientError::ApiServerError { message: msg }
     } else {
         ClientError::Runtime { message: msg }
@@ -131,7 +131,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
 
     let worktree = tools::worktree_root(cwd.as_deref());
     let audit_log = raw_path.as_ref().map(|p| tools::audit_log_path(p));
-    let max_turns = config::max_agent_turns();
+    let max_turns = crate::config::max_agent_turns();
     let mut allowed_roots = vec![worktree];
     if let Some(ref artifact_dir) = ctx.params.artifact_dir {
         allowed_roots.push(artifact_dir.clone());

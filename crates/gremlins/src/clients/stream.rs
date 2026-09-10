@@ -98,9 +98,7 @@ pub fn flush() {
 
 /// Check if per-turn telemetry is enabled via GREMLINS_TELEMETRY env var.
 fn telemetry_enabled() -> bool {
-    std::env::var("GREMLINS_TELEMETRY")
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false)
+    crate::config::telemetry_enabled()
 }
 
 /// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.

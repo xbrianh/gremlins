@@ -5,12 +5,7 @@ pub mod error;
 pub use error::DiscoveryError;
 
 fn project_overlay_dir(project_root: &std::path::Path) -> PathBuf {
-    if let Ok(ov) = std::env::var("GREMLINS_OVERLAY_DIR") {
-        if !ov.is_empty() {
-            return PathBuf::from(ov);
-        }
-    }
-    project_root.join(crate::config::OVERLAY_DIRNAME)
+    crate::config::project_overlay_dir(project_root)
 }
 
 fn project_pipeline_dirs(project_root: &std::path::Path) -> Vec<PathBuf> {

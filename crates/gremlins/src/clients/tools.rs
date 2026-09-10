@@ -30,10 +30,7 @@ pub struct ToolContext {
 }
 
 pub fn project_root() -> PathBuf {
-    match std::env::var("GREMLINS_PROJECT_ROOT") {
-        Ok(s) if !s.is_empty() => PathBuf::from(s),
-        _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    }
+    crate::config::project_root()
 }
 
 pub fn worktree_root(cwd: Option<&Path>) -> PathBuf {
@@ -41,12 +38,7 @@ pub fn worktree_root(cwd: Option<&Path>) -> PathBuf {
 }
 
 pub fn scratch_root() -> Option<PathBuf> {
-    let path: PathBuf = std::env::var("GREMLINS_SCRATCH_DIR")
-        .ok()
-        .filter(|s| !s.is_empty())?
-        .into();
-    std::fs::create_dir_all(&path).ok()?;
-    Some(path)
+    crate::config::scratch_dir(None)
 }
 
 pub fn audit_log_path(raw_path: &Path) -> PathBuf {
@@ -188,12 +180,17 @@ fn within_worktree_lexical(p: &Path, canonical_roots: &[PathBuf]) -> bool {
 
 fn expand_user(s: &str) -> String {
     if s == "~" || s.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            if s == "~" {
-                return home;
-            }
-            return format!("{home}{}", &s[1..]);
+        let home = crate::config::home_dir();
+        let home_str = home.to_string_lossy();
+        // If home resolved to the sentinel fallback (no HOME set, no
+        // platform dir), preserve ~ literally rather than expanding to ".".
+        if home_str.is_empty() || home_str == "." {
+            return s.to_string();
         }
+        if s == "~" {
+            return home_str.into_owned();
+        }
+        return format!("{home_str}{}", &s[1..]);
     }
     s.to_string()
 }
