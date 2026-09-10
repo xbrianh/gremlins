@@ -271,7 +271,7 @@ def test_loop_patches_loop_iteration_to_state(tmp_path, make_state_dir):
 
 def test_loop_registers_artifacts_across_iterations(tmp_path):
     """register across iterations — overwrite=True ensures clean re-registration."""
-    from gremlins.stages.exec import Exec
+    from _gremlins_core.stages import Exec
 
     (tmp_path / "artifacts").mkdir(exist_ok=True)
     state = _loop_state(tmp_path)
@@ -363,7 +363,7 @@ def test_loop_iter_scoping_with_exec_isolates_iterations(tmp_path, monkeypatch):
     import pathlib
     import subprocess
 
-    from gremlins.stages.exec import Exec
+    from _gremlins_core.stages import Exec
 
     (tmp_path / "artifacts").mkdir()
     loop_state = _loop_state(tmp_path)
@@ -380,7 +380,7 @@ def test_loop_iter_scoping_with_exec_isolates_iterations(tmp_path, monkeypatch):
                     p.write_text("done")
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    monkeypatch.setattr("gremlins.stages.exec._proc.run_shell_async", controlled_shell)
+    monkeypatch.setattr("_gremlins_core.utils.proc.run_shell_async", controlled_shell)
 
     exec_stage = Exec(
         "cmd",

@@ -84,8 +84,8 @@ impl Uri {
 // --- ArtifactRegistry ---
 
 #[pyclass(name = "ArtifactRegistry", module = "_gremlins_core.artifacts")]
-struct ArtifactRegistry {
-    inner: Mutex<rust_registry::ArtifactRegistry>,
+pub(crate) struct ArtifactRegistry {
+    pub(crate) inner: Mutex<rust_registry::ArtifactRegistry>,
 }
 
 #[pymethods]
