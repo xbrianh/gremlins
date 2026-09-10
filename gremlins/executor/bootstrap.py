@@ -238,11 +238,16 @@ async def run_pipeline_bootstrap(
         return
     if bootstrap.launch_cmds:
         logger.info("running %d launch command(s)", len(bootstrap.launch_cmds))
-        # Build source values for template substitution
         values: dict[str, str] = {}
         for key, val in stage_inputs.items():
-            if val is not None and val != "":
+            if val is not None:
                 values[key] = str(val)
+        # Include all declared source keys (even empty/missing) so
+        # optional placeholders like {plan} substitute to "" not literal text.
+        if bootstrap.source is not None:
+            for key in bootstrap.source.all_sources():
+                if key not in values:
+                    values[key] = ""
         shell_cmds: list[str] = []
         for c in bootstrap.launch_cmds:
             parsed = _parse_gremlins_command(c)
@@ -256,7 +261,7 @@ async def run_pipeline_bootstrap(
                     gremlin=gremlin,
                 )
             else:
-                shell_cmds.append(substitute_bootstrap_vars(c, cwd, values))
+                shell_cmds.append(substitute_bootstrap_vars(c, cwd=cwd, values=values))
         if shell_cmds:
             await run_bootstrap(shell_cmds, cwd)
     if bootstrap.cli_out:

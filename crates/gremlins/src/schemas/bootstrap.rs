@@ -292,17 +292,24 @@ pub fn validate_source_values(
 }
 
 /// Substitute {cwd} and {key} placeholders in a command string.
+/// Values are shell-escaped (wrapped in single quotes with internal quotes escaped)
+/// so that user-controlled source values cannot inject shell metacharacters.
 pub fn substitute_bootstrap_vars(
     cmd: &str,
     cwd: &Path,
     values: &HashMap<String, String>,
 ) -> String {
-    let mut result = cmd.replace("{cwd}", &cwd.to_string_lossy());
+    let mut result = cmd.replace("{cwd}", &shell_quote(&cwd.to_string_lossy()));
     for (key, value) in values {
         let placeholder = format!("{{{}}}", key);
-        result = result.replace(&placeholder, value);
+        result = result.replace(&placeholder, &shell_quote(value));
     }
     result
+}
+
+/// Wrap in single quotes, escaping any internal single quotes.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -384,14 +391,21 @@ mod tests {
     fn test_substitute_bootstrap_vars_cwd() {
         let result =
             substitute_bootstrap_vars("echo {cwd}", Path::new("/tmp/cwd"), &HashMap::new());
-        assert_eq!(result, "echo /tmp/cwd");
+        assert_eq!(result, "echo '/tmp/cwd'");
     }
 
     #[test]
     fn test_substitute_bootstrap_vars_values() {
         let values = HashMap::from([("instructions".to_string(), "do the thing".to_string())]);
         let result =
-            substitute_bootstrap_vars("test -n '{instructions}'", Path::new("/tmp"), &values);
+            substitute_bootstrap_vars("test -n {instructions}", Path::new("/tmp"), &values);
         assert_eq!(result, "test -n 'do the thing'");
+    }
+
+    #[test]
+    fn test_substitute_bootstrap_vars_shell_escape() {
+        let values = HashMap::from([("x".to_string(), "'; rm -rf /; echo 'pwned".to_string())]);
+        let result = substitute_bootstrap_vars("echo {x}", Path::new("/tmp"), &values);
+        assert_eq!(result, "echo ''\\''; rm -rf /; echo '\\''pwned'");
     }
 }

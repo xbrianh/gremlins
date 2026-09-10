@@ -60,13 +60,13 @@ def _gremlin(tmp_path: pathlib.Path) -> MockGremlin:
     return MockGremlin(state=state)
 
 
-def test_launch_cmds_see_source_env(tmp_path: pathlib.Path) -> None:
+def test_launch_cmds_see_template_substitution(tmp_path: pathlib.Path) -> None:
     marker = tmp_path / "seen.txt"
     bootstrap = Bootstrap(
         source=InputSources(
             {"plan": InputSource(name="plan", types=["string"], optional=True)}
         ),
-        launch_cmds=[f'printf "%s" "{{plan}}" > "{marker}"'],
+        launch_cmds=[f'printf "%s" {{plan}} > "{marker}"'],
     )
     gremlin = _gremlin(tmp_path)
     assert gremlin.state is not None

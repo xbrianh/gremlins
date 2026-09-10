@@ -273,7 +273,7 @@ pub fn validate_source_values(
 }
 
 #[pyfunction]
-#[pyo3(signature = (cmd, cwd, values))]
+#[pyo3(signature = (cmd, *, cwd, values))]
 pub fn substitute_bootstrap_vars(
     cmd: String,
     cwd: PathBuf,
