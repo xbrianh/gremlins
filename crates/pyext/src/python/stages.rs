@@ -101,10 +101,13 @@ _m.Bail.__str__ = _str
 // --- Exec pyclass ---
 
 #[pyclass(name = "Exec", module = "_gremlins_core.stages", skip_from_py_object)]
-#[derive(Clone)]
 struct PyExec {
     inner: rust_exec::Exec,
     raw_dict: Option<Py<PyAny>>,
+    gremlin: Option<Py<PyAny>>,
+    client: Option<Py<PyAny>>,
+    client_explicit: bool,
+    skip_if_exists: String,
 }
 
 #[pymethods]
@@ -126,6 +129,10 @@ impl PyExec {
                 bind_map: bind_map.unwrap_or_default(),
             },
             raw_dict: None,
+            gremlin: None,
+            client: None,
+            client_explicit: false,
+            skip_if_exists: String::new(),
         })
     }
 
@@ -187,6 +194,10 @@ impl PyExec {
                 bind_map: raw_bind,
             },
             raw_dict: None,
+            gremlin: None,
+            client: None,
+            client_explicit: false,
+            skip_if_exists: String::new(),
         })
     }
 
@@ -226,13 +237,23 @@ impl PyExec {
     }
 
     #[getter]
-    fn raw_dict(&self) -> Option<Py<PyAny>> {
-        self.raw_dict.clone()
+    fn raw_dict(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.raw_dict.as_ref().map(|p| p.clone_ref(py))
     }
 
     #[setter]
     fn set_raw_dict(&mut self, value: &Bound<'_, PyAny>) {
         self.raw_dict = Some(value.clone().unbind());
+    }
+
+    #[getter]
+    fn gremlin(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.gremlin.as_ref().map(|p| p.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_gremlin(&mut self, value: &Bound<'_, PyAny>) {
+        self.gremlin = Some(value.clone().unbind());
     }
 
     #[getter]
@@ -246,28 +267,34 @@ impl PyExec {
     }
 
     #[getter]
-    fn client(&self) -> Option<Py<PyAny>> {
-        None
+    fn client(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.client.as_ref().map(|p| p.clone_ref(py))
     }
 
     #[setter]
-    fn set_client(&mut self, _value: Option<&Bound<'_, PyAny>>) {}
+    fn set_client(&mut self, value: Option<&Bound<'_, PyAny>>) {
+        self.client = value.map(|v| v.clone().unbind());
+    }
 
     #[getter]
     fn client_explicit(&self) -> bool {
-        false
+        self.client_explicit
     }
 
     #[setter]
-    fn set_client_explicit(&mut self, _value: bool) {}
+    fn set_client_explicit(&mut self, value: bool) {
+        self.client_explicit = value;
+    }
 
     #[getter]
-    fn skip_if_exists(&self) -> String {
-        String::new()
+    fn skip_if_exists(&self) -> &str {
+        &self.skip_if_exists
     }
 
     #[setter]
-    fn set_skip_if_exists(&mut self, _value: String) {}
+    fn set_skip_if_exists(&mut self, value: String) {
+        self.skip_if_exists = value;
+    }
 
     #[pyo3(signature = (text, state, extra = None))]
     fn substitute_vars(
@@ -320,21 +347,19 @@ impl PyExec {
         };
         let mut prepared = match prepared_result {
             Ok(p) => p,
+            Err(rust_exec::ExecError::Resolve {
+                source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
+                ..
+            }) => {
+                let exc_type = py
+                    .import("_gremlins_core.artifacts")?
+                    .getattr("MissingArtifact")?;
+                let args = (key.clone(),);
+                let exc = exc_type.call1(args)?;
+                return Err(PyErr::from_value(exc));
+            }
             Err(e) => {
-                return Err(match &e {
-                    rust_exec::ExecError::Resolve { source, .. } => match source {
-                        gremlins::artifacts::resolve::ResolveError::MissingArtifact(key) => {
-                            let exc_type = py
-                                .import("_gremlins_core.artifacts")?
-                                .getattr("MissingArtifact")?;
-                            let args = (key.clone(),);
-                            let exc = exc_type.call1(args)?;
-                            PyErr::from_value(exc)
-                        }
-                        _ => pyo3::exceptions::PyValueError::new_err(e.to_string()),
-                    },
-                    _ => pyo3::exceptions::PyValueError::new_err(e.to_string()),
-                });
+                return Err(pyo3::exceptions::PyValueError::new_err(e.to_string()));
             }
         };
         prepared.cwd = cwd;
@@ -374,7 +399,7 @@ impl PyExec {
         let asyncio_mod = py.import("asyncio")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("result", done_obj)?;
-        Ok(asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs))?)
+        asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs))
     }
 }
 
