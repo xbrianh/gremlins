@@ -11,7 +11,7 @@ pub const STAGE_TYPES: &[(&str, &str, &str)] = &[
     ("loop", "gremlins.stages.loop", "LoopStage"),
     ("parallel", "gremlins.stages.parallel", "ParallelStage"),
     ("sequence", "gremlins.stages.sequence", "SequenceStage"),
-    ("exec", "gremlins.stages.exec", "Exec"),
+    ("exec", "_gremlins_core.stages", "Exec"),
 ];
 
 fn lookup_stage_class(

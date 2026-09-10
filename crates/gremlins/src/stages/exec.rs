@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
 use thiserror::Error;
 
 use crate::artifacts::registry::ArtifactRegistry;
-use crate::artifacts::resolve::resolve_interpolation_map;
+use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_shell_async, ProcError, ProcResult};
 use crate::stages::constants::BAIL_KEY;
@@ -23,6 +23,12 @@ pub struct Exec {
 
 #[derive(Error, Debug)]
 pub enum ExecError {
+    #[error("exec {name}: {source}")]
+    Resolve {
+        name: String,
+        #[source]
+        source: ResolveError,
+    },
     #[error("exec {name}: {detail}")]
     Generic { name: String, detail: String },
     #[error("exec {name}: exited {rc}")]
@@ -35,6 +41,15 @@ pub enum ExecError {
     MissingArtifact { name: String, uri: String },
     #[error(transparent)]
     Proc(#[from] ProcError),
+}
+
+impl From<ResolveError> for ExecError {
+    fn from(source: ResolveError) -> Self {
+        ExecError::Resolve {
+            name: String::new(),
+            source,
+        }
+    }
 }
 
 pub fn is_bail_uri(uri_str: &str, loop_iter: &str) -> bool {
@@ -63,7 +78,6 @@ pub fn substitute_vars(
     subs.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
     subs.extend(framework_subs.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-    // Add hyphen-normalized variants for underscore keys
     let hyphenated: Vec<(String, String)> = subs
         .iter()
         .filter_map(|(k, v)| {
@@ -80,7 +94,6 @@ pub fn substitute_vars(
 
     VAR_SUB_RE
         .replace_all(text, |caps: &regex::Captures| {
-            // Check if preceded by '$' (manual lookbehind since Rust regex doesn't support it)
             let start = caps.get(0).unwrap().start();
             if start > 0 && text.as_bytes()[start - 1] == b'$' {
                 return caps.get(0).unwrap().as_str().to_string();
@@ -111,29 +124,54 @@ fn string_options(options: &HashMap<String, serde_json::Value>) -> HashMap<Strin
         .collect()
 }
 
-pub async fn run_exec_stage(
+// --- Phased execution model ---
+
+pub struct ShellResult {
+    pub output: String,
+    pub rc: i32,
+    pub bail_triggered: bool,
+}
+
+#[derive(Clone)]
+pub struct ExecPrepared {
+    pub name: String,
+    pub str_opts: HashMap<String, String>,
+    pub interpolation_map: HashMap<String, String>,
+    /// bind key (trimmed, no `?`) → registered filesystem path, for command substitution.
+    pub bind_paths: HashMap<String, String>,
+    /// (bind key, substituted URI, optional) for post-run verification.
+    pub bind_uris: Vec<(String, String, bool)>,
+    pub cmds: Vec<String>,
+    pub cwd: PathBuf,
+    pub artifact_dir: PathBuf,
+    pub state_dir: PathBuf,
+    pub timeout: Option<f64>,
+    pub loop_iter: String,
+}
+
+/// Phase 1: resolve interpolation, register bind URIs, substitute commands.
+/// Requires `&mut ArtifactRegistry`. Returns a fully-prepared struct that
+/// can be passed to `run_shell` and `verify_exec` without further registry
+/// mutation.
+pub fn prepare_exec(
     exec: &Exec,
     artifacts: &mut ArtifactRegistry,
     loop_iter: &str,
-    cwd: &Path,
-    artifact_dir: &Path,
-    state_dir: &Path,
     framework_subs: &HashMap<String, String>,
-) -> Result<ProcResult, ExecError> {
+) -> Result<ExecPrepared, ExecError> {
     let name = &exec.name;
     let str_opts = string_options(&exec.options);
 
-    // Resolve interpolation vars
     let interpolation_map =
         resolve_interpolation_map(artifacts, &exec.interpolation_map, loop_iter).map_err(|e| {
-            ExecError::Generic {
+            ExecError::Resolve {
                 name: name.clone(),
-                detail: e.to_string(),
+                source: e,
             }
         })?;
 
-    // Register bind URIs and collect output paths
     let mut bind_paths: HashMap<String, String> = HashMap::new();
+    let mut bind_uris: Vec<(String, String, bool)> = Vec::new();
     for (raw_key, raw_uri_str) in &exec.bind_map {
         let k = substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
         let optional = k.ends_with('?');
@@ -153,11 +191,8 @@ pub async fn run_exec_stage(
                 name: name.clone(),
                 detail: e.to_string(),
             })?;
-        if optional {
-            bind_paths.insert(format!("{key}?"), path);
-        } else {
-            bind_paths.insert(key, path);
-        }
+        bind_paths.insert(key.clone(), path);
+        bind_uris.push((key, uri_str, optional));
     }
 
     // Merge interpolation_map and bind_paths (bind shadows interpolation)
@@ -167,7 +202,6 @@ pub async fn run_exec_stage(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    // Read cmds, filter empties, substitute vars
     let raw_cmds: Vec<String> = exec
         .options
         .get("cmds")
@@ -187,99 +221,144 @@ pub async fn run_exec_stage(
 
     let timeout: Option<f64> = exec.options.get("timeout").and_then(|v| v.as_f64());
 
-    log::info!(
-        "exec {name}: entering stage, {} command(s), timeout={}, cwd={}",
-        cmds.len(),
-        timeout
-            .map(|t| format!("{t}s"))
-            .unwrap_or_else(|| "none".to_string()),
-        cwd.display(),
+    Ok(ExecPrepared {
+        name: name.clone(),
+        str_opts,
+        interpolation_map,
+        bind_paths,
+        bind_uris,
+        cmds,
+        cwd: PathBuf::new(),
+        artifact_dir: PathBuf::new(),
+        state_dir: PathBuf::new(),
+        timeout,
+        loop_iter: loop_iter.to_string(),
+    })
+}
+
+/// Phase 2: run the shell commands. Uses only the prepared data; no registry access.
+pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError> {
+    let name = &prepared.name;
+
+    if prepared.cmds.is_empty() {
+        return Ok(ShellResult {
+            output: String::new(),
+            rc: 0,
+            bail_triggered: false,
+        });
+    }
+
+    let joined = prepared.cmds.join(" && ");
+    let mut env = HashMap::new();
+    env.insert(
+        "GREMLINS_ARTIFACT_DIR".to_string(),
+        prepared.artifact_dir.to_string_lossy().to_string(),
     );
 
-    let (shell_output, shell_rc, bail_triggered) = if cmds.is_empty() {
-        (String::new(), 0, false)
+    let result =
+        run_shell_async(&joined, Some(&prepared.cwd), Some(&env), prepared.timeout).await?;
+
+    let raw_output = {
+        let mut buf = result.stdout.clone();
+        buf.extend_from_slice(&result.stderr);
+        buf
+    };
+    let raw_output_str = String::from_utf8_lossy(&raw_output).to_string();
+    let shell_output = raw_output_str.trim().to_string();
+    let shell_rc = result.returncode;
+
+    let log_path = prepared.state_dir.join(format!("exec-{}.log", name));
+    let log_content = if raw_output_str.is_empty() {
+        "(no output)\n".to_string()
     } else {
-        let joined = cmds.join(" && ");
-        let mut env = HashMap::new();
-        env.insert(
-            "GREMLINS_ARTIFACT_DIR".to_string(),
-            artifact_dir.to_string_lossy().to_string(),
+        raw_output_str.clone()
+    };
+    if let Err(e) = std::fs::write(&log_path, &log_content) {
+        log::warn!(
+            "exec {name}: failed to write log to {}: {e}",
+            log_path.display()
         );
+    }
 
-        let result = run_shell_async(&joined, Some(cwd), Some(&env), timeout).await?;
+    log::info!(
+        "exec {name}: done rc={shell_rc} output_len={}",
+        raw_output_str.len(),
+    );
 
-        let raw_output = {
-            let mut buf = result.stdout.clone();
-            buf.extend_from_slice(&result.stderr);
-            buf
-        };
-        let raw_output_str = String::from_utf8_lossy(&raw_output).to_string();
-        let shell_output = raw_output_str.trim().to_string();
-        let shell_rc = result.returncode;
-
-        // Write log
-        let log_path = state_dir.join(format!("exec-{name}.log"));
-        let log_content = if raw_output_str.is_empty() {
-            "(no output)\n".to_string()
+    // Bail detection uses the fully-substituted bind URIs.
+    let bail_triggered = if shell_rc != 0 {
+        if prepared
+            .bind_uris
+            .iter()
+            .any(|(_, uri_str, _)| is_bail_uri(uri_str, &prepared.loop_iter))
+        {
+            true
         } else {
-            raw_output_str.clone()
-        };
-        if let Err(e) = std::fs::write(&log_path, &log_content) {
-            log::warn!(
-                "exec {name}: failed to write log to {}: {e}",
-                log_path.display()
-            );
+            return Err(ExecError::NonZeroExit {
+                name: name.clone(),
+                rc: shell_rc,
+                output: Some(shell_output.clone()),
+            });
         }
-
-        log::info!(
-            "exec {name}: done rc={shell_rc} output_len={}",
-            raw_output_str.len(),
-        );
-
-        let bail_triggered = if shell_rc != 0 {
-            if exec.bind_map.values().any(|v| is_bail_uri(v, loop_iter)) {
-                true
-            } else {
-                return Err(ExecError::NonZeroExit {
-                    name: name.clone(),
-                    rc: shell_rc,
-                    output: Some(shell_output.clone()),
-                });
-            }
-        } else {
-            false
-        };
-
-        (shell_output, shell_rc, bail_triggered)
+    } else {
+        false
     };
 
-    // Post-command verification
-    for (raw_key, raw_uri_str) in &exec.bind_map {
-        let k = substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
-        let optional = k.ends_with('?');
-        let _key = k.trim_end_matches('?').to_string();
-        let mut uri_str =
-            substitute_vars(raw_uri_str, &str_opts, &interpolation_map, framework_subs);
-        if !loop_iter.is_empty() {
-            uri_str = uri_str.replace("{loop_iter}", loop_iter);
-        }
-        if is_bail_uri(&uri_str, loop_iter) && !bail_triggered {
-            continue;
-        }
-        if !artifacts.exists(&uri_str) {
-            if optional {
+    Ok(ShellResult {
+        output: shell_output,
+        rc: shell_rc,
+        bail_triggered,
+    })
+}
+
+/// Phase 3: verify that expected artifacts exist on disk.
+/// Uses `&ArtifactRegistry` (read-only).
+pub fn verify_exec(
+    prepared: &ExecPrepared,
+    artifacts: &ArtifactRegistry,
+    shell_result: &ShellResult,
+) -> Result<(), ExecError> {
+    let name = &prepared.name;
+
+    for (_key, uri_str, optional) in &prepared.bind_uris {
+        if !artifacts.exists(uri_str) {
+            if *optional {
+                continue;
+            }
+            if is_bail_uri(uri_str, &prepared.loop_iter) && shell_result.bail_triggered {
                 continue;
             }
             return Err(ExecError::MissingArtifact {
                 name: name.clone(),
-                uri: uri_str,
+                uri: uri_str.clone(),
             });
         }
     }
 
+    Ok(())
+}
+
+/// Full pipeline: prepare → run_shell → verify.
+pub async fn run_exec_stage(
+    exec: &Exec,
+    artifacts: &mut ArtifactRegistry,
+    loop_iter: &str,
+    cwd: &Path,
+    artifact_dir: &Path,
+    state_dir: &Path,
+    framework_subs: &HashMap<String, String>,
+) -> Result<ProcResult, ExecError> {
+    let mut prepared = prepare_exec(exec, artifacts, loop_iter, framework_subs)?;
+    prepared.cwd = cwd.to_path_buf();
+    prepared.artifact_dir = artifact_dir.to_path_buf();
+    prepared.state_dir = state_dir.to_path_buf();
+
+    let shell_result = run_shell(&prepared).await?;
+    verify_exec(&prepared, artifacts, &shell_result)?;
+
     Ok(ProcResult {
-        returncode: shell_rc,
-        stdout: shell_output.into_bytes(),
+        returncode: shell_result.rc,
+        stdout: shell_result.output.into_bytes(),
         stderr: Vec::new(),
     })
 }
@@ -360,12 +439,10 @@ mod tests {
 
     #[test]
     fn test_substitute_vars_string_opts() {
-        // String options have lowest priority
         let opts = HashMap::from([("foo".to_string(), "opt".to_string())]);
         let extra = HashMap::from([("foo".to_string(), "extra".to_string())]);
         let fw = HashMap::new();
         let result = substitute_vars("{foo}", &opts, &extra, &fw);
-        // Extra shadows opts
         assert_eq!(result, "extra");
     }
 
@@ -447,15 +524,19 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
         let mut registry = ArtifactRegistry::new(artifact_dir.clone());
 
-        let bail_file = artifact_dir.join("bail");
-        fs::write(&bail_file, "bail data").unwrap();
-        registry
-            .register(&Uri::parse("artifact://bail").unwrap(), true)
-            .unwrap();
+        // The command writes the bail file before bailing, so the
+        // post-command verification sees the artifact on disk.
+        let bail_path = artifact_dir.join("bail");
 
         let exec = Exec {
             name: "test".to_string(),
-            options: HashMap::from([("cmds".to_string(), serde_json::json!(["exit 2"]))]),
+            options: HashMap::from([(
+                "cmds".to_string(),
+                serde_json::json!([
+                    format!("echo 'bail data' > {}", bail_path.display()),
+                    "exit 2",
+                ]),
+            )]),
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([("bail".to_string(), BAIL_KEY.to_string())]),
         };

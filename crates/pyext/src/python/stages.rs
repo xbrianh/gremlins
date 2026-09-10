@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use gremlins::artifacts::resolve::resolve_interpolation_map;
-use gremlins::artifacts::uri::Uri;
-use gremlins::core::proc::run_shell_async;
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec::{self as rust_exec, substitute_vars};
 use gremlins::stages::outcome::Done as RustDone;
@@ -107,6 +104,7 @@ _m.Bail.__str__ = _str
 #[derive(Clone)]
 struct PyExec {
     inner: rust_exec::Exec,
+    raw_dict: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -127,6 +125,7 @@ impl PyExec {
                 interpolation_map: interpolation_map.unwrap_or_default(),
                 bind_map: bind_map.unwrap_or_default(),
             },
+            raw_dict: None,
         })
     }
 
@@ -187,6 +186,7 @@ impl PyExec {
                 interpolation_map: raw_interpolation,
                 bind_map: raw_bind,
             },
+            raw_dict: None,
         })
     }
 
@@ -226,9 +226,48 @@ impl PyExec {
     }
 
     #[getter]
-    fn skip_if_exists(&self) -> &str {
-        ""
+    fn raw_dict(&self) -> Option<Py<PyAny>> {
+        self.raw_dict.clone()
     }
+
+    #[setter]
+    fn set_raw_dict(&mut self, value: &Bound<'_, PyAny>) {
+        self.raw_dict = Some(value.clone().unbind());
+    }
+
+    #[getter]
+    fn path(&self) -> String {
+        String::new()
+    }
+
+    #[setter]
+    fn set_path(&mut self, _value: &str) {
+        // path is set by composite stages; we don't need to store it
+    }
+
+    #[getter]
+    fn client(&self) -> Option<Py<PyAny>> {
+        None
+    }
+
+    #[setter]
+    fn set_client(&mut self, _value: Option<&Bound<'_, PyAny>>) {}
+
+    #[getter]
+    fn client_explicit(&self) -> bool {
+        false
+    }
+
+    #[setter]
+    fn set_client_explicit(&mut self, _value: bool) {}
+
+    #[getter]
+    fn skip_if_exists(&self) -> String {
+        String::new()
+    }
+
+    #[setter]
+    fn set_skip_if_exists(&mut self, _value: String) {}
 
     #[pyo3(signature = (text, state, extra = None))]
     fn substitute_vars(
@@ -262,7 +301,7 @@ impl PyExec {
 
         // Extract all data from Python objects while holding GIL.
         let artifacts_py: Py<PyAny> = state_obj.getattr("artifacts")?.unbind();
-        let loop_iter: String = state_obj.getattr("loop_iter")?.extract()?;
+        let loop_iter_str: String = state_obj.getattr("loop_iter")?.extract()?;
         let cwd: PathBuf = state_obj.getattr("cwd")?.extract()?;
         let artifact_dir: PathBuf = state_obj.getattr("artifact_dir")?.extract()?;
         let state_dir: PathBuf = gremlin.getattr("state_dir")?.extract()?;
@@ -271,153 +310,71 @@ impl PyExec {
             .extract()?;
 
         let name = exec.name.clone();
-        let str_opts = string_options(&exec.options);
 
-        // Resolve interpolation vars (needs GIL for registry)
-        let interpolation_map = {
-            let arts = artifacts_py.bind(py);
-            let arts_inner = arts.extract::<PyRef<'_, ArtifactRegistry>>()?;
-            let inner = arts_inner.inner.lock().unwrap();
-            resolve_interpolation_map(&inner, &exec.interpolation_map, &loop_iter)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("exec {name}: {e}")))?
-        };
-
-        // Register bind URIs (needs GIL for registry)
-        let mut bind_paths: HashMap<String, String> = HashMap::new();
-        {
+        // Phase 1: prepare (needs &mut ArtifactRegistry)
+        let prepared_result = {
             let arts = artifacts_py.bind(py);
             let arts_inner = arts.extract::<PyRef<'_, ArtifactRegistry>>()?;
             let mut inner = arts_inner.inner.lock().unwrap();
-            for (raw_key, raw_uri_str) in &exec.bind_map {
-                let key = substitute_vars(raw_key, &str_opts, &interpolation_map, &fw);
-                let key = key.trim_end_matches('?').to_string();
-                let mut uri_str = substitute_vars(raw_uri_str, &str_opts, &interpolation_map, &fw);
-                if !loop_iter.is_empty() {
-                    uri_str = uri_str.replace("{loop_iter}", &loop_iter);
-                }
-                let uri = Uri::parse(&uri_str).map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "exec {name}: invalid URI: {e}"
-                    ))
-                })?;
-                let path = inner.register(&uri, true).map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!("exec {name}: {e}"))
-                })?;
-                bind_paths.insert(key, path);
-            }
-        }
-
-        // Build substitution map
-        let subst_vars: HashMap<String, String> = interpolation_map
-            .iter()
-            .chain(bind_paths.iter())
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        // Read cmds and substitute
-        let raw_cmds: Vec<String> = exec
-            .options
-            .get("cmds")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let cmds: Vec<String> = raw_cmds
-            .iter()
-            .map(|c| substitute_vars(c, &str_opts, &subst_vars, &fw))
-            .collect();
-
-        let timeout: Option<f64> = exec.options.get("timeout").and_then(|v| v.as_f64());
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (_shell_output, _shell_rc, bail_triggered) = if cmds.is_empty() {
-                (String::new(), 0, false)
-            } else {
-                let joined = cmds.join(" && ");
-                let mut env = HashMap::new();
-                env.insert(
-                    "GREMLINS_ARTIFACT_DIR".to_string(),
-                    artifact_dir.to_string_lossy().to_string(),
-                );
-
-                let result = run_shell_async(&joined, Some(&cwd), Some(&env), timeout)
-                    .await
-                    .map_err(|e| {
-                        pyo3::exceptions::PyValueError::new_err(format!("exec {name}: {e}"))
-                    })?;
-
-                let raw_output = {
-                    let mut buf = result.stdout.clone();
-                    buf.extend_from_slice(&result.stderr);
-                    buf
-                };
-                let raw_output_str = String::from_utf8_lossy(&raw_output).to_string();
-                let shell_output = raw_output_str.trim().to_string();
-                let shell_rc = result.returncode;
-
-                let log_path = state_dir.join(format!("exec-{name}.log"));
-                let log_content = if raw_output_str.is_empty() {
-                    "(no output)\n".to_string()
-                } else {
-                    raw_output_str.clone()
-                };
-                let _ = std::fs::write(&log_path, &log_content);
-
-                let bail_triggered = if shell_rc != 0 {
-                    if exec
-                        .bind_map
-                        .values()
-                        .any(|v| rust_exec::is_bail_uri(v, &loop_iter))
-                    {
-                        true
-                    } else {
-                        return Err(Bail::new_err(format!("exec {name}: exited {shell_rc}")));
-                    }
-                } else {
-                    false
-                };
-
-                (shell_output, shell_rc, bail_triggered)
-            };
-
-            // Post-command verification: re-acquire GIL, return Py<PyAny> (Send)
-            let result: PyResult<Py<PyAny>> = pyo3::Python::attach(|py| {
-                let arts = artifacts_py.bind(py);
-                let arts_inner = arts.extract::<PyRef<'_, ArtifactRegistry>>()?;
-                let inner = arts_inner.inner.lock().unwrap();
-
-                for (raw_key, raw_uri_str) in &exec.bind_map {
-                    let key = substitute_vars(raw_key, &str_opts, &interpolation_map, &fw);
-                    let optional = key.ends_with('?');
-                    let _key = key.trim_end_matches('?').to_string();
-                    let mut uri_str =
-                        substitute_vars(raw_uri_str, &str_opts, &interpolation_map, &fw);
-                    if !loop_iter.is_empty() {
-                        uri_str = uri_str.replace("{loop_iter}", &loop_iter);
-                    }
-                    if rust_exec::is_bail_uri(&uri_str, &loop_iter) && !bail_triggered {
-                        continue;
-                    }
-                    if !inner.exists(&uri_str) {
-                        if optional {
-                            continue;
+            rust_exec::prepare_exec(&exec, &mut inner, &loop_iter_str, &fw)
+        };
+        let mut prepared = match prepared_result {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(match &e {
+                    rust_exec::ExecError::Resolve { source, .. } => match source {
+                        gremlins::artifacts::resolve::ResolveError::MissingArtifact(key) => {
+                            let exc_type = py
+                                .import("_gremlins_core.artifacts")?
+                                .getattr("MissingArtifact")?;
+                            let args = (key.clone(),);
+                            let exc = exc_type.call1(args)?;
+                            PyErr::from_value(exc)
                         }
-                        return Err(Bail::new_err(format!(
-                            "exec {name}: artifact {uri_str} was not produced"
-                        )));
-                    }
-                }
+                        _ => pyo3::exceptions::PyValueError::new_err(e.to_string()),
+                    },
+                    _ => pyo3::exceptions::PyValueError::new_err(e.to_string()),
+                });
+            }
+        };
+        prepared.cwd = cwd;
+        prepared.artifact_dir = artifact_dir;
+        prepared.state_dir = state_dir;
 
-                let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
-                Ok(done_obj)
-            });
-            result
-        })
+        let is_empty_cmds = prepared.cmds.is_empty();
+
+        // Run the exec stage synchronously via a temporary tokio runtime,
+        // then wrap the result in a Python coroutine for asyncio.run().
+        // This avoids the "no running event loop" error from future_into_py
+        // when called outside a running Python event loop.
+        let rt = tokio::runtime::Runtime::new().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "exec {name}: failed to create tokio runtime: {e}"
+            ))
+        })?;
+        let shell_result = if is_empty_cmds {
+            rust_exec::ShellResult {
+                output: String::new(),
+                rc: 0,
+                bail_triggered: false,
+            }
+        } else {
+            rt.block_on(rust_exec::run_shell(&prepared))
+                .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?
+        };
+
+        let arts = artifacts_py.bind(py);
+        let arts_inner = arts.extract::<PyRef<'_, ArtifactRegistry>>()?;
+        let inner = arts_inner.inner.lock().unwrap();
+        rust_exec::verify_exec(&prepared, &inner, &shell_result)
+            .map_err(|e| Bail::new_err(format!("exec {name}: {e}")))?;
+
+        let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
+        // Wrap in a coroutine so asyncio.run() can await it.
+        let asyncio_mod = py.import("asyncio")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("result", done_obj)?;
+        Ok(asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs))?)
     }
 }
 

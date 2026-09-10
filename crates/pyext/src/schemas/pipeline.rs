@@ -185,7 +185,7 @@ impl Pipeline {
                 let land_dict: &Bound<'_, PyDict> = v.cast().map_err(|_| {
                     pyo3::exceptions::PyValueError::new_err("'land' must be a mapping")
                 })?;
-                let exec_cls = py.import("gremlins.stages.exec")?.getattr("Exec")?;
+                let exec_cls = py.import("_gremlins_core.stages")?.getattr("Exec")?;
                 let land_stage_dict = PyDict::new(py);
                 land_stage_dict.set_item("name", "land")?;
                 for (k, v) in land_dict.iter() {
