@@ -160,8 +160,19 @@ pub fn within_worktree(p: &Path, roots: &[PathBuf]) -> bool {
 }
 
 fn roots_suffix(roots: &[PathBuf]) -> String {
-    let mut parts: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    // Normalized, to match the paths the containment checks actually compare
+    // against — raw roots read misleadingly under symlinked ancestors
+    // (/var -> /private/var).
+    let mut parts: Vec<String> = roots
+        .iter()
+        .filter_map(|r| normalize_path(r))
+        .map(|r| r.display().to_string())
+        .collect();
     parts.sort();
+    parts.dedup();
+    if parts.is_empty() {
+        return String::new();
+    }
     format!("\n→ sandbox roots: {}", parts.join(", "))
 }
 
