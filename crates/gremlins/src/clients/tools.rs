@@ -2497,9 +2497,8 @@ mod tests {
     #[tokio::test]
     async fn parallel_invoke_truncates_long_output() {
         let dir = tmp();
-        let subagent_fn: SubagentFn = Arc::new(|_task, _cwd| {
-            Box::pin(async move { "x".repeat(PARALLEL_OUTPUT_LIMIT + 10) })
-        });
+        let subagent_fn: SubagentFn =
+            Arc::new(|_task, _cwd| Box::pin(async move { "x".repeat(PARALLEL_OUTPUT_LIMIT + 10) }));
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
