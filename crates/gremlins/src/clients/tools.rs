@@ -2703,6 +2703,79 @@ mod tests {
         assert!(err.contains("outside sandbox"));
     }
 
+    // Independent of `normalize_path`: for existing dirs it must agree with
+    // plain canonicalization, so tests comparing against it are not tautological.
+    fn canon(p: &Path) -> String {
+        std::fs::canonicalize(p).unwrap().display().to_string()
+    }
+
+    fn sorted_canon(roots: &[PathBuf]) -> String {
+        let mut v: Vec<String> = roots.iter().map(|r| canon(r)).collect();
+        v.sort();
+        v.join(", ")
+    }
+
+    #[test]
+    fn roots_suffix_sorted_and_empty() {
+        // Creation order is deliberately `b`, `a`; the names make `a` sort
+        // first, so this fails if the sort is dropped.
+        let parent = tmp();
+        let (a, b) = (parent.join("aaa"), parent.join("bbb"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        assert_eq!(
+            roots_suffix(&[b.clone(), a.clone()]),
+            format!("\n→ sandbox roots: {}, {}", canon(&a), canon(&b))
+        );
+        assert_eq!(roots_suffix(&[]), "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn roots_suffix_dedups_symlink_alias() {
+        let dir = tmp();
+        let link = tmp().join("alias");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert_eq!(
+            roots_suffix(&[dir.clone(), link]),
+            format!("\n→ sandbox roots: {}", canon(&dir))
+        );
+    }
+
+    #[test]
+    fn enforce_denial_appends_sorted_roots() {
+        let worktree = tmp();
+        let scratch = tmp();
+        let outside = tmp().join("bad.txt");
+        let err = enforce(
+            &[worktree.clone(), scratch.clone()],
+            outside.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            err,
+            format!(
+                "Error: path outside sandbox: {}\n→ sandbox roots: {}",
+                outside.display(),
+                sorted_canon(&[worktree, scratch])
+            )
+        );
+    }
+
+    #[test]
+    fn bash_check_denial_appends_sorted_roots() {
+        let worktree = tmp();
+        let err = bash_check(std::slice::from_ref(&worktree), "cat /etc/passwd", None).unwrap();
+        assert_eq!(
+            err,
+            format!(
+                "Error: path outside sandbox (from /etc/passwd): /etc/passwd\n→ sandbox roots: {}",
+                canon(&worktree)
+            )
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn multi_root_bash_check_allows_scratch_path() {
