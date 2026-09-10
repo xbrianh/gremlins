@@ -26,7 +26,7 @@ _CHAIN_YAML = textwrap.dedent("""\
       - name: chain
         type: loop
         max-iterations: 1
-        stop_when_exists: done
+        stop_when_exists: "{loop_iter}/done"
         body:
           - { name: handoff, type: gremlins:handoff }
 """)
@@ -51,15 +51,18 @@ class _SignalClient(FakeClient):
         ad = re.escape(str(self._artifact_dir))
         if label == "handoff":
             for fname in ("signal.json", "child-plan.md"):
-                # Find the artifact path in the prompt (non-slugged: <artifact_dir>/<fname>)
-                m = re.search(ad + re.escape("/" + fname) + r"\b", prompt) or re.search(
+                # Scoped form: <artifact_dir>/<loop_iter>/<fname>
+                m = re.search(ad + r"/[0-9]+" + re.escape("/" + fname) + r"\b", prompt)
+                if not m:
+                    # Non-scoped: <artifact_dir>/<fname>
+                    m = re.search(ad + re.escape("/" + fname) + r"\b", prompt)
+                if not m:
                     # legacy slugged form: <artifact_dir>/<hex>_<fname>
-                    ad + r"/[a-f0-9]+" + re.escape("_" + fname),
-                    prompt,
-                )
+                    m = re.search(ad + r"/[a-f0-9]+" + re.escape("_" + fname), prompt)
                 if m:
                     target = pathlib.Path(m.group(0))
                     if not target.exists():
+                        target.parent.mkdir(parents=True, exist_ok=True)
                         if fname == "signal.json":
                             target.write_text(json.dumps(self._signal))
                         else:
@@ -68,10 +71,17 @@ class _SignalClient(FakeClient):
                                 target.write_text(src.read_text(encoding="utf-8"))
         elif label == "sanitize":
             m = re.search(
-                ad + re.escape("/rolling-plan.md") + r"\b", prompt
-            ) or re.search(ad + r"/[a-f0-9]+" + re.escape("_rolling-plan.md"), prompt)
+                ad + r"/[0-9]+" + re.escape("/rolling-plan.md") + r"\b", prompt
+            )
+            if not m:
+                m = re.search(
+                    ad + re.escape("/rolling-plan.md") + r"\b", prompt
+                )
+            if not m:
+                m = re.search(ad + r"/[a-f0-9]+" + re.escape("_rolling-plan.md"), prompt)
             if m:
                 target = pathlib.Path(m.group(0))
+                target.parent.mkdir(parents=True, exist_ok=True)
                 pre = self._artifact_dir / "rolling-plan-pre-sanitize.md"
                 if pre.exists():
                     target.write_text(pre.read_text(encoding="utf-8"))
@@ -122,7 +132,7 @@ def test_boss_chain_done_exits_loop(sandbox, tmp_path):
     }
     gremlin, loop = _make_loop(tmp_path, sandbox.project, signal)
     asyncio.run(loop.run(gremlin))
-    assert gremlin.state.artifacts.exists("artifact://done")
+    assert gremlin.state.artifacts.exists("artifact://1/done")
 
 
 def test_boss_next_plan_needs_fix_and_plan_swap(sandbox, tmp_path):
@@ -152,4 +162,4 @@ def test_boss_bail_raises_with_reason(sandbox, tmp_path):
     gremlin, loop = _make_loop(tmp_path, sandbox.project, signal)
     with pytest.raises(Bail, match="bad state"):
         asyncio.run(loop.run(gremlin))
-    assert gremlin.state.artifacts.exists("artifact://bail")
+    assert gremlin.state.artifacts.exists("artifact://1/bail")

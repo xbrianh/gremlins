@@ -704,10 +704,10 @@ mod tests {
     }
 
     #[test]
-    fn test_unresolved_launch_cmds_3arg_form() {
-        // Legacy 3-arg form where URI is the third argument
+    fn test_unresolved_launch_cmds_2arg_form() {
+        // 2-arg form: (uri, source_key)
         let launch_cmds =
-            vec!["gremlins:bind_artifact(plan, plan, artifact://session/plan.md)".to_string()];
+            vec!["gremlins:bind_artifact(\"artifact://session/plan.md\", plan)".to_string()];
         let stages = vec![stage_with_interp(
             "consumer",
             "agent",

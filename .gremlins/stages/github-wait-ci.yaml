@@ -82,7 +82,7 @@ stages:
 
       - name: capture-head
         type: exec
-        skip_if_exists: "artifact://{loop_iter}/done"
+        skip_if_exists: "artifact://fix-head"
         bind:
           fix_head: "artifact://fix-head"
         options:
