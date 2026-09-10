@@ -142,6 +142,92 @@ IMPL_EVENTS = [
 # ---------------------------------------------------------------------------
 
 
+def _try_handle_known_gh_cmd(cmd, cmd_resolved, fake_pr_number="101"):
+    """Intercept known gh/shell commands for GH pipeline smoke tests.
+
+    Returns a CompletedProcess if the command was handled, or None to
+    let it fall through to the real implementation.
+    """
+    if not isinstance(cmd, str):
+        return None
+    import subprocess as _sp
+
+    # Handle custom gremlins scripts that aren't gh subcommands.
+    if "gh_resolve_plan_source" in cmd:
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    if "gh_publish_issue" in cmd:
+        # Write plan-issue-number.txt so verify_produced passes.
+        m_pub = re.search(r'"([^"]+/plan-issue-number\.txt)"', cmd_resolved)
+        if m_pub:
+            p = pathlib.Path(m_pub.group(1))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("42\n")
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    if cmd.lstrip().startswith("gh "):
+        # If gh repo view, write repo.txt so discover stage passes
+        if "gh repo view" in cmd:
+            m_repo = re.search(r'"([^"]+/repo\.txt)"', cmd_resolved)
+            if m_repo:
+                p = pathlib.Path(m_repo.group(1))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("owner/repo\n")
+        # If gh pr diff, write diff.txt so fetch-pr-diff stage produces the artifact
+        if "gh pr diff" in cmd:
+            m_diff = re.search(r'"([^"]+/diff\.txt)"', cmd_resolved)
+            if m_diff:
+                p = pathlib.Path(m_diff.group(1))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("diff --git a/f b/f\n")
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    m = re.search(r'"([^"]+/pr-number\.txt)"', cmd_resolved)
+    if m:
+        p = pathlib.Path(m.group(1))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"{fake_pr_number}\n")
+        # Also write pr-url.txt and pr-branch.txt produced by push-and-open.
+        url_p = p.parent / "pr-url.txt"
+        url_p.write_text(f"https://github.com/owner/repo/pull/{fake_pr_number}\n")
+        # pr-branch.txt already written by compose-pr; ensure it's non-empty.
+        branch_p = p.parent / "pr-branch.txt"
+        if not branch_p.exists() or branch_p.stat().st_size == 0:
+            branch_p.write_text("issue-42-fake-slug\n")
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    m2 = re.search(r'"([^"]+/pr-base-ref\.txt)"', cmd_resolved)
+    if m2:
+        p = pathlib.Path(m2.group(1))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("main\n")
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    # publish-as-issue script: intercept to write a fake issue number so
+    # verify_produced passes without a real gh CLI or git remote.
+    m3 = re.search(r'"([^"]+/plan-issue-number\.txt)"', cmd_resolved)
+    if m3 and "gh issue create" in cmd:
+        p = pathlib.Path(m3.group(1))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("42\n")
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    # gather-github-review-content: intercept to write a fake
+    # github-review-content.md so the stage passes without a real gh CLI.
+    m4 = re.search(r'"([^"]+/github-review-content\.md)"', cmd_resolved)
+    if m4:
+        p = pathlib.Path(m4.group(1))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("# PR Review Comments\n\nFake review content.\n")
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    # Gremlins custom scripts (gh_*, git_*): the test doesn't have them on
+    # PATH and doesn't need them to actually run — the artifacts they
+    # produce are already pre-populated by _patch_common.
+    if cmd.lstrip().startswith("gh_") or "git_diff_summary" in cmd:
+        # Handle any > redirections so the output file is created.
+        for m_redir in re.finditer(r'>\s*"([^"]+)"', cmd_resolved):
+            p = pathlib.Path(m_redir.group(1))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if not p.exists():
+                p.write_text("")
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    return None
+
+
 def _patch_common(
     monkeypatch, tmp_path, *, state_data: dict = None, fake_pr_number: str = "101"
 ):
@@ -212,8 +298,7 @@ def _patch_common(
     (artifact_dir / "pr-base-ref.txt").write_text("main\n")
     (artifact_dir / "repo.txt").write_text("owner/repo\n")
 
-    import subprocess as _subprocess_mod
-
+    from _gremlins_core.stages import _set_exec_shell_hook
     from _gremlins_core.utils import proc as _proc_mod
 
     _orig_shell = _proc_mod.run_shell_async
@@ -229,86 +314,12 @@ def _patch_common(
             if isinstance(cmd, str)
             else cmd
         )
-        if isinstance(cmd, str):
-            # Handle custom gremlins scripts that aren't gh subcommands.
-            if "gh_resolve_plan_source" in cmd:
-                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
-            if "gh_publish_issue" in cmd:
-                # Write plan-issue-number.txt so verify_produced passes.
-                m_pub = re.search(r'"([^"]+/plan-issue-number\.txt)"', cmd_resolved)
-                if m_pub:
-                    p = pathlib.Path(m_pub.group(1))
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text("42\n")
-                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
-            if cmd.lstrip().startswith("gh "):
-                # If gh repo view, write repo.txt so discover stage passes
-                if "gh repo view" in cmd:
-                    m_repo = re.search(r'"([^"]+/repo\.txt)"', cmd_resolved)
-                    if m_repo:
-                        p = pathlib.Path(m_repo.group(1))
-                        p.parent.mkdir(parents=True, exist_ok=True)
-                        p.write_text("owner/repo\n")
-                # If gh pr diff, write diff.txt so fetch-pr-diff stage produces the artifact
-                if "gh pr diff" in cmd:
-                    m_diff = re.search(r'"([^"]+/diff\.txt)"', cmd_resolved)
-                    if m_diff:
-                        p = pathlib.Path(m_diff.group(1))
-                        p.parent.mkdir(parents=True, exist_ok=True)
-                        p.write_text("diff --git a/f b/f\n")
-                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
-            m = re.search(r'"([^"]+/pr-number\.txt)"', cmd_resolved)
-            if m:
-                p = pathlib.Path(m.group(1))
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(f"{fake_pr_number}\n")
-                # Also write pr-url.txt and pr-branch.txt produced by push-and-open.
-                url_p = p.parent / "pr-url.txt"
-                url_p.write_text(
-                    f"https://github.com/owner/repo/pull/{fake_pr_number}\n"
-                )
-                # pr-branch.txt already written by compose-pr; ensure it's non-empty.
-                branch_p = p.parent / "pr-branch.txt"
-                if not branch_p.exists() or branch_p.stat().st_size == 0:
-                    branch_p.write_text("issue-42-fake-slug\n")
-                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
-            m2 = re.search(r'"([^"]+/pr-base-ref\.txt)"', cmd_resolved)
-            if m2:
-                p = pathlib.Path(m2.group(1))
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text("main\n")
-                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
-            # publish-as-issue script: intercept to write a fake issue number so
-            # verify_produced passes without a real gh CLI or git remote.
-            m3 = re.search(r'"([^"]+/plan-issue-number\.txt)"', cmd_resolved)
-            if m3 and "gh issue create" in cmd:
-                p = pathlib.Path(m3.group(1))
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text("42\n")
-                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
-            # gather-github-review-content: intercept to write a fake
-            # github-review-content.md so the stage passes without a real gh CLI.
-            m4 = re.search(r'"([^"]+/github-review-content\.md)"', cmd_resolved)
-            if m4:
-                p = pathlib.Path(m4.group(1))
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text("# PR Review Comments\n\nFake review content.\n")
-                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
-        # Gremlins custom scripts (gh_*, git_*): the test doesn't have them on
-        # PATH and doesn't need them to actually run — the artifacts they
-        # produce are already pre-populated by _patch_common.
-        if isinstance(cmd, str):
-            if cmd.lstrip().startswith("gh_") or "git_diff_summary" in cmd:
-                # Handle any > redirections so the output file is created.
-                for m_redir in re.finditer(r'>\s*"([^"]+)"', cmd_resolved):
-                    p = pathlib.Path(m_redir.group(1))
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    if not p.exists():
-                        p.write_text("")
-                return _subprocess_mod.CompletedProcess(cmd, 0, "", "")
+        handled = _try_handle_known_gh_cmd(cmd, cmd_resolved, fake_pr_number)
+        if handled is not None:
+            return handled
         return await _orig_shell(cmd, cwd=cwd, env=env, timeout=timeout)
 
-    monkeypatch.setattr(_proc_mod, "run_shell_async", _noop_gh_shell)
+    _set_exec_shell_hook(_noop_gh_shell)
     monkeypatch.setattr(
         "gremlins.executor.state.resolve_state_file", lambda gremlin_id=None: state_file
     )
@@ -593,6 +604,7 @@ def test_publish_as_issue_skip_when_source_bound(tmp_path, monkeypatch):
     # and writes plan.md — both skips fire automatically.
 
     shell_cmds: list[str] = []
+    from _gremlins_core.stages import _set_exec_shell_hook
     from _gremlins_core.utils import proc as _proc_mod
 
     _orig_shell = _proc_mod.run_shell_async
@@ -600,9 +612,22 @@ def test_publish_as_issue_skip_when_source_bound(tmp_path, monkeypatch):
     async def _recording_shell(cmd, **kwargs):
         if isinstance(cmd, str):
             shell_cmds.append(cmd)
+        # Try to handle known commands before falling through.
+        env = kwargs.get("env") or {}
+        artifact_dir_resolved = env.get("GREMLINS_ARTIFACT_DIR") or os.environ.get(
+            "GREMLINS_ARTIFACT_DIR", ""
+        )
+        cmd_resolved = (
+            cmd.replace("$GREMLINS_ARTIFACT_DIR", artifact_dir_resolved)
+            if isinstance(cmd, str)
+            else cmd
+        )
+        handled = _try_handle_known_gh_cmd(cmd, cmd_resolved)
+        if handled is not None:
+            return handled
         return await _orig_shell(cmd, **kwargs)
 
-    monkeypatch.setattr(_proc_mod, "run_shell_async", _recording_shell)
+    _set_exec_shell_hook(_recording_shell)
 
     monkeypatch.setattr(
         subprocess,
@@ -1689,6 +1714,7 @@ def test_publish_as_issue_runs_when_no_source_bound(tmp_path, monkeypatch):
     (artifact_dir / "plan.md").unlink(missing_ok=True)
 
     shell_cmds: list[str] = []
+    from _gremlins_core.stages import _set_exec_shell_hook
     from _gremlins_core.utils import proc as _proc_mod
 
     _orig_shell = _proc_mod.run_shell_async
@@ -1696,9 +1722,22 @@ def test_publish_as_issue_runs_when_no_source_bound(tmp_path, monkeypatch):
     async def _recording_shell(cmd, **kwargs):
         if isinstance(cmd, str):
             shell_cmds.append(cmd)
+        # Try to handle known commands before falling through.
+        env = kwargs.get("env") or {}
+        artifact_dir_resolved = env.get("GREMLINS_ARTIFACT_DIR") or os.environ.get(
+            "GREMLINS_ARTIFACT_DIR", ""
+        )
+        cmd_resolved = (
+            cmd.replace("$GREMLINS_ARTIFACT_DIR", artifact_dir_resolved)
+            if isinstance(cmd, str)
+            else cmd
+        )
+        handled = _try_handle_known_gh_cmd(cmd, cmd_resolved)
+        if handled is not None:
+            return handled
         return await _orig_shell(cmd, **kwargs)
 
-    monkeypatch.setattr(_proc_mod, "run_shell_async", _recording_shell)
+    _set_exec_shell_hook(_recording_shell)
 
     monkeypatch.setattr(
         subprocess,
