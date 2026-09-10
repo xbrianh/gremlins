@@ -563,12 +563,12 @@ def _inside_worktree(workdir: str) -> bool:
     return cwd_real == worktree_real or cwd_real.startswith(worktree_real + os.sep)
 
 
-def _preflight_land(state: dict[str, Any], cwd: str | None) -> tuple[str, bool]:
-    """Shared land preflight. Returns (current_branch, ok)."""
+def _preflight_land(state: dict[str, Any], cwd: str | None) -> tuple[str, int, bool]:
+    """Shared land preflight. Returns (current_branch, tracked_changes, ok)."""
     workdir = state.get("workdir") or ""
     if _inside_worktree(workdir):
         print("you are inside this gremlin's worktree — cd elsewhere before landing")
-        return "", False
+        return "", 0, False
 
     current = _git.current_branch(cwd=cwd)
     if not current:
@@ -577,7 +577,7 @@ def _preflight_land(state: dict[str, Any], cwd: str | None) -> tuple[str, bool]:
             current = "HEAD"
         else:
             print("error: could not determine current branch")
-            return "", False
+            return "", 0, False
 
     tracked_changes = [
         ln
@@ -588,9 +588,9 @@ def _preflight_land(state: dict[str, Any], cwd: str | None) -> tuple[str, bool]:
         print(
             "error: working tree is not clean — commit or stash changes before landing"
         )
-        return current, False
+        return current, len(tracked_changes), False
 
-    return current, True
+    return current, 0, True
 
 
 def _squash_land(
@@ -762,11 +762,11 @@ def _land_boss(
     project_root = state.get("project_root") or ""
     cwd = project_root if project_root and os.path.isdir(project_root) else None
 
-    current, ok = _preflight_land(state, cwd)
+    current, tracked_changes, ok = _preflight_land(state, cwd)
     if not ok:
         return False
 
-    logger.info("_land_boss: current=%s tracked_changes=%d", current, 0)
+    logger.info("_land_boss: current=%s tracked_changes=%d", current, tracked_changes)
 
     label = f"boss {gremlin_id} ({boss_head[:12]})"
     if mode == "squash":
@@ -782,7 +782,11 @@ def _land_boss(
             current,
             client,
         )
-    logger.info("_land_boss: fast-forwarding %s to %s (%d commits)", current, label, 0)
+    try:
+        commit_count = _git.rev_list_count(f"{current}..{boss_head}", cwd=cwd)
+    except _git.GitError:
+        commit_count = 0
+    logger.info("_land_boss: fast-forwarding %s to %s (%d commits)", current, label, commit_count)
     return _ff_land(gremlin_id, wdir, state, cwd, boss_head, label, current)
 
 
@@ -1112,8 +1116,8 @@ def do_land(
             os.environ.update(env_vars)
         except Exception as exc:
             print(f"warning: could not source bootstrap env: {exc}", flush=True)
-
-    logger.debug("land: bootstrap env sourced (%d chars)", len(env_script))
+        else:
+            logger.debug("land: bootstrap env sourced (%d chars)", len(env_script))
 
     # Resolve the model client this gremlin used so commit-message synthesis
     # goes through the same backend as the pipeline stages.
@@ -1135,11 +1139,9 @@ def do_land(
         artifact_dir = pathlib.Path(_scratch_root_fn(gremlin_id)) / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        logger.debug(
-            "land: registry check — exists(artifact://pr)=%s",
-            registry.exists("artifact://pr"),
-        )
-        if registry.exists("artifact://pr"):
+        has_pr = registry.exists("artifact://pr")
+        logger.debug("land: registry check — exists(artifact://pr)=%s", has_pr)
+        if has_pr:
             shape = "one_pr"
 
     if shape == "many_prs":
