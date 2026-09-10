@@ -7,7 +7,7 @@ use crate::schemas::error::SchemaError;
 use gremlins::schemas::loader as core_loader;
 
 pub const STAGE_TYPES: &[(&str, &str, &str)] = &[
-    ("agent", "gremlins.stages.agent", "Agent"),
+    ("agent", "_gremlins_core.stages", "Agent"),
     ("loop", "gremlins.stages.loop", "LoopStage"),
     ("parallel", "gremlins.stages.parallel", "ParallelStage"),
     ("sequence", "gremlins.stages.sequence", "SequenceStage"),

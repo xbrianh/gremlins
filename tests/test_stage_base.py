@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from _gremlins_core.schemas import Pipeline
-from _gremlins_core.stages import Done, Outcome
+from _gremlins_core.stages import Agent, Done, Outcome
 from conftest import MockGremlin
 
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.agent import Agent
 from gremlins.stages.base import Stage
 from tests.fake_client import FakeClient
 

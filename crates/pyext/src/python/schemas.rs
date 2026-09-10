@@ -78,9 +78,9 @@ pub fn register_schemas_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
 
     // Add a placeholder STAGE_TYPES so that Python imports triggered during
-    // the real STAGE_TYPES construction (e.g. gremlins.stages.agent ->
-    // gremlins.executor.gremlin -> _gremlins_core.schemas.STAGE_TYPES) can
-    // resolve the name without error. We replace it with the real dict below.
+    // the real STAGE_TYPES construction (e.g. _gremlins_core.stages ->
+    // _gremlins_core.schemas.STAGE_TYPES) can resolve the name without
+    // error. We replace it with the real dict below.
     let placeholder = PyDict::new(m.py());
     schemas_mod.add("STAGE_TYPES", &placeholder)?;
 

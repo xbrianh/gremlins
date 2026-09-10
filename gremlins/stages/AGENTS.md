@@ -4,20 +4,51 @@ Per-stage bodies — the work each pipeline stage actually does. Modules
 here are called by orchestrators in `../orchestrators/`; they own no
 sequencing logic of their own.
 
-## Modules
+## Rust-ported stages
 
-- `agent.py` — `Agent(Stage)` (type `"agent"`). The generic agentic primitive. Declared in YAML with `in:` / `out:` maps:
-  - `in: {var_name: registry_key}` — resolves each `registry_key` from `state.artifacts`, converts to string, and substitutes `{var_name}` into the rendered prompt. Dotted paths like `pr.branch` walk attributes on the resolved value before stringifying. Raises `MissingArtifact` if a key is not bound.
-  - `out: {registry_key: uri_string}` — binds each URI in `state.artifacts` before the agent runs, then calls `resolver.verify_produced(uri)` post-run to assert the artifact was written.
-  - Invokes the agent via `agent_runner.run_agent`; the `label` is the stage name.
-  - Prompt template is `"\n\n".join(self.prompts)`; if `in:` produces substitution vars, `str.format(**subs)` is applied.
-  - `state.artifacts` is required only when `in:` or `out:` maps are non-empty; stages with empty maps (e.g. `implement`) can delegate to `Agent` without a registry.
-- `agent_runner.py` — `run_agent`, `_check_bail`. Single chokepoint for agentic execution: delegates to `state.client.run()`, then raises `Bail` if the agent's final message ends with a `BAIL: <class>: <detail>` sentinel line. Import from here (not from `agent.py`) in any stage that needs `run_agent`.
-- `loop.py` — `LoopStage(Stage)`. Iterates a `body: list[Stage]` (or raw `body_runners` callables) until `stop_when_exists` artifact is bound or `max_iterations` is exhausted. Body stages execute in order on every iteration. After each full body run: if a bail artifact is set, raises `Bail`; if the `stop_when_exists` artifact is bound, returns `Done()`; if `max_iterations` is reached without stopping, raises `Bail`. The stopping condition is declared explicitly in the pipeline YAML via `stop_when_exists: <artifact-key>`. No magic `status=needs_fix` marker or `head_stable` predicate.
-- `exec.py` — `Exec(Stage)`. Runs `options["cmds"]` joined with `&&`; writes combined stdout+stderr to `exec-{name}.log`. On non-zero exit: raises `Bail` unless exit code 2 with `bail` in the `out:` map (which sets the bail artifact). Supports `in:`/`out:` artifact substitution and `git://range` out-URIs. Stage type `"exec"`.
-- `parallel.py` — `ParallelStage(Stage)`. Constructed by the orchestrator with pre-built child runners; call `build_runtime_stages()` to get the three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that implement fan-out/fan-in execution.
-- `sequence.py` — `SequenceStage(Stage)`. Runs `body: list[Stage]` sequentially in order, inheriting parent state (no fan-out). Child stages share artifacts and execution scope with the parent; client override is applied if the child declares one. Useful for bundling multi-stage units (e.g., the `handoff` recipe) that should appear as a single iteration in a parent loop. Stage type `"sequence"`.
-- `composite.py` — Shared helpers for composite stages (`Loop`, `Sequence`, `Parallel`): `child_state(parent, child, fan_out=False, child_id=None)` derives child state from parent, handling client override and optional artifact isolation.
+- `agent` (type `"agent"`) — The generic agentic primitive. Now a Rust
+  `PyAgent` class in `_gremlins_core.stages.Agent`. Declared in YAML with
+  `interpolation:` / `bind:` maps. Resolves interpolation artifacts,
+  registers bind URIs, builds a prompt with workspace preamble, delegates
+  to a model client, records token usage, checks for bail, and verifies
+  single-output artifacts.
+  - Prompt template is `"\n\n".join(prompts)`; `{var}` tokens are substituted
+    via interpolation_map → bind_paths → framework_subs resolution order.
+  - `state.artifacts` is required only when `interpolation:` or `bind:` maps
+    are non-empty; stages with empty maps can delegate to `Agent` without
+    a registry.
+- `exec` — `Exec(Stage)`. Runs `options["cmds"]` joined with `&&`;
+  writes combined stdout+stderr to `exec-{name}.log`. On non-zero exit:
+  raises `Bail` unless exit code 2 with `bail` in the `out:` map (which sets
+  the bail artifact). Supports `interpolation:`/`bind:` artifact substitution
+  and `git://range` out-URIs. Stage type `"exec"`.
+  Rust `PyExec` class in `_gremlins_core.stages.Exec`.
+
+## Python stages
+
+- `loop.py` — `LoopStage(Stage)`. Iterates a `body: list[Stage]` (or raw
+  `body_runners` callables) until `stop_when_exists` artifact is bound or
+  `max_iterations` is exhausted. Body stages execute in order on every
+  iteration. After each full body run: if a bail artifact is set, raises
+  `Bail`; if the `stop_when_exists` artifact is bound, returns `Done()`;
+  if `max_iterations` is reached without stopping, raises `Bail`. The
+  stopping condition is declared explicitly in the pipeline YAML via
+  `stop_when_exists: <artifact-key>`. No magic `status=needs_fix` marker
+  or `head_stable` predicate.
+- `parallel.py` — `ParallelStage(Stage)`. Constructed by the orchestrator
+  with pre-built child runners; call `build_runtime_stages()` to get the
+  three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`)
+  that implement fan-out/fan-in execution.
+- `sequence.py` — `SequenceStage(Stage)`. Runs `body: list[Stage]`
+  sequentially in order, inheriting parent state (no fan-out). Child stages
+  share artifacts and execution scope with the parent; client override is
+  applied if the child declares one. Useful for bundling multi-stage units
+  (e.g., the `handoff` recipe) that should appear as a single iteration in
+  a parent loop. Stage type `"sequence"`.
+- `composite.py` — Shared helpers for composite stages (`Loop`, `Sequence`,
+  `Parallel`): `child_state(parent, child, fan_out=False, child_id=None)`
+  derives child state from parent, handling client override and optional
+  artifact isolation.
 
 ## Recipes
 
@@ -45,7 +76,9 @@ Bundled stage recipes live under `gremlins/recipes/stages/`. Each recipe is a mu
   Bundled internal prompts are loaded via `load_bundled_prompt` / `render_bundled_prompt`
   from `gremlins.utils.yaml_io`. Bundled prompt files live under `gremlins/prompts/`. See
   `gremlins/prompts/README.md` for the runtime placeholder inventory.
-- Stages that should respect a bail marker call `run_agent` from `agent_runner`, which parses the agent's final transcript message for a `BAIL: <class>: <detail>` sentinel line and raises `Bail` if found.
+- Stages that should respect a bail marker delegate to the Rust agent's
+  `check_bail`, which parses the agent's final transcript message for a
+  `BAIL: <class>: <detail>` sentinel line and raises `Bail` if found.
 - Most stages return `None`.
 - The `label=` argument passed to `client.run(...)` is the stream-event
   prefix and the `FakeClient` fixture key. Stages that re-enter the

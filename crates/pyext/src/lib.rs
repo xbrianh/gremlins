@@ -47,8 +47,7 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     modules.set_item("_gremlins_core.clients", &clients)?;
 
     // artifacts submodule — must be registered before schemas because
-    // register_schemas_module imports gremlins.stages.agent which imports
-    // _gremlins_core.artifacts.Uri.
+    // register_schemas_module imports _gremlins_core.artifacts.Uri.
     python::artifacts::register_artifacts_module(m)?;
 
     // assets submodule
@@ -60,8 +59,7 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::config::register_config_module(m)?;
 
     // stages submodule — must be registered before schemas because
-    // register_schemas_module imports gremlins.stages.agent which imports
-    // _gremlins_core.stages.
+    // register_schemas_module builds STAGE_TYPES from _gremlins_core.stages.
     python::stages::register_stages_module(m)?;
 
     // schemas submodule
