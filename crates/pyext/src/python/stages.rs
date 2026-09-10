@@ -440,8 +440,7 @@ impl PyExec {
                 kwargs.set_item("cwd", Some(&shell_cwd))?;
                 kwargs.set_item("env", Some(&shell_env))?;
                 kwargs.set_item("timeout", shell_timeout)?;
-                let py_coro =
-                    proc_mod.call_method("run_shell_async", (&joined,), Some(&kwargs))?;
+                let py_coro = proc_mod.call_method("run_shell_async", (&joined,), Some(&kwargs))?;
                 pyo3_async_runtimes::tokio::into_future(py_coro)
             })?;
 
