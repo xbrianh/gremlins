@@ -556,8 +556,6 @@ def test_token_usage_accumulated_into_state(tmp_path):
     asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
     asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
-    import json
-
     data = json.loads(state.data.state_file.read_text())
     assert data["token_usage"] == {
         "prompt_tokens": 200,
@@ -573,8 +571,6 @@ def test_token_usage_absent_is_noop(tmp_path):
     state = _make_state(tmp_path, attempt="att1")
     agent = _make_agent(prompts=["hello"])
     asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
-
-    import json
 
     data = json.loads(state.data.state_file.read_text())
     assert "token_usage" not in data

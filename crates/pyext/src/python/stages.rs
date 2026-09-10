@@ -815,20 +815,11 @@ impl PyAgent {
         // Build workspace preamble
         let preamble =
             rust_agent::build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
-        let full_prompt = if preamble.is_empty() {
-            prepared.prompt.clone()
-        } else {
-            format!("{preamble}\n\n{}", prepared.prompt)
-        };
+        let full_prompt = format!("{preamble}\n\n{}", prepared.prompt);
 
         let raw_path = artifact_dir.join(format!("stream-{}.jsonl", prepared.name));
         let single = prepared.bind_paths.len() == 1;
 
-        // Collect string-valued options (excluding "model") to pass as kwargs
-        // to client.run()
-        let str_opts = base::string_options(&agent.options);
-
-        // Extract all string options from options for pass-through to client
         let model = prepared.model.clone();
 
         let expected_artifact_paths: Vec<PathBuf> = prepared
@@ -863,9 +854,11 @@ impl PyAgent {
                     kwargs.set_item("model", m.as_str())?;
                 }
 
-                kwargs.set_item("raw_path", raw_path.to_string_lossy().to_string())?;
+                kwargs.set_item("raw_path", raw_path.as_path())?;
                 if let Some(ref wt) = worktree_str {
                     kwargs.set_item("cwd", wt.as_str())?;
+                } else {
+                    kwargs.set_item("cwd", py.None())?;
                 }
                 kwargs.set_item("artifact_dir", prepared.artifact_dir.as_str())?;
 
@@ -876,12 +869,13 @@ impl PyAgent {
                 )?;
                 kwargs.set_item("artifact_reminder_count", 3)?;
 
-                // Pass through any remaining string options (except "model")
-                // as kwargs to client.run()
-                for (k, v) in &str_opts {
-                    if k != "model" {
-                        kwargs.set_item(k.as_str(), v.as_str())?;
+                // Pass through remaining options (except "model") as kwargs to client.run()
+                for (k, v) in &agent.options {
+                    if k == "model" {
+                        continue;
                     }
+                    let py_val = json_value_to_py(py, v)?;
+                    kwargs.set_item(k.as_str(), py_val)?;
                 }
 
                 let coro = client_obj.call_method("run", (&full_prompt,), Some(&kwargs))?;

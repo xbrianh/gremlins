@@ -121,7 +121,7 @@ pub fn prepare_agent(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let template = agent.prompts.join("\n\n");
+    let template = agent.prompts.join("\n\n").trim_end().to_string();
     let prompt = base::substitute_vars(&template, &str_opts, &subst_vars, framework_subs);
 
     // Model substitution
@@ -157,17 +157,17 @@ pub fn check_bail(completed: &CompletedRun) -> Result<(), AgentError> {
         .rev()
         .find(|ln| !ln.trim().is_empty())
         .unwrap_or("");
-    if let Some(tail) = last_line.strip_prefix("BAIL:") {
-        // Format: BAIL: <word>: <reason> — extract everything after "<word>: "
-        let reason = tail
-            .split_once(':')
-            .map(|(_, rest)| rest.trim())
-            .unwrap_or(tail.trim())
-            .to_string();
-        return Err(AgentError::Bail {
-            name: String::new(),
-            reason,
-        });
+    // Format must match: BAIL: <class>: <reason>
+    let trimmed = last_line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("BAIL:") {
+        let rest = rest.trim_start();
+        if let Some((_class, reason)) = rest.split_once(':') {
+            let reason = reason.trim().to_string();
+            return Err(AgentError::Bail {
+                name: String::new(),
+                reason,
+            });
+        }
     }
     Ok(())
 }
@@ -186,12 +186,10 @@ pub fn build_workspace_preamble(cwd: &str, worktree: Option<&str>) -> String {
             parts.push(format!("Project worktree: {wt}"));
         }
     }
-    if !parts.is_empty() {
-        parts.push(
-            "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR, $GREMLINS_ARTIFACT_DIR"
-                .to_string(),
-        );
-    }
+    parts.push(
+        "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR, $GREMLINS_ARTIFACT_DIR"
+            .to_string(),
+    );
     parts.join("\n")
 }
 
@@ -363,11 +361,19 @@ mod tests {
             cost_usd: None,
             token_usage: None,
         };
-        let err = check_bail(&cr).unwrap_err();
-        match err {
-            AgentError::Bail { reason, .. } => assert_eq!(reason, ""),
-            _ => panic!("expected Bail"),
-        }
+        assert!(check_bail(&cr).is_ok());
+    }
+
+    #[test]
+    fn test_check_bail_requires_class() {
+        let cr = CompletedRun {
+            exit_code: 0,
+            text_result: Some("BAIL: other".to_string()),
+            events: None,
+            cost_usd: None,
+            token_usage: None,
+        };
+        assert!(check_bail(&cr).is_ok());
     }
 
     #[test]
@@ -450,6 +456,7 @@ mod tests {
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
         let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
         assert!(prepared.prompt.contains("from-fw"));
+        assert!(!prepared.prompt.contains("from-interp"));
     }
 
     #[test]
@@ -612,10 +619,13 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
-        let preamble = build_workspace_preamble("", None);
-        assert!(preamble.is_empty());
-        assert!(!prepared.prompt.contains("Your working directory is"));
+        let mut prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        prepared.cwd = String::new();
+        prepared.worktree = None;
+        let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
+        assert_eq!(preamble, "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR, $GREMLINS_ARTIFACT_DIR");
+        let full = format!("{preamble}\n\n{}", prepared.prompt);
+        assert!(!full.contains("Your working directory is"));
     }
 
     #[test]
@@ -635,11 +645,7 @@ mod tests {
         prepared.cwd = "/work".to_string();
         prepared.worktree = Some("/work".to_string());
         let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
-        let full = if preamble.is_empty() {
-            prepared.prompt.clone()
-        } else {
-            format!("{preamble}\n\n{}", prepared.prompt)
-        };
+        let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(full.contains("Your working directory is: /work"));
         assert!(!full.contains("Project worktree:"));
     }
