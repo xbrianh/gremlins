@@ -60,7 +60,7 @@ stage-definitions:
           cmds:
             - "make -j8 check && make -j8 test"
           max_iterations: 7
-        prompt: [style_guide.md, dev-env-howto.md, gremlins:verify_fix.md, gremlins:bail_section_fix.md]
+        prompt: [style_guide.md, dev-env-howto.md, verify_fix.md]
       - name: commit
         type: exec
         options:
@@ -70,7 +70,7 @@ stage-definitions:
 
 stages:
   - { type: plan-gh, prompt: [style_guide.md, plan_gh.md] }
-  - { type: gremlins:implement, prompt: [style_guide.md, dev-env-howto.md, implement_gh.md] }
+  - { type: gremlins:implement, prompt: [style_guide.md, dev-env-howto.md, implement.md] }
   - { type: check-and-fix }
 
   - name: compute-diff
@@ -103,7 +103,7 @@ stages:
 
   - name: address
     type: agent
-    prompt: [style_guide.md, dev-env-howto.md, address.md, no_lint_in_implement.md, gremlins:bail_section.md]
+    prompt: [style_guide.md, dev-env-howto.md, address.md]
     interpolation:
       plan: content("artifact://plan.md")
       review_one: content("artifact://review-one.md")
@@ -131,6 +131,5 @@ stages:
       - style_guide.md
       - dev-env-howto.md
       - github_address_pull_request_reviews.md
-      - gremlins:bail_section.md
   - { type: check-and-fix }
-  - { type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, gremlins:ci_fix.md, gremlins:bail_section_fix.md] }
+  - { type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, gremlins:ci_fix.md] }

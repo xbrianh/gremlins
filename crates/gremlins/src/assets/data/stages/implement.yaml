@@ -4,7 +4,6 @@ stages:
   - name: implement
     type: agent
     interpolation:
-      spec: content("artifact://spec.md")?
       plan: content("artifact://plan.md")
     prompt:
       - "{{prompt}}"
