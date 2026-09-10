@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn test_content_raw_non_file_value() {
+    fn test_content_reads_file_containing_uri_text() {
         let (_tmp, artifact_dir) = setup();
         let mut reg = ArtifactRegistry::new(artifact_dir);
         let uri = Uri::parse("artifact://range").unwrap();

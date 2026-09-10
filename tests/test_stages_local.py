@@ -3,7 +3,7 @@ import pathlib
 import subprocess
 from typing import TYPE_CHECKING, cast
 
-from _gremlins_core.artifacts import ArtifactRegistry, Uri
+from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.schemas import Pipeline
 from _gremlins_core.stages import Agent
 from conftest import MINIMAL_EVENTS, MockGremlin, ReviewCreatingClient
@@ -35,13 +35,8 @@ def test_local_yaml_loads_and_validates():
     ]
 
 
-def _make_state(client, artifact_dir, *, gremlin_id=None, base_ref_sha=""):
+def _make_state(client, artifact_dir, *, gremlin_id=None):
     registry = ArtifactRegistry(artifact_dir)
-    if base_ref_sha:
-        uri = Uri.parse("artifact://base_sha")
-        path = pathlib.Path(registry.register(uri))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"git://commit/{base_ref_sha}", encoding="utf-8")
     state = build_state(
         data=StateData(gremlin_id=gremlin_id),
         client=client,
