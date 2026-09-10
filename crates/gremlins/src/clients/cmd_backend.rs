@@ -12,8 +12,7 @@ use tokio::process::{Child, Command};
 
 use super::backend::{Backend, ClientError, RunParams};
 use super::protocol::CompletedRun;
-use super::retry;
-use super::retry::{validate_max_retries, STREAM_IDLE_BACKOFF};
+use super::retry::{validate_max_retries, with_retry, STREAM_IDLE_BACKOFF};
 use super::stream;
 use super::stream_json::{self, StreamState};
 

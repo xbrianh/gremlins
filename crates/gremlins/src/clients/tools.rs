@@ -182,6 +182,11 @@ fn expand_user(s: &str) -> String {
     if s == "~" || s.starts_with("~/") {
         let home = crate::config::home_dir();
         let home_str = home.to_string_lossy();
+        // If home resolved to the sentinel fallback (no HOME set, no
+        // platform dir), preserve ~ literally rather than expanding to ".".
+        if home_str.is_empty() || home_str == "." {
+            return s.to_string();
+        }
         if s == "~" {
             return home_str.into_owned();
         }

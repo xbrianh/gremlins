@@ -315,6 +315,7 @@ pub fn scratch_dir(gremlin_id: Option<&str>) -> Option<PathBuf> {
 pub fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .ok()
+        .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
