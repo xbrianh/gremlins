@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import pathlib
 import re
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from _gremlins_core.artifacts import ArtifactRegistry, MissingArtifact, Uri
-from _gremlins_core.stages import Bail, Done
+from _gremlins_core.stages import Agent, Bail, Done
 from conftest import MINIMAL_EVENTS, MockGremlin
 
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.agent import Agent
 from tests.fake_client import FakeClient
 
 if TYPE_CHECKING:
@@ -25,12 +25,22 @@ def _make_state(
     client: FakeClient | None = None,
     *,
     registry: ArtifactRegistry | None = None,
+    attempt: str = "",
+    fixtures: dict | None = None,
 ) -> State:
     if client is None:
-        client = FakeClient(fixtures={"my-agent": MINIMAL_EVENTS})
+        client = FakeClient(fixtures=fixtures or {"my-agent": MINIMAL_EVENTS})
     reg = registry or ArtifactRegistry(tmp_path / "artifacts")
+    data = StateData()
+    if attempt:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file = state_dir / "state.json"
+        state_file.write_text(json.dumps({"id": "gr-test", "stage": ""}))
+        data.state_file = state_file
+        data.patch(attempt=attempt)
     return build_state(
-        data=StateData(),
+        data=data,
         client=client,
         artifact_dir=tmp_path / "artifacts",
         worktree=tmp_path,
@@ -498,3 +508,69 @@ def test_loop_iter_in_interpolation_value(tmp_path):
     result = asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
     assert isinstance(result, Done)
     assert "# Plan for iteration 2" in client.calls[0].prompt
+
+
+# ---------------------------------------------------------------------------
+# End-to-end tests absorbed from test_stage_agent_helper.py
+# ---------------------------------------------------------------------------
+
+
+def test_calls_client_run_with_expected_kwargs(tmp_path):
+    state = _make_state(tmp_path, attempt="att1")
+    agent = _make_agent(prompts=["hello"])
+
+    asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
+
+    assert len(state.client.calls) == 1
+    call = state.client.calls[0]
+    assert call.label == "my-agent"
+    assert "hello" in call.prompt
+    assert call.model == state.client.model
+
+
+def test_model_kwarg_forwarded(tmp_path):
+    state = _make_state(tmp_path)
+    agent = _make_agent(prompts=["hello"], options={"model": "haiku"})
+
+    asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
+    assert state.client.calls[0].model == "haiku"
+
+
+def test_token_usage_accumulated_into_state(tmp_path):
+    usage_events = [
+        {
+            "type": "result",
+            "result": "done",
+            "token_usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "cached_input_tokens": 90,
+                "cache_creation_input_tokens": 5,
+                "reasoning_tokens": 8,
+                "turns": 3,
+            },
+        }
+    ]
+    state = _make_state(tmp_path, attempt="att1", fixtures={"my-agent": usage_events})
+    agent = _make_agent(prompts=["hello"])
+    asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
+    asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
+
+    data = json.loads(state.data.state_file.read_text())
+    assert data["token_usage"] == {
+        "prompt_tokens": 200,
+        "completion_tokens": 40,
+        "cached_input_tokens": 180,
+        "cache_creation_input_tokens": 10,
+        "reasoning_tokens": 16,
+        "turns": 6,
+    }
+
+
+def test_token_usage_absent_is_noop(tmp_path):
+    state = _make_state(tmp_path, attempt="att1")
+    agent = _make_agent(prompts=["hello"])
+    asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
+
+    data = json.loads(state.data.state_file.read_text())
+    assert "token_usage" not in data

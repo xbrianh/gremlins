@@ -246,8 +246,7 @@ def test_launch_unknown_kind_exits_nonzero_with_error(monkeypatch, capsys):
 
 def _make_fake_pipeline():
     from _gremlins_core.schemas import Bootstrap, InputSource, InputSources, Pipeline
-
-    from gremlins.stages.agent import Agent
+    from _gremlins_core.stages import Agent
 
     stage = Agent("plan", [], {})
     return Pipeline(

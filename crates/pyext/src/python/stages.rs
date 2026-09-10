@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Mutex;
 
+use gremlins::stages::agent as rust_agent;
 use gremlins::stages::base;
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec as rust_exec;
@@ -501,6 +502,470 @@ impl PyExec {
     }
 }
 
+// --- Agent pyclass ---
+
+#[pyclass(name = "Agent", module = "_gremlins_core.stages", skip_from_py_object)]
+struct PyAgent {
+    inner: rust_agent::Agent,
+    stage_type: String,
+    raw_dict: Option<Py<PyAny>>,
+    gremlin: Option<Py<PyAny>>,
+    client: Option<Py<PyAny>>,
+    client_explicit: bool,
+    skip_if_exists: String,
+}
+
+#[pymethods]
+impl PyAgent {
+    #[new]
+    #[pyo3(signature = (name, prompts, options, interpolation_map = None, bind_map = None))]
+    fn new(
+        name: String,
+        prompts: Vec<String>,
+        options: &Bound<'_, PyAny>,
+        interpolation_map: Option<HashMap<String, String>>,
+        bind_map: Option<HashMap<String, String>>,
+    ) -> PyResult<Self> {
+        let options = extract_json_value_dict(options)?;
+        Ok(PyAgent {
+            inner: rust_agent::Agent {
+                name,
+                prompts,
+                options,
+                interpolation_map: interpolation_map.unwrap_or_default(),
+                bind_map: bind_map.unwrap_or_default(),
+            },
+            stage_type: "agent".to_string(),
+            raw_dict: None,
+            gremlin: None,
+            client: None,
+            client_explicit: false,
+            skip_if_exists: String::new(),
+        })
+    }
+
+    #[classmethod]
+    #[pyo3(signature = (d, _depth = 0))]
+    fn with_dict(_cls: &Bound<'_, PyType>, d: &Bound<'_, PyDict>, _depth: usize) -> PyResult<Self> {
+        let name: String = d
+            .get_item("name")
+            .ok()
+            .flatten()
+            .and_then(|v| v.extract::<String>().ok())
+            .unwrap_or_default();
+
+        if d.contains("in")? || d.contains("out")? {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "stage {name:?}: 'in'/'out' keys are no longer supported; \
+                 use 'interpolation'/'bind' with URI values"
+            )));
+        }
+
+        let raw_interpolation: HashMap<String, String> = match d.get_item("interpolation")? {
+            Some(v) => v.extract().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "stage {name:?}: 'interpolation' must be a mapping"
+                ))
+            })?,
+            None => HashMap::new(),
+        };
+
+        let raw_bind: HashMap<String, String> = match d.get_item("bind")? {
+            Some(v) => v.extract().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "stage {name:?}: 'bind' must be a mapping"
+                ))
+            })?,
+            None => HashMap::new(),
+        };
+
+        let options: HashMap<String, serde_json::Value> = match d.get_item("options")? {
+            Some(v) => extract_json_value_dict(&v).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "stage {name:?}: 'options' must be a mapping of string keys to JSON-serializable values"
+                ))
+            })?,
+            None => HashMap::new(),
+        };
+
+        for k in options.keys() {
+            if FRAMEWORK_KEYS.contains(k.as_str()) && k != "model" {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "stage {name:?}: option key {k:?} collides with framework substitution variable"
+                )));
+            }
+        }
+
+        let prompts: Vec<String> = match d.get_item("prompt")? {
+            Some(v) => v.extract::<Vec<String>>().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "stage {name:?}: 'prompt' must be a list of strings"
+                ))
+            })?,
+            None => Vec::new(),
+        };
+
+        let raw_client: Option<String> = d
+            .get_item("client")?
+            .and_then(|v| v.extract::<String>().ok());
+        let (client, client_explicit) = if let Some(raw) = raw_client {
+            let py = _cls.py();
+            let parsed = py
+                .import("_gremlins_core.clients")?
+                .getattr("RustClient")?
+                .call_method1("parse", (raw,))?;
+            (Some(parsed.unbind()), true)
+        } else {
+            (None, false)
+        };
+
+        Ok(PyAgent {
+            inner: rust_agent::Agent {
+                name,
+                prompts,
+                options,
+                interpolation_map: raw_interpolation,
+                bind_map: raw_bind,
+            },
+            stage_type: "agent".to_string(),
+            raw_dict: None,
+            gremlin: None,
+            client,
+            client_explicit,
+            skip_if_exists: String::new(),
+        })
+    }
+
+    #[getter]
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    #[getter]
+    fn r#type(&self) -> &str {
+        &self.stage_type
+    }
+
+    #[setter]
+    fn set_type(&mut self, value: String) {
+        self.stage_type = value;
+    }
+
+    #[getter]
+    fn prompts(&self) -> Vec<String> {
+        self.inner.prompts.clone()
+    }
+
+    #[getter]
+    fn options<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for (k, v) in &self.inner.options {
+            let py_val = json_value_to_py(py, v)?;
+            dict.set_item(k.as_str(), py_val)?;
+        }
+        Ok(dict)
+    }
+
+    #[getter]
+    fn bind_map(&self) -> HashMap<String, String> {
+        self.inner.bind_map.clone()
+    }
+
+    #[getter]
+    fn interpolation_map(&self) -> HashMap<String, String> {
+        self.inner.interpolation_map.clone()
+    }
+
+    #[getter]
+    fn body(&self) -> Vec<Py<PyAny>> {
+        Vec::new()
+    }
+
+    #[getter]
+    fn raw_dict(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.raw_dict.as_ref().map(|p| p.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_raw_dict(&mut self, value: &Bound<'_, PyAny>) {
+        self.raw_dict = Some(value.clone().unbind());
+    }
+
+    #[getter]
+    fn gremlin(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.gremlin.as_ref().map(|p| p.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_gremlin(&mut self, value: &Bound<'_, PyAny>) {
+        self.gremlin = Some(value.clone().unbind());
+    }
+
+    #[getter]
+    fn path(&self) -> String {
+        String::new()
+    }
+
+    #[setter]
+    fn set_path(&mut self, _value: &str) {}
+
+    #[getter]
+    fn client(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.client.as_ref().map(|p| p.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_client(&mut self, value: Option<&Bound<'_, PyAny>>) {
+        self.client = value.map(|v| v.clone().unbind());
+    }
+
+    #[getter]
+    fn client_explicit(&self) -> bool {
+        self.client_explicit
+    }
+
+    #[setter]
+    fn set_client_explicit(&mut self, value: bool) {
+        self.client_explicit = value;
+    }
+
+    #[getter]
+    fn skip_if_exists(&self) -> &str {
+        &self.skip_if_exists
+    }
+
+    #[setter]
+    fn set_skip_if_exists(&mut self, value: String) {
+        self.skip_if_exists = value;
+    }
+
+    #[pyo3(signature = (text, state, extra = None))]
+    fn substitute_vars(
+        slf: PyRef<'_, Self>,
+        text: &str,
+        state: &Bound<'_, PyAny>,
+        extra: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        let str_opts = base::string_options(&slf.inner.options);
+        let extra_map: HashMap<String, String> = extra
+            .map(|d| d.extract().unwrap_or_default())
+            .unwrap_or_default();
+        let fw: HashMap<String, String> =
+            state.call_method1("framework_subs", (slf,))?.extract()?;
+        Ok(base::substitute_vars(text, &str_opts, &extra_map, &fw))
+    }
+
+    fn _run_impl<'py>(
+        slf: PyRef<'_, Self>,
+        py: Python<'py>,
+        gremlin: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let agent = slf.inner.clone();
+
+        let state_obj = gremlin.getattr("state")?;
+        if state_obj.is_none() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "agent stage requires gremlin.state to be initialized",
+            ));
+        }
+
+        // Extract all data from Python objects while holding GIL.
+        let artifacts: Py<ArtifactRegistry> = state_obj.getattr("artifacts")?.extract()?;
+        let loop_iter_str: String = state_obj.getattr("loop_iter")?.extract()?;
+        let cwd_str: String = state_obj.getattr("cwd")?.extract()?;
+        let worktree_path: Option<PathBuf> = state_obj.getattr("worktree")?.extract()?;
+        let artifact_dir: PathBuf = state_obj.getattr("artifact_dir")?.extract()?;
+        let client_py: Py<PyAny> = state_obj.getattr("client")?.extract()?;
+        let data_py: Py<PyAny> = state_obj.getattr("data")?.extract()?;
+        let fw: HashMap<String, String> = state_obj
+            .call_method1("framework_subs", (&slf,))?
+            .extract()?;
+
+        let worktree_str = worktree_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+
+        // Phase 1: prepare (needs &mut ArtifactRegistry).
+        let mut prepared = {
+            let arts_ref = artifacts.bind(py);
+            let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
+            let mut inner = arts_inner.inner.lock().unwrap();
+            match rust_agent::prepare_agent(&agent, &mut inner, &loop_iter_str, &fw) {
+                Ok(p) => p,
+                Err(rust_agent::AgentError::Resolve {
+                    source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
+                    ..
+                }) => {
+                    let exc_type = py
+                        .import("_gremlins_core.artifacts")?
+                        .getattr("MissingArtifact")?;
+                    let args = (key.clone(),);
+                    let exc = exc_type.call1(args)?;
+                    return Err(PyErr::from_value(exc));
+                }
+                Err(e) => {
+                    return Err(Bail::new_err(e.to_string()));
+                }
+            }
+        };
+        prepared.cwd = cwd_str.clone();
+        prepared.worktree = worktree_str.clone();
+        prepared.artifact_dir = artifact_dir.to_string_lossy().to_string();
+
+        // Build workspace preamble
+        let preamble =
+            rust_agent::build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
+        let full_prompt = format!("{preamble}\n\n{}", prepared.prompt);
+
+        let raw_path = artifact_dir.join(format!("stream-{}.jsonl", prepared.name));
+        let single = prepared.bind_paths.len() == 1;
+
+        let model = prepared.model.clone();
+
+        let expected_artifact_paths: Vec<PathBuf> = prepared
+            .expected_artifact_paths
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+
+        let optional_keys: Vec<String> = prepared
+            .bind_uris
+            .iter()
+            .filter_map(|(key, _, optional)| if *optional { Some(key.clone()) } else { None })
+            .collect();
+
+        pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
+            // Call the Python client.run() method.
+            let client_fut = Python::attach(|py| -> PyResult<PyAwaitable> {
+                let client_obj = client_py.bind(py);
+
+                // Build kwargs for client.run()
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("label", prepared.name.as_str())?;
+
+                // If model is specified, use it; otherwise client default
+                let resolved_model = model.clone().or_else(|| {
+                    client_obj
+                        .getattr("model")
+                        .ok()
+                        .and_then(|m| m.extract::<String>().ok())
+                });
+                if let Some(m) = &resolved_model {
+                    kwargs.set_item("model", m.as_str())?;
+                }
+
+                kwargs.set_item("raw_path", raw_path.as_path())?;
+                if let Some(ref wt) = worktree_str {
+                    kwargs.set_item("cwd", wt.as_str())?;
+                } else {
+                    kwargs.set_item("cwd", py.None())?;
+                }
+                kwargs.set_item("artifact_dir", prepared.artifact_dir.as_str())?;
+
+                // Pass through expected_artifact_paths
+                kwargs.set_item(
+                    "expected_artifact_paths",
+                    expected_artifact_paths.as_slice(),
+                )?;
+                kwargs.set_item("artifact_reminder_count", 3)?;
+
+                // Pass through remaining options (except "model") as kwargs to client.run()
+                for (k, v) in &agent.options {
+                    if k == "model" {
+                        continue;
+                    }
+                    let py_val = json_value_to_py(py, v)?;
+                    kwargs.set_item(k.as_str(), py_val)?;
+                }
+
+                let coro = client_obj.call_method("run", (&full_prompt,), Some(&kwargs))?;
+                let fut = pyo3_async_runtimes::tokio::into_future(coro)?;
+                Ok(Box::pin(fut))
+            })?;
+
+            let completed_result: Py<PyAny> = client_fut
+                .await
+                .map_err(|e| Bail::new_err(format!("agent stage client error: {e}")))?;
+
+            Python::attach(|py| -> PyResult<Py<PyAny>> {
+                // Record token usage
+                let token_usage = completed_result.bind(py).getattr("token_usage")?;
+                if !token_usage.is_none() {
+                    let prompt_tokens: u64 = token_usage.getattr("prompt_tokens")?.extract()?;
+                    let completion_tokens: u64 =
+                        token_usage.getattr("completion_tokens")?.extract()?;
+                    let cached_input_tokens: u64 =
+                        token_usage.getattr("cached_input_tokens")?.extract()?;
+                    let cache_creation_input_tokens: u64 = token_usage
+                        .getattr("cache_creation_input_tokens")?
+                        .extract()?;
+                    let reasoning_tokens: u64 =
+                        token_usage.getattr("reasoning_tokens")?.extract()?;
+                    let turns: usize = token_usage.getattr("turns")?.extract()?;
+
+                    let delta = HashMap::from([
+                        ("prompt_tokens".to_string(), prompt_tokens as i64),
+                        ("completion_tokens".to_string(), completion_tokens as i64),
+                        (
+                            "cached_input_tokens".to_string(),
+                            cached_input_tokens as i64,
+                        ),
+                        (
+                            "cache_creation_input_tokens".to_string(),
+                            cache_creation_input_tokens as i64,
+                        ),
+                        ("reasoning_tokens".to_string(), reasoning_tokens as i64),
+                        ("turns".to_string(), turns as i64),
+                    ]);
+
+                    let data_obj = data_py.bind(py);
+                    data_obj.call_method1("accumulate_token_usage", (delta,))?;
+                }
+
+                // Check bail
+                let exit_code: i32 = completed_result.bind(py).getattr("exit_code")?.extract()?;
+                let text_result: Option<String> = completed_result
+                    .bind(py)
+                    .getattr("text_result")?
+                    .extract()?;
+
+                let cr = gremlins::clients::protocol::CompletedRun {
+                    exit_code,
+                    text_result,
+                    events: None,
+                    cost_usd: None,
+                    token_usage: None,
+                };
+
+                if let Err(rust_agent::AgentError::Bail { reason, .. }) =
+                    rust_agent::check_bail(&cr)
+                {
+                    return Err(Bail::new_err(reason));
+                }
+
+                // Verify single-output artifact
+                if single {
+                    for (key, path_str) in &prepared.bind_paths {
+                        if optional_keys.contains(key) {
+                            continue;
+                        }
+                        let p = std::path::Path::new(path_str);
+                        if !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+                            return Err(Bail::new_err(format!(
+                                "agent {}: artifact {} was not produced",
+                                prepared.name, key
+                            )));
+                        }
+                    }
+                }
+
+                let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
+                Ok(done_obj.into_any())
+            })
+        })
+    }
+}
+
 // --- Free functions ---
 
 #[pyfunction]
@@ -527,6 +992,7 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
 
     m.add_class::<PyExec>()?;
+    m.add_class::<PyAgent>()?;
     m.add_class::<Done>()?;
     m.add("Bail", m.py().get_type::<Bail>())?;
 
@@ -543,7 +1009,8 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     globals.set_item("_m", &m)?;
     py.run(
         c"\
-async def _exec_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Exec.run = _exec_run_async\n",
+async def _exec_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Exec.run = _exec_run_async\n\
+async def _agent_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Agent.run = _agent_run_async\n",
         Some(&globals),
         None,
     )?;
