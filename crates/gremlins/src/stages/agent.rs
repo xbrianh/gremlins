@@ -237,6 +237,18 @@ pub fn build_workspace_preamble(cwd: &str, worktree: Option<&str>) -> String {
     parts.join("\n")
 }
 
+impl AgentPrepared {
+    /// Assemble the final prompt: system prompt + workspace preamble + stage prompt.
+    pub fn final_prompt(&self) -> String {
+        let preamble = build_workspace_preamble(&self.cwd, self.worktree.as_deref());
+        format!(
+            "{}\n\n{preamble}\n\n{}",
+            crate::config::AGENT_SYSTEM_PROMPT,
+            self.prompt
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stage trait impl
 // ---------------------------------------------------------------------------

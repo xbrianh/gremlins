@@ -8,6 +8,13 @@ use serde_json::Value;
 /// Default name of the project-local overlay directory.
 pub const OVERLAY_DIRNAME: &str = ".gremlins";
 
+/// System prompt injected into every agent stage.
+pub const AGENT_SYSTEM_PROMPT: &str = "\
+Keep your context lean: delegate every self-contained piece of work to a subagent. Subagents \
+have isolated context — they absorb the noise so you don't have to. When you have multiple \
+independent tasks, fan them out with the parallel tool. Plan the fan-out before you start; \
+parallel work is cheaper than serial drift.\n";
+
 // ---------------------------------------------------------------------------
 // Path overrides from config.json "paths" section
 // ---------------------------------------------------------------------------

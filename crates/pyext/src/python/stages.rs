@@ -789,10 +789,8 @@ impl PyAgent {
         prepared.worktree = worktree_str.clone();
         prepared.artifact_dir = artifact_dir.to_string_lossy().to_string();
 
-        // Build workspace preamble
-        let preamble =
-            rust_agent::build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
-        let full_prompt = format!("{preamble}\n\n{}", prepared.prompt);
+        // Assemble full prompt (system prompt + workspace preamble + stage prompt)
+        let full_prompt = prepared.final_prompt();
 
         let raw_path = artifact_dir.join(format!("stream-{}.jsonl", prepared.name));
 
