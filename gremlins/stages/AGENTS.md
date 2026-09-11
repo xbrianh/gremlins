@@ -87,7 +87,7 @@ Bundled stage recipes live under `gremlins/recipes/stages/`. Each recipe is a mu
 
 ## Import constraint for new stages
 
-Any new `gremlins/stages/introspect.py` (planned for #258) must import only `inspect` and `gremlins.stages.base.Stage` — never any orchestrator module. This keeps the stages package free of upward dependencies so orchestrators can import stages without cycles.
+Any new `gremlins/stages/introspect.py` (planned for #258) must import only `inspect` and `gremlins.stages.composite.StageAttrs` — never any orchestrator module. This keeps the stages package free of upward dependencies so orchestrators can import stages without cycles.
 
 ## Load-bearing invariants
 

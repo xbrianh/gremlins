@@ -426,7 +426,7 @@ def test_child_state_uses_explicit_client(tmp_path):
     from gremlins.stages.composite import child_state
 
     agent = _make_agent(name="child")
-    from _gremlins_core.clients import RustClient as Client
+    from _gremlins_core.clients import Client
 
     agent.client = Client.parse("xai:grok-5")
     agent.client_explicit = True
@@ -448,7 +448,7 @@ def test_child_state_uses_explicit_client(tmp_path):
 
 def test_child_state_falls_back_to_parent_when_not_explicit(tmp_path):
     """child_state() must fall back to the parent client when client_explicit is False."""
-    from _gremlins_core.clients import RustClient as Client
+    from _gremlins_core.clients import Client
     from _gremlins_core.schemas import Pipeline
 
     from gremlins.stages.composite import child_state

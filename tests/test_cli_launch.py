@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from unittest.mock import MagicMock, patch
 
 from _gremlins_core.schemas import Bootstrap, InputSource, InputSources, Pipeline
@@ -146,17 +145,7 @@ def test_early_death_returns_exit_code(capsys):
     assert "exited early with code 2" in capsys.readouterr().err
 
 
-def test_self_background_main_populates_registry_before_validation(monkeypatch):
-    # conftest imports FakeClient which causes gremlins._clients_init to
-    # run and populate CLIENT_FACTORIES. Simulate the cold-import scenario by
-    # clearing the dict and evicting the init module so _self_background_main must
-    # trigger registration itself.
-    from _gremlins_core.clients import CLIENT_FACTORIES
-
-    saved = dict(CLIENT_FACTORIES)
-    CLIENT_FACTORIES.clear()
-    monkeypatch.delitem(sys.modules, "gremlins._clients_init", raising=False)
-
+def test_self_background_main_returns_zero_when_child_runs():
     fake_proc = MagicMock()
     fake_proc.poll.return_value = None
     args = argparse.Namespace(
@@ -169,15 +158,11 @@ def test_self_background_main_populates_registry_before_validation(monkeypatch):
         print_id=False,
         wait=False,
     )
-    try:
-        with (
-            patch("gremlins.cli.launch.launch", return_value=("gr-reg01", fake_proc)),
-            patch("gremlins.cli.launch.time.sleep"),
-            patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
-        ):
-            rc = _self_background_main("some-pipeline", args, {})
-    finally:
-        CLIENT_FACTORIES.clear()
-        CLIENT_FACTORIES.update(saved)
+    with (
+        patch("gremlins.cli.launch.launch", return_value=("gr-reg01", fake_proc)),
+        patch("gremlins.cli.launch.time.sleep"),
+        patch("gremlins.cli.launch.time.time", side_effect=[0, 100]),
+    ):
+        rc = _self_background_main("some-pipeline", args, {})
 
     assert rc == 0

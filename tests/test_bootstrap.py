@@ -8,7 +8,7 @@ import sys
 
 import pytest
 from _gremlins_core.artifacts import ArtifactRegistry
-from _gremlins_core.clients import RustClient as Client
+from _gremlins_core.clients import Client
 from _gremlins_core.schemas import Bootstrap, InputSource, InputSources
 from conftest import MockGremlin
 

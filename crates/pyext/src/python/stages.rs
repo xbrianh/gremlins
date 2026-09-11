@@ -196,7 +196,7 @@ impl PyExec {
             let py = _cls.py();
             let parsed = py
                 .import("_gremlins_core.clients")?
-                .getattr("RustClient")?
+                .getattr("Client")?
                 .call_method1("parse", (raw,))?;
             (Some(parsed.unbind()), true)
         } else {
@@ -559,7 +559,7 @@ impl PyAgent {
             let py = _cls.py();
             let parsed = py
                 .import("_gremlins_core.clients")?
-                .getattr("RustClient")?
+                .getattr("Client")?
                 .call_method1("parse", (raw,))?;
             (Some(parsed.unbind()), true)
         } else {

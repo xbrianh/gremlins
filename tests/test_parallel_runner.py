@@ -347,12 +347,12 @@ def test_parallel_sequence_child_worktree_flows() -> None:
     """SequenceStage inside a parallel group sees the fanout worktree in all sub-stages."""
     from _gremlins_core.stages import Done, Outcome
 
-    from gremlins.stages.base import Stage
+    from gremlins.stages.composite import StageAttrs
     from gremlins.stages.sequence import SequenceStage
 
     observed: list[pathlib.Path | None] = []
 
-    class _CaptureStage(Stage):
+    class _CaptureStage(StageAttrs):
         def __init__(self, name: str) -> None:
             super().__init__(name)
 
@@ -411,9 +411,9 @@ def test_run_stages_async_callable_executes() -> None:
 def test_make_runner_returns_async_for_any_stage() -> None:
     from _gremlins_core.stages import Done, Outcome
 
-    from gremlins.stages.base import Stage
+    from gremlins.stages.composite import StageAttrs
 
-    class AStage(Stage):
+    class AStage(StageAttrs):
         type = "a-test"
 
         async def run(self, gremlin) -> Outcome:
@@ -430,18 +430,18 @@ def test_make_runner_returns_async_for_any_stage() -> None:
 def test_stages_run_in_order_via_make_runner() -> None:
     from _gremlins_core.stages import Done, Outcome
 
-    from gremlins.stages.base import Stage
+    from gremlins.stages.composite import StageAttrs
 
     executed: list[str] = []
 
-    class StageA(Stage):
+    class StageA(StageAttrs):
         type = "stage-a"
 
         async def run(self, gremlin) -> Outcome:
             executed.append("a")
             return Done()
 
-    class StageB(Stage):
+    class StageB(StageAttrs):
         type = "stage-b"
 
         async def run(self, gremlin) -> Outcome:

@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from _gremlins_core.artifacts import ArtifactRegistry
-from _gremlins_core.clients import RustClient as Client
+from _gremlins_core.clients import Client
 from _gremlins_core.config import project_root, state_root
 from _gremlins_core.stages import FRAMEWORK_KEYS, Done
 

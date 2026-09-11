@@ -18,7 +18,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from _gremlins_core.artifacts import ArtifactRegistry
-from _gremlins_core.clients import RustClient as Client
+from _gremlins_core.clients import Client
 from _gremlins_core.config import (
     project_root,
     scratch_root,

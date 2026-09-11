@@ -167,8 +167,6 @@ def _self_background_main(
     *,
     telemetry: bool = False,
 ) -> int:
-    import gremlins._clients_init  # noqa: F401  # pyright: ignore[reportUnusedImport] — registers built-in providers
-
     pipeline_args = ("--client", args.client) if args.client else ()
     try:
         gremlin_id, proc = launch(

@@ -47,9 +47,9 @@ def test_parallel_run_cleans_up_child_state_dirs(sandbox) -> None:
 
     from _gremlins_core.stages import Done, Outcome
 
-    from gremlins.stages.base import Stage
+    from gremlins.stages.composite import StageAttrs
 
-    class _NoopStage(Stage):
+    class _NoopStage(StageAttrs):
         type = "_test_noop_v2"
 
         async def run(self, gremlin) -> Outcome:
@@ -83,9 +83,9 @@ def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:
 
     from _gremlins_core.stages import Done, Outcome
 
-    from gremlins.stages.base import Stage
+    from gremlins.stages.composite import StageAttrs
 
-    class _NoopStage(Stage):
+    class _NoopStage(StageAttrs):
         type = "_test_noop_v3"
 
         async def run(self, gremlin) -> Outcome:
@@ -224,8 +224,7 @@ def test_fork_uses_parent_not_child_state_as_source(sandbox) -> None:
     from _gremlins_core.schemas import Pipeline
 
     from gremlins.executor.gremlin import Gremlin
-    from gremlins.stages.base import Stage
-    from gremlins.stages.composite import child_state
+    from gremlins.stages.composite import StageAttrs, child_state
 
     # Create a temporary git repo
     tmp_repo = sandbox.root / "repo"
@@ -280,7 +279,7 @@ def test_fork_uses_parent_not_child_state_as_source(sandbox) -> None:
     state_file = parent_state_dir / "state.json"
     state_file.write_text(
         json.dumps(
-            {"id": gremlin_id, "client": "fake:fake", "project_root": str(tmp_repo)}
+            {"id": gremlin_id, "client": "cmd:fake", "project_root": str(tmp_repo)}
         ),
         encoding="utf-8",
     )
@@ -316,7 +315,7 @@ def test_fork_uses_parent_not_child_state_as_source(sandbox) -> None:
     # Simulate what _ParallelExecutor._fan_out does:
     # 1. Create a child state via child_state(fan_out=True) — this gives artifact_dir
     #    pointing to an empty directory under scratch_root(<child_id>)/artifacts/
-    child_stage = Stage("child-x")
+    child_stage = StageAttrs("child-x")
     child_stage.type = "agent"
     child_id = f"{gremlin_id}--mygroup--child-x"
     cs = child_state(parent_state, child_stage, fan_out=True, child_id=child_id)

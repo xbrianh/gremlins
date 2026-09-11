@@ -15,7 +15,7 @@ from conftest import MockGremlin
 from gremlins.executor.state import State, StateData, build_state
 from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
-from gremlins.stages.base import Stage
+from gremlins.stages.composite import StageAttrs
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.sequence import SequenceStage
@@ -47,7 +47,7 @@ def _read_state(tmp_path: pathlib.Path) -> dict[str, Any]:
 def test_sequence_active_children_cleared_after_run(tmp_path: pathlib.Path) -> None:
     gremlin = _stateful(tmp_path)
 
-    class _Spy(Stage):
+    class _Spy(StageAttrs):
         captured: list[str] | None = None
 
         async def run(self, gremlin: Any) -> Outcome:
@@ -64,7 +64,7 @@ def test_sequence_active_children_cleared_after_run(tmp_path: pathlib.Path) -> N
 def test_sequence_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> None:
     gremlin = _stateful(tmp_path)
 
-    class _Boom(Stage):
+    class _Boom(StageAttrs):
         async def run(self, gremlin: Any) -> Outcome:
             raise RuntimeError("boom")
 
@@ -84,7 +84,7 @@ def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
     gremlin = _stateful(tmp_path)
     captured: list[list[str] | None] = []
 
-    class _Spy(Stage):
+    class _Spy(StageAttrs):
         async def run(self, gremlin: Any) -> Outcome:
             captured.append(_read_state(tmp_path).get("active_children"))
 
@@ -109,7 +109,7 @@ def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
 def test_loop_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> None:
     gremlin = _stateful(tmp_path)
 
-    class _Boom(Stage):
+    class _Boom(StageAttrs):
         async def run(self, gremlin: Any) -> Outcome:
             raise RuntimeError("boom")
 

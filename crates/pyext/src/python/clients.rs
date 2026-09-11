@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyList;
 
 use gremlins::clients::backend::{Backend, ClientError, RunParams};
 use gremlins::clients::cmd_backend::CmdBackend;
@@ -12,10 +12,10 @@ use gremlins::clients::openai_backend::{OpenAiBackend, OpenAiProvider};
 use gremlins::clients::protocol::CompletedRun;
 use rig_core::providers::openai;
 
-/// Python-exposed RustClient.
+/// Python-exposed Client.
 #[pyclass(skip_from_py_object)]
 #[derive(Clone)]
-pub struct RustClient {
+pub struct Client {
     #[pyo3(get)]
     provider: String,
     #[pyo3(get)]
@@ -211,11 +211,10 @@ fn build_openai_backend(
 }
 
 #[pymethods]
-impl RustClient {
+impl Client {
     #[new]
     #[pyo3(signature = (provider, model, native_block=None, extra_params=None))]
     fn new(
-        py: Python<'_>,
         provider: String,
         model: String,
         native_block: Option<HashMap<String, Vec<String>>>,
@@ -224,60 +223,29 @@ impl RustClient {
         let native_block = native_block.unwrap_or_else(default_native_block);
         let extra_params = extra_params.unwrap_or_default();
 
-        let known = matches!(provider.as_str(), "openai" | "xai" | "openrouter" | "cmd");
-        if known {
-            return Ok(RustClient {
-                provider,
-                model,
-                extra_params,
-                native_block,
-                inner: Arc::new(Mutex::new(None)),
-            });
-        }
-
-        // Unknown provider: look up CLIENT_FACTORIES and extract the inner backend.
-        let factories: Bound<'_, PyDict> = py
-            .import("_gremlins_core.clients")?
-            .getattr("CLIENT_FACTORIES")?
-            .cast_into()?;
-        let factory = factories.get_item(&provider)?;
-        match factory {
-            Some(f) => {
-                let args: (&str, &IndexMap<String, String>) = (&model, &extra_params);
-                let result = f.call1(args)?;
-                let delegate: Py<Self> = result.extract()?;
-                let borrowed = delegate.borrow(py);
-                let backend = borrowed.inner.lock().unwrap().clone();
-                Ok(RustClient {
-                    provider,
-                    model,
-                    extra_params,
-                    native_block,
-                    inner: Arc::new(Mutex::new(backend)),
-                })
-            }
-            None => Err(pyo3::exceptions::PyValueError::new_err(format!(
+        if !matches!(provider.as_str(), "openai" | "xai" | "openrouter" | "cmd") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unknown provider '{provider}'"
-            ))),
+            )));
         }
+        Ok(Client {
+            provider,
+            model,
+            extra_params,
+            native_block,
+            inner: Arc::new(Mutex::new(None)),
+        })
     }
 
     #[staticmethod]
-    fn parse(py: Python<'_>, s: &str) -> PyResult<Self> {
+    fn parse(s: &str) -> PyResult<Self> {
         let (provider, model, extra_params) = parse_spec(s)?;
-        let known = matches!(provider.as_str(), "openai" | "xai" | "openrouter" | "cmd");
-        if !known {
-            let factories: Bound<'_, PyDict> = py
-                .import("_gremlins_core.clients")?
-                .getattr("CLIENT_FACTORIES")?
-                .cast_into()?;
-            if factories.get_item(&provider)?.is_none() {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unknown provider '{provider}'"
-                )));
-            }
+        if !matches!(provider.as_str(), "openai" | "xai" | "openrouter" | "cmd") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown provider '{provider}'"
+            )));
         }
-        Ok(RustClient {
+        Ok(Client {
             provider,
             model,
             extra_params,
@@ -339,7 +307,7 @@ impl RustClient {
         expected_artifact_paths: Option<Vec<PathBuf>>,
         artifact_reminder_count: usize,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let backend = self.get_or_build_backend(py)?;
+        let backend = self.get_or_build_backend()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let params = RunParams {
                 prompt,
@@ -377,8 +345,8 @@ impl RustClient {
     }
 }
 
-impl RustClient {
-    fn get_or_build_backend(&self, py: Python<'_>) -> PyResult<Arc<dyn Backend>> {
+impl Client {
+    fn get_or_build_backend(&self) -> PyResult<Arc<dyn Backend>> {
         {
             let guard = self.inner.lock().unwrap();
             if let Some(ref backend) = *guard {
@@ -397,40 +365,9 @@ impl RustClient {
             "xai" => OpenAiProvider::Xai,
             "openrouter" => OpenAiProvider::OpenRouter,
             other => {
-                // Fall back to CLIENT_FACTORIES for custom providers registered by
-                // tests or user code (e.g. "fake" in conftest.py).
-                let factories: Bound<'_, PyDict> = py
-                    .import("_gremlins_core.clients")?
-                    .getattr("CLIENT_FACTORIES")?
-                    .cast_into()?;
-                let factory = factories.get_item(other)?;
-                match factory {
-                    Some(f) => {
-                        let args: (&str, &IndexMap<String, String>) =
-                            (&self.model, &self.extra_params);
-                        let result = f.call1(args)?;
-                        let delegate: Py<Self> = result.extract()?;
-                        let borrowed = delegate.borrow(py);
-                        let backend = borrowed.inner.lock().unwrap().clone();
-                        match backend {
-                            Some(backend) => {
-                                *self.inner.lock().unwrap() = Some(backend.clone());
-                                return Ok(backend);
-                            }
-                            None => {
-                                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                    "factory for provider '{other}' returned without \
-                                         building a backend"
-                                )));
-                            }
-                        }
-                    }
-                    None => {
-                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                            "unknown provider '{other}'"
-                        )));
-                    }
-                }
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown provider '{other}'"
+                )));
             }
         };
         let backend =
@@ -458,7 +395,7 @@ impl PyCompletedRun {
 }
 
 pub fn init_clients_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<RustClient>()?;
+    m.add_class::<Client>()?;
     m.add_class::<PyCompletedRun>()?;
     m.add_class::<PyUsageStats>()?;
 
@@ -475,8 +412,117 @@ pub fn init_clients_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py_tools = PyList::new(m.py(), &tools)?;
     m.add("_DEFAULT_ALLOWED_TOOLS", py_tools)?;
 
-    let factories = PyDict::new(m.py());
-    m.add("CLIENT_FACTORIES", factories)?;
-
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_spec_basic() {
+        let (p, m, e) = parse_spec("openai:gpt-4o").unwrap();
+        assert_eq!(p, "openai");
+        assert_eq!(m, "gpt-4o");
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn parse_spec_with_params() {
+        let (p, m, e) = parse_spec("openrouter:deepseek/deepseek-v4-pro:reasoning=high").unwrap();
+        assert_eq!(p, "openrouter");
+        assert_eq!(m, "deepseek/deepseek-v4-pro");
+        assert_eq!(e.get("reasoning").unwrap(), "high");
+    }
+
+    #[test]
+    fn parse_spec_cmd_ignores_params() {
+        let (p, m, e) = parse_spec("cmd:echo hello:world=foo").unwrap();
+        assert_eq!(p, "cmd");
+        assert_eq!(m, "echo hello:world=foo");
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn parse_spec_rejects_malformed() {
+        for (bad, expected) in [
+            ("no-colon", "expected 'provider:model'"),
+            (":model", "provider must not be empty"),
+            ("provider:", "model must not be empty"),
+            ("openai:gpt-4:reasoning=high,reasoning=low", "duplicate key"),
+        ] {
+            let err = parse_spec(bad).unwrap_err().to_string();
+            assert!(err.contains(expected), "{bad:?} -> {err:?}");
+        }
+    }
+
+    #[test]
+    fn parse_spec_multiple_params() {
+        let (_, _, e) = parse_spec(
+            "openrouter:deepseek/deepseek-v4-pro:reasoning=high,thinking=deepseek,foo=bar",
+        )
+        .unwrap();
+        assert_eq!(e.get("reasoning").unwrap(), "high");
+        assert_eq!(e.get("thinking").unwrap(), "deepseek");
+        assert_eq!(e.get("foo").unwrap(), "bar");
+    }
+
+    #[test]
+    fn parse_spec_roundtrips() {
+        for spec in [
+            "openai:gpt-4o-mini",
+            "xai:grok-4",
+            "openrouter:openai/gpt-4o",
+            "openrouter:deepseek/deepseek-v4-pro:reasoning=high",
+            "openrouter:deepseek/deepseek-v4-pro:reasoning=high,thinking=deepseek",
+            "xai:grok-4:reasoning=low,foo=bar",
+        ] {
+            let (p, m, e) = parse_spec(spec).unwrap();
+            let mut s = format!("{p}:{m}");
+            if !e.is_empty() {
+                let params: Vec<String> = e.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                s.push(':');
+                s.push_str(&params.join(","));
+            }
+            assert_eq!(s, spec);
+        }
+    }
+
+    #[test]
+    fn default_allowlist_has_six_tools() {
+        let block = default_native_block();
+        let tools = block.get("allowed_tools").unwrap();
+        assert_eq!(tools.len(), 6);
+        for name in ["Bash", "Edit", "Read", "Write", "Grep", "Glob"] {
+            assert!(tools.contains(&name.to_string()));
+        }
+    }
+
+    #[test]
+    fn equality_and_hash_track_provider_model_params() {
+        let high = IndexMap::from([("reasoning".to_string(), "high".to_string())]);
+        let low = IndexMap::from([("reasoning".to_string(), "low".to_string())]);
+        let a = Client::new("openai".into(), "gpt-4".into(), None, None).unwrap();
+        let b = Client::new("openai".into(), "gpt-4".into(), None, None).unwrap();
+        let c = Client::new("openai".into(), "gpt-4o".into(), None, None).unwrap();
+        let d = Client::new("openai".into(), "gpt-4".into(), None, Some(high.clone())).unwrap();
+        let e = Client::new("openai".into(), "gpt-4".into(), None, Some(high)).unwrap();
+        let f = Client::new("openai".into(), "gpt-4".into(), None, Some(low)).unwrap();
+
+        assert!(a.__eq__(&b));
+        assert_eq!(a.__hash__(), b.__hash__());
+        assert!(!a.__eq__(&c));
+        assert_ne!(a.__hash__(), c.__hash__());
+
+        assert!(!a.__eq__(&d));
+        assert!(d.__eq__(&e));
+        assert_eq!(d.__hash__(), e.__hash__());
+        assert!(!d.__eq__(&f));
+    }
+
+    #[test]
+    fn unknown_provider_rejected() {
+        assert!(Client::new("fake".into(), "m".into(), None, None).is_err());
+        assert!(Client::parse("fake:m").is_err());
+    }
 }

@@ -1,4 +1,4 @@
-"""Behavior tests for Stage.skip_if_exists dispatch check."""
+"""Behavior tests for StageAttrs.skip_if_exists dispatch check."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from _gremlins_core.stages import Agent, Done, Outcome
 from conftest import MockGremlin
 
 from gremlins.executor.state import State, StateData, build_state
-from gremlins.stages.base import Stage
+from gremlins.stages.composite import StageAttrs
 from tests.fake_client import FakeClient
 
 _PIPELINE = Pipeline(
@@ -22,7 +22,7 @@ _PIPELINE = Pipeline(
 )
 
 
-class _CountingStage(Stage):
+class _CountingStage(StageAttrs):
     type = "counting"
 
     def __init__(self, name: str, prompts: list[str], options: dict[str, Any]) -> None:

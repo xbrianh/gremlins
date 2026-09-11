@@ -12,7 +12,6 @@ import types
 from typing import Any
 
 import pytest
-from _gremlins_core.clients import CLIENT_FACTORIES
 from _gremlins_core.config import scratch_root
 
 from gremlins.executor.gremlin import State
@@ -25,18 +24,6 @@ os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 FIXTURES_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
 FAKE_CLAUDE = FIXTURES_DIR / "fake_claude.py"
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    def _make_fake_client(
-        model: str | None, extra_params: dict[str, str] | None = None
-    ) -> object:
-        return FakeClient(
-            fixtures={},
-            model=model or "fake",
-        )
-
-    CLIENT_FACTORIES["fake"] = _make_fake_client
 
 
 def _setup_claude_home(home: pathlib.Path) -> None:

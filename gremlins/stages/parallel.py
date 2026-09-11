@@ -20,7 +20,7 @@ from _gremlins_core.config import project_root, scratch_root, state_root
 from _gremlins_core.stages import Bail, Done, Outcome
 
 from gremlins.executor.parallel_state import ParallelGroupState
-from gremlins.stages.base import Stage
+from gremlins.stages.composite import StageAttrs
 from gremlins.stages.composite import child_state as _child_state
 from gremlins.utils import git, parallel_bail, proc
 
@@ -40,9 +40,7 @@ def _noop_set_stage(_: str) -> None:
     pass
 
 
-def _branch_pipeline(
-    branch_stage: Stage | None, parent_state: State
-) -> Pipeline | None:
+def _branch_pipeline(branch_stage: Any | None, parent_state: State) -> Pipeline | None:
     from _gremlins_core.schemas import Pipeline
 
     if branch_stage is None or branch_stage.raw_dict is None:
@@ -60,7 +58,7 @@ def _branch_pipeline(
     )
 
 
-class ParallelStage(Stage):
+class ParallelStage(StageAttrs):
     """Fan-out/fan-in execution of a parallel pipeline block."""
 
     type = "parallel"
@@ -68,7 +66,7 @@ class ParallelStage(Stage):
     def __init__(
         self,
         name: str,
-        body: list[Stage],
+        body: list[Any],
         *,
         max_concurrent: int | None = None,
         cancel_on_bail: bool = False,
@@ -156,7 +154,7 @@ class ParallelStage(Stage):
         project_root_path: pathlib.Path | None = None,
         worktree_parent: pathlib.Path | None = None,
         set_stage_fn: Callable[[str], None] | None = None,
-        child_stages: list[Stage] | None = None,
+        child_stages: list[Any] | None = None,
     ) -> list[_Stage]:
         """Return the three runtime stages for this parallel block."""
         return _ParallelExecutor(
@@ -222,7 +220,7 @@ class _ParallelExecutor:
         project_root: pathlib.Path,
         worktree_parent: pathlib.Path | None = None,
         stage_path: str = "",
-        child_stages: list[Stage] | None = None,
+        child_stages: list[Any] | None = None,
     ) -> None:
         self._parallel_stage = parallel_stage
         self._group_name = parallel_stage.name
@@ -235,7 +233,7 @@ class _ParallelExecutor:
         self._project_root = project_root
         self._worktree_parent = worktree_parent
         self._stage_path = stage_path
-        self._stages_by_key: dict[str, Stage] = (
+        self._stages_by_key: dict[str, Any] = (
             {st.name: st for st in child_stages} if child_stages else {}
         )
         self._group_state = ParallelGroupState(self._group_name, self._parent_data)
@@ -476,7 +474,7 @@ class _ParallelExecutor:
     # --- subprocess runner ---
 
     async def _run_subprocess(
-        self, child_key: str, child_st: State, stage_obj: Stage
+        self, child_key: str, child_st: State, stage_obj: Any
     ) -> None:
         parent_gid = self._parent_data.gremlin_id or ""
         child_id = (
@@ -635,7 +633,7 @@ class _ParallelExecutor:
 # ---------------------------------------------------------------------------
 
 
-def _parse_child_timeout(stage_obj: Stage, child_key: str) -> float | None:
+def _parse_child_timeout(stage_obj: Any, child_key: str) -> float | None:
     if not stage_obj.raw_dict:
         return None
     raw_t = stage_obj.raw_dict.get("timeout_seconds")
@@ -671,7 +669,7 @@ def _missing_result_detail(child_key: str, returncode: int | None) -> str:
 
 
 def _build_child_spec_dict(
-    stage_obj: Stage,
+    stage_obj: Any,
     child_st: State,
     child_key: str,
     attempt: str,
@@ -712,7 +710,7 @@ def _read_child_result(
 
 
 async def run_child_subprocess(
-    stage_obj: Stage,
+    stage_obj: Any,
     child_st: State,
     child_key: str,
     attempt: str,

@@ -13,7 +13,7 @@ from conftest import MockGremlin, _make_gremlin_wrapper
 
 from gremlins.executor.state import State as RuntimeState
 from gremlins.executor.state import StateData, build_state
-from gremlins.stages.base import Stage
+from gremlins.stages.composite import StageAttrs
 from gremlins.stages.sequence import SequenceStage
 from tests.fake_client import FakeClient
 
@@ -26,7 +26,7 @@ def _state(**kw) -> RuntimeState:
     return build_state(data=StateData(), client=FakeClient(), **kw)
 
 
-class _FakeStage(Stage):
+class _FakeStage(StageAttrs):
     """Minimal Stage that records the state it received and optionally raises."""
 
     def __init__(self, name: str, *, raises: Exception | None = None) -> None:
@@ -44,7 +44,7 @@ class _FakeStage(Stage):
 def test_sequence_runs_body_in_order() -> None:
     log: list[str] = []
 
-    class _LogStage(Stage):
+    class _LogStage(StageAttrs):
         def __init__(self, label: str) -> None:
             super().__init__(label)
             self._label = label
@@ -61,7 +61,7 @@ def test_sequence_runs_body_in_order() -> None:
 def test_sequence_stops_on_exception() -> None:
     log: list[str] = []
 
-    class _LogStage(Stage):
+    class _LogStage(StageAttrs):
         def __init__(self, label: str, *, fail: bool = False) -> None:
             super().__init__(label)
             self._label = label
@@ -126,7 +126,7 @@ def test_sequence_resume_skips_completed_children(sandbox) -> None:
     ran: list[str] = []
     fail = {"b": True}
 
-    class _TrackedStage(Stage):
+    class _TrackedStage(StageAttrs):
         def __init__(self, label: str) -> None:
             super().__init__(label)
 
@@ -155,7 +155,7 @@ def test_sequence_resume_skips_completed_children(sandbox) -> None:
 def test_sibling_sequences_done_sets_are_independent(sandbox) -> None:
     ran: list[str] = []
 
-    class _LogStage(Stage):
+    class _LogStage(StageAttrs):
         def __init__(self, label: str) -> None:
             super().__init__(label)
 

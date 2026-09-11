@@ -8,16 +8,16 @@ from _gremlins_core.schemas import Pipeline as _PipelineData
 from _gremlins_core.stages import Agent
 
 from gremlins.executor.gremlin import Gremlin
-from gremlins.stages.base import Stage
+from gremlins.protocols import StageProtocol
 from gremlins.stages.parallel import ParallelStage
 
 
-def _pipeline_data(stages: list[Stage] | None = None) -> _PipelineData:
+def _pipeline_data(stages: list[StageProtocol] | None = None) -> _PipelineData:
     return _PipelineData(name="test", path=pathlib.Path("."), stages=stages or [])
 
 
 def _local(
-    stages: list[Stage],
+    stages: list[StageProtocol],
     *,
     resume_from: str | None = None,
     tmp_path: pathlib.Path,
@@ -74,12 +74,12 @@ def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_stages(*names: str) -> list[Stage]:
+def _make_stages(*names: str) -> list[StageProtocol]:
     return [Agent(n, [], {}) for n in names]
 
 
 def _make_parallel_stage(name: str, children: list[str]) -> ParallelStage:
-    child_stages: list[Stage] = [Agent(c, [], {}) for c in children]
+    child_stages: list[StageProtocol] = [Agent(c, [], {}) for c in children]
     return ParallelStage(name, child_stages)
 
 
