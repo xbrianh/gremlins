@@ -16,7 +16,7 @@ pub(crate) fn agent_system_prompt(
 ) -> String {
     format!(
         "\
-Keep your context lean: delegate every self-contained piece of work to a subagent. Subagents \
+Keep your context lean: delegate self-contained piece of work to a subagent. Subagents \
 have isolated context — they absorb the noise so you don't have to. When you have multiple \
 independent tasks, fan them out with the parallel tool. Plan the fan-out before you start; \
 parallel work is cheaper than serial drift.\n\n\
@@ -1164,7 +1164,7 @@ mod tests {
             Path::new("/project"),
         );
         assert!(
-            prompt.contains("delegate every self-contained piece of work to a subagent"),
+            prompt.contains("delegate self-contained piece of work to a subagent"),
             "agent prompt must include delegation guidance"
         );
     }
@@ -1192,7 +1192,7 @@ mod tests {
             Path::new("/project"),
         );
         assert!(
-            !prompt.contains("delegate every self-contained piece of work to a subagent"),
+            !prompt.contains("delegate self-contained piece of work to a subagent"),
             "subagent prompt must not include delegation guidance — subagents are already delegates"
         );
     }
