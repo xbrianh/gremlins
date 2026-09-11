@@ -70,7 +70,7 @@ The `Makefile` sets `MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || npr
 ## Project-wide conventions
 
 - **Unopinionated workflow language.** The harness supplies mechanics (sequencing, worktrees, artifacts, bail bookkeeping, client plumbing) and injects no system prompt or operational norms into any model. A stage's model sees only the prompts its pipeline declares. Do not add hard-coded system prompting or behavioral instructions to the harness — put them in the pipeline's own prompt files, where the pipeline author owns them.
-- **No re-export facades.** Package `__init__.py` files do not import from submodules and re-publish via `__all__`. Imports name the defining submodule directly: `from gremlins.cli.fleet import fleet_main`, not `from gremlins.cli import fleet_main`. The sole exceptions are `__init__.py` files that *define* something (e.g. `gremlins/clients/__init__.py` runs provider registrations on import; `gremlins/__init__.py` defines `PACKAGE_ROOT`).
+- **No re-export facades.** Package `__init__.py` files do not import from submodules and re-publish via `__all__`. Imports name the defining submodule directly: `from gremlins.cli.fleet import fleet_main`, not `from gremlins.cli import fleet_main`. The sole exceptions are `__init__.py` files that *define* something (e.g. `gremlins/__init__.py` defines `PACKAGE_ROOT`).
 - **No backwards-compatibility shims.** No legacy aliases, no deprecation paths, no compat decorators. Replace at every call site.
 - **No inheritance.** Composition only. Single inheritance is almost always the wrong tool; multiple inheritance is never acceptable.
 - **Functional first.** Pure functions and plain data over classes. Reach for a class only when state must be kept.

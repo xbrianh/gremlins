@@ -445,13 +445,14 @@ mod tests {
 
     #[test]
     fn parse_spec_rejects_malformed() {
-        for bad in [
-            "no-colon",
-            ":model",
-            "provider:",
-            "openai:gpt-4:reasoning=high,reasoning=low",
+        for (bad, expected) in [
+            ("no-colon", "expected 'provider:model'"),
+            (":model", "provider must not be empty"),
+            ("provider:", "model must not be empty"),
+            ("openai:gpt-4:reasoning=high,reasoning=low", "duplicate key"),
         ] {
-            assert!(parse_spec(bad).is_err(), "expected error for {bad:?}");
+            let err = parse_spec(bad).unwrap_err().to_string();
+            assert!(err.contains(expected), "{bad:?} -> {err:?}");
         }
     }
 
@@ -498,13 +499,25 @@ mod tests {
     }
 
     #[test]
-    fn equality_and_hash_ignore_backend() {
+    fn equality_and_hash_track_provider_model_params() {
+        let high = IndexMap::from([("reasoning".to_string(), "high".to_string())]);
+        let low = IndexMap::from([("reasoning".to_string(), "low".to_string())]);
         let a = Client::new("openai".into(), "gpt-4".into(), None, None).unwrap();
         let b = Client::new("openai".into(), "gpt-4".into(), None, None).unwrap();
         let c = Client::new("openai".into(), "gpt-4o".into(), None, None).unwrap();
+        let d = Client::new("openai".into(), "gpt-4".into(), None, Some(high.clone())).unwrap();
+        let e = Client::new("openai".into(), "gpt-4".into(), None, Some(high)).unwrap();
+        let f = Client::new("openai".into(), "gpt-4".into(), None, Some(low)).unwrap();
+
         assert!(a.__eq__(&b));
         assert_eq!(a.__hash__(), b.__hash__());
         assert!(!a.__eq__(&c));
+        assert_ne!(a.__hash__(), c.__hash__());
+
+        assert!(!a.__eq__(&d));
+        assert!(d.__eq__(&e));
+        assert_eq!(d.__hash__(), e.__hash__());
+        assert!(!d.__eq__(&f));
     }
 
     #[test]

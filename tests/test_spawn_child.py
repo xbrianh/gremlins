@@ -16,6 +16,10 @@ from _gremlins_core.stages import Bail, Done, Outcome
 import gremlins.spawn.child as _rc
 from gremlins.stages.composite import StageAttrs
 
+# Inert client spec: parsed by Gremlin.from_subprocess but never invoked — the
+# stages under test return Done/Bail/raise without calling the backend.
+_FAKE_CLIENT = "cmd:fake"
+
 
 class _SimpleStage(StageAttrs):
     @classmethod
@@ -62,7 +66,7 @@ def _write_spec(
 ) -> pathlib.Path:
     spec: dict[str, Any] = {
         "stage_dict": {"name": "test-stage", "type": stage_type},
-        "client": "cmd:fake",
+        "client": _FAKE_CLIENT,
         "artifact_dir": str(tmp_path / "artifacts"),
     }
     if extra:
@@ -108,7 +112,7 @@ def test_build_state_missing_artifact_dir() -> None:
     from gremlins.executor.gremlin import Gremlin
 
     with pytest.raises(ValueError, match="artifact_dir"):
-        Gremlin.from_subprocess({"client": "cmd:fake"})
+        Gremlin.from_subprocess({"client": _FAKE_CLIENT})
 
 
 def test_run_done(tmp_path: pathlib.Path) -> None:
@@ -142,7 +146,7 @@ def test_run_stage_raises(tmp_path: pathlib.Path) -> None:
 def test_run_bad_spec_missing_stage_dict(tmp_path: pathlib.Path) -> None:
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(
-        json.dumps({"client": "cmd:fake", "artifact_dir": str(tmp_path)}),
+        json.dumps({"client": _FAKE_CLIENT, "artifact_dir": str(tmp_path)}),
         encoding="utf-8",
     )
     rc = asyncio.run(_rc._run(spec_path))

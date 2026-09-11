@@ -31,6 +31,7 @@ class StageAttrs:
     """Common attributes shared by composite stages and duck-typed test stages."""
 
     type: str = ""
+    body: list[Any] = []
     skip_if_exists: str = ""
 
     def __init__(self, name: str) -> None:

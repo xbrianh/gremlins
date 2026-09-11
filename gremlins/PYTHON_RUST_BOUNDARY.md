@@ -40,8 +40,9 @@ in `gremlins/utils/proc.py` itself.
 
 ### `_gremlins_core.clients.Client`
 
-The LLM client backend. Python `gremlins/clients/__init__.py` imports
-`Client` and wraps it. This handles all provider API calls.
+The LLM client backend. There is no Python wrapper — call sites import
+`Client` directly from `_gremlins_core.clients`. This handles all provider
+API calls.
 
 ### `_gremlins_core.discovery.*`
 
@@ -107,7 +108,6 @@ The Python `gremlins/pipeline/discovery.py` has been deleted.
 | File | Role |
 |---|---|
 | `gremlins/utils/proc.py` | Re-exports `_gremlins_core.utils.proc.*` — **active** |
-| `gremlins/clients/__init__.py` | Wraps `_gremlins_core.clients.Client` — **active** |
 | `gremlins/pipeline/discovery.py` | ~~Pure Python `list_pipelines`, `resolve_pipeline_name`, `resolve_pipeline_path` — **active**~~ **deleted** — replaced by `_gremlins_core.discovery.*` |
 | `gremlins/pipeline/loader.py` | ~~Pure Python `parse_stage`, `parse_stages`, `fill_names`, `check_duplicate_producers` — **active**~~ **deleted** — replaced by `_gremlins_core.schemas.*` |
 | `gremlins/pipeline/__init__.py` | ~~Python `Pipeline` class — **active**~~ **deleted** — replaced by `_gremlins_core.schemas.Pipeline` |
