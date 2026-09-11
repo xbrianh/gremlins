@@ -532,6 +532,20 @@ fn split_commands(s: &str) -> Vec<String> {
 /// Paths inside subshells are runtime-expanded by the shell, not literal
 /// arguments from the agent, so they must not be checked by `bash_check`.
 fn strip_subshells(s: &str) -> String {
+    /// Skip a quoted region: returns when the matching close-quote is found.
+    fn skip_quoted(chars: &mut std::str::Chars, quote: char) {
+        loop {
+            match chars.next() {
+                None => break,
+                Some(c) if c == quote => break,
+                Some('\\') => {
+                    chars.next();
+                }
+                _ => {}
+            }
+        }
+    }
+
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(ch) = chars.next() {
@@ -545,6 +559,7 @@ fn strip_subshells(s: &str) -> String {
                     while depth > 0 {
                         match chars.next() {
                             None => break,
+                            Some(c) if c == '\'' || c == '"' => skip_quoted(&mut chars, c),
                             Some('(') => depth += 1,
                             Some(')') => depth -= 1,
                             Some('\\') => {
@@ -559,11 +574,12 @@ fn strip_subshells(s: &str) -> String {
                 result.push(ch);
             }
             '`' => {
-                // Consume until matching backtick.
+                // Consume until matching backtick, skipping quoted regions.
                 loop {
                     match chars.next() {
                         None => break,
                         Some('`') => break,
+                        Some(c) if c == '\'' || c == '"' => skip_quoted(&mut chars, c),
                         Some('\\') => {
                             chars.next();
                         }
@@ -1365,6 +1381,64 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
             }
         }
     }
+    // Nested constraints for tools with structured array items.
+    match name {
+        "Edit" => {
+            if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
+                if edits.is_empty() {
+                    return Some("Error: 'edits' array must not be empty for Edit tool".into());
+                }
+                for (i, edit) in edits.iter().enumerate() {
+                    let obj = match edit.as_object() {
+                        Some(o) => o,
+                        None => {
+                            return Some(format!(
+                                "Error: edit {} in 'edits' must be an object for Edit tool",
+                                i + 1
+                            ));
+                        }
+                    };
+                    if !obj.contains_key("old_string") {
+                        return Some(format!(
+                            "Error: edit {} missing 'old_string' for Edit tool",
+                            i + 1
+                        ));
+                    }
+                    if !obj.contains_key("new_string") {
+                        return Some(format!(
+                            "Error: edit {} missing 'new_string' for Edit tool",
+                            i + 1
+                        ));
+                    }
+                }
+            }
+        }
+        "parallel" => {
+            if let Some(tasks) = args.get("tasks").and_then(|v| v.as_array()) {
+                if tasks.is_empty() {
+                    return Some("Error: 'tasks' array must not be empty for parallel tool".into());
+                }
+                for (i, task) in tasks.iter().enumerate() {
+                    let obj = match task.as_object() {
+                        Some(o) => o,
+                        None => {
+                            return Some(format!(
+                                "Error: task {} in 'tasks' must be an object for parallel tool",
+                                i + 1
+                            ));
+                        }
+                    };
+                    if !obj.contains_key("task") {
+                        return Some(format!(
+                            "Error: task {} missing 'task' for parallel tool",
+                            i + 1
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
     None
 }
 
@@ -1896,6 +1970,47 @@ mod tests {
     }
 
     #[test]
+    fn validate_tool_args_edit_empty_array() {
+        let err = validate_tool_args("Edit", &serde_json::json!({"file_path": "x", "edits": []}))
+            .unwrap();
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn validate_tool_args_edit_missing_nested_fields() {
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": [{}]}),
+        )
+        .unwrap();
+        assert!(err.contains("missing 'old_string'"));
+        assert!(err.contains("edit 1"));
+    }
+
+    #[test]
+    fn validate_tool_args_edit_item_not_object() {
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": ["not-an-object"]}),
+        )
+        .unwrap();
+        assert!(err.contains("must be an object"));
+    }
+
+    #[test]
+    fn validate_tool_args_parallel_empty_array() {
+        let err = validate_tool_args("parallel", &serde_json::json!({"tasks": []})).unwrap();
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn validate_tool_args_parallel_missing_task() {
+        let err = validate_tool_args("parallel", &serde_json::json!({"tasks": [{}]})).unwrap();
+        assert!(err.contains("missing 'task'"));
+        assert!(err.contains("task 1"));
+    }
+
+    #[test]
     fn resolve_relative_against_cwd() {
         let cwd = PathBuf::from("/tmp/work");
         assert_eq!(
@@ -2092,6 +2207,23 @@ mod tests {
         )
         .unwrap();
         assert!(err.contains("outside sandbox"));
+    }
+
+    #[test]
+    fn bash_check_quoted_paren_in_subshell() {
+        let dir = tmp();
+        // Quoted parentheses inside $() must not affect the depth counter.
+        // The literal /etc/passwd after the subshell is still checked.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cat $(printf '(') /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(
+            err.contains("outside sandbox"),
+            "literal /etc/passwd after subshell must be caught: {err}"
+        );
     }
 
     #[test]
