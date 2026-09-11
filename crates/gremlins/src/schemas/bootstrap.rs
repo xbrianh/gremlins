@@ -292,17 +292,18 @@ pub fn validate_source_values(
     Ok(())
 }
 
-/// Substitute `{cwd}` and `{key}` placeholders in a command string.
-/// Values are shell-escaped so that user-controlled source values cannot
-/// inject shell metacharacters.
+/// Substitute `{cwd}` and `{key}` placeholders in a command string. Each value
+/// is escaped for the quoting context it lands in, so user-controlled source
+/// values cannot inject shell metacharacters. `${key}` tokens are skipped and
+/// underscore keys also match their hyphenated form; a substituted value is
+/// not re-scanned.
 pub fn substitute_bootstrap_vars(
     cmd: &str,
     cwd: &Path,
     values: &HashMap<String, String>,
 ) -> String {
-    let mut all = values.clone();
-    all.insert("cwd".to_string(), cwd.to_string_lossy().to_string());
-    interpolation::substitute_vars_into_shell(cmd, &all)
+    let cwd = HashMap::from([("cwd".to_string(), cwd.to_string_lossy().to_string())]);
+    interpolation::substitute_vars_into_shell(cmd, &[&cwd, values])
 }
 
 #[cfg(test)]
@@ -393,5 +394,47 @@ mod tests {
         let result =
             substitute_bootstrap_vars("test -n {instructions}", Path::new("/tmp"), &values);
         assert_eq!(result, "test -n 'do the thing'");
+    }
+
+    #[test]
+    fn test_substitute_bootstrap_vars_keeps_template_double_quotes() {
+        let values = HashMap::from([("plan".to_string(), "a b".to_string())]);
+        let result =
+            substitute_bootstrap_vars("printf '%s' \"{plan}\"", Path::new("/tmp"), &values);
+        assert_eq!(result, "printf '%s' \"a b\"");
+    }
+
+    #[test]
+    fn test_substitute_bootstrap_vars_shell_escape() {
+        let values = HashMap::from([("x".to_string(), "'; rm -rf /; echo 'pwned".to_string())]);
+        let result = substitute_bootstrap_vars("echo {x}", Path::new("/tmp"), &values);
+        assert_eq!(result, "echo ''\\''; rm -rf /; echo '\\''pwned'");
+    }
+
+    #[test]
+    fn test_substitute_bootstrap_vars_blocks_double_quote_breakout() {
+        let values = HashMap::from([("x".to_string(), "\"; rm -rf /; echo \"".to_string())]);
+        let result = substitute_bootstrap_vars("echo \"{x}\"", Path::new("/tmp"), &values);
+        assert_eq!(result, "echo \"\\\"; rm -rf /; echo \\\"\"");
+    }
+
+    #[test]
+    fn test_substitute_bootstrap_vars_skips_dollar_tokens() {
+        let values = HashMap::from([("x".to_string(), "y".to_string())]);
+        let result = substitute_bootstrap_vars("echo ${x}", Path::new("/tmp"), &values);
+        assert_eq!(result, "echo ${x}");
+    }
+
+    #[test]
+    fn test_substitute_bootstrap_vars_hyphen_normalization() {
+        let values = HashMap::from([("child_plan".to_string(), "v".to_string())]);
+        let result = substitute_bootstrap_vars("echo {child-plan}", Path::new("/tmp"), &values);
+        assert_eq!(result, "echo 'v'");
+    }
+
+    #[test]
+    fn test_substitute_bootstrap_vars_unknown_key_left_verbatim() {
+        let result = substitute_bootstrap_vars("echo {nope}", Path::new("/tmp"), &HashMap::new());
+        assert_eq!(result, "echo {nope}");
     }
 }

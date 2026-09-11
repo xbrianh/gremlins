@@ -150,7 +150,7 @@ pub fn prepare_exec(
 
     let cmds: Vec<String> = raw_cmds
         .iter()
-        .map(|c| base::substitute_vars(c, &str_opts, &subst_vars, framework_subs))
+        .map(|c| base::substitute_vars_into_shell(c, &str_opts, &subst_vars, framework_subs))
         .collect();
 
     let timeout: Option<f64> = exec.options.get("timeout").and_then(|v| v.as_f64());

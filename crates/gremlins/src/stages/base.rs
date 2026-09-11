@@ -26,11 +26,18 @@ pub fn substitute_vars(
     extra: &HashMap<String, String>,
     framework_subs: &HashMap<String, String>,
 ) -> String {
-    let mut subs: HashMap<String, String> = HashMap::new();
-    subs.extend(string_options.iter().map(|(k, v)| (k.clone(), v.clone())));
-    subs.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-    subs.extend(framework_subs.iter().map(|(k, v)| (k.clone(), v.clone())));
-    interpolation::substitute_vars(text, &subs)
+    interpolation::substitute_vars(text, &[framework_subs, extra, string_options])
+}
+
+/// [`substitute_vars`] for shell commands, escaping each value for the quoting
+/// context it lands in. Same resolution order as `substitute_vars`.
+pub fn substitute_vars_into_shell(
+    text: &str,
+    string_options: &HashMap<String, String>,
+    extra: &HashMap<String, String>,
+    framework_subs: &HashMap<String, String>,
+) -> String {
+    interpolation::substitute_vars_into_shell(text, &[framework_subs, extra, string_options])
 }
 
 /// Trait representing the contract every Rust stage implements.

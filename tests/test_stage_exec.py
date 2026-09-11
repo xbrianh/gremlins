@@ -88,6 +88,88 @@ def test_interpolation_map_missing_artifact_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# shell escaping of interpolated values
+# ---------------------------------------------------------------------------
+
+
+def _payload_state(tmp_path, text: str):
+    """State whose artifact://payload.txt holds *text*."""
+    state = _make_state(tmp_path)
+    (state.artifact_dir / "payload.txt").write_text(text)
+    state.artifacts.register(Uri.parse("artifact://payload.txt"))
+    return state
+
+
+def test_interpolated_value_cannot_inject_shell_commands(tmp_path):
+    """A value holding shell metacharacters is inert, not executed."""
+    state = _payload_state(tmp_path, '"; touch pwned; echo "')
+
+    marker = tmp_path / "pwned"
+    out_file = tmp_path / "captured.txt"
+    stage = _exec(
+        cmds=[f'printf "%s" "{{VAL}}" > {out_file}'],
+        interpolation_map={"VAL": 'content("artifact://payload.txt")'},
+    )
+    asyncio.run(stage.run(MockGremlin(state=state)))
+    assert not marker.exists()
+    assert out_file.read_text() == '"; touch pwned; echo "'
+
+
+def test_interpolated_value_blocks_command_substitution(tmp_path):
+    state = _payload_state(tmp_path, "$(touch pwned)`touch pwned2`")
+
+    out_file = tmp_path / "captured.txt"
+    stage = _exec(
+        cmds=[f'printf "%s" "{{VAL}}" > {out_file}'],
+        interpolation_map={"VAL": 'content("artifact://payload.txt")'},
+    )
+    asyncio.run(stage.run(MockGremlin(state=state)))
+    assert not (tmp_path / "pwned").exists()
+    assert not (tmp_path / "pwned2").exists()
+    assert out_file.read_text() == "$(touch pwned)`touch pwned2`"
+
+
+def test_interpolated_value_blocks_single_quote_breakout(tmp_path):
+    state = _payload_state(tmp_path, "'; touch pwned; echo '")
+
+    out_file = tmp_path / "captured.txt"
+    stage = _exec(
+        cmds=[f"printf '%s' '{{VAL}}' > {out_file}"],
+        interpolation_map={"VAL": 'content("artifact://payload.txt")'},
+    )
+    asyncio.run(stage.run(MockGremlin(state=state)))
+    assert not (tmp_path / "pwned").exists()
+    assert out_file.read_text() == "'; touch pwned; echo '"
+
+
+def test_unquoted_interpolated_value_is_single_quoted(tmp_path):
+    """A bare placeholder still transmits its value, spaces included."""
+    state = _payload_state(tmp_path, "do the thing; touch pwned")
+
+    out_file = tmp_path / "captured.txt"
+    stage = _exec(
+        cmds=[f"printf '%s' {{VAL}} > {out_file}"],
+        interpolation_map={"VAL": 'content("artifact://payload.txt")'},
+    )
+    asyncio.run(stage.run(MockGremlin(state=state)))
+    assert not (tmp_path / "pwned").exists()
+    assert out_file.read_text() == "do the thing; touch pwned"
+
+
+def test_double_quoted_placeholder_keeps_template_form(tmp_path):
+    """Templates that quote placeholders are not double-wrapped."""
+    state = _payload_state(tmp_path, "plain value")
+
+    out_file = tmp_path / "captured.txt"
+    stage = _exec(
+        cmds=[f'printf "%s" "{{VAL}}" > {out_file}'],
+        interpolation_map={"VAL": 'content("artifact://payload.txt")'},
+    )
+    asyncio.run(stage.run(MockGremlin(state=state)))
+    assert out_file.read_text() == "plain value"
+
+
+# ---------------------------------------------------------------------------
 # out: file://session/<name>
 # ---------------------------------------------------------------------------
 
