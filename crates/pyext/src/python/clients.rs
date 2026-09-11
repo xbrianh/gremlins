@@ -467,11 +467,8 @@ pub fn init_clients_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .setattr("__doc__", "Token usage summary for a model invocation.")?;
     m.getattr("PyCompletedRun")?.setattr(
         "__doc__",
-        concat!(
-            "Result of a single model run.\n\n",
-            "Events are JSON-encoded strings (one per event). ",
-            "Call `json.loads()` on each element to get structured dicts.",
-        ),
+        "Result of a single model run.\n\n\
+         Exposes `exit_code`, `text_result`, `cost_usd` and `token_usage`.",
     )?;
 
     let tools = vec!["Bash", "Edit", "Read", "Write", "Grep", "Glob"];
