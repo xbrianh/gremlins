@@ -242,7 +242,6 @@ impl AgentPrepared {
     pub fn final_prompt(&self) -> String {
         let preamble = build_workspace_preamble(&self.cwd, self.worktree.as_deref());
         let sys = crate::config::agent_system_prompt(
-            &crate::config::state_root(),
             &crate::config::work_root(),
             &crate::config::scratch_root(None),
             &crate::config::project_root(),

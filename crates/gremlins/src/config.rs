@@ -10,7 +10,6 @@ pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
 /// System prompt injected into every agent stage.
 pub(crate) fn agent_system_prompt(
-    state_root: &Path,
     work_root: &Path,
     scratch_root: &Path,
     project_root: &Path,
@@ -24,13 +23,12 @@ parallel work is cheaper than serial drift.\n\n\
 Directories you may write to:\n  \
   Project root:  {project}\n  \
   Work root:     {work}\n  \
-  Scratch root:  {scratch}\n  \
-  State root:    {state}\
+  Scratch root:  {scratch}\n\
+  (use scratch for test cruft and temporary files)\
 ",
         project = project_root.display(),
         work = work_root.display(),
         scratch = scratch_root.display(),
-        state = state_root.display(),
     )
 }
 
