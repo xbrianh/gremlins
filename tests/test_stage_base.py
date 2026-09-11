@@ -10,7 +10,7 @@ from _gremlins_core.schemas import Pipeline
 from _gremlins_core.stages import Agent, Done, Outcome
 from conftest import MockGremlin
 
-from gremlins.executor.state import State, StateData, build_state
+from gremlins.executor.state import StateData, build_state
 from gremlins.stages.base import Stage
 from tests.fake_client import FakeClient
 
@@ -88,57 +88,3 @@ def test_deleted_helpers_not_on_stage() -> None:
     assert not hasattr(stage, "run_claude")
     assert not hasattr(stage, "bail_command")
     assert not hasattr(stage, "run_subprocess")
-
-
-def _subs_state() -> State:
-    return build_state(
-        data=StateData(gremlin_id=None),
-        client=FakeClient(fixtures={}),
-        artifact_dir=pathlib.Path("/tmp/sess"),
-        pipeline_data=_PIPELINE,
-        cwd="/work",
-        base_ref="trunk",
-    )
-
-
-def test_substitute_vars_renders_shared_framework_keys() -> None:
-    stage = _SimpleStage("st", [], {})
-    state = _subs_state()
-    text = "{name} {model} {cwd} {base_ref}"
-    assert stage.substitute_vars(text, state) == ("st fake /work trunk")
-
-
-def test_substitute_vars_framework_wins_over_options_and_extra() -> None:
-    stage = _SimpleStage("st", [], {"repo": "from-opt", "x": "opt-x"})
-    state = _subs_state()
-    out = stage.substitute_vars(
-        "{repo} {x} {y}", state, extra={"repo": "from-extra", "y": "extra-y"}
-    )
-    # {repo} comes from extra (not framework); extra wins over option for {y}.
-    assert out == "from-extra opt-x extra-y"
-
-
-def test_substitute_vars_extra_wins_over_options() -> None:
-    stage = _SimpleStage("st", [], {"k": "opt"})
-    state = _subs_state()
-    assert stage.substitute_vars("{k}", state, extra={"k": "resolved"}) == "resolved"
-
-
-def test_substitute_vars_unknown_and_nonword_braces_pass_through() -> None:
-    stage = _SimpleStage("st", [], {})
-    state = _subs_state()
-    text = "{unknown} ${shell} {read:k} {{name}}"
-    # unknown tokens, shell ${x}, {read:k}, and doubled braces are left verbatim;
-    # the inner {name} of {{name}} is substituted (regex, not format_map semantics).
-    assert stage.substitute_vars(text, state) == "{unknown} ${shell} {read:k} {st}"
-
-
-def test_substitute_vars_hyphenated_keys() -> None:
-    stage = _SimpleStage("st", [], {"review-one": "done", "my-key": "val"})
-    state = _subs_state()
-    assert stage.substitute_vars("{review-one}", state) == "done"
-    assert stage.substitute_vars("{my-key}", state) == "val"
-    assert (
-        stage.substitute_vars("prefix {review-one} {my-key} suffix", state)
-        == "prefix done val suffix"
-    )

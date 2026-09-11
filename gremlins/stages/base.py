@@ -10,7 +10,7 @@ from _gremlins_core.stages import Outcome
 from gremlins.protocols import GremlinProtocol
 
 if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin, State
+    from gremlins.executor.gremlin import Gremlin
 
 
 logger = logging.getLogger(__name__)
@@ -45,21 +45,6 @@ class Stage(abc.ABC):
         self.options: dict[str, Any] = {}
         self.bind_map = {}
         self.gremlin = None
-
-    def substitute_vars(
-        self, text: str, state: State, extra: dict[str, str] | None = None
-    ) -> str:
-        """Replace {var} tokens with framework subs, resolved in: vars, and
-        string options (framework wins on conflict)."""
-        from _gremlins_core.stages import substitute_vars as _rust_sub_vars
-
-        string_opts = {k: str(v) for k, v in self.options.items() if isinstance(v, str)}
-        return _rust_sub_vars(
-            text,
-            string_opts,
-            extra or {},
-            state.framework_subs(self),
-        )
 
     @property
     def path(self) -> str:

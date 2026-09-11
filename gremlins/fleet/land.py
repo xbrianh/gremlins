@@ -1024,9 +1024,7 @@ def _land_with_stage(
     return True
 
 
-def do_land(
-    target: str, force: bool = False, mode: str | None = None, into_dir: str = ""
-) -> bool:
+def do_land(target: str, force: bool = False, mode: str | None = None) -> bool:
     match = resolve_gremlin(target)
     if match is None:
         return False
@@ -1119,7 +1117,7 @@ def do_land(
 
     logger.info("land: client=%s", client_str)
 
-    if shape in ("empty", "one_branch"):
+    if shape == "empty":
         artifact_dir = pathlib.Path(_scratch_root_fn(gremlin_id)) / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         registry = ArtifactRegistry(artifact_dir=artifact_dir)

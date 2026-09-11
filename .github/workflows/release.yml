@@ -35,7 +35,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Release version: ${VERSION}"
-          for f in pyproject.toml crates/gremlins-core/Cargo.toml crates/gremlins-core/pyproject.toml; do
+          for f in pyproject.toml crates/pyext/Cargo.toml; do
             tmp=$(mktemp)
             sed "s/^version = \"0.0.0\"$/version = \"${VERSION}\"/" "$f" > "$tmp"
             mv "$tmp" "$f"
@@ -53,9 +53,9 @@ jobs:
           rm -rf dist/
           uv build --sdist
 
-      - name: Build gremlins-core (native extension sdist)
+      - name: Build gremlins-pyext (native extension sdist)
         run: |
-          maturin sdist -o dist -m crates/gremlins-core/Cargo.toml
+          maturin sdist -o dist -m crates/pyext/Cargo.toml
 
       - name: Assert dist contains exactly two distributions
         run: |
