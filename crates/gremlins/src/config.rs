@@ -9,11 +9,51 @@ use serde_json::Value;
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
 /// System prompt injected into every agent stage.
-pub(crate) const AGENT_SYSTEM_PROMPT: &str = "\
+pub(crate) fn agent_system_prompt(
+    work_root: &Path,
+    scratch_root: &Path,
+    project_root: &Path,
+) -> String {
+    format!(
+        "\
 Keep your context lean: delegate every self-contained piece of work to a subagent. Subagents \
 have isolated context — they absorb the noise so you don't have to. When you have multiple \
 independent tasks, fan them out with the parallel tool. Plan the fan-out before you start; \
-parallel work is cheaper than serial drift.\n";
+parallel work is cheaper than serial drift.\n\n\
+Directories you may write to:\n  \
+  Project root:  {project}\n  \
+  Work root:     {work}\n  \
+  Scratch root:  {scratch}\n\
+  (use scratch for test cruft and temporary files)\
+",
+        project = project_root.display(),
+        work = work_root.display(),
+        scratch = scratch_root.display(),
+    )
+}
+
+/// System prompt injected into every subagent (nested agent) invocation.
+/// Omits the delegation guidance — subagents are already delegates.
+pub(crate) fn subagent_system_prompt(
+    work_root: &Path,
+    scratch_root: &Path,
+    project_root: &Path,
+) -> String {
+    format!(
+        "\
+When you have multiple independent tasks, fan them out with the parallel tool. Plan the fan-out \
+before you start; parallel work is cheaper than serial drift.\n\n\
+Directories you may write to:\n  \
+  Project root:  {project}\n  \
+  Work root:     {work}\n  \
+  Scratch root:  {scratch}\n\
+  (use scratch for test cruft and temporary files)\
+",
+        project = project_root.display(),
+        work = work_root.display(),
+        scratch = scratch_root.display(),
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Path overrides from config.json "paths" section
@@ -1095,5 +1135,65 @@ mod tests {
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
         clear_sandbox_env();
+    }
+
+    // -----------------------------------------------------------------------
+    // Prompt generation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_agent_system_prompt_renders_directory_paths() {
+        let prompt = agent_system_prompt(
+            Path::new("/tmp/gremlins"),
+            Path::new("/tmp/scratch"),
+            Path::new("/home/user/project"),
+        );
+        assert!(prompt.contains("/tmp/gremlins"), "must contain work root");
+        assert!(prompt.contains("/tmp/scratch"), "must contain scratch root");
+        assert!(
+            prompt.contains("/home/user/project"),
+            "must contain project root"
+        );
+    }
+
+    #[test]
+    fn test_agent_system_prompt_includes_delegation_guidance() {
+        let prompt = agent_system_prompt(
+            Path::new("/work"),
+            Path::new("/scratch"),
+            Path::new("/project"),
+        );
+        assert!(
+            prompt.contains("delegate every self-contained piece of work to a subagent"),
+            "agent prompt must include delegation guidance"
+        );
+    }
+
+    #[test]
+    fn test_subagent_system_prompt_renders_directory_paths() {
+        let prompt = subagent_system_prompt(
+            Path::new("/tmp/gremlins"),
+            Path::new("/tmp/scratch"),
+            Path::new("/home/user/project"),
+        );
+        assert!(prompt.contains("/tmp/gremlins"), "must contain work root");
+        assert!(prompt.contains("/tmp/scratch"), "must contain scratch root");
+        assert!(
+            prompt.contains("/home/user/project"),
+            "must contain project root"
+        );
+    }
+
+    #[test]
+    fn test_subagent_system_prompt_omits_delegation_guidance() {
+        let prompt = subagent_system_prompt(
+            Path::new("/work"),
+            Path::new("/scratch"),
+            Path::new("/project"),
+        );
+        assert!(
+            !prompt.contains("delegate every self-contained piece of work to a subagent"),
+            "subagent prompt must not include delegation guidance — subagents are already delegates"
+        );
     }
 }

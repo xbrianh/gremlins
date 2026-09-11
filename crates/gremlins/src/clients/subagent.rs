@@ -87,9 +87,21 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 depth + 1,
             ));
 
+            let scratch = crate::config::scratch_dir(None)
+                .unwrap_or_else(|| crate::config::scratch_root(None));
+            let subagent_prompt = format!(
+                "{}\n\n{}",
+                crate::config::subagent_system_prompt(
+                    &crate::config::work_root(),
+                    &scratch,
+                    &crate::config::project_root(),
+                ),
+                task,
+            );
+
             let result = crate::clients::agent_loop::run_agent_loop_nested(
                 &model,
-                &task,
+                &subagent_prompt,
                 &sub_ctx,
                 &cancel,
                 tool_filter.as_deref(),
