@@ -108,6 +108,21 @@ def test_bind_file_scheme_missing_file_raises(tmp_path):
         asyncio.run(stage.run(MockGremlin(state=state)))
 
 
+def test_bind_recovers_from_stale_registration(tmp_path):
+    """A deleted output file must not block the stage from recreating it."""
+    state = _make_state(tmp_path)
+    stale = state.artifacts.write_into_registry(
+        Uri.parse("file://session/out.txt"), "stale"
+    )
+    pathlib.Path(stale).unlink()
+    stage = _exec(
+        cmds=["echo fresh > {result}"], bind_map={"result": "file://session/out.txt"}
+    )
+    result = asyncio.run(stage.run(MockGremlin(state=state)))
+    assert isinstance(result, Done)
+    assert state.artifacts.content("file://session/out.txt", None).strip() == "fresh"
+
+
 # ---------------------------------------------------------------------------
 # loop_iter in bind URIs
 # ---------------------------------------------------------------------------

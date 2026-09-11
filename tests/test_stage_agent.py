@@ -144,6 +144,32 @@ def test_verify_produced_fails_when_output_missing(tmp_path):
         asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
 
+def test_bind_recovers_from_stale_registration(tmp_path):
+    """A deleted output file must not block the agent from recreating it."""
+
+    class WritingClient(FakeClient):
+        async def run(self, prompt, *, label, **kwargs):
+            m = re.search(r"`([^`]*output\.md)`", prompt)
+            if m:
+                pathlib.Path(m.group(1)).write_text("# Fresh")
+            return await super().run(prompt, label=label, **kwargs)
+
+    client = WritingClient(fixtures={"my-agent": MINIMAL_EVENTS})
+    state = _make_state(tmp_path, client)
+    stale = state.artifacts.write_into_registry(
+        Uri.parse("file://session/output.md"), "# Stale"
+    )
+    pathlib.Path(stale).unlink()
+    agent = _make_agent(
+        prompts=["Write output to `{result}`"],
+        bind_map={"result": "file://session/output.md"},
+    )
+
+    result = asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
+    assert isinstance(result, Done)
+    assert state.artifacts.content("file://session/output.md", None) == "# Fresh"
+
+
 def test_bind_uri_committed_after_agent_produces(tmp_path):
     seen_bound_before_run: list[bool] = []
 

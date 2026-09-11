@@ -105,10 +105,12 @@ pub fn prepare_agent(
             detail: e.to_string(),
         })?;
         // Optional binds are skipped when a sibling already committed the URI.
-        if !optional && artifacts.is_registered(&uri_str) {
+        // Liveness, not membership: a stale binding whose file was removed
+        // (e.g. a skip_if_exists producer recovering) must not block the stage.
+        if !optional && artifacts.is_live(&uri_str) {
             return Err(AgentError::Generic {
                 name: name.clone(),
-                detail: format!("artifact {uri_str:?} is already registered — duplicate producer"),
+                detail: format!("artifact {uri_str:?} is already produced — duplicate producer"),
             });
         }
         let path = artifacts
@@ -903,6 +905,27 @@ mod tests {
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([(key.to_string(), uri.to_string())]),
         }
+    }
+
+    #[test]
+    fn test_prepare_agent_allows_recovering_from_stale_binding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+
+        // Registered but its file is gone: a skip_if_exists producer must be
+        // able to run (and commit) again.
+        let uri = Uri::parse("artifact://plan.md").unwrap();
+        let stale = reg.write_into_registry(&uri, "# plan").unwrap();
+        std::fs::remove_file(&stale).unwrap();
+
+        let agent = agent_with_bind("plan", "artifact://plan.md");
+        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        std::fs::write(&prepared.bind_paths["plan"], "# new plan").unwrap();
+        commit_agent(&prepared, &mut reg).unwrap();
+        assert_eq!(
+            reg.content("artifact://plan.md", None).unwrap(),
+            "# new plan",
+        );
     }
 
     #[test]

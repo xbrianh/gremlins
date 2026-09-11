@@ -122,10 +122,12 @@ pub fn prepare_exec(
             detail: e.to_string(),
         })?;
         // Optional binds are skipped when a sibling already committed the URI.
-        if !optional && artifacts.is_registered(&uri_str) {
+        // Liveness, not membership: a stale binding whose file was removed
+        // (e.g. a skip_if_exists producer recovering) must not block the stage.
+        if !optional && artifacts.is_live(&uri_str) {
             return Err(ExecError::Generic {
                 name: name.clone(),
-                detail: format!("artifact {uri_str:?} is already registered — duplicate producer"),
+                detail: format!("artifact {uri_str:?} is already produced — duplicate producer"),
             });
         }
         let path = artifacts
@@ -398,6 +400,34 @@ mod tests {
             .err()
             .expect("expected duplicate-producer error");
         assert!(matches!(err, ExecError::Generic { .. }));
+    }
+
+    #[test]
+    fn test_prepare_exec_allows_recovering_from_stale_binding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let mut registry = ArtifactRegistry::new(artifact_dir);
+
+        // Registered but its file is gone: a skip_if_exists producer must be
+        // able to run (and commit) again.
+        let uri = Uri::parse("artifact://plan.md").unwrap();
+        let stale = registry.write_into_registry(&uri, "# plan").unwrap();
+        fs::remove_file(&stale).unwrap();
+
+        let exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("plan".to_string(), "artifact://plan.md".to_string())]),
+        };
+        let prepared = prepare_exec(&exec, &mut registry, "", &HashMap::new()).unwrap();
+        fs::write(&prepared.bind_paths["plan"], "# new plan").unwrap();
+        commit_exec(&prepared, &mut registry).unwrap();
+        assert_eq!(
+            registry.content("artifact://plan.md", None).unwrap(),
+            "# new plan",
+        );
     }
 
     #[test]
