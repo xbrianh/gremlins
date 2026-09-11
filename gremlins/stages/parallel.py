@@ -514,11 +514,27 @@ class _ParallelExecutor:
         for entry in sr.iterdir():
             if entry.name.startswith(prefix) and entry.is_dir():
                 shutil.rmtree(entry, ignore_errors=True)
-        # Clean up child scratch dirs under scratch_root.
+        # Preserve per-child logs before scratch cleanup so operator can inspect
+        # output that the stdout pump may have failed to relay.
+        logs_dir = pathlib.Path(state_root()) / parent_gid / "logs"
         for child_key in self._stages_by_key:
             child_id = f"{parent_gid}--{self._group_name}--{child_key}"
             child_scratch = pathlib.Path(scratch_root(child_id))
             if child_scratch.is_dir():
+                child_log = child_scratch / "log"
+                if child_log.is_file():
+                    try:
+                        logs_dir.mkdir(parents=True, exist_ok=True)
+                        dest = logs_dir / f"{child_key}.log"
+                        shutil.copy2(child_log, dest)
+                        logger.debug(
+                            "parallel %s: saved child log %s -> %s",
+                            self._group_name,
+                            child_key,
+                            dest,
+                        )
+                    except OSError:
+                        pass
                 shutil.rmtree(child_scratch, ignore_errors=True)
 
     def _gather_child_artifacts(self) -> None:

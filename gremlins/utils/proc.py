@@ -151,23 +151,38 @@ async def terminate_with_grace(
     await _terminate_with_grace(p.pid, grace_s=grace_s)
 
 
+def _emit_prefixed_line(prefix: str, line: str, log_file: Any) -> None:
+    """Write one complete line to stdout and optionally *log_file*, swallowing
+    errors on either path so a broken stream cannot kill the pump."""
+    try:
+        sys.stdout.write(f"[{prefix}] {line}")
+        sys.stdout.flush()
+    except Exception:
+        pass
+    if log_file is not None:
+        try:
+            log_file.write(line)
+        except Exception:
+            pass
+
+
 async def _pump_prefixed(
     stream: asyncio.StreamReader, prefix: str, *, log_file: Any = None
 ) -> None:
     # Read in chunks so a child emitting a huge un-newlined blob cannot deadlock
-    # by filling the pipe buffer. Re-split on newlines for the [prefix] label.
+    # by filling the pipe buffer. Carry a partial trailing line across chunk
+    # boundaries so the [prefix] label is never inserted mid-line.
+    remainder = ""
     while True:
         chunk = await stream.read(4096)
         if not chunk:
+            if remainder:
+                _emit_prefixed_line(prefix, remainder + "\n", log_file)
             break
-        for line in chunk.decode("utf-8", "replace").splitlines(keepends=True):
-            sys.stdout.write(f"[{prefix}] {line}")
-            if log_file is not None:
-                try:
-                    log_file.write(line)
-                except Exception:
-                    pass
-        sys.stdout.flush()
+        lines = (remainder + chunk.decode("utf-8", "replace")).splitlines(keepends=True)
+        remainder = lines.pop() if lines and not lines[-1].endswith("\n") else ""
+        for line in lines:
+            _emit_prefixed_line(prefix, line, log_file)
 
 
 async def spawn_with_pumps(

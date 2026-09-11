@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from _gremlins_core.config import scratch_root
 from _gremlins_core.stages import Done, Outcome
 from conftest import make_parent_state
 
@@ -549,6 +550,67 @@ def test_build_child_spec_dict_base_ref_empty_by_default(
     stage = _child_stage("c")
     spec = _parallel_mod._build_child_spec_dict(stage, child_st, "c", "attempt-1")
     assert spec["base_ref"] == ""
+
+
+def test_child_logs_survive_fan_in_cleanup(
+    sandbox: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Child scratch logs are copied into the parent state logs/ dir before
+    fan-in removes the child scratch directories."""
+    gremlin_id = "test-log-save"
+    state_dir = sandbox.state / gremlin_id
+    state_dir.mkdir(parents=True)
+    write_state(state_dir, {"id": gremlin_id})
+    sf = state_dir / "state.json"
+
+    parent_data = StateData(gremlin_id=gremlin_id)
+    parent_data.state_file = sf
+    parent_state = build_state(
+        data=parent_data, client=FakeClient(), artifact_dir=state_dir
+    )
+
+    stages = [_child_stage(k) for k in ("child-a", "child-b")]
+    states = []
+    for key in ("child-a", "child-b"):
+        session = pathlib.Path(scratch_root(f"{gremlin_id}--g--{key}")) / "artifacts"
+        session.mkdir(parents=True, exist_ok=True)
+        child_data = StateData(gremlin_id=gremlin_id)
+        child_data.state_file = sf
+        states.append(
+            build_state(data=child_data, client=FakeClient(), artifact_dir=session)
+        )
+
+    runners = [(s.name, st, lambda: None) for s, st in zip(stages, states)]
+    rt = dict(
+        ParallelStage("g", stages).build_runtime_stages(
+            runners,
+            parent_state=parent_state,
+            project_root_path=sandbox.project,
+            child_stages=stages,
+        )
+    )
+
+    async def _mock_exec(*args: Any, **_kwargs: Any) -> _FakeProcess:
+        spec_path = pathlib.Path(args[-1])
+        spec_path.parent.parent.joinpath("log").write_text(
+            f"stream failed for {spec_path.parent.name}\n", encoding="utf-8"
+        )
+        result_path = pathlib.Path(str(spec_path) + ".result")
+        result_path.write_text(
+            json.dumps(
+                {"status": "done", "detail": "", "returncode": None, "cost_usd": 0.0}
+            ),
+            encoding="utf-8",
+        )
+        return _FakeProcess(exit_code=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+    asyncio.run(rt["g"]())
+    asyncio.run(rt["g-fanin"]())
+
+    logs_dir = state_dir / "logs"
+    assert (logs_dir / "child-a.log").exists()
+    assert (logs_dir / "child-b.log").exists()
 
 
 def test_terminate_with_grace_does_not_kill_descendants(
