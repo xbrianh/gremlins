@@ -24,7 +24,7 @@ parallel work is cheaper than serial drift.\n\
 </gremlins:info>\n\n\
 <gremlins:tools>\n\
 Read (read files), Write (create files), Edit (targeted \
-replacements), Grep (regex search, skips .gitignore'd dirs), Glob (find files \
+replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), subagent, parallel\n\
 </gremlins:tools>\n\n\
 <gremlins:directories>\n\
@@ -55,7 +55,7 @@ before you start; parallel work is cheaper than serial drift.\n\
 </gremlins:info>\n\n\
 <gremlins:tools>\n\
 Read (read files), Write (create files), Edit (targeted \
-replacements), Grep (regex search, skips .gitignore'd dirs), Glob (find files \
+replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), subagent, parallel\n\
 </gremlins:tools>\n\n\
 <gremlins:directories>\n\
