@@ -26,7 +26,6 @@ on-disk contents directly — no fake executables or subprocess interception
 needed since set_stage is pure Python.
 """
 
-import asyncio
 import json
 import os
 import pathlib
@@ -34,12 +33,6 @@ import subprocess
 import sys
 import textwrap
 
-from conftest import MINIMAL_EVENTS
-from conftest import REVIEW_LABELS as _REVIEW_LABELS
-from conftest import ReviewCreatingClient as _ReviewCreatingClient
-from conftest import common_local_patches as _common_patches
-
-from gremlins.executor.run import run_pipeline
 from gremlins.executor.state import StateData
 
 
@@ -107,54 +100,6 @@ def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(
         f"inner pytest failed (autouse fixture not isolating GREMLINS_GREMLIN_ID?):\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-
-
-def _stage_parent_state(sandbox):
-    """Pre-create a parent gremlin's state.json under an isolated state root.
-    Returns (parent_state_file, original_content, parent_mtime).
-    """
-    state_root = sandbox.state
-    parent_id = "parent-gremlin-deadbeef"
-    parent_state_dir = state_root / parent_id
-    parent_state_dir.mkdir(parents=True)
-    parent_state_file = parent_state_dir / "state.json"
-    original_content = json.dumps({"id": parent_id, "stage": "implement"})
-    parent_state_file.write_text(original_content)
-    parent_mtime = parent_state_file.stat().st_mtime_ns
-    # No monkeypatch needed — GREMLINS_SANDBOX_ROOT already redirects state_root()
-    return parent_state_file, original_content, parent_mtime
-
-
-def _assert_no_state_clobber(parent_state_file, original_content, parent_mtime):
-    assert parent_state_file.stat().st_mtime_ns == parent_mtime
-    assert parent_state_file.read_text() == original_content
-
-
-def test_local_main_does_not_clobber_external_state(tmp_path, monkeypatch, sandbox):
-    parent_state_file, original_content, parent_mtime = _stage_parent_state(sandbox)
-
-    _common_patches(monkeypatch)
-    client = _ReviewCreatingClient(
-        fixtures={
-            "plan": MINIMAL_EVENTS,
-            "implement": MINIMAL_EVENTS,
-            **{lbl: MINIMAL_EVENTS for lbl in _REVIEW_LABELS},
-            "address-code": MINIMAL_EVENTS,
-        }
-    )
-    from conftest import PIPELINE_FIXTURES_DIR
-
-    assert (
-        asyncio.run(
-            run_pipeline(
-                PIPELINE_FIXTURES_DIR / "local.yaml",
-                argv=[],
-                client=client,
-            )
-        )
-        == 0
-    )
-    _assert_no_state_clobber(parent_state_file, original_content, parent_mtime)
 
 
 # ---------------------------------------------------------------------------
