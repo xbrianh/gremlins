@@ -625,6 +625,32 @@ def test_child_logs_survive_fan_in_cleanup(
         assert not scratch_dirs[key].exists() or not list(scratch_dirs[key].iterdir())
 
 
+def test_child_scratch_cleaned_when_parent_state_dir_missing(sandbox: Any) -> None:
+    """A missing parent state dir only skips log preservation; scratch still goes."""
+    gremlin_id = "test-missing-state"
+    child_scratch = pathlib.Path(scratch_root(f"{gremlin_id}--g--child-a"))
+    (child_scratch / "artifacts").mkdir(parents=True, exist_ok=True)
+
+    parent_data = StateData(gremlin_id=gremlin_id)
+    parent_data.state_file = sandbox.state / gremlin_id / "state.json"
+    stage = _child_stage("child-a")
+    executor = _parallel_mod._ParallelExecutor(
+        ParallelStage("g", [stage]),
+        [],
+        max_concurrent=None,
+        set_stage_fn=lambda _: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        parent_state=build_state(
+            parent_data, FakeClient(), artifact_dir=sandbox.state / "artifacts"
+        ),
+        project_root=sandbox.project,
+        child_stages=[stage],
+    )
+    executor._rm_child_dirs()
+    assert not child_scratch.exists()
+
+
 def test_terminate_with_grace_does_not_kill_descendants(
     tmp_path: pathlib.Path,
 ) -> None:

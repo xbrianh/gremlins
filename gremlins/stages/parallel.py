@@ -518,18 +518,18 @@ class _ParallelExecutor:
         # outside state_root, so the rmtree below is the last chance to keep
         # output that a failed stdout pump never relayed.
         state_dir = pathlib.Path(state_root()) / parent_gid
-        if not state_dir.is_dir():
+        preserve = state_dir.is_dir()
+        if not preserve:
             logger.warning(
                 "parallel %s: parent state dir %s is missing, child logs not preserved",
                 self._group_name,
                 state_dir,
             )
-            return
         for child_key in self._stages_by_key:
             child_id = f"{parent_gid}--{self._group_name}--{child_key}"
             child_scratch = pathlib.Path(scratch_root(child_id))
             child_log = child_scratch / "log"
-            if child_log.is_file():
+            if preserve and child_log.is_file():
                 self._save_child_log(child_log, state_dir / "logs" / f"{child_key}.log")
             shutil.rmtree(child_scratch, ignore_errors=True)
 

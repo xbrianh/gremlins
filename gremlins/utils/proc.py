@@ -161,10 +161,11 @@ _RECORD = re.compile(r".*?(?:\r\n|\r|\n)|.+\Z", re.S)
 
 
 def _emit_prefixed_line(prefix: str, line: str, log_file: Any) -> None:
-    """Write one complete line to stdout and optionally *log_file*, swallowing
-    errors on either path so a broken stream cannot kill the pump."""
+    """Write one complete line to stdout (flushed) and optionally *log_file*,
+    swallowing errors on either path so a broken stream cannot kill the pump."""
     try:
         sys.stdout.write(f"[{prefix}] {line}")
+        sys.stdout.flush()
     except Exception:
         pass
     if log_file is not None:
@@ -172,13 +173,6 @@ def _emit_prefixed_line(prefix: str, line: str, log_file: Any) -> None:
             log_file.write(line)
         except Exception:
             pass
-
-
-def _flush_stdout() -> None:
-    try:
-        sys.stdout.flush()
-    except Exception:
-        pass
 
 
 async def _pump_prefixed(
@@ -189,6 +183,9 @@ async def _pump_prefixed(
     # across reads, so the [prefix] label is never inserted mid-line; it is
     # relayed at EOF, or once it outgrows _MAX_PENDING_BYTES so a child that
     # writes progress without newlines stays live instead of buffering forever.
+    # A trailing bare \r is also held back: it may be the first half of a CRLF
+    # split across the boundary, and emitting it now would put the prefix
+    # between the carriage return and the newline.
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     pending = ""
     while True:
@@ -196,16 +193,17 @@ async def _pump_prefixed(
         if not chunk:
             tail = pending + decoder.decode(chunk, True)
             if tail:
-                _emit_prefixed_line(prefix, tail + "\n", log_file)
+                _emit_prefixed_line(
+                    prefix, tail if tail.endswith("\r") else tail + "\n", log_file
+                )
             break
         records = _RECORD.findall(pending + decoder.decode(chunk))
-        pending = records.pop() if records and records[-1][-1] not in "\n\r" else ""
+        pending = records.pop() if records and not records[-1].endswith("\n") else ""
         for record in records:
             _emit_prefixed_line(prefix, record, log_file)
         if len(pending) > _MAX_PENDING_BYTES:
             _emit_prefixed_line(prefix, pending + "\n", log_file)
             pending = ""
-        _flush_stdout()
 
 
 async def spawn_with_pumps(
