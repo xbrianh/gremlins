@@ -528,6 +528,56 @@ fn split_commands(s: &str) -> Vec<String> {
     parts
 }
 
+/// Strip `$(...)` and backtick command substitutions from a command string.
+/// Paths inside subshells are runtime-expanded by the shell, not literal
+/// arguments from the agent, so they must not be checked by `bash_check`.
+fn strip_subshells(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '$' => {
+                // Peek ahead for `$(` — if found, skip the entire subshell.
+                let mut peek = chars.clone();
+                if peek.next() == Some('(') {
+                    chars = peek;
+                    let mut depth = 1u32;
+                    while depth > 0 {
+                        match chars.next() {
+                            None => break,
+                            Some('(') => depth += 1,
+                            Some(')') => depth -= 1,
+                            Some('\\') => {
+                                chars.next();
+                            }
+                            _ => {}
+                        }
+                    }
+                    result.push('_'); // placeholder — never path-like
+                    continue;
+                }
+                result.push(ch);
+            }
+            '`' => {
+                // Consume until matching backtick.
+                loop {
+                    match chars.next() {
+                        None => break,
+                        Some('`') => break,
+                        Some('\\') => {
+                            chars.next();
+                        }
+                        _ => {}
+                    }
+                }
+                result.push('_');
+            }
+            _ => result.push(ch),
+        }
+    }
+    result
+}
+
 pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> {
     let s = cmd.trim();
     if s.is_empty() {
@@ -541,12 +591,15 @@ pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Op
     if let Some(err) = check_cd(roots, s, cwd) {
         return Some(err);
     }
+    // Strip subshells before tokenizing — paths inside `$()` and backticks
+    // are runtime-expanded by the shell, not literal arguments from the agent.
+    let cleaned = strip_subshells(s);
     // Canonicalize roots once — avoid re-resolving per token.
     let canonical_roots: Vec<PathBuf> = roots.iter().filter_map(|r| normalize_path(r)).collect();
     if canonical_roots.is_empty() {
         return Some("Error: invalid sandbox root".into());
     }
-    for tok in shell_tokenize(s) {
+    for tok in shell_tokenize(&cleaned) {
         if tok.value.is_empty() {
             continue;
         }
@@ -1239,6 +1292,82 @@ pub(crate) async fn parallel_invoke(ctx: &ToolContext, args_json: &str) -> Strin
     out
 }
 
+/// Returns the required fields and their JSON types for a tool.
+/// Used by `validate_tool_args` to produce rich error messages when
+/// the model sends malformed tool-call arguments.
+fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str)>> {
+    match name {
+        "Read" => Some(vec![("file_path", "string")]),
+        "Edit" => Some(vec![("file_path", "string"), ("edits", "array")]),
+        "Bash" => Some(vec![("command", "string")]),
+        "Write" => Some(vec![("file_path", "string"), ("content", "string")]),
+        "Grep" => Some(vec![("pattern", "string")]),
+        "Glob" => Some(vec![("pattern", "string")]),
+        "subagent" => Some(vec![("task", "string")]),
+        "parallel" => Some(vec![("tasks", "array")]),
+        _ => None,
+    }
+}
+
+/// Validate tool arguments against the expected schema before dispatching
+/// to the handler. Returns an error message with the expected shape on mismatch,
+/// or `None` if valid.
+fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
+    let schema = tool_param_schema(name)?;
+    for (field, expected_type) in &schema {
+        match args.get(field) {
+            None => {
+                let expected: Vec<String> =
+                    schema.iter().map(|(f, t)| format!("{f}: {t}")).collect();
+                let found: Vec<String> = args
+                    .as_object()
+                    .map(|o| o.keys().map(|k| format!("{k}: …")).collect())
+                    .unwrap_or_default();
+                let found_str = if found.is_empty() {
+                    "<not an object>".into()
+                } else {
+                    format!("{{{}}}", found.join(", "))
+                };
+                return Some(format!(
+                    "Error: missing '{field}' for {name} tool. \
+                     Expected: {{{}}}. Got: {found_str}",
+                    expected.join(", ")
+                ));
+            }
+            Some(val) => {
+                let ok = match *expected_type {
+                    "string" => val.is_string(),
+                    "array" => val.is_array(),
+                    "integer" => val.is_number(),
+                    "object" => val.is_object(),
+                    _ => true,
+                };
+                if !ok {
+                    let actual = if val.is_string() {
+                        "string"
+                    } else if val.is_array() {
+                        "array"
+                    } else if val.is_number() {
+                        "number"
+                    } else if val.is_object() {
+                        "object"
+                    } else if val.is_null() {
+                        "null"
+                    } else if val.is_boolean() {
+                        "bool"
+                    } else {
+                        "?"
+                    };
+                    return Some(format!(
+                        "Error: '{field}' for {name} must be {expected_type}, got {actual}"
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
 pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> String {
     if let Some(allowed) = &ctx.allowed_tools {
         if !always_available(name) && !allowed.iter().any(|n| n == name) {
@@ -1259,6 +1388,19 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
             return "Error: invalid arguments".into();
         }
     };
+    // Validate args against the tool's expected schema before dispatching.
+    // Produces a rich, schema-specific error message so the model can
+    // self-correct in a single retry.
+    if let Some(err) = validate_tool_args(name, &args) {
+        audit(
+            ctx.audit_log.as_deref(),
+            ctx.audit_lock.as_deref(),
+            name,
+            &ka,
+            "error",
+        );
+        return err;
+    }
     if let Some(err) = check_tool(name, ctx, &args) {
         audit(
             ctx.audit_log.as_deref(),
@@ -1705,6 +1847,55 @@ mod tests {
     }
 
     #[test]
+    fn validate_tool_args_missing_required() {
+        let err = validate_tool_args("Edit", &serde_json::json!({"file_path": "foo.py"})).unwrap();
+        assert!(err.contains("missing 'edits'"));
+        assert!(err.contains("Edit"));
+        assert!(err.contains("file_path: string"));
+    }
+
+    #[test]
+    fn validate_tool_args_wrong_type() {
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "foo.py", "edits": "not-an-array"}),
+        )
+        .unwrap();
+        assert!(err.contains("'edits'"));
+        assert!(err.contains("must be array"));
+    }
+
+    #[test]
+    fn validate_tool_args_valid_passes() {
+        assert!(validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "foo.py", "edits": [{"old_string": "a", "new_string": "b"}]})
+        )
+        .is_none());
+        assert!(validate_tool_args("Read", &serde_json::json!({"file_path": "foo.py"})).is_none());
+        assert!(validate_tool_args("Bash", &serde_json::json!({"command": "ls"})).is_none());
+        assert!(validate_tool_args(
+            "Write",
+            &serde_json::json!({"file_path": "f", "content": "x"})
+        )
+        .is_none());
+        assert!(validate_tool_args("Grep", &serde_json::json!({"pattern": "fn"})).is_none());
+        assert!(validate_tool_args("Glob", &serde_json::json!({"pattern": "*.rs"})).is_none());
+        assert!(validate_tool_args("subagent", &serde_json::json!({"task": "do it"})).is_none());
+        assert!(
+            validate_tool_args("parallel", &serde_json::json!({"tasks": [{"task": "a"}]}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn validate_tool_args_not_an_object() {
+        let err = validate_tool_args("Read", &serde_json::json!("not an object")).unwrap();
+        assert!(err.contains("missing 'file_path'"));
+        assert!(err.contains("<not an object>"));
+    }
+
+    #[test]
     fn resolve_relative_against_cwd() {
         let cwd = PathBuf::from("/tmp/work");
         assert_eq!(
@@ -1854,6 +2045,53 @@ mod tests {
         let dir = tmp();
         assert!(bash_check(std::slice::from_ref(&dir), "", Some(&dir)).is_none());
         assert!(bash_check(std::slice::from_ref(&dir), "   ", Some(&dir)).is_none());
+    }
+
+    #[test]
+    fn bash_check_subshell_dollar_paren_ignored() {
+        let dir = tmp();
+        // Paths inside $(...) are runtime-expanded, not literal — skip them.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "for f in $(grep -rl pattern /); do echo $f; done",
+            Some(&dir),
+        )
+        .is_none());
+        // Nested $(...) works too.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "echo $(cat $(find /tmp -name '*.rs'))",
+            Some(&dir),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn bash_check_subshell_backtick_ignored() {
+        let dir = tmp();
+        // Paths inside backticks are runtime-expanded — skip them.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "for f in `grep -rl pattern /`; do echo $f; done",
+            Some(&dir),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn bash_check_literal_path_still_checked() {
+        let dir = tmp();
+        // A literal /etc/passwd outside a subshell is still denied.
+        let err = bash_check(std::slice::from_ref(&dir), "cat /etc/passwd", Some(&dir)).unwrap();
+        assert!(err.contains("outside sandbox"));
+        // Path outside subshell with $() still caught.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cat /etc/passwd $(echo foo)",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
     }
 
     #[test]
@@ -2430,10 +2668,10 @@ mod tests {
         let result = invoke("subagent", &c, &args).await;
         assert!(result.contains("subagent task is required"));
 
-        // Missing task key entirely.
+        // Missing task key entirely — caught by schema validation.
         let args2 = serde_json::json!({}).to_string();
         let result2 = invoke("subagent", &c, &args2).await;
-        assert!(result2.contains("subagent task is required"));
+        assert!(result2.contains("missing 'task'"), "got: {result2}");
     }
 
     // --- Part 3b: Parallel tests ---

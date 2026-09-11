@@ -20,6 +20,9 @@ Keep your context lean: delegate self-contained piece of work to a subagent. Sub
 have isolated context — they absorb the noise so you don't have to. When you have multiple \
 independent tasks, fan them out with the parallel tool. Plan the fan-out before you start; \
 parallel work is cheaper than serial drift.\n\n\
+Available tools: Read (read files), Write (create files), Edit (targeted \
+replacements), Grep (regex search, skips .gitignore'd dirs), Glob (find files \
+by pattern), Bash (shell commands), subagent, parallel.\n\n\
 Directories you may write to:\n  \
   Project root:  {project}\n  \
   Work root:     {work}\n  \
@@ -43,6 +46,9 @@ pub(crate) fn subagent_system_prompt(
         "\
 When you have multiple independent tasks, fan them out with the parallel tool. Plan the fan-out \
 before you start; parallel work is cheaper than serial drift.\n\n\
+Available tools: Read (read files), Write (create files), Edit (targeted \
+replacements), Grep (regex search, skips .gitignore'd dirs), Glob (find files \
+by pattern), Bash (shell commands), subagent, parallel.\n\n\
 Directories you may write to:\n  \
   Project root:  {project}\n  \
   Work root:     {work}\n  \
