@@ -1150,7 +1150,10 @@ mod tests {
         );
         assert!(prompt.contains("/tmp/gremlins"), "must contain work root");
         assert!(prompt.contains("/tmp/scratch"), "must contain scratch root");
-        assert!(prompt.contains("/home/user/project"), "must contain project root");
+        assert!(
+            prompt.contains("/home/user/project"),
+            "must contain project root"
+        );
     }
 
     #[test]
@@ -1175,7 +1178,10 @@ mod tests {
         );
         assert!(prompt.contains("/tmp/gremlins"), "must contain work root");
         assert!(prompt.contains("/tmp/scratch"), "must contain scratch root");
-        assert!(prompt.contains("/home/user/project"), "must contain project root");
+        assert!(
+            prompt.contains("/home/user/project"),
+            "must contain project root"
+        );
     }
 
     #[test]
