@@ -88,8 +88,7 @@ pub struct PyCompletedRun {
     exit_code: i32,
     #[pyo3(get)]
     text_result: Option<String>,
-    #[pyo3(get)]
-    events: Option<Vec<String>>,
+    _events: Option<Vec<String>>,
     #[pyo3(get)]
     cost_usd: Option<f64>,
     #[pyo3(get)]
@@ -109,7 +108,7 @@ impl PyCompletedRun {
         Self {
             exit_code,
             text_result,
-            events,
+            _events: events,
             cost_usd,
             token_usage,
         }
@@ -271,18 +270,6 @@ impl RustClient {
     }
 
     #[staticmethod]
-    fn cmd(command: String) -> PyResult<Self> {
-        let backend = CmdBackend::new(&command).map_err(pyo3::exceptions::PyValueError::new_err)?;
-        Ok(RustClient {
-            provider: "cmd".to_string(),
-            model: command,
-            extra_params: IndexMap::new(),
-            native_block: default_native_block(),
-            inner: Arc::new(Mutex::new(Some(Arc::new(backend)))),
-        })
-    }
-
-    #[staticmethod]
     fn parse(py: Python<'_>, s: &str) -> PyResult<Self> {
         let (provider, model, extra_params) = parse_spec(s)?;
         let known = matches!(provider.as_str(), "openai" | "xai" | "openrouter" | "cmd");
@@ -318,15 +305,6 @@ impl RustClient {
             s.push_str(&params.join(","));
         }
         s
-    }
-
-    fn __repr__(&self) -> String {
-        let mut base = format!("Client({:?}, {:?}", self.provider, self.model);
-        if !self.extra_params.is_empty() {
-            base.push_str(&format!(", extra_params={:?}", self.extra_params));
-        }
-        base.push(')');
-        base
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -386,14 +364,6 @@ impl RustClient {
                 artifact_reminder_count,
             };
             let result = backend.run(params).await.map_err(map_error)?;
-            Python::attach(|py| PyCompletedRun::from_rust(py, &result))
-        })
-    }
-
-    fn resume<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let backend = self.get_or_build_backend(py)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = backend.resume().await.map_err(map_error)?;
             Python::attach(|py| PyCompletedRun::from_rust(py, &result))
         })
     }

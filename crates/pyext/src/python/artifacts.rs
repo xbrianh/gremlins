@@ -26,13 +26,6 @@ struct Uri {
 
 #[pymethods]
 impl Uri {
-    #[new]
-    fn new(scheme: String, path: String) -> Self {
-        Uri {
-            inner: rust_uri::Uri::new(scheme, path),
-        }
-    }
-
     #[staticmethod]
     fn parse(s: &str) -> PyResult<Self> {
         rust_uri::Uri::parse(s)
@@ -50,20 +43,8 @@ impl Uri {
         &self.inner.scheme
     }
 
-    #[getter]
-    fn path(&self) -> &str {
-        &self.inner.path
-    }
-
     fn __str__(&self) -> String {
         self.inner.to_string()
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "Uri(scheme={:?}, path={:?})",
-            self.inner.scheme, self.inner.path
-        )
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
