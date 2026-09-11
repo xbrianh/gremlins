@@ -553,12 +553,11 @@ def build_state(
     parent_stage: str = "",
     base_ref: str = "",
 ) -> State:
-    reg = ArtifactRegistry(artifact_dir=artifact_dir)
     return State(
         data=data,
         client=client,
         artifact_dir=artifact_dir,
-        artifacts=artifacts or reg,
+        artifacts=artifacts or ArtifactRegistry(artifact_dir=artifact_dir),
         cwd=cwd or (str(worktree) if worktree is not None else str(project_root())),
         args=args if args is not None else argparse.Namespace(),
         pipeline_data=pipeline_data,
