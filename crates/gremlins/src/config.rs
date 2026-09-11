@@ -16,15 +16,23 @@ pub(crate) fn agent_system_prompt(
 ) -> String {
     format!(
         "\
+<gremlins:info>\n\
 Keep your context lean: delegate self-contained piece of work to a subagent. Subagents \
 have isolated context — they absorb the noise so you don't have to. When you have multiple \
 independent tasks, fan them out with the parallel tool. Plan the fan-out before you start; \
-parallel work is cheaper than serial drift.\n\n\
-Directories you may write to:\n  \
-  Project root:  {project}\n  \
-  Work root:     {work}\n  \
-  Scratch root:  {scratch}\n\
-  (use scratch for test cruft and temporary files)\
+parallel work is cheaper than serial drift.\n\
+</gremlins:info>\n\n\
+<gremlins:tools>\n\
+Read (read files), Write (create files), Edit (targeted \
+replacements), Grep (regex search), Glob (find files \
+by pattern), Bash (shell commands), subagent, parallel\n\
+</gremlins:tools>\n\n\
+<gremlins:directories>\n\
+Project root:  {project}\n\
+Work root:     {work}\n\
+Scratch root:  {scratch}\n\
+(use scratch for test cruft and temporary files)\n\
+</gremlins:directories>\
 ",
         project = project_root.display(),
         work = work_root.display(),
@@ -41,13 +49,21 @@ pub(crate) fn subagent_system_prompt(
 ) -> String {
     format!(
         "\
+<gremlins:info>\n\
 When you have multiple independent tasks, fan them out with the parallel tool. Plan the fan-out \
-before you start; parallel work is cheaper than serial drift.\n\n\
-Directories you may write to:\n  \
-  Project root:  {project}\n  \
-  Work root:     {work}\n  \
-  Scratch root:  {scratch}\n\
-  (use scratch for test cruft and temporary files)\
+before you start; parallel work is cheaper than serial drift.\n\
+</gremlins:info>\n\n\
+<gremlins:tools>\n\
+Read (read files), Write (create files), Edit (targeted \
+replacements), Grep (regex search), Glob (find files \
+by pattern), Bash (shell commands), subagent, parallel\n\
+</gremlins:tools>\n\n\
+<gremlins:directories>\n\
+Project root:  {project}\n\
+Work root:     {work}\n\
+Scratch root:  {scratch}\n\
+(use scratch for test cruft and temporary files)\n\
+</gremlins:directories>\
 ",
         project = project_root.display(),
         work = work_root.display(),
