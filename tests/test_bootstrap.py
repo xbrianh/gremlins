@@ -111,7 +111,7 @@ def test_cli_out_bound_after_launch_cmds(tmp_path: pathlib.Path) -> None:
         )
 
     asyncio.run(_test())
-    assert gremlin.state.artifacts.exists("artifact://instructions.txt")
+    assert gremlin.state.artifacts.is_registered("artifact://instructions.txt")
     assert (
         gremlin.state.artifacts.content("artifact://instructions.txt") == "do the thing"
     )
@@ -143,7 +143,7 @@ def test_children_only_run_cmds(tmp_path: pathlib.Path) -> None:
     asyncio.run(_test())
     assert cmds_marker.exists()
     assert not launch_marker.exists()
-    assert not gremlin.state.artifacts.exists("artifact://instructions.txt")
+    assert not gremlin.state.artifacts.is_registered("artifact://instructions.txt")
 
 
 def test_cli_out_skipped_when_launch_excluded(tmp_path: pathlib.Path) -> None:
@@ -169,7 +169,7 @@ def test_cli_out_skipped_when_launch_excluded(tmp_path: pathlib.Path) -> None:
         )
 
     asyncio.run(_test())
-    assert not gremlin.state.artifacts.exists("artifact://instructions.txt")
+    assert not gremlin.state.artifacts.is_registered("artifact://instructions.txt")
     assert (artifact_dir / "instructions.txt").read_text() == "stale"
 
 
@@ -232,7 +232,7 @@ def test_bind_artifact_inline_text(tmp_path: pathlib.Path) -> None:
         )
 
     asyncio.run(_test())
-    assert gremlin.state.artifacts.exists("artifact://plan.md")
+    assert gremlin.state.artifacts.is_registered("artifact://plan.md")
     assert (
         gremlin.state.artifacts.content("artifact://plan.md") == "implement the feature"
     )
@@ -269,7 +269,7 @@ def test_bind_artifact_filepath_source(tmp_path: pathlib.Path) -> None:
         )
 
     asyncio.run(_test())
-    assert gremlin.state.artifacts.exists("artifact://plan.md")
+    assert gremlin.state.artifacts.is_registered("artifact://plan.md")
     assert gremlin.state.artifacts.content("artifact://plan.md") == "plan from file"
 
 
@@ -297,7 +297,7 @@ def test_bind_artifact_optional_missing(tmp_path: pathlib.Path) -> None:
         )
 
     asyncio.run(_test())
-    assert not gremlin.state.artifacts.exists("artifact://plan.md")
+    assert not gremlin.state.artifacts.is_registered("artifact://plan.md")
     assert not (artifact_dir / "plan.md").exists()
 
 
@@ -325,7 +325,7 @@ def test_bind_artifact_optional_empty(tmp_path: pathlib.Path) -> None:
         )
 
     asyncio.run(_test())
-    assert not gremlin.state.artifacts.exists("artifact://plan.md")
+    assert not gremlin.state.artifacts.is_registered("artifact://plan.md")
 
 
 def test_bind_artifact_source_key_differs_from_uri(
@@ -354,10 +354,10 @@ def test_bind_artifact_source_key_differs_from_uri(
         )
 
     asyncio.run(_test())
-    assert gremlin.state.artifacts.exists("artifact://plan.md")
+    assert gremlin.state.artifacts.is_registered("artifact://plan.md")
     assert gremlin.state.artifacts.content("artifact://plan.md") == "hello from my_plan"
     # only the URI-derived key is bound, not the source key
-    assert not gremlin.state.artifacts.exists("artifact://my_plan")
+    assert not gremlin.state.artifacts.is_registered("artifact://my_plan")
 
 
 def test_bind_artifact_mixed_with_shell_commands(tmp_path: pathlib.Path) -> None:
@@ -400,9 +400,9 @@ def test_bind_artifact_mixed_with_shell_commands(tmp_path: pathlib.Path) -> None
         )
 
     asyncio.run(_test())
-    assert gremlin.state.artifacts.exists("artifact://plan.md")
+    assert gremlin.state.artifacts.is_registered("artifact://plan.md")
     assert gremlin.state.artifacts.content("artifact://plan.md") == "the plan"
-    assert gremlin.state.artifacts.exists("artifact://instructions.txt")
+    assert gremlin.state.artifacts.is_registered("artifact://instructions.txt")
     assert (
         gremlin.state.artifacts.content("artifact://instructions.txt")
         == "the instructions"
@@ -504,5 +504,5 @@ def test_bind_artifact_skipped_when_launch_excluded(tmp_path: pathlib.Path) -> N
         )
 
     asyncio.run(_test())
-    assert not gremlin.state.artifacts.exists("artifact://plan.md")
+    assert not gremlin.state.artifacts.is_registered("artifact://plan.md")
     assert (artifact_dir / "plan.md").read_text() == "stale"

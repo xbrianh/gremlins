@@ -1040,11 +1040,10 @@ def test_gather_commit_inputs_missing_spec_does_not_crash(tmp_path, monkeypatch)
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
 
-    plan_path = artifact_dir / "plan.md"
-    plan_path.write_text("# Plan\n\nDo the thing.")
-
     registry = ArtifactRegistry(artifact_dir=artifact_dir)
-    registry.register(Uri.parse("artifact://plan.md"))
+    registry.write_into_registry(
+        Uri.parse("artifact://plan.md"), "# Plan\n\nDo the thing."
+    )
 
     monkeypatch.setattr(
         _land._git, "log_oneline", lambda *a, **kw: "abc123 Do the thing"
@@ -1073,14 +1072,9 @@ def test_gather_commit_inputs_spec_present_reads_content(tmp_path, monkeypatch):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
 
-    plan_path = artifact_dir / "plan.md"
-    plan_path.write_text("# Plan")
-    spec_path = artifact_dir / "spec.md"
-    spec_path.write_text("# Spec\n\nDo this.")
-
     registry = ArtifactRegistry(artifact_dir=artifact_dir)
-    registry.register(Uri.parse("artifact://plan.md"))
-    registry.register(Uri.parse("artifact://spec.md"))
+    registry.write_into_registry(Uri.parse("artifact://plan.md"), "# Plan")
+    registry.write_into_registry(Uri.parse("artifact://spec.md"), "# Spec\n\nDo this.")
 
     monkeypatch.setattr(_land._git, "log_oneline", lambda *a, **kw: "")
     monkeypatch.setattr(_land._git, "diff_stat", lambda *a, **kw: "")

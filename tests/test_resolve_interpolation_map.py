@@ -26,10 +26,7 @@ def _make_registry(tmp_path: pathlib.Path) -> ArtifactRegistry:
 
 
 def _register_text(reg: ArtifactRegistry, uri: str, text: str) -> str:
-    path = pathlib.Path(reg.register(Uri.parse(uri)))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return str(path)
+    return reg.write_into_registry(Uri.parse(uri), text)
 
 
 def _make_state(tmp_path: pathlib.Path, client=None):
@@ -98,9 +95,7 @@ def test_file_backed_json_value(tmp_path):
 
 def test_content_resolves_artifact_file(tmp_path):
     reg = _make_registry(tmp_path)
-    uri = Uri.parse("artifact://greeting.txt")
-    p = pathlib.Path(reg.register(uri))
-    p.write_text("hello world", encoding="utf-8")
+    reg.write_into_registry(Uri.parse("artifact://greeting.txt"), "hello world")
     result = resolve_interpolation_map(
         reg, {"msg": 'content("artifact://greeting.txt")'}
     )
@@ -109,9 +104,9 @@ def test_content_resolves_artifact_file(tmp_path):
 
 def test_content_with_json_path(tmp_path):
     reg = _make_registry(tmp_path)
-    uri = Uri.parse("artifact://pr.json")
-    p = pathlib.Path(reg.register(uri))
-    p.write_text('{"branch": "feat-x", "number": 7}', encoding="utf-8")
+    reg.write_into_registry(
+        Uri.parse("artifact://pr.json"), '{"branch": "feat-x", "number": 7}'
+    )
     result = resolve_interpolation_map(
         reg, {"branch": 'content("artifact://pr.json", "branch")'}
     )
@@ -120,9 +115,7 @@ def test_content_with_json_path(tmp_path):
 
 def test_content_with_json_path_int(tmp_path):
     reg = _make_registry(tmp_path)
-    uri = Uri.parse("artifact://pr.json")
-    p = pathlib.Path(reg.register(uri))
-    p.write_text('{"number": 42}', encoding="utf-8")
+    reg.write_into_registry(Uri.parse("artifact://pr.json"), '{"number": 42}')
     result = resolve_interpolation_map(
         reg, {"num": 'content("artifact://pr.json", "number")'}
     )
@@ -131,9 +124,7 @@ def test_content_with_json_path_int(tmp_path):
 
 def test_content_unknown_key_raises(tmp_path):
     reg = _make_registry(tmp_path)
-    uri = Uri.parse("artifact://pr.json")
-    p = pathlib.Path(reg.register(uri))
-    p.write_text('{"branch": "main"}', encoding="utf-8")
+    reg.write_into_registry(Uri.parse("artifact://pr.json"), '{"branch": "main"}')
     with pytest.raises((ValueError, KeyError)):
         resolve_interpolation_map(
             reg, {"x": 'content("artifact://pr.json", "nonexistent")'}
@@ -154,11 +145,9 @@ def test_content_optional_returns_empty(tmp_path):
 
 def test_exec_content_substitutes_brace_var(tmp_path):
     state = _make_state(tmp_path)
-    uri = Uri.parse("artifact://pr.json")
-    p = pathlib.Path(state.artifacts.register(uri))
-    p.write_text(
+    state.artifacts.write_into_registry(
+        Uri.parse("artifact://pr.json"),
         '{"url": "https://github.com/o/r/pull/5", "number": 5, "branch": "my-branch"}',
-        encoding="utf-8",
     )
 
     out_file = tmp_path / "branch.txt"
@@ -179,11 +168,9 @@ def test_exec_content_substitutes_brace_var(tmp_path):
 def test_agent_content_substituted_into_prompt(tmp_path):
     client = FakeClient(fixtures={"push-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
-    uri = Uri.parse("artifact://pr.json")
-    p = pathlib.Path(state.artifacts.register(uri))
-    p.write_text(
+    state.artifacts.write_into_registry(
+        Uri.parse("artifact://pr.json"),
         '{"url": "https://github.com/o/r/pull/9", "number": 9, "branch": "agent-branch"}',
-        encoding="utf-8",
     )
 
     agent = Agent(

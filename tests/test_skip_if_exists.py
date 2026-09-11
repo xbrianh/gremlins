@@ -51,9 +51,7 @@ def _make_state(tmp_path: pathlib.Path) -> tuple[State, ArtifactRegistry]:
 
 def test_skip_if_exists_skips_when_key_produced(tmp_path: pathlib.Path) -> None:
     state, reg = _make_state(tmp_path)
-    artifact_dir = tmp_path / "artifacts"
-    (artifact_dir / "out.txt").write_text("content", encoding="utf-8")
-    reg.register(Uri.parse("artifact://out.txt"))
+    reg.write_into_registry(Uri.parse("artifact://out.txt"), "content")
 
     stage = _CountingStage("s", [], {})
     stage.skip_if_exists = "artifact://out.txt"
@@ -63,6 +61,24 @@ def test_skip_if_exists_skips_when_key_produced(tmp_path: pathlib.Path) -> None:
     asyncio.run(runner())
 
     assert stage.run_count == 0
+
+
+def test_skip_if_exists_runs_when_registered_key_file_deleted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A registered-but-deleted artifact must not skip the stage."""
+    state, reg = _make_state(tmp_path)
+    reg.write_into_registry(Uri.parse("artifact://out.txt"), "content")
+    pathlib.Path(reg.data_uri("artifact://out.txt")).unlink()
+
+    stage = _CountingStage("s", [], {})
+    stage.skip_if_exists = "artifact://out.txt"
+
+    gremlin = MockGremlin(state=state)
+    runner = state.make_runner(stage, gremlin, record_stage=False)
+    asyncio.run(runner())
+
+    assert stage.run_count == 1
 
 
 def test_skip_if_exists_runs_when_key_absent(tmp_path: pathlib.Path) -> None:
@@ -80,7 +96,7 @@ def test_skip_if_exists_runs_when_key_absent(tmp_path: pathlib.Path) -> None:
 
 def test_no_skip_if_exists_always_runs(tmp_path: pathlib.Path) -> None:
     state, reg = _make_state(tmp_path)
-    reg.register(Uri.parse("artifact://out.txt"))
+    reg.write_into_registry(Uri.parse("artifact://out.txt"), "content")
 
     stage = _CountingStage("s", [], {})
     # skip_if_exists is "" by default — should not skip even when key is produced

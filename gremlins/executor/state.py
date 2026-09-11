@@ -515,7 +515,7 @@ class State:
             skip = entry.skip_if_exists
             if skip:
                 skip = skip.replace("{loop_iter}", base_state.loop_iter)
-                if base_state.artifacts.exists(skip):
+                if base_state.artifacts.is_live(skip):
                     logger.info("stage skipped (artifact exists): %s", entry.name)
                     return Done()
             child_gremlin = copy.copy(gremlin)

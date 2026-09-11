@@ -85,10 +85,10 @@ pub struct ExecPrepared {
     pub loop_iter: String,
 }
 
-/// Phase 1: resolve interpolation, register bind URIs, substitute commands.
-/// Requires `&mut ArtifactRegistry`. Returns a fully-prepared struct that
-/// can be passed to `run_shell` and `verify_exec` without further registry
-/// mutation.
+/// Phase 1: resolve interpolation, compute bind paths, substitute commands.
+/// Requires `&mut ArtifactRegistry` (for interpolation lookups). Returns a
+/// fully-prepared struct that can be passed to `run_shell` and `commit_exec`
+/// without further registry mutation.
 pub fn prepare_exec(
     exec: &Exec,
     artifacts: &mut ArtifactRegistry,
@@ -121,10 +121,21 @@ pub fn prepare_exec(
             name: name.clone(),
             detail: e.to_string(),
         })?;
-        let path = artifacts.register(&uri).map_err(|e| ExecError::Generic {
-            name: name.clone(),
-            detail: e.to_string(),
-        })?;
+        // Optional binds are skipped when a sibling already committed the URI.
+        // Liveness, not membership: a stale binding whose file was removed
+        // (e.g. a skip_if_exists producer recovering) must not block the stage.
+        if !optional && artifacts.is_live(&uri_str) {
+            return Err(ExecError::Generic {
+                name: name.clone(),
+                detail: format!("artifact {uri_str:?} is already produced — duplicate producer"),
+            });
+        }
+        let path = artifacts
+            .path_for_uri(&uri)
+            .map_err(|e| ExecError::Generic {
+                name: name.clone(),
+                detail: e.to_string(),
+            })?;
         bind_paths.insert(key.clone(), path);
         bind_uris.push((key, uri_str, optional));
     }
@@ -253,30 +264,28 @@ pub fn process_shell_result(
     })
 }
 
-/// Phase 3: verify that expected artifacts exist on disk.
-/// Uses `&ArtifactRegistry` (read-only).
-pub fn verify_exec(
+/// Phase 3: commit produced artifacts into the registry.
+/// Non-optional artifacts that are absent abort the stage, except bail URIs.
+pub fn commit_exec(
     prepared: &ExecPrepared,
-    artifacts: &ArtifactRegistry,
-    _shell_result: &ShellResult,
+    artifacts: &mut ArtifactRegistry,
 ) -> Result<(), ExecError> {
-    let name = &prepared.name;
-
-    for (_key, uri_str, optional) in &prepared.bind_uris {
-        if !artifacts.exists(uri_str) {
-            if *optional {
-                continue;
-            }
-            if is_bail_uri(uri_str, &prepared.loop_iter) {
-                continue;
-            }
+    for (key, uri_str, optional) in &prepared.bind_uris {
+        let path = &prepared.bind_paths[key];
+        if Path::new(path).exists() {
+            artifacts
+                .commit(uri_str, path)
+                .map_err(|e| ExecError::Generic {
+                    name: prepared.name.clone(),
+                    detail: e.to_string(),
+                })?;
+        } else if !*optional && !is_bail_uri(uri_str, &prepared.loop_iter) {
             return Err(ExecError::MissingArtifact {
-                name: name.clone(),
+                name: prepared.name.clone(),
                 uri: uri_str.clone(),
             });
         }
     }
-
     Ok(())
 }
 
@@ -296,7 +305,7 @@ pub async fn run_exec_stage(
     prepared.state_dir = state_dir.to_path_buf();
 
     let shell_result = run_shell(&prepared).await?;
-    verify_exec(&prepared, artifacts, &shell_result)?;
+    commit_exec(&prepared, artifacts)?;
 
     Ok(ProcResult {
         returncode: shell_result.rc,
@@ -355,6 +364,130 @@ impl crate::stages::base::Stage for Exec {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn test_commit_exec_optional_bind_ignores_duplicate_registration() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let mut registry = ArtifactRegistry::new(artifact_dir);
+
+        // A sibling already committed this URI.
+        let uri = Uri::parse("artifact://out.txt").unwrap();
+        registry.write_into_registry(&uri, "existing").unwrap();
+
+        let fw = HashMap::new();
+
+        // Optional bind: skipped, not an error.
+        let optional_exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
+        };
+        let prepared = prepare_exec(&optional_exec, &mut registry, "", &fw).unwrap();
+        assert_eq!(prepared.bind_uris[0].0, "out");
+        assert!(prepared.bind_uris[0].2);
+
+        // Non-optional bind: still a duplicate-producer error.
+        let non_optional_exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+        };
+        let err = prepare_exec(&non_optional_exec, &mut registry, "", &fw)
+            .err()
+            .expect("expected duplicate-producer error");
+        assert!(matches!(err, ExecError::Generic { .. }));
+    }
+
+    #[test]
+    fn test_prepare_exec_allows_recovering_from_stale_binding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let mut registry = ArtifactRegistry::new(artifact_dir);
+
+        // Registered but its file is gone: a skip_if_exists producer must be
+        // able to run (and commit) again.
+        let uri = Uri::parse("artifact://plan.md").unwrap();
+        let stale = registry.write_into_registry(&uri, "# plan").unwrap();
+        fs::remove_file(&stale).unwrap();
+
+        let exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("plan".to_string(), "artifact://plan.md".to_string())]),
+        };
+        let prepared = prepare_exec(&exec, &mut registry, "", &HashMap::new()).unwrap();
+        fs::write(&prepared.bind_paths["plan"], "# new plan").unwrap();
+        commit_exec(&prepared, &mut registry).unwrap();
+        assert_eq!(
+            registry.content("artifact://plan.md", None).unwrap(),
+            "# new plan",
+        );
+    }
+
+    #[test]
+    fn test_commit_exec_missing_non_optional_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let mut registry = ArtifactRegistry::new(artifact_dir);
+
+        let exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+        };
+        let fw = HashMap::new();
+        let prepared = prepare_exec(&exec, &mut registry, "", &fw).unwrap();
+        let err = commit_exec(&prepared, &mut registry).unwrap_err();
+        assert!(matches!(err, ExecError::MissingArtifact { .. }));
+        assert!(!registry.is_registered("artifact://out.txt"));
+    }
+
+    #[test]
+    fn test_commit_exec_allows_missing_optional() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let mut registry = ArtifactRegistry::new(artifact_dir);
+
+        let exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
+        };
+        let fw = HashMap::new();
+        let prepared = prepare_exec(&exec, &mut registry, "", &fw).unwrap();
+        commit_exec(&prepared, &mut registry).unwrap();
+        assert!(!registry.is_registered("artifact://out.txt"));
+    }
+
+    #[test]
+    fn test_commit_exec_registers_produced_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let mut registry = ArtifactRegistry::new(artifact_dir);
+
+        let exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+        };
+        let fw = HashMap::new();
+        let prepared = prepare_exec(&exec, &mut registry, "", &fw).unwrap();
+        fs::write(&prepared.bind_paths["out"], "data").unwrap();
+        commit_exec(&prepared, &mut registry).unwrap();
+        assert!(registry.is_registered("artifact://out.txt"));
+    }
 
     #[test]
     fn test_exec_implements_stage_trait() {

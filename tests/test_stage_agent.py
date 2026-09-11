@@ -71,8 +71,7 @@ def _make_agent(
 def test_in_content_substituted_into_prompt(tmp_path):
     registry = ArtifactRegistry(tmp_path / "artifacts")
     (tmp_path / "artifacts").mkdir(exist_ok=True)
-    (tmp_path / "artifacts" / "plan.md").write_bytes(b"# My Plan")
-    registry.register(Uri.parse("artifact://plan.md"))
+    registry.write_into_registry(Uri.parse("artifact://plan.md"), "# My Plan")
 
     client = FakeClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client, registry=registry)
@@ -130,7 +129,7 @@ def test_verify_produced_passes_when_output_written(tmp_path):
 
     assert isinstance(result, Done)
     assert state.artifacts is not None
-    assert state.artifacts.exists("file://session/output.md")
+    assert state.artifacts.is_registered("file://session/output.md")
 
 
 def test_verify_produced_fails_when_output_missing(tmp_path):
@@ -145,7 +144,33 @@ def test_verify_produced_fails_when_output_missing(tmp_path):
         asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
 
-def test_bind_uri_bound_in_registry_before_agent_runs(tmp_path):
+def test_bind_recovers_from_stale_registration(tmp_path):
+    """A deleted output file must not block the agent from recreating it."""
+
+    class WritingClient(FakeClient):
+        async def run(self, prompt, *, label, **kwargs):
+            m = re.search(r"`([^`]*output\.md)`", prompt)
+            if m:
+                pathlib.Path(m.group(1)).write_text("# Fresh")
+            return await super().run(prompt, label=label, **kwargs)
+
+    client = WritingClient(fixtures={"my-agent": MINIMAL_EVENTS})
+    state = _make_state(tmp_path, client)
+    stale = state.artifacts.write_into_registry(
+        Uri.parse("file://session/output.md"), "# Stale"
+    )
+    pathlib.Path(stale).unlink()
+    agent = _make_agent(
+        prompts=["Write output to `{result}`"],
+        bind_map={"result": "file://session/output.md"},
+    )
+
+    result = asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
+    assert isinstance(result, Done)
+    assert state.artifacts.content("file://session/output.md", None) == "# Fresh"
+
+
+def test_bind_uri_committed_after_agent_produces(tmp_path):
     seen_bound_before_run: list[bool] = []
 
     class CheckingClient(FakeClient):
@@ -155,7 +180,7 @@ def test_bind_uri_bound_in_registry_before_agent_runs(tmp_path):
                 registry is not None
                 and registry.is_registered("file://session/output.md")
             )
-            # Extract path from {result} and write so verify passes.
+            # Extract path from {result} and write so commit succeeds.
             m = re.search(r"`([^`]*output\.md)`", prompt)
             if m:
                 p = pathlib.Path(m.group(1))
@@ -171,7 +196,8 @@ def test_bind_uri_bound_in_registry_before_agent_runs(tmp_path):
     )
 
     asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
-    assert seen_bound_before_run == [True]
+    assert seen_bound_before_run == [False]
+    assert state.artifacts.is_registered("file://session/output.md")
 
 
 # --- with_dict parsing ---
@@ -307,7 +333,7 @@ def test_single_file_out_missing_source_raises(tmp_path):
         asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
 
-# --- multi-file out: auto-management (best-effort) ---
+# --- multi-file out: auto-management ---
 
 
 def test_multi_file_out_prompt_gets_per_key_paths(tmp_path):
@@ -316,9 +342,9 @@ def test_multi_file_out_prompt_gets_per_key_paths(tmp_path):
     agent = _make_agent(
         prompts=["Write to {blah}, {foo}, {biz}"],
         bind_map={
-            "blah": "file://session/blah.md",
-            "foo": "file://session/foo.md",
-            "biz": "file://session/biz.md",
+            "blah?": "file://session/blah.md",
+            "foo?": "file://session/foo.md",
+            "biz?": "file://session/biz.md",
         },
     )
 
@@ -352,7 +378,7 @@ def test_multi_file_out_renames_only_written_files(tmp_path):
         bind_map={
             "blah": "file://session/blah.md",
             "foo": "file://session/foo.md",
-            "biz": "file://session/biz.md",
+            "biz?": "file://session/biz.md",
         },
     )
 
@@ -446,7 +472,22 @@ def test_child_state_falls_back_to_parent_when_not_explicit(tmp_path):
     assert child.client is not agent.client
 
 
-def test_multi_file_out_missing_files_do_not_raise(tmp_path):
+def test_multi_file_out_missing_optional_files_do_not_raise(tmp_path):
+    client = FakeClient(fixtures={"my-agent": MINIMAL_EVENTS})
+    state = _make_state(tmp_path, client)
+    agent = _make_agent(
+        prompts=["Write nothing"],
+        bind_map={
+            "blah?": "file://session/blah.md",
+            "foo?": "file://session/foo.md",
+        },
+    )
+
+    result = asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
+    assert isinstance(result, Done)
+
+
+def test_multi_file_out_missing_non_optional_raises(tmp_path):
     client = FakeClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
     agent = _make_agent(
@@ -457,8 +498,8 @@ def test_multi_file_out_missing_files_do_not_raise(tmp_path):
         },
     )
 
-    result = asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
-    assert isinstance(result, Done)
+    with pytest.raises(Bail, match="was not produced"):
+        asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +530,7 @@ def test_loop_iter_in_bind_uri(tmp_path):
     )
     result = asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
     assert isinstance(result, Done)
-    assert state.artifacts.exists("artifact://my-agent~3/out.txt")
+    assert state.artifacts.is_registered("artifact://my-agent~3/out.txt")
 
 
 def test_loop_iter_in_interpolation_value(tmp_path):
@@ -497,10 +538,9 @@ def test_loop_iter_in_interpolation_value(tmp_path):
     client = FakeClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
     state.loop_stack = [("my-agent", 2)]
-    p = state.artifact_dir / "my-agent~2" / "plan.md"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("# Plan for iteration 2")
-    state.artifacts.register(Uri.parse("artifact://my-agent~2/plan.md"))
+    state.artifacts.write_into_registry(
+        Uri.parse("artifact://my-agent~2/plan.md"), "# Plan for iteration 2"
+    )
     agent = _make_agent(
         prompts=["Plan: {plan}"],
         interpolation_map={"plan": 'content("artifact://{loop_iter}/plan.md")'},

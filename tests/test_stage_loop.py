@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -37,10 +38,8 @@ def _loop_state(tmp_path: Any) -> RuntimeState:
 
 def _set_done(state: RuntimeState) -> None:
     """Write the done artifact to signal loop completion."""
-    done_uri = Uri.parse("artifact://done.txt")
-    (state.artifact_dir / "done.txt").write_text("done")
-    if not state.artifacts.exists(str(done_uri)):
-        state.artifacts.register(done_uri)
+    if not state.artifacts.is_registered("artifact://done.txt"):
+        state.artifacts.write_into_registry(Uri.parse("artifact://done.txt"), "done")
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +78,28 @@ def test_loop_stops_when_stop_when_exists_artifact_is_bound(tmp_path):
 
     assert outcome == Done()
     assert calls == ["run"]
+
+
+def test_loop_does_not_stop_on_stale_registered_done(tmp_path):
+    """A registered-but-deleted stop artifact must not stop the loop."""
+    loop_state = _loop_state(tmp_path)
+    _set_done(loop_state)
+    pathlib.Path(loop_state.artifacts.data_uri("artifact://done.txt")).unlink()
+    calls: list[str] = []
+
+    async def runner() -> Done:
+        calls.append("run")
+        return Done()
+
+    loop = LoopStage(
+        "loop",
+        body_runners=[runner],
+        max_iterations=2,
+        stop_when_exists="artifact://done.txt",
+    )
+    with pytest.raises(Bail):
+        asyncio.run(loop.run(_make_gremlin_wrapper(loop_state)))
+    assert calls == ["run", "run"]
 
 
 def test_loop_cmd_failure_then_fix_then_green(tmp_path):
@@ -210,6 +231,45 @@ def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
     assert data["class"] == "other"
 
 
+def test_loop_bail_with_committed_reason(tmp_path):
+    """A committed per-iteration bail artifact stops the loop with its reason."""
+    loop_state = _loop_state(tmp_path)
+
+    async def bailer() -> Done:
+        loop_state.artifacts.write_into_registry(
+            Uri.parse(f"artifact://{loop_state.loop_iter}/bail"), "boom"
+        )
+        return Done()
+
+    loop = LoopStage("loop", body_runners=[bailer], max_iterations=3)
+    with pytest.raises(Bail, match="boom"):
+        asyncio.run(loop.run(_make_gremlin_wrapper(loop_state)))
+
+
+def test_loop_stale_bail_cleared_on_resume(tmp_path):
+    """Registry membership must not keep a bail set once its file is cleared.
+
+    The loop clears a stale per-iteration bail from a prior attempt/resume by
+    unlinking its file; the registry entry survives that, so bail detection
+    must consult file liveness rather than membership alone.
+    """
+    loop_state = _loop_state(tmp_path)
+    loop_state.artifacts.write_into_registry(
+        Uri.parse("artifact://loop~1/bail"), "stale reason"
+    )
+    stale = pathlib.Path(loop_state.artifacts.data_uri("artifact://loop~1/bail"))
+    assert stale.exists()
+
+    async def runner() -> Done:
+        return Done()
+
+    loop = LoopStage("loop", body_runners=[runner], max_iterations=2)
+    # Iteration 1 unlinks the stale file; the loop must run to exhaustion
+    # (Bail for max-iterations) rather than re-bailing on the stale reason.
+    with pytest.raises(Bail, match="loop exhausted"):
+        asyncio.run(loop.run(_make_gremlin_wrapper(loop_state)))
+
+
 # ---------------------------------------------------------------------------
 # stop_when_exists from YAML
 # ---------------------------------------------------------------------------
@@ -279,8 +339,9 @@ def test_loop_registers_artifacts_across_iterations(tmp_path):
     bound_count = [0]
 
     async def binder() -> Done:
-        uri = Uri.parse(f"artifact://out-{bound_count[0]}.txt")
-        state.artifacts.register(uri)
+        state.artifacts.write_into_registry(
+            Uri.parse(f"artifact://out-{bound_count[0]}.txt"), "out"
+        )
         bound_count[0] += 1
         if bound_count[0] == 2:
             _set_done(state)
@@ -342,10 +403,9 @@ def test_stop_when_exists_resolves_loop_iter(tmp_path):
 
     async def runner() -> Done:
         it = loop_state.loop_iter
-        p = loop_state.artifact_dir / it / "done"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("done")
-        loop_state.artifacts.register(Uri.parse(f"artifact://{it}/done"))
+        loop_state.artifacts.write_into_registry(
+            Uri.parse(f"artifact://{it}/done"), "done"
+        )
         return Done()
 
     loop = LoopStage(
@@ -360,7 +420,6 @@ def test_stop_when_exists_resolves_loop_iter(tmp_path):
 
 def test_loop_iter_scoping_with_exec_isolates_iterations(tmp_path, monkeypatch):
     """Exec bind URIs with {loop_iter} isolate artifacts per iteration."""
-    import pathlib
     import subprocess
 
     from _gremlins_core.stages import Exec
@@ -373,11 +432,9 @@ def test_loop_iter_scoping_with_exec_isolates_iterations(tmp_path, monkeypatch):
     async def controlled_shell(cmd, **kwargs):
         shell_calls.append(cmd)
         if len(shell_calls) >= 2:
-            for key in loop_state.artifacts.keys():
-                if key.endswith("/done"):
-                    p = pathlib.Path(loop_state.artifacts.data_uri(key))
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text("done")
+            p = loop_state.artifact_dir / loop_state.loop_iter / "done"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("done")
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     exec_stage = Exec(
@@ -398,7 +455,6 @@ def test_loop_iter_scoping_with_exec_isolates_iterations(tmp_path, monkeypatch):
 
     assert outcome == Done()
     assert len(shell_calls) == 2
-    assert loop_state.artifacts.is_registered("artifact://verify~1/done")
     assert loop_state.artifacts.is_registered("artifact://verify~2/done")
     assert not loop_state.artifacts.is_registered("artifact://verify~3/done")
 

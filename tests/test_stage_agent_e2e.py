@@ -41,9 +41,8 @@ def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):
     # Bind the source document in the registry
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir(exist_ok=True)
-    (artifact_dir / "source.md").write_bytes(b"# Hello\nWorld")
     registry = ArtifactRegistry(artifact_dir)
-    registry.register(Uri.parse("artifact://source.md"))
+    registry.write_into_registry(Uri.parse("artifact://source.md"), "# Hello\nWorld")
 
     # Client writes the expected output file when called.
 
@@ -72,7 +71,7 @@ def test_agent_stage_e2e_reads_artifact_and_writes_output(tmp_path):
     # Source content was substituted into the prompt
     assert "# Hello" in client.calls[0].prompt
     # Output artifact is bound in the registry
-    assert registry.exists("file://session/summary.md")
+    assert registry.is_registered("file://session/summary.md")
     # Output file exists
     assert (artifact_dir / "summary.md").exists()
 

@@ -105,9 +105,7 @@ mod tests {
 
     fn register_file(reg: &mut ArtifactRegistry, name: &str, content: &str) -> String {
         let uri = crate::artifacts::uri::Uri::parse(&format!("artifact://{name}")).unwrap();
-        let path = reg.register(&uri).unwrap();
-        fs::write(&path, content).unwrap();
-        path
+        reg.write_into_registry(&uri, content).unwrap()
     }
 
     fn unwrap_result<T>(r: Result<T, ResolveError>) -> T {

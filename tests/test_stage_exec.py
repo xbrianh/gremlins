@@ -68,8 +68,7 @@ def test_no_cmds_returns_done(tmp_path):
 
 def test_interpolation_map_substitutes_in_cmds(tmp_path):
     state = _make_state(tmp_path)
-    (state.artifact_dir / "value.txt").write_text("hello")
-    state.artifacts.register(Uri.parse("artifact://value.txt"))
+    state.artifacts.write_into_registry(Uri.parse("artifact://value.txt"), "hello")
 
     out_file = tmp_path / "captured.txt"
     stage = _exec(
@@ -98,8 +97,8 @@ def test_bind_file_scheme_binds_and_verifies(tmp_path):
     stage = _exec(cmds=["true"], bind_map={"result": "file://session/out.txt"})
     result = asyncio.run(stage.run(MockGremlin(state=state)))
     assert isinstance(result, Done)
-    assert state.artifacts.exists("file://session/out.txt")
-    # register stores the resolved filesystem path, not the original URI
+    assert state.artifacts.is_registered("file://session/out.txt")
+    # the registry binds the resolved filesystem path, not the original URI
 
 
 def test_bind_file_scheme_missing_file_raises(tmp_path):
@@ -107,6 +106,21 @@ def test_bind_file_scheme_missing_file_raises(tmp_path):
     stage = _exec(cmds=["true"], bind_map={"result": "file://session/missing.txt"})
     with pytest.raises(Bail, match="was not produced"):
         asyncio.run(stage.run(MockGremlin(state=state)))
+
+
+def test_bind_recovers_from_stale_registration(tmp_path):
+    """A deleted output file must not block the stage from recreating it."""
+    state = _make_state(tmp_path)
+    stale = state.artifacts.write_into_registry(
+        Uri.parse("file://session/out.txt"), "stale"
+    )
+    pathlib.Path(stale).unlink()
+    stage = _exec(
+        cmds=["echo fresh > {result}"], bind_map={"result": "file://session/out.txt"}
+    )
+    result = asyncio.run(stage.run(MockGremlin(state=state)))
+    assert isinstance(result, Done)
+    assert state.artifacts.content("file://session/out.txt", None).strip() == "fresh"
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +142,7 @@ def test_loop_iter_in_bind_uri(tmp_path):
     )
     result = asyncio.run(stage.run(MockGremlin(state=state)))
     assert isinstance(result, Done)
-    assert state.artifacts.exists("artifact://test-exec~3/out.txt")
+    assert state.artifacts.is_registered("artifact://test-exec~3/out.txt")
 
 
 # ---------------------------------------------------------------------------
@@ -191,4 +205,4 @@ def test_bail_artifact_on_exit_2(tmp_path):
     )
     result = asyncio.run(stage.run(MockGremlin(state=state)))
     assert isinstance(result, Done)
-    assert state.artifacts.exists("artifact://bail")
+    assert state.artifacts.is_registered("artifact://bail")

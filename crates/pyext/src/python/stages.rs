@@ -389,16 +389,11 @@ impl PyExec {
         prepared.state_dir = state_dir;
 
         if prepared.cmds.is_empty() {
-            // Empty commands: everything is synchronous — lock, verify, return.
+            // Empty commands: everything is synchronous — lock, commit, return.
             let arts_ref = artifacts.bind(py);
             let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
-            let inner = arts_inner.inner.lock().unwrap();
-            let shell_result = rust_exec::ShellResult {
-                output: String::new(),
-                rc: 0,
-                bail_triggered: false,
-            };
-            rust_exec::verify_exec(&prepared, &inner, &shell_result)
+            let mut inner = arts_inner.inner.lock().unwrap();
+            rust_exec::commit_exec(&prepared, &mut inner)
                 .map_err(|e| Bail::new_err(e.to_string()))?;
 
             let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
@@ -415,7 +410,7 @@ impl PyExec {
         // future_into_py, no Python round-trip). Test path uses a Python hook
         // set via _shell_fn.
         pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
-            let shell_result = if let Some(shell_fn) = shell_fn {
+            if let Some(shell_fn) = shell_fn {
                 // Test path: call the Python hook (async function returning
                 // a CompletedProcess-like object).
                 let joined = prepared.cmds.join(" && ");
@@ -473,8 +468,8 @@ impl PyExec {
             Python::attach(|py| {
                 let arts_ref = artifacts.bind(py);
                 let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
-                let inner = arts_inner.inner.lock().unwrap();
-                rust_exec::verify_exec(&prepared, &inner, &shell_result)
+                let mut inner = arts_inner.inner.lock().unwrap();
+                rust_exec::commit_exec(&prepared, &mut inner)
                     .map_err(|e| Bail::new_err(e.to_string()))?;
 
                 let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
@@ -800,7 +795,6 @@ impl PyAgent {
         let full_prompt = format!("{preamble}\n\n{}", prepared.prompt);
 
         let raw_path = artifact_dir.join(format!("stream-{}.jsonl", prepared.name));
-        let single = prepared.bind_paths.len() == 1;
 
         let model = prepared.model.clone();
 
@@ -808,12 +802,6 @@ impl PyAgent {
             .expected_artifact_paths
             .iter()
             .map(PathBuf::from)
-            .collect();
-
-        let optional_keys: Vec<String> = prepared
-            .bind_uris
-            .iter()
-            .filter_map(|(key, _, optional)| if *optional { Some(key.clone()) } else { None })
             .collect();
 
         pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
@@ -925,21 +913,10 @@ impl PyAgent {
                     return Err(Bail::new_err(reason));
                 }
 
-                // Verify single-output artifact
-                if single {
-                    for (key, path_str) in &prepared.bind_paths {
-                        if optional_keys.contains(key) {
-                            continue;
-                        }
-                        let p = std::path::Path::new(path_str);
-                        if !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-                            return Err(Bail::new_err(format!(
-                                "agent {}: artifact {} was not produced",
-                                prepared.name, key
-                            )));
-                        }
-                    }
-                }
+                let arts_inner: PyRef<'_, ArtifactRegistry> = artifacts.bind(py).extract()?;
+                let mut inner = arts_inner.inner.lock().unwrap();
+                rust_agent::commit_agent(&prepared, &mut inner)
+                    .map_err(|e| Bail::new_err(e.to_string()))?;
 
                 let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
                 Ok(done_obj.into_any())
