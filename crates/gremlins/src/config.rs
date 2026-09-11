@@ -17,10 +17,10 @@ pub(crate) fn agent_system_prompt(
     format!(
         "\
 <gremlins:info>\n\
-Keep your context lean: delegate self-contained piece of work to a subagent. Subagents \
+Keep your context lean: delegate self-contained pieces of work to subagents. Subagents \
 have isolated context — they absorb the noise so you don't have to. When you have multiple \
-independent tasks, fan them out with the parallel tool. Plan the fan-out before you start; \
-parallel work is cheaper than serial drift.\n\
+independent tasks, fan them out with the parallel tool. Plan the fan-out before you start. \
+Use subagents as scouts to explore options and gather information.\n\n\
 </gremlins:info>\n\n\
 <gremlins:tools>\n\
 Read (read files), Write (create files), Edit (targeted \
@@ -1180,7 +1180,7 @@ mod tests {
             Path::new("/project"),
         );
         assert!(
-            prompt.contains("delegate self-contained piece of work to a subagent"),
+            prompt.contains("delegate self-contained pieces of work to subagents"),
             "agent prompt must include delegation guidance"
         );
     }
@@ -1208,7 +1208,7 @@ mod tests {
             Path::new("/project"),
         );
         assert!(
-            !prompt.contains("delegate self-contained piece of work to a subagent"),
+            !prompt.contains("delegate self-contained pieces of work to subagents"),
             "subagent prompt must not include delegation guidance — subagents are already delegates"
         );
     }
