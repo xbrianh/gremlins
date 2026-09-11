@@ -1136,4 +1136,58 @@ mod tests {
         assert!(keys.get("openai").is_none());
         clear_sandbox_env();
     }
+
+    // -----------------------------------------------------------------------
+    // Prompt generation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_agent_system_prompt_renders_directory_paths() {
+        let prompt = agent_system_prompt(
+            Path::new("/tmp/gremlins"),
+            Path::new("/tmp/scratch"),
+            Path::new("/home/user/project"),
+        );
+        assert!(prompt.contains("/tmp/gremlins"), "must contain work root");
+        assert!(prompt.contains("/tmp/scratch"), "must contain scratch root");
+        assert!(prompt.contains("/home/user/project"), "must contain project root");
+    }
+
+    #[test]
+    fn test_agent_system_prompt_includes_delegation_guidance() {
+        let prompt = agent_system_prompt(
+            Path::new("/work"),
+            Path::new("/scratch"),
+            Path::new("/project"),
+        );
+        assert!(
+            prompt.contains("delegate every self-contained piece of work to a subagent"),
+            "agent prompt must include delegation guidance"
+        );
+    }
+
+    #[test]
+    fn test_subagent_system_prompt_renders_directory_paths() {
+        let prompt = subagent_system_prompt(
+            Path::new("/tmp/gremlins"),
+            Path::new("/tmp/scratch"),
+            Path::new("/home/user/project"),
+        );
+        assert!(prompt.contains("/tmp/gremlins"), "must contain work root");
+        assert!(prompt.contains("/tmp/scratch"), "must contain scratch root");
+        assert!(prompt.contains("/home/user/project"), "must contain project root");
+    }
+
+    #[test]
+    fn test_subagent_system_prompt_omits_delegation_guidance() {
+        let prompt = subagent_system_prompt(
+            Path::new("/work"),
+            Path::new("/scratch"),
+            Path::new("/project"),
+        );
+        assert!(
+            !prompt.contains("delegate every self-contained piece of work to a subagent"),
+            "subagent prompt must not include delegation guidance — subagents are already delegates"
+        );
+    }
 }
