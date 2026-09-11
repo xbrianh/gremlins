@@ -158,8 +158,8 @@ def test_parallel_child_artifact_dir_is_full_copy(sandbox) -> None:
     data = StateData(gremlin_id=gremlin_id)
     data.state_file = state_file
     parent_artifacts = ArtifactRegistry(artifact_dir=parent_artifact_dir)
-    parent_artifacts.register(Uri.parse("artifact://file1.txt"))
-    parent_artifacts.register(Uri.parse("artifact://file2.txt"))
+    parent_artifacts.write_into_registry(Uri.parse("artifact://file1.txt"), "content1")
+    parent_artifacts.write_into_registry(Uri.parse("artifact://file2.txt"), "content2")
 
     parent = build_state(
         data=data,
@@ -287,8 +287,12 @@ def test_fork_uses_parent_not_child_state_as_source(sandbox) -> None:
     data = StateData(gremlin_id=gremlin_id)
     data.state_file = state_file
     parent_artifacts = ArtifactRegistry(artifact_dir=parent_artifact_dir)
-    parent_artifacts.register(Uri.parse("artifact://plan.md"))
-    parent_artifacts.register(Uri.parse("artifact://spec.md"))
+    parent_artifacts.write_into_registry(
+        Uri.parse("artifact://plan.md"), "# Plan\nSome plan content"
+    )
+    parent_artifacts.write_into_registry(
+        Uri.parse("artifact://spec.md"), "# Spec\nSome spec"
+    )
 
     parent_state = build_state(
         data=data,

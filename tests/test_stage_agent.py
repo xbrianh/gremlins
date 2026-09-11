@@ -71,8 +71,7 @@ def _make_agent(
 def test_in_content_substituted_into_prompt(tmp_path):
     registry = ArtifactRegistry(tmp_path / "artifacts")
     (tmp_path / "artifacts").mkdir(exist_ok=True)
-    (tmp_path / "artifacts" / "plan.md").write_bytes(b"# My Plan")
-    registry.register(Uri.parse("artifact://plan.md"))
+    registry.write_into_registry(Uri.parse("artifact://plan.md"), "# My Plan")
 
     client = FakeClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client, registry=registry)
@@ -130,7 +129,7 @@ def test_verify_produced_passes_when_output_written(tmp_path):
 
     assert isinstance(result, Done)
     assert state.artifacts is not None
-    assert state.artifacts.exists("file://session/output.md")
+    assert state.artifacts.is_registered("file://session/output.md")
 
 
 def test_verify_produced_fails_when_output_missing(tmp_path):
@@ -145,7 +144,7 @@ def test_verify_produced_fails_when_output_missing(tmp_path):
         asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
 
-def test_bind_uri_bound_in_registry_before_agent_runs(tmp_path):
+def test_bind_uri_committed_after_agent_produces(tmp_path):
     seen_bound_before_run: list[bool] = []
 
     class CheckingClient(FakeClient):
@@ -155,7 +154,7 @@ def test_bind_uri_bound_in_registry_before_agent_runs(tmp_path):
                 registry is not None
                 and registry.is_registered("file://session/output.md")
             )
-            # Extract path from {result} and write so verify passes.
+            # Extract path from {result} and write so commit succeeds.
             m = re.search(r"`([^`]*output\.md)`", prompt)
             if m:
                 p = pathlib.Path(m.group(1))
@@ -171,7 +170,8 @@ def test_bind_uri_bound_in_registry_before_agent_runs(tmp_path):
     )
 
     asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
-    assert seen_bound_before_run == [True]
+    assert seen_bound_before_run == [False]
+    assert state.artifacts.is_registered("file://session/output.md")
 
 
 # --- with_dict parsing ---
@@ -489,7 +489,7 @@ def test_loop_iter_in_bind_uri(tmp_path):
     )
     result = asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
     assert isinstance(result, Done)
-    assert state.artifacts.exists("artifact://my-agent~3/out.txt")
+    assert state.artifacts.is_registered("artifact://my-agent~3/out.txt")
 
 
 def test_loop_iter_in_interpolation_value(tmp_path):
@@ -497,10 +497,9 @@ def test_loop_iter_in_interpolation_value(tmp_path):
     client = FakeClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
     state.loop_stack = [("my-agent", 2)]
-    p = state.artifact_dir / "my-agent~2" / "plan.md"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("# Plan for iteration 2")
-    state.artifacts.register(Uri.parse("artifact://my-agent~2/plan.md"))
+    state.artifacts.write_into_registry(
+        Uri.parse("artifact://my-agent~2/plan.md"), "# Plan for iteration 2"
+    )
     agent = _make_agent(
         prompts=["Plan: {plan}"],
         interpolation_map={"plan": 'content("artifact://{loop_iter}/plan.md")'},

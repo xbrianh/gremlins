@@ -104,10 +104,18 @@ pub fn prepare_agent(
             name: name.clone(),
             detail: e.to_string(),
         })?;
-        let path = artifacts.register(&uri).map_err(|e| AgentError::Generic {
-            name: name.clone(),
-            detail: e.to_string(),
-        })?;
+        if artifacts.is_registered(&uri_str) {
+            return Err(AgentError::Generic {
+                name: name.clone(),
+                detail: format!("artifact {uri_str:?} is already registered — duplicate producer"),
+            });
+        }
+        let path = artifacts
+            .path_for_uri(&uri)
+            .map_err(|e| AgentError::Generic {
+                name: name.clone(),
+                detail: e.to_string(),
+            })?;
         bind_paths.insert(key.clone(), path);
         bind_uris.push((key, uri_str, optional));
     }
@@ -142,6 +150,42 @@ pub fn prepare_agent(
         worktree: None,
         artifact_dir: String::new(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// commit_agent
+// ---------------------------------------------------------------------------
+
+/// Commit produced artifacts into the registry. Single-output agents must
+/// produce a non-empty file for non-optional binds; multi-output agents are
+/// best-effort (only produced files are committed).
+pub fn commit_agent(
+    prepared: &AgentPrepared,
+    artifacts: &mut ArtifactRegistry,
+) -> Result<(), AgentError> {
+    let single = prepared.bind_paths.len() == 1;
+    for (key, uri_str, optional) in &prepared.bind_uris {
+        let path = &prepared.bind_paths[key];
+        let produced = std::path::Path::new(path)
+            .metadata()
+            .map(|m| m.len())
+            .unwrap_or(0)
+            > 0;
+        if produced {
+            artifacts
+                .commit(uri_str, path)
+                .map_err(|e| AgentError::Generic {
+                    name: prepared.name.clone(),
+                    detail: e.to_string(),
+                })?;
+        } else if single && !*optional {
+            return Err(AgentError::MissingArtifact {
+                name: prepared.name.clone(),
+                key: key.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -414,9 +458,7 @@ mod tests {
 
     fn register_file(reg: &mut ArtifactRegistry, name: &str, content: &str) -> String {
         let uri = Uri::parse(&format!("artifact://{name}")).unwrap();
-        let path = reg.register(&uri).unwrap();
-        std::fs::write(&path, content).unwrap();
-        path
+        reg.write_into_registry(&uri, content).unwrap()
     }
 
     fn ensure_artifact_dir(tmp: &tempfile::TempDir) -> PathBuf {
@@ -539,8 +581,7 @@ mod tests {
         let mut reg = make_registry(ad.clone());
         // Pre-register the artifact that content() will look up
         let plan_uri = Uri::parse("artifact://my-agent~2/plan.md").unwrap();
-        let plan_path = reg.register(&plan_uri).unwrap();
-        std::fs::write(&plan_path, "# Plan").unwrap();
+        reg.write_into_registry(&plan_uri, "# Plan").unwrap();
         // Register bind for the output so verify doesn't fail
         let agent = Agent {
             name: "test".to_string(),
@@ -852,5 +893,79 @@ mod tests {
         let p2 = build_workspace_preamble("/tmp/run", Some("/repo"));
         assert!(p2.contains("Your working directory is: /tmp/run"));
         assert!(p2.contains("Project worktree: /repo"));
+    }
+
+    fn agent_with_bind(key: &str, uri: &str) -> Agent {
+        Agent {
+            name: "test".to_string(),
+            prompts: vec!["hi".to_string()],
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([(key.to_string(), uri.to_string())]),
+        }
+    }
+
+    #[test]
+    fn test_commit_agent_rejects_missing_non_optional() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let agent = agent_with_bind("out", "artifact://out.md");
+        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        let err = commit_agent(&prepared, &mut reg).unwrap_err();
+        assert!(matches!(err, AgentError::MissingArtifact { .. }));
+        assert!(!reg.is_registered("artifact://out.md"));
+    }
+
+    #[test]
+    fn test_commit_agent_rejects_empty_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let agent = agent_with_bind("out", "artifact://out.md");
+        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        std::fs::write(&prepared.bind_paths["out"], "").unwrap();
+        assert!(commit_agent(&prepared, &mut reg).is_err());
+        assert!(!reg.is_registered("artifact://out.md"));
+    }
+
+    #[test]
+    fn test_commit_agent_allows_missing_optional() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let agent = agent_with_bind("out?", "artifact://out.md");
+        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        commit_agent(&prepared, &mut reg).unwrap();
+        assert!(!reg.is_registered("artifact://out.md"));
+    }
+
+    #[test]
+    fn test_commit_agent_multi_output_is_best_effort() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let agent = Agent {
+            name: "test".to_string(),
+            prompts: vec!["hi".to_string()],
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([
+                ("a".to_string(), "artifact://a.md".to_string()),
+                ("b".to_string(), "artifact://b.md".to_string()),
+            ]),
+        };
+        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        std::fs::write(&prepared.bind_paths["a"], "content").unwrap();
+        commit_agent(&prepared, &mut reg).unwrap();
+        assert!(reg.is_registered("artifact://a.md"));
+        assert!(!reg.is_registered("artifact://b.md"));
+    }
+
+    #[test]
+    fn test_commit_agent_registers_produced_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let agent = agent_with_bind("out", "artifact://out.md");
+        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        std::fs::write(&prepared.bind_paths["out"], "content").unwrap();
+        commit_agent(&prepared, &mut reg).unwrap();
+        assert!(reg.is_registered("artifact://out.md"));
     }
 }

@@ -38,7 +38,7 @@ stages:
           spec_section: content("artifact://boss-spec.md")?
           rolling_plan: artifact://rolling-plan.md
         bind:
-          child_plan:   "artifact://{loop_iter}/child-plan.md"
+          child_plan?: "artifact://{loop_iter}/child-plan.md"
           signal:       "artifact://{loop_iter}/signal.json"
         options:
           idle_timeout: 3600
@@ -48,7 +48,7 @@ stages:
         interpolation:
           signal: artifact://{loop_iter}/signal.json
           rolling_plan: artifact://rolling-plan.md
-          child_plan: artifact://{loop_iter}/child-plan.md
+          child_plan: artifact://{loop_iter}/child-plan.md?
         bind:
           bail?: "artifact://{loop_iter}/bail"
           done?: "artifact://{loop_iter}/done"

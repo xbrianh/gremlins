@@ -97,10 +97,17 @@ impl ArtifactRegistry {
         }
     }
 
-    fn register(&self, uri: &Uri) -> PyResult<String> {
-        let inner = &mut *self.inner.lock().unwrap();
-        match inner.register(&uri.inner) {
-            Ok(p) => Ok(p),
+    fn path_for_uri(&self, uri: &Uri) -> PyResult<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .path_for_uri(&uri.inner)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    fn commit(&self, key: &str, path: &str) -> PyResult<()> {
+        match self.inner.lock().unwrap().commit(key, path) {
+            Ok(()) => Ok(()),
             Err(e) => {
                 if let Some(dup) = e.downcast_ref::<rust_registry::DuplicateArtifact>() {
                     return Err(DuplicateArtifact::new_err(format!(
@@ -111,6 +118,22 @@ impl ArtifactRegistry {
                 Err(pyo3::exceptions::PyValueError::new_err(e.to_string()))
             }
         }
+    }
+
+    fn write_into_registry(&self, uri: &Uri, content: &str) -> PyResult<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .write_into_registry(&uri.inner, content)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    fn copy_into_registry(&self, uri: &Uri, source: PathBuf) -> PyResult<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .copy_into_registry(&uri.inner, &source)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn data_uri(&self, key: &str) -> PyResult<String> {
@@ -134,20 +157,6 @@ impl ArtifactRegistry {
                 }
                 pyo3::exceptions::PyValueError::new_err(e.to_string())
             })
-    }
-
-    #[pyo3(signature = (uri))]
-    fn exists(&self, uri: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let s = if let Ok(s) = uri.extract::<&str>() {
-            s.to_string()
-        } else if let Ok(uri_obj) = uri.extract::<PyRef<'_, Uri>>() {
-            uri_obj.inner.to_string()
-        } else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "expected str or Uri",
-            ));
-        };
-        Ok(self.inner.lock().unwrap().exists(&s))
     }
 
     fn is_registered(&self, key: &str) -> bool {

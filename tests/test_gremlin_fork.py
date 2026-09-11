@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import pathlib
 import subprocess
 
 import pytest
@@ -63,8 +62,7 @@ def test_fork_without_worktree(tmp_path, tmp_repo, monkeypatch):
 
         # Create some artifacts
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        uri = Uri.parse("artifact://spec.md")
-        pathlib.Path(registry.register(uri)).write_text("# Spec\n")
+        registry.write_into_registry(Uri.parse("artifact://spec.md"), "# Spec\n")
 
         # Create state
         state_data = StateData(gremlin_id="gr-1")
@@ -127,8 +125,7 @@ def test_fork_with_worktree(tmp_path, tmp_repo, monkeypatch):
 
         # Create artifacts
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        uri = Uri.parse("artifact://spec.md")
-        pathlib.Path(registry.register(uri)).write_text("# Spec\n")
+        registry.write_into_registry(Uri.parse("artifact://spec.md"), "# Spec\n")
 
         # Create state with worktree
         state_data = StateData(gremlin_id="gr-1")
@@ -216,13 +213,10 @@ def test_fork_preserves_registry(tmp_path, tmp_repo, monkeypatch):
 
         # Create registry with multiple file-backed bindings
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        spec_uri = Uri.parse("artifact://spec.md")
-        plan_uri = Uri.parse("artifact://plan.md")
-        data_uri = Uri.parse("artifact://some_key")
-        pathlib.Path(registry.register(spec_uri)).write_text("# Spec\n")
-        pathlib.Path(registry.register(plan_uri)).write_text("# Plan\n")
-        pathlib.Path(registry.register(data_uri)).write_text(
-            json.dumps({"data": "value"})
+        registry.write_into_registry(Uri.parse("artifact://spec.md"), "# Spec\n")
+        registry.write_into_registry(Uri.parse("artifact://plan.md"), "# Plan\n")
+        registry.write_into_registry(
+            Uri.parse("artifact://some_key"), json.dumps({"data": "value"})
         )
 
         # Create state

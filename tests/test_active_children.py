@@ -88,9 +88,9 @@ def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
         async def run(self, gremlin: Any) -> Outcome:
             captured.append(_read_state(tmp_path).get("active_children"))
 
-            uri = Uri.parse("artifact://done.txt")
-            path = pathlib.Path(gremlin.state.artifacts.register(uri))
-            path.write_text("registered", encoding="utf-8")
+            gremlin.state.artifacts.write_into_registry(
+                Uri.parse("artifact://done.txt"), "registered"
+            )
             return Done()
 
     # Set stop_when_exists so the loop doesn't exhaust

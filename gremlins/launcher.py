@@ -465,13 +465,13 @@ def launch(
         artifact_dir.mkdir(parents=True, exist_ok=True)
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
         if inputs.base_ref_sha:
-            uri = Uri.parse("artifact://base_sha")
-            path = pathlib.Path(registry.register(uri))
-            path.write_text(inputs.base_ref_sha, encoding="utf-8")
+            registry.write_into_registry(
+                Uri.parse("artifact://base_sha"), inputs.base_ref_sha
+            )
         if inputs.base_ref_name:
-            uri = Uri.parse("artifact://base_ref")
-            path = pathlib.Path(registry.register(uri))
-            path.write_text(inputs.base_ref_name, encoding="utf-8")
+            registry.write_into_registry(
+                Uri.parse("artifact://base_ref"), inputs.base_ref_name
+            )
         p = _spawn(inputs.gremlin_id, inputs, state_dir)
     except Exception:
         shutil.rmtree(state_dir, ignore_errors=True)

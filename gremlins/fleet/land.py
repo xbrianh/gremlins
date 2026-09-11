@@ -1144,7 +1144,7 @@ def do_land(
         artifact_dir = pathlib.Path(_scratch_root_fn(gremlin_id)) / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        has_pr = registry.exists("artifact://pr")
+        has_pr = registry.is_registered("artifact://pr")
         logger.debug("land: registry check — exists(artifact://pr)=%s", has_pr)
         if has_pr:
             shape = "one_pr"

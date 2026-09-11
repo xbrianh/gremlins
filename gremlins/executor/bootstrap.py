@@ -15,7 +15,6 @@ import logging
 import os
 import pathlib
 import re
-import shutil
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -133,33 +132,22 @@ async def _execute_bind_artifact(
     stage_inputs: Mapping[str, Any],
     gremlin: Gremlin,
 ) -> None:
-    """Resolve a source value, write it to the artifact dir, and register it.
-
-    Source value resolution:
-    - Empty / missing → no-op (optional source)
-    - Existing filepath → copies the file to artifact_dir
-    - Inline text → written directly
-
-    After writing, the artifact is registered via register().
-    """
+    """Resolve a source value, write it to the artifact dir, and register it."""
     value = stage_inputs.get(source_key)
     if value is None or value == "":
         return  # optional source, nothing to bind
     value_str = str(value)
 
     uri = Uri.parse(uri_str)
-    dest_path = pathlib.Path(gremlin.registry.register(uri))
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-
     if os.path.isfile(value_str):
-        shutil.copy2(value_str, dest_path)
+        gremlin.registry.copy_into_registry(uri, pathlib.Path(value_str))
+        return
+    project_root = getattr(gremlin, "project_root", None) or ""
+    project_path = os.path.join(project_root, value_str) if project_root else None
+    if project_path and os.path.isfile(project_path):
+        gremlin.registry.copy_into_registry(uri, pathlib.Path(project_path))
     else:
-        project_root = getattr(gremlin, "project_root", None) or ""
-        project_path = os.path.join(project_root, value_str) if project_root else None
-        if project_path and os.path.isfile(project_path):
-            shutil.copy2(project_path, dest_path)
-        else:
-            dest_path.write_text(value_str, encoding="utf-8")
+        gremlin.registry.write_into_registry(uri, value_str)
 
 
 _DSL_DISPATCH: dict[str, object] = {

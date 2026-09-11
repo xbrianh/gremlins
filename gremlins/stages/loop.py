@@ -20,28 +20,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _bail_reason(artifacts: ArtifactRegistry, key: str) -> str | None:
+    """Bail reason bound to *key*, or None when unset or already cleared.
+
+    Registry membership alone is not enough for file-backed bail entries: the
+    loop clears a stale per-iteration bail by unlinking its file on resume, so
+    a missing file means the bail no longer applies.
+    """
+    if not artifacts.is_registered(key):
+        return None
+    raw = artifacts.data_uri(key)
+    if not (isinstance(raw, str) and raw.startswith("/")):
+        return str(raw).strip()
+    path = pathlib.Path(raw)
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return raw
+
+
 def _is_bail_set(artifacts: ArtifactRegistry, loop_iter: str) -> bool:
-    return artifacts.exists(f"artifact://{loop_iter}/bail") or artifacts.exists(
-        _BAIL_KEY
+    return (
+        _bail_reason(artifacts, f"artifact://{loop_iter}/bail") is not None
+        or _bail_reason(artifacts, _BAIL_KEY) is not None
     )
 
 
 def _do_bail(gremlin: Gremlin, artifacts: ArtifactRegistry, loop_iter: str) -> None:
     if gremlin.state is None:
         raise RuntimeError("gremlin.state is required for _do_bail")
-    scoped_key = f"artifact://{loop_iter}/bail"
-    if artifacts.exists(scoped_key):
-        raw = artifacts.data_uri(scoped_key)
-    else:
-        raw = artifacts.data_uri(_BAIL_KEY)
-    if isinstance(raw, str) and raw.startswith("/"):
-        # It's a filesystem path — read the content
-        try:
-            reason = pathlib.Path(raw).read_text(encoding="utf-8").strip()
-        except Exception:
-            reason = raw
-    else:
-        reason = str(raw).strip()
+    reason = _bail_reason(artifacts, f"artifact://{loop_iter}/bail")
+    if reason is None:
+        reason = _bail_reason(artifacts, _BAIL_KEY) or ""
     gremlin.state.record_bail(reason)
     raise Bail(reason)
 
@@ -201,9 +213,9 @@ class LoopStage(Stage):
                     resolved = self._stop_when_exists.replace(
                         "{loop_iter}", state.loop_iter
                     )
-                    if state.artifacts.exists(resolved) or state.artifacts.exists(
-                        f"artifact://{resolved}"
-                    ):
+                    if state.artifacts.is_registered(
+                        resolved
+                    ) or state.artifacts.is_registered(f"artifact://{resolved}"):
                         logger.info(
                             "loop %s: stopped after %d iteration(s) — artifact %r produced",
                             self.name,
