@@ -15,53 +15,11 @@ import pytest
 from _gremlins_core.clients import CLIENT_FACTORIES
 from _gremlins_core.config import scratch_root
 
-from gremlins.executor.gremlin import Gremlin, State
+from gremlins.executor.gremlin import State
 from gremlins.executor.state import StateData, build_state
 from tests.fake_client import FakeClient
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")
-
-
-def make_gremlin(
-    *,
-    gremlin_id: str | None = None,
-    state_data: StateData | None = None,
-    client: Any = None,
-    artifact_dir: pathlib.Path | None = None,
-    **state_kwargs: Any,
-) -> Gremlin:
-    """Create a Gremlin with sensible test defaults."""
-    if artifact_dir is None:
-        temp_root = pathlib.Path(tempfile.mkdtemp())
-        artifact_dir = temp_root / "artifacts"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        temp_root = artifact_dir.parent
-
-    from _gremlins_core.schemas import Pipeline as PipelineData
-
-    if client is None:
-        client = FakeClient(fixtures={}, model="fake")
-
-    if state_data is None:
-        state_data = StateData(gremlin_id=gremlin_id)
-
-    state = build_state(
-        data=state_data,
-        client=client,
-        artifact_dir=artifact_dir,
-        **state_kwargs,
-    )
-
-    gremlin = Gremlin(
-        [],
-        state_dir=temp_root,
-        gremlin_id=gremlin_id,
-        pipeline_data=PipelineData(name="test", path=pathlib.Path("."), stages=[]),
-    )
-    gremlin.state = state
-    gremlin.registry = state.artifacts
-    return gremlin
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -373,11 +331,6 @@ def child_sandbox(sandbox, request):
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 PIPELINE_FIXTURES_DIR = TESTS_DIR / "fixtures" / "pipelines"
-
-
-@pytest.fixture
-def pipeline_fixtures_dir() -> pathlib.Path:
-    return PIPELINE_FIXTURES_DIR
 
 
 if str(TESTS_DIR) not in sys.path:

@@ -102,7 +102,7 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 | `resume` | Re-spawn an existing gremlin from its recorded stage |
 | `stop` | Send SIGTERM to a running gremlin and wait for it to exit |
 | `land` | Land a finished gremlin onto the current branch, then clean up |
-| `rm` | Delete a gremlin's state directory, worktree, and branch |
+| `rm` | Delete a gremlin's state directory and worktree |
 | `close` | Mark a gremlin as closed (hidden from default view) |
 | `log` | Tail the gremlin's log file |
 | `ack` | Acknowledge a gremlin waiting for human input |

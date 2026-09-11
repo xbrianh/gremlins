@@ -38,7 +38,7 @@ _DISPATCH: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         "Land a finished gremlin onto the current branch, then clean up.",
         land_main,
     ),
-    "rm": ("Delete a gremlin's state directory, worktree, and branch.", rm_main),
+    "rm": ("Delete a gremlin's state directory and worktree.", rm_main),
     "close": ("Mark a gremlin as closed (hidden from default view).", close_main),
     "log": ("Tail the gremlin's log file (tail -F). Ctrl-C exits.", log_main),
     "ack": ("Acknowledge a gremlin waiting for human input.", ack_main),

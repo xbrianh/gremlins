@@ -18,7 +18,6 @@ gremlins/                    Python package — see gremlins/AGENTS.md
   logging_setup.py           configure_logging — UTC timestamp formatter, stdout, GREMLINS_LOG_LEVEL
   env_file.py                .env file loading (shell-like parsing)
   protocols.py               GremlinProtocol, StageProtocol — shared protocols to avoid circular imports
-  _core.py                   Shim: import _gremlins_core as _core; exports _core
   cli/                       Subcommand entry points — one file per subcommand group
   clients/                   Client classes + provider impls — see gremlins/clients/AGENTS.md
   stages/                    Stage classes: agent, exec, loop, composite, parallel, sequence — see gremlins/stages/AGENTS.md
@@ -26,7 +25,7 @@ gremlins/                    Python package — see gremlins/AGENTS.md
   pipelines/                 Bundled YAML pipelines (gh, gh-terse, local, boss, pr-extend)
   prompts/                   Bundled prompt templates
   executor/                  Run-time orchestrator — see gremlins/executor/AGENTS.md
-    state.py                 State class: execution context + state.json I/O, bail constants
+    state.py                 State class: execution context + state.json I/O
     run.py                   run_pipeline: unified pipeline entry point
     gremlin.py               Gremlin: constructs, initializes, and runs a pipeline
     parallel_state.py        Per-shard state bookkeeping for parallel stages
@@ -35,7 +34,7 @@ gremlins/                    Python package — see gremlins/AGENTS.md
   spawn/                     Internal spawn boundaries (pipeline + child subprocess entry points)
   queue/                     Sequential gremlin dispatch queue
   recipes/                   Reusable stage recipes (shell stages for YAML cmds:)
-  utils/                     proc, git, text, decorators, yaml_io, state_file, parallel_bail helpers
+  utils/                     proc, git, text, yaml_io, state_file, parallel_bail helpers
 Cargo.toml                   Rust workspace root
 crates/                      Rust crates
   gremlins-core/             PyO3 native extension (maturin)
@@ -83,7 +82,7 @@ The `Makefile` sets `MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || npr
 
 These values are persisted to `state.json` and read by other writers (the fleet manager, the launcher). Renaming any of them silently breaks cross-process consumers.
 
-- **Bail classes** (`state.json.bail_class`): `reviewer_requested_changes`, `security`, `secrets`, `other`. Source of truth in `gremlins/executor/state.py`.
+- **Bail classes** (`state.json.bail_class`): `reviewer_requested_changes`, `security`, `secrets`, `other`. These are convention tokens parsed by the agent stage from the `BAIL: <class>: <detail>` marker (`crates/gremlins/src/stages/agent.rs`); no Python constant enumerates them.
 - **Stage names** (`state.json.stage`): defined per-pipeline in YAML. The authoritative list for a pipeline is its YAML file under `gremlins/pipelines/` or `.gremlins/`.
 
 ## Where to look for…

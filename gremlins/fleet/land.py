@@ -40,16 +40,6 @@ def landable_shape(state: dict[str, Any]) -> str:
     return "many_prs"
 
 
-def expected_branch(state: dict[str, Any], gremlin_id: str):
-    """Return the durable branch name for a gremlin, or None if there isn't one."""
-    artifacts = list(state.get("artifacts") or [])
-    for art in reversed(artifacts):
-        if art.get("type") == "pr":
-            branch = str(art.get("branch") or "")
-            return branch or None
-    return None
-
-
 def _print_cost(state: dict[str, Any]) -> None:
     cost = state.get("total_cost_usd")
     if isinstance(cost, (int, float)) and cost > 0:
@@ -312,16 +302,6 @@ def _registry_for_gremlin(gremlin_id: str) -> ArtifactRegistry:
     artifact_dir = pathlib.Path(_scratch_root_fn(gremlin_id)) / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     return ArtifactRegistry(artifact_dir=artifact_dir)
-
-
-def compose_commit_message(plan_path: str):
-    """Return (subject, body) distilled from plan.md."""
-    try:
-        with open(plan_path, encoding="utf-8") as fh:
-            content = fh.read()
-    except OSError:
-        return _fallback_commit_subject(), ""
-    return compose_commit_message_from_content(content)
 
 
 def compose_commit_message_from_content(content: str):
@@ -977,7 +957,6 @@ def _load_pipeline_land_stage(state: dict[str, Any]):
     from _gremlins_core.schemas import Pipeline
 
     pipeline_path = str(state.get("pipeline_path") or "")
-    _pr = str(state.get("project_root") or "")
     if not pipeline_path:
         return None
     try:

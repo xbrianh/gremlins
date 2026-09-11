@@ -66,10 +66,6 @@ impl Done {
         Done(RustDone)
     }
 
-    fn __repr__(&self) -> &'static str {
-        "Done()"
-    }
-
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other.is_instance_of::<Self>()
     }
@@ -231,16 +227,6 @@ impl PyExec {
     #[getter]
     fn r#type(&self) -> &'static str {
         "exec"
-    }
-
-    #[getter]
-    fn options<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let dict = PyDict::new(py);
-        for (k, v) in &self.inner.options {
-            let py_val = json_value_to_py(py, v)?;
-            dict.set_item(k.as_str(), py_val)?;
-        }
-        Ok(dict)
     }
 
     #[getter]
@@ -634,16 +620,6 @@ impl PyAgent {
     }
 
     #[getter]
-    fn options<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let dict = PyDict::new(py);
-        for (k, v) in &self.inner.options {
-            let py_val = json_value_to_py(py, v)?;
-            dict.set_item(k.as_str(), py_val)?;
-        }
-        Ok(dict)
-    }
-
-    #[getter]
     fn bind_map(&self) -> HashMap<String, String> {
         self.inner.bind_map.clone()
     }
@@ -926,12 +902,6 @@ impl PyAgent {
 // --- Free functions ---
 
 #[pyfunction]
-#[pyo3(signature = (uri_str, loop_iter = ""))]
-fn _is_bail_uri(uri_str: &str, loop_iter: &str) -> bool {
-    rust_exec::is_bail_uri(uri_str, loop_iter)
-}
-
-#[pyfunction]
 #[pyo3(name = "substitute_vars", signature = (text, string_options, extra, framework_subs))]
 fn substitute_vars_py(
     text: &str,
@@ -976,7 +946,6 @@ async def _agent_run_async(stage, gremlin):\n    return await stage._run_impl(gr
     m.add("_BAIL_KEY", BAIL_KEY)?;
     let keys: Vec<&str> = FRAMEWORK_KEYS.iter().copied().collect();
     m.add("FRAMEWORK_KEYS", PyFrozenSet::new(py, &keys)?)?;
-    m.add_function(wrap_pyfunction!(_is_bail_uri, &m)?)?;
     m.add_function(wrap_pyfunction!(substitute_vars_py, &m)?)?;
 
     Ok(())

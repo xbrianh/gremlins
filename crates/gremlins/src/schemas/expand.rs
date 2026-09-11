@@ -15,7 +15,7 @@ pub trait PipelineResolver {
     fn resolve(&self, name: &str, project_root: &std::path::Path) -> Result<PathBuf, SchemaError>;
 }
 
-pub fn load_yaml_file(path: &Path) -> Result<serde_yaml::Value, SchemaError> {
+pub(crate) fn load_yaml_file(path: &Path) -> Result<serde_yaml::Value, SchemaError> {
     let text = std::fs::read_to_string(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => SchemaError::PipelineFileNotFound {
             path: path.display().to_string(),
@@ -36,7 +36,7 @@ pub fn load_yaml_file(path: &Path) -> Result<serde_yaml::Value, SchemaError> {
     Ok(parsed)
 }
 
-pub fn load_bundled_recipe(raw_name: &str) -> Result<serde_yaml::Value, SchemaError> {
+pub(crate) fn load_bundled_recipe(raw_name: &str) -> Result<serde_yaml::Value, SchemaError> {
     let name = raw_name.replace('-', "_");
     let yaml_str = assets::RECIPES.get(name.as_str()).ok_or_else(|| {
         let mut available: Vec<_> = assets::RECIPES.keys().copied().collect();
@@ -52,7 +52,7 @@ pub fn load_bundled_recipe(raw_name: &str) -> Result<serde_yaml::Value, SchemaEr
     })
 }
 
-pub fn resolve_prompt_dir(
+pub(crate) fn resolve_prompt_dir(
     value: Option<&serde_yaml::Value>,
     yaml_dir: &std::path::Path,
 ) -> Result<PathBuf, SchemaError> {
@@ -76,17 +76,17 @@ pub fn resolve_prompt_dir(
     }
 }
 
-pub fn project_stage_def_dir(project_root: &Path) -> PathBuf {
+pub(crate) fn project_stage_def_dir(project_root: &Path) -> PathBuf {
     crate::config::project_overlay_dir(project_root).join("stages")
 }
 
-pub fn stage_definition_dirs_with_project(project_root: &Path) -> Vec<PathBuf> {
+pub(crate) fn stage_definition_dirs_with_project(project_root: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![project_stage_def_dir(project_root)];
     dirs.extend(crate::config::stage_definition_dirs());
     dirs
 }
 
-pub fn load_stage_def_from_dirs(
+pub(crate) fn load_stage_def_from_dirs(
     name: &str,
     project_root: Option<&Path>,
 ) -> Result<Option<serde_yaml::Value>, SchemaError> {
@@ -107,7 +107,7 @@ pub fn load_stage_def_from_dirs(
     Ok(None)
 }
 
-pub fn parse_stage_definitions(
+pub(crate) fn parse_stage_definitions(
     raw: Option<&serde_yaml::Value>,
     project_root: Option<&PathBuf>,
 ) -> Result<HashMap<String, serde_yaml::Value>, SchemaError> {
@@ -176,7 +176,7 @@ pub fn parse_stage_definitions(
     Ok(defs)
 }
 
-pub fn substitute_recipe(
+pub(crate) fn substitute_recipe(
     node: &serde_yaml::Value,
     ctx: &serde_yaml::Value,
 ) -> Result<serde_yaml::Value, SchemaError> {
@@ -254,7 +254,7 @@ fn val_to_string(val: &serde_yaml::Value) -> String {
     }
 }
 
-pub fn resolve_placeholder(
+pub(crate) fn resolve_placeholder(
     key: &str,
     ctx: &serde_yaml::Value,
 ) -> Result<serde_yaml::Value, String> {
@@ -293,7 +293,7 @@ pub fn resolve_placeholder(
     }
 }
 
-pub fn parse_default(raw: &str) -> serde_yaml::Value {
+pub(crate) fn parse_default(raw: &str) -> serde_yaml::Value {
     let s = raw.trim();
     if s.len() >= 2 {
         let first = s.chars().next().unwrap();
@@ -312,7 +312,9 @@ pub fn parse_default(raw: &str) -> serde_yaml::Value {
 /// By the time this runs, all bundled recipe call-sites have already been
 /// inlined by `_expand_stage_def`, so the validator only ever sees fully
 /// expanded stages — no recipe-skipping logic is needed.
-pub fn validate_stage_keys(expanded_yaml: &serde_yaml::Value) -> Result<(), Vec<SchemaError>> {
+pub(crate) fn validate_stage_keys(
+    expanded_yaml: &serde_yaml::Value,
+) -> Result<(), Vec<SchemaError>> {
     let mut errors = Vec::new();
 
     // Validate the `land` stage if present

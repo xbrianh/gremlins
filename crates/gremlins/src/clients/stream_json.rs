@@ -2,7 +2,7 @@ use serde_json::Value;
 
 /// Parse a stream-json line and extract state updates.
 /// Returns None if the line is not valid JSON or not a relevant event.
-pub fn decode_line(line: &[u8]) -> Option<Value> {
+pub(crate) fn decode_line(line: &[u8]) -> Option<Value> {
     let evt: Value = serde_json::from_slice(line).ok()?;
     if evt.is_object() {
         Some(evt)
@@ -12,7 +12,7 @@ pub fn decode_line(line: &[u8]) -> Option<Value> {
 }
 
 /// Extract cost_usd, result_text, is_error, and api_error_status from a result event.
-pub fn extract_state(evt: &Value, state: &mut StreamState) {
+pub(crate) fn extract_state(evt: &Value, state: &mut StreamState) {
     if evt.get("type").and_then(|v| v.as_str()) != Some("result") {
         return;
     }
@@ -37,15 +37,15 @@ pub fn extract_state(evt: &Value, state: &mut StreamState) {
 }
 
 #[derive(Debug, Default)]
-pub struct StreamState {
+pub(crate) struct StreamState {
     pub cost_usd: Option<f64>,
-    pub result_text: Option<String>,
-    pub is_error: bool,
-    pub api_error_status: Option<i32>,
+    pub(crate) result_text: Option<String>,
+    pub(crate) is_error: bool,
+    pub(crate) api_error_status: Option<i32>,
 }
 
 /// Emit a stream-json event to stderr in the standard format.
-pub fn emit_event(prefix: &str, evt: &Value) {
+pub(crate) fn emit_event(prefix: &str, evt: &Value) {
     use crate::clients::stream;
 
     let evt_type = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");

@@ -77,10 +77,6 @@ impl PyUsageStats {
 }
 
 /// Python-exposed completed run result.
-///
-/// Events are JSON-encoded strings (one per event emitted by the backend)
-/// rather than parsed dicts — downstream consumers should call
-/// ``json.loads()`` on each element if they need structured access.
 #[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyCompletedRun {
@@ -88,8 +84,6 @@ pub struct PyCompletedRun {
     exit_code: i32,
     #[pyo3(get)]
     text_result: Option<String>,
-    #[pyo3(get)]
-    events: Option<Vec<String>>,
     #[pyo3(get)]
     cost_usd: Option<f64>,
     #[pyo3(get)]
@@ -102,14 +96,12 @@ impl PyCompletedRun {
     fn new(
         exit_code: i32,
         text_result: Option<String>,
-        events: Option<Vec<String>>,
         cost_usd: Option<f64>,
         token_usage: Option<PyUsageStats>,
     ) -> Self {
         Self {
             exit_code,
             text_result,
-            events,
             cost_usd,
             token_usage,
         }
@@ -271,18 +263,6 @@ impl RustClient {
     }
 
     #[staticmethod]
-    fn cmd(command: String) -> PyResult<Self> {
-        let backend = CmdBackend::new(&command).map_err(pyo3::exceptions::PyValueError::new_err)?;
-        Ok(RustClient {
-            provider: "cmd".to_string(),
-            model: command,
-            extra_params: IndexMap::new(),
-            native_block: default_native_block(),
-            inner: Arc::new(Mutex::new(Some(Arc::new(backend)))),
-        })
-    }
-
-    #[staticmethod]
     fn parse(py: Python<'_>, s: &str) -> PyResult<Self> {
         let (provider, model, extra_params) = parse_spec(s)?;
         let known = matches!(provider.as_str(), "openai" | "xai" | "openrouter" | "cmd");
@@ -318,15 +298,6 @@ impl RustClient {
             s.push_str(&params.join(","));
         }
         s
-    }
-
-    fn __repr__(&self) -> String {
-        let mut base = format!("Client({:?}, {:?}", self.provider, self.model);
-        if !self.extra_params.is_empty() {
-            base.push_str(&format!(", extra_params={:?}", self.extra_params));
-        }
-        base.push(')');
-        base
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -386,14 +357,6 @@ impl RustClient {
                 artifact_reminder_count,
             };
             let result = backend.run(params).await.map_err(map_error)?;
-            Python::attach(|py| PyCompletedRun::from_rust(py, &result))
-        })
-    }
-
-    fn resume<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let backend = self.get_or_build_backend(py)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = backend.resume().await.map_err(map_error)?;
             Python::attach(|py| PyCompletedRun::from_rust(py, &result))
         })
     }
@@ -489,18 +452,7 @@ impl PyCompletedRun {
                 u.turns,
             )
         });
-        let events: Option<Vec<String>> = r.events.as_ref().map(|evts| {
-            evts.iter()
-                .map(|e| serde_json::to_string(e).unwrap_or_default())
-                .collect()
-        });
-        let instance = PyCompletedRun::new(
-            r.exit_code,
-            r.text_result.clone(),
-            events,
-            r.cost_usd,
-            usage,
-        );
+        let instance = PyCompletedRun::new(r.exit_code, r.text_result.clone(), r.cost_usd, usage);
         Ok(Py::new(py, instance)?.into_any())
     }
 }
@@ -515,11 +467,8 @@ pub fn init_clients_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .setattr("__doc__", "Token usage summary for a model invocation.")?;
     m.getattr("PyCompletedRun")?.setattr(
         "__doc__",
-        concat!(
-            "Result of a single model run.\n\n",
-            "Events are JSON-encoded strings (one per event). ",
-            "Call `json.loads()` on each element to get structured dicts.",
-        ),
+        "Result of a single model run.\n\n\
+         Exposes `exit_code`, `text_result`, `cost_usd` and `token_usage`.",
     )?;
 
     let tools = vec!["Bash", "Edit", "Read", "Write", "Grep", "Glob"];

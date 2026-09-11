@@ -22,7 +22,7 @@ pub static PROMPTS: Map<&'static str, &'static str> = phf_map! {
 };
 
 /// Compile-time map: recipe name → raw YAML content.
-pub static RECIPES: Map<&'static str, &'static str> = phf_map! {
+pub(crate) static RECIPES: Map<&'static str, &'static str> = phf_map! {
     "handoff"                       => include_str!("data/stages/handoff.yaml"),
     "implement"                     => include_str!("data/stages/implement.yaml"),
     "plan"                          => include_str!("data/stages/plan.yaml"),

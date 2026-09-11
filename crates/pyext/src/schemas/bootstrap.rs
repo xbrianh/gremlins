@@ -24,33 +24,13 @@ impl InputSource {
     }
 
     #[getter]
-    fn get_name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    #[setter]
-    fn set_name(&mut self, name: String) {
-        self.inner.name = name;
-    }
-
-    #[getter]
     fn get_types(&self) -> Vec<String> {
         self.inner.types.clone()
-    }
-
-    #[setter]
-    fn set_types(&mut self, types: Vec<String>) {
-        self.inner.types = types;
     }
 
     #[getter]
     fn get_optional(&self) -> bool {
         self.inner.optional
-    }
-
-    #[setter]
-    fn set_optional(&mut self, optional: bool) {
-        self.inner.optional = optional;
     }
 }
 
@@ -210,19 +190,9 @@ impl Bootstrap {
         self.inner.launch_cmds.clone()
     }
 
-    #[setter]
-    fn set_launch_cmds(&mut self, cmds: Vec<String>) {
-        self.inner.launch_cmds = cmds;
-    }
-
     #[getter]
     fn get_cmds(&self) -> Vec<String> {
         self.inner.cmds.clone()
-    }
-
-    #[setter]
-    fn set_cmds(&mut self, cmds: Vec<String>) {
-        self.inner.cmds = cmds;
     }
 
     #[getter]
@@ -230,19 +200,9 @@ impl Bootstrap {
         self.inner.cli_out.clone()
     }
 
-    #[setter]
-    fn set_cli_out(&mut self, cli_out: HashMap<String, String>) {
-        self.inner.cli_out = cli_out;
-    }
-
     #[getter]
     fn get_env(&self) -> String {
         self.inner.env.clone()
-    }
-
-    #[setter]
-    fn set_env(&mut self, env: String) {
-        self.inner.env = env;
     }
 }
 

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::time::sleep;
 
-pub async fn with_retry<F, Fut, T, E>(
+pub(crate) async fn with_retry<F, Fut, T, E>(
     backoff: &[f64],
     classify: impl Fn(&E) -> bool,
     mut on_retry: impl FnMut(usize, &E, f64),
@@ -30,9 +30,9 @@ where
     unreachable!()
 }
 
-pub const STREAM_IDLE_BACKOFF: [f64; 3] = [60.0, 300.0, 600.0];
+pub(crate) const STREAM_IDLE_BACKOFF: [f64; 3] = [60.0, 300.0, 600.0];
 
-pub fn validate_max_retries(max_retries: usize) -> Result<(), String> {
+pub(crate) fn validate_max_retries(max_retries: usize) -> Result<(), String> {
     if max_retries > STREAM_IDLE_BACKOFF.len() {
         Err(format!(
             "max_retries={max_retries} exceeds backoff schedule length {}",
@@ -67,7 +67,7 @@ const TRANSIENT_SUBSTRINGS: &[&str] = &[
     "tls handshake",
 ];
 
-pub fn is_transient_stream_error(message: &str) -> bool {
+pub(crate) fn is_transient_stream_error(message: &str) -> bool {
     let lower = message.to_lowercase();
     TRANSIENT_SUBSTRINGS.iter().any(|s| lower.contains(s))
 }

@@ -27,32 +27,32 @@ fn always_available(name: &str) -> bool {
 type SubagentFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
 
 /// Callback that `invoke` calls for subagent tool invocations.
-pub type SubagentFn = Arc<dyn Fn(String, Option<PathBuf>) -> SubagentFuture + Send + Sync>;
+pub(crate) type SubagentFn = Arc<dyn Fn(String, Option<PathBuf>) -> SubagentFuture + Send + Sync>;
 
 #[derive(Clone)]
-pub struct ToolContext {
+pub(crate) struct ToolContext {
     pub cwd: Option<PathBuf>,
     pub extra_env: Option<HashMap<String, String>>,
-    pub allowed_roots: Vec<PathBuf>,
-    pub audit_log: Option<PathBuf>,
-    pub allowed_tools: Option<Vec<String>>,
-    pub subagent_fn: Option<SubagentFn>,
-    pub audit_lock: Option<Arc<std::sync::Mutex<()>>>,
+    pub(crate) allowed_roots: Vec<PathBuf>,
+    pub(crate) audit_log: Option<PathBuf>,
+    pub(crate) allowed_tools: Option<Vec<String>>,
+    pub(crate) subagent_fn: Option<SubagentFn>,
+    pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
 }
 
-pub fn project_root() -> PathBuf {
+pub(crate) fn project_root() -> PathBuf {
     crate::config::project_root()
 }
 
-pub fn worktree_root(cwd: Option<&Path>) -> PathBuf {
+pub(crate) fn worktree_root(cwd: Option<&Path>) -> PathBuf {
     cwd.map(Path::to_path_buf).unwrap_or_else(project_root)
 }
 
-pub fn scratch_root() -> Option<PathBuf> {
+pub(crate) fn scratch_root() -> Option<PathBuf> {
     crate::config::scratch_dir(None)
 }
 
-pub fn audit_log_path(raw_path: &Path) -> PathBuf {
+pub(crate) fn audit_log_path(raw_path: &Path) -> PathBuf {
     let stem = raw_path.file_stem().unwrap_or_default();
     let name = format!("{}.audit.jsonl", stem.to_string_lossy());
     match raw_path.parent() {
@@ -61,7 +61,7 @@ pub fn audit_log_path(raw_path: &Path) -> PathBuf {
     }
 }
 
-pub fn resolve(file_path: &str, cwd: Option<&Path>) -> PathBuf {
+pub(crate) fn resolve(file_path: &str, cwd: Option<&Path>) -> PathBuf {
     let p = PathBuf::from(file_path);
     if !p.is_absolute() {
         if let Some(cwd) = cwd {
@@ -148,7 +148,7 @@ fn normalize_path(p: &Path) -> Option<PathBuf> {
     Some(normalize_dots(&canonical))
 }
 
-pub fn within_worktree(p: &Path, roots: &[PathBuf]) -> bool {
+pub(crate) fn within_worktree(p: &Path, roots: &[PathBuf]) -> bool {
     let p_norm = match normalize_path(p) {
         Some(n) => n,
         None => return false,
@@ -223,7 +223,7 @@ fn expand_user(s: &str) -> String {
     s.to_string()
 }
 
-pub fn enforce(roots: &[PathBuf], pth: &str, cwd: Option<&Path>) -> Option<String> {
+pub(crate) fn enforce(roots: &[PathBuf], pth: &str, cwd: Option<&Path>) -> Option<String> {
     let p = resolve(pth, cwd);
     if !within_worktree(&p, roots) {
         return Some(format!(
@@ -244,7 +244,7 @@ pub fn enforce(roots: &[PathBuf], pth: &str, cwd: Option<&Path>) -> Option<Strin
 /// path is denied. This is stricter and safer than the old single-root
 /// behavior, which returned `None` (allow) on canonicalization failure —
 /// a "paranoid, shouldn't happen" branch that was effectively fail-open.
-pub fn io_enforce(path: &Path, roots: &[PathBuf]) -> Option<String> {
+pub(crate) fn io_enforce(path: &Path, roots: &[PathBuf]) -> Option<String> {
     let real = canonicalize_or_ancestor(path);
     let mut allowed = false;
     for root in roots {
@@ -528,7 +528,7 @@ fn split_commands(s: &str) -> Vec<String> {
     parts
 }
 
-pub fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> {
+pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> {
     let s = cmd.trim();
     if s.is_empty() {
         return None;
@@ -704,7 +704,7 @@ fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String
         .ok_or_else(|| format!("Error: missing '{key}'"))
 }
 
-pub async fn read_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn read_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.allowed_roots.clone();
     let args_json = args_json.to_string();
@@ -743,7 +743,7 @@ fn read_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     lines.concat()
 }
 
-pub async fn edit_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn edit_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.allowed_roots.clone();
     let args_json = args_json.to_string();
@@ -890,7 +890,7 @@ fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     "OK".into()
 }
 
-pub async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -936,7 +936,7 @@ pub async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     }
 }
 
-pub async fn write_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn write_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.allowed_roots.clone();
     let args_json = args_json.to_string();
@@ -1074,7 +1074,7 @@ fn walk_grep(
     }
 }
 
-pub async fn grep_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn grep_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.allowed_roots.clone();
     let args_json = args_json.to_string();
@@ -1149,7 +1149,7 @@ fn grep_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     result
 }
 
-pub async fn glob_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn glob_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.allowed_roots.clone();
     let args_json = args_json.to_string();
@@ -1189,7 +1189,7 @@ fn glob_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     }
 }
 
-pub async fn parallel_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn parallel_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let Some(f) = &ctx.subagent_fn else {
         return "Error: subagent not available for this backend".to_string();
     };
@@ -1239,7 +1239,7 @@ pub async fn parallel_invoke(ctx: &ToolContext, args_json: &str) -> String {
     out
 }
 
-pub async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> String {
     if let Some(allowed) = &ctx.allowed_tools {
         if !always_available(name) && !allowed.iter().any(|n| n == name) {
             return format!("Error: unknown tool {name}");
@@ -1301,7 +1301,7 @@ pub async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> String {
     res
 }
 
-pub fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition> {
+pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition> {
     let mut all = vec![
         ToolDefinition {
             name: "Read".into(),

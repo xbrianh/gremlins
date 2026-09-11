@@ -106,10 +106,11 @@ These values are persisted to `state.json` files and read by other
 writers (`session-summary.sh` hook, `liveness.sh` sourced from
 `session-summary.sh`, the fleet manager that inlines an equivalent
 classifier in [`fleet/state.py`](fleet/state.py), the launcher). Renaming any of them silently breaks cross-process
-consumers. Source of truth: bail-class constants live in
-[`state.py`](state.py); stage-name vocab is defined in the pipeline YAML.
+consumers. Source of truth: the bail-class tokens are parsed from the
+`BAIL: <class>: <detail>` marker by
+[`stages/agent.rs`](../crates/gremlins/src/stages/agent.rs); stage-name vocab is defined in the pipeline YAML.
 
-- **Bail classes** (`state.json.bail_class`): `reviewer_requested_changes`, `security`, `secrets`, `other`.
+- **Bail classes** (`state.json.bail_class`): `reviewer_requested_changes`, `security`, `secrets`, `other`. Convention tokens only — no Python constant enumerates them.
 - **Stage names** (`state.json.stage`): stable within a pipeline definition. The authoritative list for any pipeline is its YAML file. `resolve_pipeline_path` checks `.gremlins/pipelines/<name>.yaml` (project-scoped) first, then bundled `gremlins/pipelines/<name>.yaml`; `--pipeline` accepts either a bare name (resolved this way) or a direct path.
 ## Recovering from a child bail
 

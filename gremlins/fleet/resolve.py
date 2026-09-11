@@ -1,26 +1,10 @@
 """Gremlin resolution by id prefix."""
 
 import logging
-import pathlib
-from typing import Any
 
 from gremlins.fleet.state import iter_state_files
-from gremlins.utils.yaml_io import YamlLoadError
 
 logger = logging.getLogger(__name__)
-
-
-def stage_names_for_gremlin(state: dict[str, Any]) -> list[str]:
-    pipeline_path = state.get("pipeline_path")
-    if pipeline_path:
-        try:
-            from _gremlins_core.schemas import Pipeline
-
-            pipeline = Pipeline.from_yaml(pathlib.Path(str(pipeline_path)))
-            return [s.name for s in pipeline.stages]
-        except (FileNotFoundError, ValueError, YamlLoadError):
-            pass
-    return []
 
 
 def collect_gremlin_matches(

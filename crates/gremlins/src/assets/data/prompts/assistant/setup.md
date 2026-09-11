@@ -23,7 +23,7 @@ queue work against a different repo, prefix the command with `cd`:
 - `gremlins land <id-prefix>` — land a finished gremlin onto the current branch
 - `gremlins resume <id-prefix>` — re-spawn from the last recorded stage
 - `gremlins stop <id-prefix>` — send SIGTERM to a running gremlin
-- `gremlins rm <id-prefix>` — delete a dead gremlin's state dir, worktree, and branch
+- `gremlins rm <id-prefix>` — delete a dead gremlin's state dir and worktree
 - `gremlins queue add <cmd…>` — append a command to the default queue
 - `gremlins queue list [--json | --watch [SEC]]` — show all queue items with bucket and status
 - `gremlins queue run` — execute the queue serially, halting on first failure; watches for new items when empty (use `--once` to exit instead of watching; `--poll-interval SEC` to tune the polling interval, default 1s)

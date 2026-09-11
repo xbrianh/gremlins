@@ -1,3 +1,4 @@
+#![deny(unreachable_pub)]
 pub mod artifacts;
 pub mod assets;
 pub mod clients;

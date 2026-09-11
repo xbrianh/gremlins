@@ -1,9 +1,0 @@
-{
-  "statusCheckRollup": [
-    {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/owner/repo/runs/1"},
-    {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/owner/repo/runs/2"},
-    {"__typename": "StatusContext", "context": "ci/circleci", "state": "SUCCESS", "targetUrl": "https://circleci.com/gh/owner/repo/3"}
-  ],
-  "reviewDecision": null,
-  "headRefOid": "abc1234"
-}

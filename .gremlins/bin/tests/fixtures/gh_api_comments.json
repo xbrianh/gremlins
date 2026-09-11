@@ -1,4 +1,0 @@
-[
-  {"id": 1, "user": {"login": "reviewer1"}, "body": "Please fix this", "path": "src/main.py", "line": 42, "original_line": 42},
-  {"id": 2, "user": {"login": "reviewer2"}, "body": "Looks good", "path": "src/lib.py", "line": 10, "original_line": 10}
-]

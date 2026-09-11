@@ -20,10 +20,6 @@ impl Uri {
             path: path.to_string(),
         })
     }
-
-    pub fn parse_or_none(s: &str) -> Option<Self> {
-        Self::parse(s).ok()
-    }
 }
 
 impl fmt::Display for Uri {
@@ -68,22 +64,6 @@ mod tests {
     #[test]
     fn test_parse_missing_separator() {
         assert!(Uri::parse("no-slashes").is_err());
-    }
-
-    #[test]
-    fn test_parse_or_none_valid() {
-        let uri = Uri::parse_or_none("artifact://bar.md").unwrap();
-        assert_eq!(uri.scheme, "artifact");
-    }
-
-    #[test]
-    fn test_parse_or_none_invalid() {
-        // Only missing separator is invalid now
-        assert_eq!(Uri::parse_or_none("not-a-uri"), None);
-        assert_eq!(
-            Uri::parse_or_none("file://foo"),
-            Some(Uri::new("file".to_string(), "foo".to_string()))
-        );
     }
 
     #[test]

@@ -30,9 +30,9 @@ pub struct AgentPrepared {
     pub name: String,
     pub prompt: String,
     pub model: Option<String>,
-    pub bind_paths: HashMap<String, String>,
+    pub(crate) bind_paths: HashMap<String, String>,
     /// (key, uri_str, optional)
-    pub bind_uris: Vec<(String, String, bool)>,
+    pub(crate) bind_uris: Vec<(String, String, bool)>,
     pub expected_artifact_paths: Vec<String>,
     pub cwd: String,
     pub worktree: Option<String>,
@@ -220,7 +220,7 @@ pub fn check_bail(completed: &CompletedRun) -> Result<(), AgentError> {
 // Workspace preamble assembly
 // ---------------------------------------------------------------------------
 
-pub fn build_workspace_preamble(cwd: &str, worktree: Option<&str>) -> String {
+pub(crate) fn build_workspace_preamble(cwd: &str, worktree: Option<&str>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !cwd.is_empty() {
         parts.push(format!("Your working directory is: {cwd}"));

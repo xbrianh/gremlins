@@ -1,10 +1,10 @@
-pub mod agent_loop;
+pub(crate) mod agent_loop;
 pub mod backend;
 pub mod cmd_backend;
 pub mod openai_backend;
 pub mod protocol;
-pub mod retry;
-pub mod stream;
-pub mod stream_json;
-pub mod subagent;
-pub mod tools;
+pub(crate) mod retry;
+pub(crate) mod stream;
+pub(crate) mod stream_json;
+pub(crate) mod subagent;
+pub(crate) mod tools;

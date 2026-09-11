@@ -293,36 +293,6 @@ impl Pipeline {
             None => false,
         }
     }
-
-    fn validate(&self, py: Python<'_>) -> PyResult<()> {
-        let stages_list = PyList::new(py, self.stages.iter().map(|s| s.bind(py)))?;
-
-        let (launch_cmds, cli_out) = match &self.bootstrap {
-            Some(bs) => {
-                let lc: Vec<String> = bs
-                    .getattr(py, "launch_cmds")
-                    .ok()
-                    .and_then(|v| v.extract::<Vec<String>>(py).ok())
-                    .unwrap_or_default();
-                let co: std::collections::HashMap<String, String> = bs
-                    .getattr(py, "cli_out")
-                    .ok()
-                    .and_then(|v| {
-                        v.extract::<std::collections::HashMap<String, String>>(py)
-                            .ok()
-                    })
-                    .unwrap_or_default();
-                (lc, co)
-            }
-            None => (Vec::new(), std::collections::HashMap::new()),
-        };
-
-        let nodes = loader::py_stages_to_nodes(&stages_list)?;
-        gremlins::schemas::loader::check_unresolved_consumers(&nodes, &launch_cmds, &cli_out)
-            .map_err(|e: gremlins::schemas::error::SchemaError| {
-                pyo3::exceptions::PyValueError::new_err(e.to_string())
-            })
-    }
 }
 
 fn fill_stage_clients_inner(

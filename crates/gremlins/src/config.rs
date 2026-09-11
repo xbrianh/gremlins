@@ -6,10 +6,10 @@ use log::warn;
 use serde_json::Value;
 
 /// Default name of the project-local overlay directory.
-pub const OVERLAY_DIRNAME: &str = ".gremlins";
+pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
 /// System prompt injected into every agent stage.
-pub const AGENT_SYSTEM_PROMPT: &str = "\
+pub(crate) const AGENT_SYSTEM_PROMPT: &str = "\
 Keep your context lean: delegate every self-contained piece of work to a subagent. Subagents \
 have isolated context — they absorb the noise so you don't have to. When you have multiple \
 independent tasks, fan them out with the parallel tool. Plan the fan-out before you start; \
@@ -23,9 +23,9 @@ parallel work is cheaper than serial drift.\n";
 pub struct PathOverrides {
     pub state_root: Option<PathBuf>,
     pub work_root: Option<PathBuf>,
-    pub config_root: Option<PathBuf>,
+    pub(crate) config_root: Option<PathBuf>,
     pub project_root: Option<PathBuf>,
-    pub overlay_dir: Option<PathBuf>,
+    pub(crate) overlay_dir: Option<PathBuf>,
     pub scratch_root: Option<PathBuf>,
 }
 
@@ -201,7 +201,7 @@ pub fn init_global() -> Result<(), ConfigError> {
     Ok(())
 }
 
-pub fn get_global() -> Option<Arc<Config>> {
+pub(crate) fn get_global() -> Option<Arc<Config>> {
     GLOBAL_CONFIG.lock().unwrap().clone()
 }
 
@@ -270,7 +270,7 @@ fn overlay_dir_env_override() -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 /// GREMLINS_STREAM_IDLE_TIMEOUT in seconds. Default 600.0.
-pub fn stream_idle_timeout() -> f64 {
+pub(crate) fn stream_idle_timeout() -> f64 {
     std::env::var("GREMLINS_STREAM_IDLE_TIMEOUT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -279,7 +279,7 @@ pub fn stream_idle_timeout() -> f64 {
 
 /// GREMLINS_AGENT_MAX_TURNS, with GREMLINS_OPENAI_AGENTS_MAX_TURNS as fallback.
 /// Default 1000.
-pub fn max_agent_turns() -> usize {
+pub(crate) fn max_agent_turns() -> usize {
     std::env::var("GREMLINS_AGENT_MAX_TURNS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -292,19 +292,19 @@ pub fn max_agent_turns() -> usize {
 }
 
 /// GREMLINS_REASONING_EFFORT override. None means use provider default.
-pub fn reasoning_effort() -> Option<String> {
+pub(crate) fn reasoning_effort() -> Option<String> {
     std::env::var("GREMLINS_REASONING_EFFORT").ok()
 }
 
 /// GREMLINS_TELEMETRY — "1" or "true" enables per-turn telemetry logging.
-pub fn telemetry_enabled() -> bool {
+pub(crate) fn telemetry_enabled() -> bool {
     std::env::var("GREMLINS_TELEMETRY")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false)
 }
 
 /// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
-pub fn scratch_dir(gremlin_id: Option<&str>) -> Option<PathBuf> {
+pub(crate) fn scratch_dir(gremlin_id: Option<&str>) -> Option<PathBuf> {
     let path: PathBuf = std::env::var("GREMLINS_SCRATCH_DIR")
         .ok()
         .filter(|s| !s.is_empty())?
@@ -319,7 +319,7 @@ pub fn scratch_dir(gremlin_id: Option<&str>) -> Option<PathBuf> {
 }
 
 /// HOME directory with platform fallback.
-pub fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .ok()
         .filter(|s| !s.is_empty())
@@ -472,7 +472,7 @@ pub fn project_overlay_dir(project_root: &Path) -> PathBuf {
 /// Directories searched for stage-definition .yaml files (e.g. in
 /// ``stage-definitions:`` blocks).  Returns overlay ``stages/`` subdirectory;
 /// bundled recipes live in ``assets::RECIPES`` and are resolved separately.
-pub fn stage_definition_dirs() -> Vec<PathBuf> {
+pub(crate) fn stage_definition_dirs() -> Vec<PathBuf> {
     let overlay = resolve_project_overlay_dir(None, &project_root());
     vec![overlay.join("stages")]
 }
@@ -488,13 +488,13 @@ pub fn scratch_root(gremlin_id: Option<&str>) -> PathBuf {
 
 /// Parsed content of providers.json.
 #[derive(Debug, Clone, Default)]
-pub struct ApiKeys {
+pub(crate) struct ApiKeys {
     keys: HashMap<String, String>,
 }
 
 impl ApiKeys {
     /// Load from `user_config_root() / "providers.json"`.
-    pub fn load() -> Self {
+    pub(crate) fn load() -> Self {
         let path = user_config_root().join("providers.json");
         match parse_api_keys(&path) {
             Ok(keys) => ApiKeys { keys },
@@ -509,7 +509,7 @@ impl ApiKeys {
     }
 
     /// Get the API key for a provider name (e.g. "openai", "xai").
-    pub fn get(&self, provider: &str) -> Option<&str> {
+    pub(crate) fn get(&self, provider: &str) -> Option<&str> {
         self.keys
             .get(provider)
             .map(|s| s.as_str())
@@ -544,7 +544,7 @@ fn parse_api_keys(path: &Path) -> Result<HashMap<String, String>, ApiKeysError> 
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ApiKeysError {
+pub(crate) enum ApiKeysError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON parse error: {0}")]

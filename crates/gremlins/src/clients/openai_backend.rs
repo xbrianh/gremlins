@@ -44,7 +44,7 @@ impl OpenAiProvider {
         }
     }
 
-    pub fn default_model(self) -> &'static str {
+    pub(crate) fn default_model(self) -> &'static str {
         match self {
             Self::OpenAi | Self::OpenRouter => "gpt-4o",
             Self::Xai => "grok-4",

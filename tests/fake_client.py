@@ -5,21 +5,11 @@ from __future__ import annotations
 import contextvars
 import json
 import pathlib
-from dataclasses import dataclass
+import types
 from typing import Any, cast
 
 from _gremlins_core.clients import PyCompletedRun as CompletedRun
 from _gremlins_core.clients import PyUsageStats as UsageStats
-
-
-@dataclass
-class RecordedCall:
-    prompt: str
-    label: str
-    model: str | None
-    raw_path: pathlib.Path | None
-    capture_events: bool
-    cwd: pathlib.Path | None = None
 
 
 class FakeClient:
@@ -41,7 +31,7 @@ class FakeClient:
         self.provider = "fake"
         self.model = model
         self.extra_params: dict[str, str] = {}
-        self.calls: list[RecordedCall] = []
+        self.calls: list[Any] = []
         self._fixtures: dict[str, object] = dict(fixtures or {})
         self._total_cost_usd: float = 0.0
         self._ctx: contextvars.ContextVar[dict[str, Any] | None] = (
@@ -114,7 +104,7 @@ class FakeClient:
             }
         )
         self.calls.append(
-            RecordedCall(
+            types.SimpleNamespace(
                 prompt=prompt,
                 label=label,
                 model=model,
@@ -163,7 +153,6 @@ class FakeClient:
         return CompletedRun(
             exit_code=0,
             text_result=result_text,
-            events=[json.dumps(e) for e in events] if capture_events else None,
             cost_usd=cost_usd,
             token_usage=token_usage,
         )

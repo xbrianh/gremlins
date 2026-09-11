@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import abc
 import logging
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 from _gremlins_core.clients import RustClient as Client
 from _gremlins_core.stages import Outcome
@@ -26,14 +26,6 @@ def get_client_from_dict(d: dict[str, Any]) -> Client | None:
             f"stage {name!r}: 'client' must be a string, got {type(raw)!r}"
         )
     return Client.parse(raw)
-
-
-class StageInput(NamedTuple):
-    name: str
-    type: type
-    required: bool
-    default: Any
-    help: str
 
 
 class Stage(abc.ABC):
@@ -87,10 +79,6 @@ class Stage(abc.ABC):
         stage.client_explicit = client is not None
 
         return stage
-
-    @classmethod
-    def orchestration_args(cls) -> list[StageInput]:
-        return []
 
     async def run(self, gremlin: Gremlin) -> Outcome:  # noqa: ARG002
         raise NotImplementedError
