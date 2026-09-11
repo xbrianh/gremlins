@@ -2,8 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::schemas::error::SchemaError;
-use crate::schemas::interpolation;
-use crate::schemas::interpolation::HereDocInterpolation;
+use crate::schemas::interpolation::{HereDocInterpolation, Interpolator};
 
 const VALID_SOURCE_TYPES: [&str; 2] = ["filepath", "string"];
 const BOOTSTRAP_KEYS: [&str; 5] = ["source", "launch_cmds", "cmds", "cli_out", "env"];
@@ -306,8 +305,10 @@ pub fn substitute_bootstrap_vars(
     cwd: &Path,
     values: &HashMap<String, String>,
 ) -> Result<String, HereDocInterpolation> {
-    let cwd = HashMap::from([("cwd".to_string(), cwd.to_string_lossy().to_string())]);
-    interpolation::substitute_vars_into_shell(cmd, &[&cwd, values])
+    Interpolator::new()
+        .with("cwd", cwd.to_string_lossy().to_string())
+        .with_map(values)
+        .shell(cmd)
 }
 
 #[cfg(test)]

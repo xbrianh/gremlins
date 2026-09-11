@@ -196,21 +196,17 @@ impl ArtifactRegistry {
 // --- Python function ---
 
 #[pyfunction]
-#[pyo3(signature = (artifacts, interpolation_map, loop_iter = ""))]
 fn resolve_interpolation_map(
     artifacts: &ArtifactRegistry,
     interpolation_map: HashMap<String, String>,
-    loop_iter: &str,
 ) -> PyResult<HashMap<String, String>> {
     let inner = artifacts.inner.lock().unwrap();
-    rust_resolve::resolve_interpolation_map(&inner, &interpolation_map, loop_iter).map_err(|e| {
-        match &e {
-            rust_resolve::ResolveError::MissingArtifact(key) => {
-                MissingArtifact::new_err(format!("artifact not bound: {:?}", key))
-            }
-            rust_resolve::ResolveError::Other(src) => {
-                pyo3::exceptions::PyValueError::new_err(src.to_string())
-            }
+    rust_resolve::resolve_interpolation_map(&inner, &interpolation_map).map_err(|e| match &e {
+        rust_resolve::ResolveError::MissingArtifact(key) => {
+            MissingArtifact::new_err(format!("artifact not bound: {:?}", key))
+        }
+        rust_resolve::ResolveError::Other(src) => {
+            pyo3::exceptions::PyValueError::new_err(src.to_string())
         }
     })
 }

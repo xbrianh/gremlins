@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Mutex;
 
+use gremlins::schemas::interpolation::Interpolator;
 use gremlins::stages::agent as rust_agent;
 use gremlins::stages::base;
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
@@ -343,7 +344,11 @@ impl PyExec {
             .unwrap_or_default();
         let fw: HashMap<String, String> =
             state.call_method1("framework_subs", (slf,))?.extract()?;
-        Ok(base::substitute_vars(text, &str_opts, &extra_map, &fw))
+        Ok(Interpolator::new()
+            .with_map(&str_opts)
+            .with_map(&extra_map)
+            .with_map(&fw)
+            .text(text))
     }
 
     fn _run_impl<'py>(
@@ -752,7 +757,11 @@ impl PyAgent {
             .unwrap_or_default();
         let fw: HashMap<String, String> =
             state.call_method1("framework_subs", (slf,))?.extract()?;
-        Ok(base::substitute_vars(text, &str_opts, &extra_map, &fw))
+        Ok(Interpolator::new()
+            .with_map(&str_opts)
+            .with_map(&extra_map)
+            .with_map(&fw)
+            .text(text))
     }
 
     fn _run_impl<'py>(
@@ -982,7 +991,11 @@ fn substitute_vars_py(
     extra: HashMap<String, String>,
     framework_subs: HashMap<String, String>,
 ) -> String {
-    base::substitute_vars(text, &string_options, &extra, &framework_subs)
+    Interpolator::new()
+        .with_map(&string_options)
+        .with_map(&extra)
+        .with_map(&framework_subs)
+        .text(text)
 }
 
 // --- Module registration ---

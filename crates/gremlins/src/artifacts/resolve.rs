@@ -17,10 +17,11 @@ pub enum ResolveError {
     Other(Box<dyn std::error::Error>),
 }
 
+/// Resolve each map value to an artifact path or `content()` body. Values are
+/// expected to arrive already interpolated by the caller.
 pub fn resolve_interpolation_map(
     artifacts: &ArtifactRegistry,
     interpolation_map: &HashMap<String, String>,
-    loop_iter: &str,
 ) -> Result<HashMap<String, String>, ResolveError> {
     let mut result = HashMap::new();
     for (var, raw) in interpolation_map {
@@ -29,10 +30,7 @@ pub fn resolve_interpolation_map(
         let raw_clean = trimmed.trim_end_matches('?');
 
         if let Some(caps) = CONTENT_RE.captures(raw_clean) {
-            let mut uri_str = caps.get(1).unwrap().as_str().to_string();
-            if !loop_iter.is_empty() {
-                uri_str = uri_str.replace("{loop_iter}", loop_iter);
-            }
+            let uri_str = caps.get(1).unwrap().as_str().to_string();
             let json_path = caps.get(2).map(|m| m.as_str());
             match artifacts.content(&uri_str, json_path) {
                 Ok(val) => {
@@ -67,10 +65,7 @@ pub fn resolve_interpolation_map(
         } else {
             (raw, None)
         };
-        let mut key = key.to_string();
-        if !loop_iter.is_empty() {
-            key = key.replace("{loop_iter}", loop_iter);
-        }
+        let key = key.to_string();
         match artifacts.data_uri(&key) {
             Ok(val) => {
                 result.insert(var.clone(), val.to_string());
@@ -125,7 +120,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("var".to_string(), "artifact://mykey".to_string());
 
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map));
         assert_eq!(result.get("var").unwrap(), &path);
     }
 
@@ -136,7 +131,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("var".to_string(), "missing?default_val".to_string());
 
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map));
         assert_eq!(result.get("var").unwrap(), "default_val");
     }
 
@@ -147,7 +142,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("var".to_string(), r#"content("missing.txt")?"#.to_string());
 
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map));
         assert_eq!(result.get("var").unwrap(), "");
     }
 
@@ -160,20 +155,19 @@ mod tests {
             "var".to_string(),
             r#"content("artifact://data.json", "x.y")"#.to_string(),
         );
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map));
         assert_eq!(result.get("var").unwrap(), "z");
     }
 
     #[test]
-    fn test_resolve_loop_iter_substitution() {
+    fn test_resolve_takes_pre_interpolated_values() {
         let (_tmp, mut reg) = setup_registry();
-        register_file(&mut reg, "key_0", "val0");
         let path_1 = register_file(&mut reg, "key_1", "val1");
 
         let mut map = HashMap::new();
-        map.insert("var".to_string(), "artifact://key_{loop_iter}".to_string());
+        map.insert("var".to_string(), "artifact://key_1".to_string());
 
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "1"));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map));
         assert_eq!(result.get("var").unwrap(), &path_1);
     }
 }

@@ -6,6 +6,7 @@ use crate::artifacts::registry::ArtifactRegistry;
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::clients::protocol::CompletedRun;
+use crate::schemas::interpolation::Interpolator;
 use crate::stages::base;
 
 // ---------------------------------------------------------------------------
@@ -81,25 +82,42 @@ pub fn prepare_agent(
     let name = &agent.name;
     let str_opts = base::string_options(&agent.options);
 
+    // Interpolation values are templates too, so resolve them against the
+    // string options, framework subs, and loop iteration before the lookup.
+    let raw_interp = Interpolator::new()
+        .with_map(&str_opts)
+        .with_map(framework_subs)
+        .with_loop_iter(loop_iter);
+
+    let resolved_values: HashMap<String, String> = agent
+        .interpolation_map
+        .iter()
+        .map(|(k, v)| (k.clone(), raw_interp.text(v)))
+        .collect();
+
     let interpolation_map =
-        resolve_interpolation_map(artifacts, &agent.interpolation_map, loop_iter).map_err(|e| {
+        resolve_interpolation_map(artifacts, &resolved_values).map_err(|e| {
             AgentError::Resolve {
                 name: name.clone(),
                 source: e,
             }
         })?;
 
+    // Bind keys and URIs resolve against string options, interpolation values,
+    // and framework subs (framework wins on collision).
+    let interp = Interpolator::new()
+        .with_map(&str_opts)
+        .with_map(&interpolation_map)
+        .with_map(framework_subs)
+        .with_loop_iter(loop_iter);
+
     let mut bind_paths: HashMap<String, String> = HashMap::new();
     let mut bind_uris: Vec<(String, String, bool)> = Vec::new();
     for (raw_key, raw_uri_str) in &agent.bind_map {
-        let k = base::substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
+        let k = interp.text(raw_key);
         let optional = k.ends_with('?');
         let key = k.trim_end_matches('?').to_string();
-        let mut uri_str =
-            base::substitute_vars(raw_uri_str, &str_opts, &interpolation_map, framework_subs);
-        if !loop_iter.is_empty() {
-            uri_str = uri_str.replace("{loop_iter}", loop_iter);
-        }
+        let uri_str = interp.text(raw_uri_str);
         let uri = Uri::parse(&uri_str).map_err(|e| AgentError::Generic {
             name: name.clone(),
             detail: e.to_string(),
@@ -112,22 +130,20 @@ pub fn prepare_agent(
         bind_uris.push((key, uri_str, optional));
     }
 
-    // Merge: bind output paths shadow interpolation keys on collision
-    let subst_vars: HashMap<String, String> = interpolation_map
-        .iter()
-        .chain(bind_paths.iter())
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    // Prompt and model substitution additionally see the bind output paths,
+    // which shadow interpolation keys; framework subs are re-applied last so
+    // they still win.
+    let interp = interp.with_map(&bind_paths).with_map(framework_subs);
 
     let template = agent.prompts.join("\n\n").trim_end().to_string();
-    let prompt = base::substitute_vars(&template, &str_opts, &subst_vars, framework_subs);
+    let prompt = interp.text(&template);
 
     // Model substitution
     let model = agent
         .options
         .get("model")
         .and_then(|v| v.as_str())
-        .map(|raw| base::substitute_vars(raw, &str_opts, &subst_vars, framework_subs));
+        .map(|raw| interp.text(raw));
 
     let expected_artifact_paths: Vec<String> = bind_paths.values().cloned().collect();
 

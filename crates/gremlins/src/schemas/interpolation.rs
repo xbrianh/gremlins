@@ -68,6 +68,53 @@ pub fn substitute_vars_into_shell(
     refusal.map_or(Ok(out), Err)
 }
 
+/// Accumulates resolved `{key}` → value pairs and applies them to templates.
+/// Maps are merged with last-write-wins precedence: call the highest-precedence
+/// map last.
+#[derive(Debug, Clone, Default)]
+pub struct Interpolator {
+    values: HashMap<String, String>,
+}
+
+impl Interpolator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_map(mut self, map: &HashMap<String, String>) -> Self {
+        self.values
+            .extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self
+    }
+
+    pub fn with(mut self, key: &str, value: String) -> Self {
+        self.values.insert(key.to_string(), value);
+        self
+    }
+
+    /// `{loop_iter}` is template-scoped rather than a framework sub: callers
+    /// pass `""` while no loop is active, and the token then stays verbatim.
+    pub fn with_loop_iter(self, loop_iter: &str) -> Self {
+        if loop_iter.is_empty() {
+            self
+        } else {
+            self.with("loop_iter", loop_iter.to_string())
+        }
+    }
+
+    /// Replace `{key}` tokens. Unknown keys left verbatim, `${key}` skipped,
+    /// `-`/`_` interchangeable.
+    pub fn text(&self, template: &str) -> String {
+        substitute_vars(template, &[&self.values])
+    }
+
+    /// [`Self::text`] for shell commands, escaping each value for the quoting
+    /// region it lands in. Refuses here-document bodies.
+    pub fn shell(&self, template: &str) -> Result<String, HereDocInterpolation> {
+        substitute_vars_into_shell(template, &[&self.values])
+    }
+}
+
 fn preceded_by_dollar(text: &str, at: usize) -> bool {
     at > 0 && text.as_bytes()[at - 1] == b'$'
 }
@@ -323,6 +370,53 @@ mod tests {
 
     fn shell_err(text: &str, k: &str, v: &str) -> HereDocInterpolation {
         substitute_vars_into_shell(text, &[&one(k, v)]).unwrap_err()
+    }
+
+    #[test]
+    fn test_interpolator_last_map_wins() {
+        let interp = Interpolator::new()
+            .with_map(&one("k", "low"))
+            .with_map(&one("k", "high"));
+        assert_eq!(interp.text("{k}"), "high");
+    }
+
+    #[test]
+    fn test_interpolator_with_overrides_maps() {
+        let interp = Interpolator::new()
+            .with_map(&one("k", "mapped"))
+            .with("k", "explicit".to_string());
+        assert_eq!(interp.text("{k}"), "explicit");
+    }
+
+    #[test]
+    fn test_interpolator_text_and_shell_agree_on_unknown_keys() {
+        let interp = Interpolator::new().with_map(&one("known", "v"));
+        assert_eq!(interp.text("{known} {unknown}"), "v {unknown}");
+        assert_eq!(interp.shell("echo {unknown}").unwrap(), "echo {unknown}");
+    }
+
+    #[test]
+    fn test_interpolator_shell_escapes_and_refuses_heredoc() {
+        let interp = Interpolator::new().with_map(&one("x", "a;b"));
+        assert_eq!(interp.shell("echo {x}").unwrap(), "echo 'a;b'");
+        assert_eq!(
+            interp.shell("cat <<EOF\n{x}\nEOF").unwrap_err().delimiter,
+            "EOF"
+        );
+    }
+
+    #[test]
+    fn test_interpolator_loop_iter_empty_leaves_token_verbatim() {
+        let interp = Interpolator::new().with_loop_iter("");
+        assert_eq!(
+            interp.text("artifact://{loop_iter}/x"),
+            "artifact://{loop_iter}/x"
+        );
+        let interp = Interpolator::new().with_loop_iter("loop~2");
+        assert_eq!(
+            interp.text("artifact://{loop_iter}/x"),
+            "artifact://loop~2/x"
+        );
     }
 
     #[test]

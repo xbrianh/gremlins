@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-use crate::schemas::interpolation;
-use crate::schemas::interpolation::HereDocInterpolation;
+use crate::schemas::interpolation::Interpolator;
 
 /// Extract string-valued entries from an options map, filtering out
 /// non-string JSON values (numbers, booleans, arrays, etc.).
@@ -16,29 +15,6 @@ pub fn string_options(options: &HashMap<String, serde_json::Value>) -> HashMap<S
             }
         })
         .collect()
-}
-
-/// Substitute `{var}` tokens in `text` using the same resolution order:
-/// string options → extra (bind/interpolation) → framework_subs.
-/// Framework subs win on collision.
-pub fn substitute_vars(
-    text: &str,
-    string_options: &HashMap<String, String>,
-    extra: &HashMap<String, String>,
-    framework_subs: &HashMap<String, String>,
-) -> String {
-    interpolation::substitute_vars(text, &[framework_subs, extra, string_options])
-}
-
-/// [`substitute_vars`] for shell commands, escaping each value for the quoting
-/// context it lands in. Same resolution order as `substitute_vars`.
-pub fn substitute_vars_into_shell(
-    text: &str,
-    string_options: &HashMap<String, String>,
-    extra: &HashMap<String, String>,
-    framework_subs: &HashMap<String, String>,
-) -> Result<String, HereDocInterpolation> {
-    interpolation::substitute_vars_into_shell(text, &[framework_subs, extra, string_options])
 }
 
 /// Trait representing the contract every Rust stage implements.
@@ -66,7 +42,11 @@ pub trait Stage: Send + Sync {
         extra: &HashMap<String, String>,
         framework_subs: &HashMap<String, String>,
     ) -> String {
-        substitute_vars(text, &string_options(self.options()), extra, framework_subs)
+        Interpolator::new()
+            .with_map(&string_options(self.options()))
+            .with_map(extra)
+            .with_map(framework_subs)
+            .text(text)
     }
 }
 
@@ -75,113 +55,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_substitute_vars_basic() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("var".to_string(), "world".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("hello {var}", &opts, &extra, &fw);
-        assert_eq!(result, "hello world");
-    }
-
-    #[test]
-    fn test_substitute_vars_hyphen_normalization() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("child_plan".to_string(), "value".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("{child-plan}", &opts, &extra, &fw);
-        assert_eq!(result, "value");
-    }
-
-    #[test]
-    fn test_substitute_vars_framework_overrides() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("name".to_string(), "extra".to_string())]);
-        let fw = HashMap::from([("name".to_string(), "fw".to_string())]);
-        let result = substitute_vars("{name}", &opts, &extra, &fw);
-        assert_eq!(result, "fw");
-    }
-
-    #[test]
-    fn test_substitute_vars_unknown_token() {
-        let opts = HashMap::new();
-        let extra = HashMap::new();
-        let fw = HashMap::new();
-        let result = substitute_vars("hello {unknown}", &opts, &extra, &fw);
-        assert_eq!(result, "hello {unknown}");
-    }
-
-    #[test]
-    fn test_substitute_vars_escaped_brace() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("x".to_string(), "y".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("\\${x}", &opts, &extra, &fw);
-        assert_eq!(result, "\\${x}");
-    }
-
-    #[test]
-    fn test_substitute_vars_string_opts() {
-        let opts = HashMap::from([("foo".to_string(), "opt".to_string())]);
-        let extra = HashMap::from([("foo".to_string(), "extra".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("{foo}", &opts, &extra, &fw);
-        assert_eq!(result, "extra");
-    }
-
-    #[test]
-    fn test_substitute_vars_dollar_skip() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("x".to_string(), "y".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("${x}", &opts, &extra, &fw);
-        assert_eq!(result, "${x}");
-    }
-
-    #[test]
-    fn test_substitute_vars_doubled_braces() {
-        let opts = HashMap::new();
-        let extra = HashMap::from([("name".to_string(), "value".to_string())]);
-        let fw = HashMap::new();
-        let result = substitute_vars("{{name}}", &opts, &extra, &fw);
-        assert_eq!(result, "{value}");
-    }
-
-    #[test]
-    fn test_substitute_vars_hyphen_keys_direct() {
-        let opts = HashMap::from([("review-one".to_string(), "done".to_string())]);
-        let extra = HashMap::new();
-        let fw = HashMap::new();
-        let result = substitute_vars("{review-one}", &opts, &extra, &fw);
-        assert_eq!(result, "done");
-    }
-
-    #[test]
-    fn test_substitute_vars_non_string_options_filtered() {
+    fn test_string_options_filters_non_string_values() {
         let mut opts: HashMap<String, serde_json::Value> = HashMap::new();
         opts.insert("count".to_string(), serde_json::Value::Number(42.into()));
         let str_opts = string_options(&opts);
-        let extra = HashMap::new();
-        let fw = HashMap::new();
-        let result = substitute_vars("{count}", &str_opts, &extra, &fw);
+        assert!(str_opts.is_empty());
+        let result = Interpolator::new().with_map(&str_opts).text("{count}");
         assert_eq!(result, "{count}");
-    }
-
-    #[test]
-    fn test_substitute_vars_empty_text() {
-        let opts = HashMap::new();
-        let extra = HashMap::new();
-        let fw = HashMap::new();
-        let result = substitute_vars("", &opts, &extra, &fw);
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn test_substitute_vars_no_braces() {
-        let opts = HashMap::new();
-        let extra = HashMap::new();
-        let fw = HashMap::new();
-        let result = substitute_vars("no braces here", &opts, &extra, &fw);
-        assert_eq!(result, "no braces here");
     }
 
     #[test]
