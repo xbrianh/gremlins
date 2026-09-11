@@ -32,6 +32,29 @@ Directories you may write to:\n  \
     )
 }
 
+/// System prompt injected into every subagent (nested agent) invocation.
+/// Omits the delegation guidance — subagents are already delegates.
+pub(crate) fn subagent_system_prompt(
+    work_root: &Path,
+    scratch_root: &Path,
+    project_root: &Path,
+) -> String {
+    format!(
+        "\
+When you have multiple independent tasks, fan them out with the parallel tool. Plan the fan-out \
+before you start; parallel work is cheaper than serial drift.\n\n\
+Directories you may write to:\n  \
+  Project root:  {project}\n  \
+  Work root:     {work}\n  \
+  Scratch root:  {scratch}\n\
+  (use scratch for test cruft and temporary files)\
+",
+        project = project_root.display(),
+        work = work_root.display(),
+        scratch = scratch_root.display(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Path overrides from config.json "paths" section
 // ---------------------------------------------------------------------------
