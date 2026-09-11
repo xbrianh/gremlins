@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::schemas::error::SchemaError;
 use crate::schemas::interpolation;
+use crate::schemas::interpolation::HereDocInterpolation;
 
 const VALID_SOURCE_TYPES: [&str; 2] = ["filepath", "string"];
 const BOOTSTRAP_KEYS: [&str; 5] = ["source", "launch_cmds", "cmds", "cli_out", "env"];
@@ -297,11 +298,14 @@ pub fn validate_source_values(
 /// values cannot inject shell metacharacters. `${key}` tokens are skipped and
 /// underscore keys also match their hyphenated form; a substituted value is
 /// not re-scanned.
+///
+/// Fails on a placeholder inside a here-document body, where no escaping can
+/// neutralise the value.
 pub fn substitute_bootstrap_vars(
     cmd: &str,
     cwd: &Path,
     values: &HashMap<String, String>,
-) -> String {
+) -> Result<String, HereDocInterpolation> {
     let cwd = HashMap::from([("cwd".to_string(), cwd.to_string_lossy().to_string())]);
     interpolation::substitute_vars_into_shell(cmd, &[&cwd, values])
 }
@@ -381,60 +385,78 @@ mod tests {
         assert!(err.to_string().contains("required bootstrap.source"));
     }
 
+    fn subs(cmd: &str, values: &HashMap<String, String>) -> String {
+        substitute_bootstrap_vars(cmd, Path::new("/tmp"), values).unwrap()
+    }
+
     #[test]
     fn test_substitute_bootstrap_vars_cwd() {
-        let result =
-            substitute_bootstrap_vars("echo {cwd}", Path::new("/tmp/cwd"), &HashMap::new());
-        assert_eq!(result, "echo '/tmp/cwd'");
+        assert_eq!(
+            substitute_bootstrap_vars("echo {cwd}", Path::new("/tmp/cwd"), &HashMap::new())
+                .unwrap(),
+            "echo '/tmp/cwd'"
+        );
     }
 
     #[test]
     fn test_substitute_bootstrap_vars_values() {
         let values = HashMap::from([("instructions".to_string(), "do the thing".to_string())]);
-        let result =
-            substitute_bootstrap_vars("test -n {instructions}", Path::new("/tmp"), &values);
-        assert_eq!(result, "test -n 'do the thing'");
+        assert_eq!(
+            subs("test -n {instructions}", &values),
+            "test -n 'do the thing'"
+        );
     }
 
     #[test]
     fn test_substitute_bootstrap_vars_keeps_template_double_quotes() {
         let values = HashMap::from([("plan".to_string(), "a b".to_string())]);
-        let result =
-            substitute_bootstrap_vars("printf '%s' \"{plan}\"", Path::new("/tmp"), &values);
-        assert_eq!(result, "printf '%s' \"a b\"");
+        assert_eq!(
+            subs("printf '%s' \"{plan}\"", &values),
+            "printf '%s' \"a b\""
+        );
     }
 
     #[test]
     fn test_substitute_bootstrap_vars_shell_escape() {
         let values = HashMap::from([("x".to_string(), "'; rm -rf /; echo 'pwned".to_string())]);
-        let result = substitute_bootstrap_vars("echo {x}", Path::new("/tmp"), &values);
-        assert_eq!(result, "echo ''\\''; rm -rf /; echo '\\''pwned'");
+        assert_eq!(
+            subs("echo {x}", &values),
+            "echo ''\\''; rm -rf /; echo '\\''pwned'"
+        );
     }
 
     #[test]
     fn test_substitute_bootstrap_vars_blocks_double_quote_breakout() {
         let values = HashMap::from([("x".to_string(), "\"; rm -rf /; echo \"".to_string())]);
-        let result = substitute_bootstrap_vars("echo \"{x}\"", Path::new("/tmp"), &values);
-        assert_eq!(result, "echo \"\\\"; rm -rf /; echo \\\"\"");
+        assert_eq!(
+            subs("echo \"{x}\"", &values),
+            "echo \"\\\"; rm -rf /; echo \\\"\""
+        );
     }
 
     #[test]
     fn test_substitute_bootstrap_vars_skips_dollar_tokens() {
         let values = HashMap::from([("x".to_string(), "y".to_string())]);
-        let result = substitute_bootstrap_vars("echo ${x}", Path::new("/tmp"), &values);
-        assert_eq!(result, "echo ${x}");
+        assert_eq!(subs("echo ${x}", &values), "echo ${x}");
     }
 
     #[test]
     fn test_substitute_bootstrap_vars_hyphen_normalization() {
         let values = HashMap::from([("child_plan".to_string(), "v".to_string())]);
-        let result = substitute_bootstrap_vars("echo {child-plan}", Path::new("/tmp"), &values);
-        assert_eq!(result, "echo 'v'");
+        assert_eq!(subs("echo {child-plan}", &values), "echo 'v'");
     }
 
     #[test]
     fn test_substitute_bootstrap_vars_unknown_key_left_verbatim() {
-        let result = substitute_bootstrap_vars("echo {nope}", Path::new("/tmp"), &HashMap::new());
-        assert_eq!(result, "echo {nope}");
+        assert_eq!(subs("echo {nope}", &HashMap::new()), "echo {nope}");
+    }
+
+    #[test]
+    fn test_substitute_bootstrap_vars_refuses_here_document_body() {
+        let values = HashMap::from([("plan".to_string(), "do the thing".to_string())]);
+        let err = substitute_bootstrap_vars("cat <<EOF\n{plan}\nEOF", Path::new("/tmp"), &values)
+            .unwrap_err();
+        assert_eq!(err.delimiter, "EOF");
+        assert_eq!(err.key, "plan");
     }
 }

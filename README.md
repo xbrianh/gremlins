@@ -569,6 +569,7 @@ stages:
 - `interpolation:` values are registry key lookups: a URI string (e.g., `file://session/report`), an optional `?default` fallback (e.g., `mykey?fallback`), or a `content("URI")` expression that reads and inlines file contents
 - `bind:` values are URI strings naming what the stage produces; the bind map key is a local variable name for `{var}` substitution within the same stage's templates (prompts, cmds)
 - After a stage completes, bound artifacts are registered under their URI strings; downstream stages reference those URI strings in their `interpolation:` maps
+- `exec` and bootstrap commands substitute `{var}` into the command line with shell quoting, so a value holding spaces, quotes, or `$()`/backquotes arrives as one literal argument instead of being re-interpreted. Values are escaped for the quoting region the placeholder sits in, which is why the placeholder's own quotes are not doubled up. `{var}` keys are looked up with `-` and `_` treated as interchangeable, so `{child_plan}` and `{child-plan}` both resolve. Interpolating a placeholder inside a here-document body is rejected, since no quoting can neutralise a value there
 - `interpolation:` can be declared in a stage definition and will be merged with call-site `interpolation:` values; `bind:` cannot appear inside a definition
 
 ### Stage definitions and bundled recipes

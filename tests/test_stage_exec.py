@@ -169,6 +169,19 @@ def test_double_quoted_placeholder_keeps_template_form(tmp_path):
     assert out_file.read_text() == "plain value"
 
 
+def test_heredoc_body_interpolation_is_rejected(tmp_path):
+    """Quoting cannot neutralise a value inside a here-document body."""
+    state = _payload_state(tmp_path, "$(touch pwned)")
+
+    stage = _exec(
+        cmds=["cat <<EOF\n{VAL}\nEOF"],
+        interpolation_map={"VAL": 'content("artifact://payload.txt")'},
+    )
+    with pytest.raises(ValueError, match="here-document"):
+        asyncio.run(stage.run(MockGremlin(state=state)))
+    assert not (tmp_path / "pwned").exists()
+
+
 # ---------------------------------------------------------------------------
 # out: file://session/<name>
 # ---------------------------------------------------------------------------

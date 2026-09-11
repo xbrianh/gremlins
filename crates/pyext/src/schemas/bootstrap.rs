@@ -278,6 +278,7 @@ pub fn substitute_bootstrap_vars(
     cmd: String,
     cwd: PathBuf,
     values: HashMap<String, String>,
-) -> String {
+) -> PyResult<String> {
     rust_bootstrap::substitute_bootstrap_vars(&cmd, &cwd, &values)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }

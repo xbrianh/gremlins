@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::schemas::interpolation;
+use crate::schemas::interpolation::HereDocInterpolation;
 
 /// Extract string-valued entries from an options map, filtering out
 /// non-string JSON values (numbers, booleans, arrays, etc.).
@@ -36,7 +37,7 @@ pub fn substitute_vars_into_shell(
     string_options: &HashMap<String, String>,
     extra: &HashMap<String, String>,
     framework_subs: &HashMap<String, String>,
-) -> String {
+) -> Result<String, HereDocInterpolation> {
     interpolation::substitute_vars_into_shell(text, &[framework_subs, extra, string_options])
 }
 
