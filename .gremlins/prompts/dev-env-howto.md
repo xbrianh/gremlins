@@ -95,7 +95,7 @@ This project has an incremental Rust port. Two crates exist:
 ### How to check if a Rust function is live
 
 ```bash
-grep -rnE '_core\.schemas|from _gremlins_core' gremlins/ --include='*.py'
+grep -rnE '_gremlins_core\.schemas|from _gremlins_core' gremlins/ --include='*.py'
 ```
 
 If the Python call site still exists and is referenced, that's the active one.

@@ -144,7 +144,7 @@ def stop_main(argv: list[str]) -> int:
 def rm_main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
         prog="gremlins rm",
-        description="Delete a gremlin's state directory, worktree, and branch.",
+        description="Delete a gremlin's state directory and worktree.",
     )
     p.add_argument("id_prefix", metavar="id-prefix")
     args = p.parse_args(argv)

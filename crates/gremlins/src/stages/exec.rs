@@ -65,24 +65,22 @@ pub fn is_bail_uri(uri_str: &str, loop_iter: &str) -> bool {
 pub struct ShellResult {
     pub output: String,
     pub rc: i32,
-    pub bail_triggered: bool,
 }
 
 #[derive(Clone)]
 pub struct ExecPrepared {
     pub name: String,
-    pub str_opts: HashMap<String, String>,
     pub interpolation_map: HashMap<String, String>,
     /// bind key (trimmed, no `?`) → registered filesystem path, for command substitution.
-    pub bind_paths: HashMap<String, String>,
+    pub(crate) bind_paths: HashMap<String, String>,
     /// (bind key, substituted URI, optional) for post-run verification.
-    pub bind_uris: Vec<(String, String, bool)>,
+    pub(crate) bind_uris: Vec<(String, String, bool)>,
     pub cmds: Vec<String>,
     pub cwd: PathBuf,
     pub artifact_dir: PathBuf,
     pub state_dir: PathBuf,
     pub timeout: Option<f64>,
-    pub loop_iter: String,
+    pub(crate) loop_iter: String,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
@@ -168,7 +166,6 @@ pub fn prepare_exec(
 
     Ok(ExecPrepared {
         name: name.clone(),
-        str_opts,
         interpolation_map,
         bind_paths,
         bind_uris,
@@ -187,7 +184,6 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         return Ok(ShellResult {
             output: String::new(),
             rc: 0,
-            bail_triggered: false,
         });
     }
 
@@ -238,29 +234,24 @@ pub fn process_shell_result(
         raw_output_str.len(),
     );
 
-    // Bail detection uses the fully-substituted bind URIs.
-    let bail_triggered = if shell_rc != 0 {
-        if prepared
+    // A non-zero exit is an error unless a bind URI is a bail URI; in that
+    // case the failure is reported by the caller as a Python exception.
+    if shell_rc != 0
+        && !prepared
             .bind_uris
             .iter()
             .any(|(_, uri_str, _)| is_bail_uri(uri_str, &prepared.loop_iter))
-        {
-            true
-        } else {
-            return Err(ExecError::NonZeroExit {
-                name: name.clone(),
-                rc: shell_rc,
-                output: Some(shell_output.clone()),
-            });
-        }
-    } else {
-        false
-    };
+    {
+        return Err(ExecError::NonZeroExit {
+            name: name.clone(),
+            rc: shell_rc,
+            output: Some(shell_output.clone()),
+        });
+    }
 
     Ok(ShellResult {
         output: shell_output,
         rc: shell_rc,
-        bail_triggered,
     })
 }
 
@@ -287,31 +278,6 @@ pub fn commit_exec(
         }
     }
     Ok(())
-}
-
-/// Full pipeline: prepare → run_shell → verify.
-pub async fn run_exec_stage(
-    exec: &Exec,
-    artifacts: &mut ArtifactRegistry,
-    loop_iter: &str,
-    cwd: &Path,
-    artifact_dir: &Path,
-    state_dir: &Path,
-    framework_subs: &HashMap<String, String>,
-) -> Result<ProcResult, ExecError> {
-    let mut prepared = prepare_exec(exec, artifacts, loop_iter, framework_subs)?;
-    prepared.cwd = cwd.to_path_buf();
-    prepared.artifact_dir = artifact_dir.to_path_buf();
-    prepared.state_dir = state_dir.to_path_buf();
-
-    let shell_result = run_shell(&prepared).await?;
-    commit_exec(&prepared, artifacts)?;
-
-    Ok(ProcResult {
-        returncode: shell_result.rc,
-        stdout: shell_result.output.into_bytes(),
-        stderr: Vec::new(),
-    })
 }
 
 impl crate::stages::base::Stage for Exec {
@@ -542,115 +508,5 @@ mod tests {
     fn test_is_bail_uri_no_match() {
         assert!(!is_bail_uri("artifact://stuff", ""));
         assert!(!is_bail_uri("artifact://stuff", "loop~1"));
-    }
-
-    #[tokio::test]
-    async fn test_run_exec_stage_trivial() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let artifact_dir = tmp.path().join("artifacts");
-        let state_dir = tmp.path().join("state");
-        fs::create_dir_all(&artifact_dir).unwrap();
-        fs::create_dir_all(&state_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir.clone());
-
-        let exec = Exec {
-            name: "test".to_string(),
-            options: HashMap::from([("cmds".to_string(), serde_json::json!(["echo hello"]))]),
-            interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
-        };
-
-        let fw = HashMap::new();
-        let result = run_exec_stage(
-            &exec,
-            &mut registry,
-            "",
-            tmp.path(),
-            &artifact_dir,
-            &state_dir,
-            &fw,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.returncode, 0);
-        assert!(String::from_utf8_lossy(&result.stdout).contains("hello"));
-    }
-
-    #[tokio::test]
-    async fn test_run_exec_stage_timeout() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let artifact_dir = tmp.path().join("artifacts");
-        let state_dir = tmp.path().join("state");
-        fs::create_dir_all(&artifact_dir).unwrap();
-        fs::create_dir_all(&state_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir.clone());
-
-        let exec = Exec {
-            name: "test".to_string(),
-            options: HashMap::from([
-                ("cmds".to_string(), serde_json::json!(["sleep 10"])),
-                ("timeout".to_string(), serde_json::json!(0.05)),
-            ]),
-            interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
-        };
-
-        let fw = HashMap::new();
-        let err = run_exec_stage(
-            &exec,
-            &mut registry,
-            "",
-            tmp.path(),
-            &artifact_dir,
-            &state_dir,
-            &fw,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            ExecError::Proc(ProcError::TimeoutExpired(..))
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_run_exec_stage_bail_on_exit() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let artifact_dir = tmp.path().join("artifacts");
-        let state_dir = tmp.path().join("state");
-        fs::create_dir_all(&artifact_dir).unwrap();
-        fs::create_dir_all(&state_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir.clone());
-
-        // The command writes the bail file before bailing, so the
-        // post-command verification sees the artifact on disk.
-        let bail_path = artifact_dir.join("bail");
-
-        let exec = Exec {
-            name: "test".to_string(),
-            options: HashMap::from([(
-                "cmds".to_string(),
-                serde_json::json!([
-                    format!("echo 'bail data' > {}", bail_path.display()),
-                    "exit 2",
-                ]),
-            )]),
-            interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("bail".to_string(), BAIL_KEY.to_string())]),
-        };
-
-        let fw = HashMap::new();
-        let result = run_exec_stage(
-            &exec,
-            &mut registry,
-            "",
-            tmp.path(),
-            &artifact_dir,
-            &state_dir,
-            &fw,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.returncode, 2);
     }
 }

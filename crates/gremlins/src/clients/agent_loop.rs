@@ -63,8 +63,8 @@ impl CancelToken {
 pub(crate) struct RunContext {
     pub(crate) params: RunParams,
     pub(crate) prefix: String,
-    pub(crate) idle_timeout: f64,
-    pub(crate) expected_artifact_paths: Vec<PathBuf>,
+    pub idle_timeout: f64,
+    pub expected_artifact_paths: Vec<PathBuf>,
     pub(crate) reminder_budget: usize,
 }
 

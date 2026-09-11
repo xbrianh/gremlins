@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.clients import RustClient as Client
-from _gremlins_core.config import project_root, scratch_root, state_root
+from _gremlins_core.config import project_root, state_root
 from _gremlins_core.stages import FRAMEWORK_KEYS, Done
 
 from gremlins.utils.state_file import locked_update
@@ -31,30 +31,12 @@ from gremlins.protocols import StageProtocol
 
 logger = logging.getLogger(__name__)
 
-BAIL_CLASS_REVIEWER_REQUESTED_CHANGES = "reviewer_requested_changes"
-BAIL_CLASS_SECURITY = "security"
-BAIL_CLASS_SECRETS = "secrets"
-BAIL_CLASS_OTHER = "other"
-
 
 def resolve_state_file(gremlin_id: str | None) -> pathlib.Path | None:
     """Return path to state.json for gremlin_id, or None when gremlin_id is absent."""
     if not gremlin_id:
         return None
     return pathlib.Path(state_root()) / gremlin_id / "state.json"
-
-
-def resolve_artifact_dir(gremlin_id: str | None = None) -> pathlib.Path:
-    """Resolve the artifacts directory for the current run."""
-    scratch = pathlib.Path(scratch_root(gremlin_id))
-    if gremlin_id:
-        artifact_dir = scratch / "artifacts"
-    else:
-        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        rand = secrets.token_hex(3)
-        artifact_dir = scratch / f"{ts}-{rand}" / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    return artifact_dir
 
 
 def write_state(state_dir: pathlib.Path, data: dict[str, Any]) -> None:
@@ -473,9 +455,6 @@ class State:
         self, name: str, sub_stage: object = None, *, parent_stage: str = ""
     ) -> None:
         self.data.set_stage(name, sub_stage, parent_stage=parent_stage)
-
-    def record_state_field(self, **fields: Any) -> None:
-        self.data.patch(**fields)
 
     def make_runner(
         self,

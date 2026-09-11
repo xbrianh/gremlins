@@ -58,6 +58,14 @@ Rust layer. All schema functions are now **active** — the Python
 `gremlins/pipeline/loader.py` has been deleted and all call sites import
 from `_gremlins_core.schemas`.
 
+> **Reading the `Status` column:** **Active** here means *"has >=1 Python
+> caller"* (see "How to check whether a Rust function is live" below) — it
+> is **not** a guarantee that the binding must stay. Three rows
+> (`check_duplicate_producers`, `fill_stage_clients`, `list_bundled_prompts`)
+> currently have **0 Python call sites** and are deliberate **KEEPs**
+> (documented scaffolding / called from within Rust only). No row in this
+> table was deleted by the section-D Python/Rust surface cleanup.
+
 | Rust export | Status |
 |---|---|
 | `parse_stage` | **Active**. Imported in `gremlins/spawn/child.py` and `gremlins/stages/sequence.py`. |
@@ -98,7 +106,6 @@ The Python `gremlins/pipeline/discovery.py` has been deleted.
 
 | File | Role |
 |---|---|
-| `gremlins/_core.py` | Shim: `import _gremlins_core as _core; __all__ = ["_core"]` |
 | `gremlins/utils/proc.py` | Re-exports `_gremlins_core.utils.proc.*` — **active** |
 | `gremlins/clients/__init__.py` | Wraps `_gremlins_core.clients.RustClient` — **active** |
 | `gremlins/pipeline/discovery.py` | ~~Pure Python `list_pipelines`, `resolve_pipeline_name`, `resolve_pipeline_path` — **active**~~ **deleted** — replaced by `_gremlins_core.discovery.*` |

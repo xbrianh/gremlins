@@ -46,7 +46,7 @@ fn trunc(s: &str, n: usize) -> String {
     }
 }
 
-pub fn emit_init(prefix: &str, model: &str, cwd: &str, reasoning_effort: Option<&str>) {
+pub(crate) fn emit_init(prefix: &str, model: &str, cwd: &str, reasoning_effort: Option<&str>) {
     let effort = trunc(reasoning_effort.unwrap_or("default"), 50);
     eprintln!(
         "{} {}init model={} cwd={} reasoning_effort={}",
@@ -58,11 +58,11 @@ pub fn emit_init(prefix: &str, model: &str, cwd: &str, reasoning_effort: Option<
     );
 }
 
-pub fn emit_text(prefix: &str, text: &str) {
+pub(crate) fn emit_text(prefix: &str, text: &str) {
     eprintln!("{} {}text: {}", ts_internal(), prefix, trunc(text, 200));
 }
 
-pub fn emit_think(prefix: &str, thinking: &str) {
+pub(crate) fn emit_think(prefix: &str, thinking: &str) {
     eprintln!(
         "{} {}think: {}",
         ts_internal(),
@@ -71,7 +71,7 @@ pub fn emit_think(prefix: &str, thinking: &str) {
     );
 }
 
-pub fn emit_tool(prefix: &str, name: &str, arg: &str) {
+pub(crate) fn emit_tool(prefix: &str, name: &str, arg: &str) {
     eprintln!(
         "{} {}tool: {} {}",
         ts_internal(),
@@ -81,7 +81,7 @@ pub fn emit_tool(prefix: &str, name: &str, arg: &str) {
     );
 }
 
-pub fn emit_result(prefix: &str, content: &str, is_error: bool) {
+pub(crate) fn emit_result(prefix: &str, content: &str, is_error: bool) {
     let err = if is_error { " ERROR" } else { "" };
     eprintln!(
         "{} {}result{}: {}",
@@ -92,7 +92,7 @@ pub fn emit_result(prefix: &str, content: &str, is_error: bool) {
     );
 }
 
-pub fn flush() {
+pub(crate) fn flush() {
     let _ = std::io::stderr().flush();
 }
 

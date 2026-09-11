@@ -45,8 +45,6 @@ fn expand_pipeline(
     )
 }
 
-pub const GREMLINS_PREFIX: &str = schemas::GREMLINS_PREFIX;
-
 pub fn register_schemas_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let schemas_mod = PyModule::new(m.py(), "schemas")?;
 
@@ -54,7 +52,6 @@ pub fn register_schemas_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     schemas_mod.add_class::<schemas::bootstrap::InputSources>()?;
     schemas_mod.add_class::<schemas::bootstrap::Bootstrap>()?;
     schemas_mod.add_class::<schemas::pipeline::Pipeline>()?;
-    schemas_mod.add("GREMLINS_PREFIX", GREMLINS_PREFIX)?;
     schemas_mod.add_function(wrap_pyfunction!(parse_stage, &schemas_mod)?)?;
     schemas_mod.add_function(wrap_pyfunction!(parse_stages, &schemas_mod)?)?;
     schemas_mod.add_function(wrap_pyfunction!(fill_names, &schemas_mod)?)?;

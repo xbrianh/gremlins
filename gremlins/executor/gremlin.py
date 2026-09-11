@@ -111,16 +111,6 @@ def _apply_client_override(stages: Sequence[StageProtocol], cli: Client) -> None
             _apply_client_override(body, cli)
 
 
-def read_stage_inputs(sf: pathlib.Path | None) -> dict[str, Any]:
-    if sf is None or not sf.exists():
-        return {}
-    try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        return data.get("stage_inputs") or {}
-    except Exception:
-        return {}
-
-
 def _expand_stage_entries(raw_stages: Sequence[StageProtocol]) -> list[StageProtocol]:
     top_level_names = {e.name for e in raw_stages}
     child_names: set[str] = set()
@@ -655,10 +645,6 @@ class Gremlin:
             raise
 
         return self
-
-    @staticmethod
-    def validate_id(gremlin_id: str) -> None:
-        validate_gremlin_id(gremlin_id)
 
     @staticmethod
     def bail_info_for(gremlin_id: str) -> dict[str, str] | None:

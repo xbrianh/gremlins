@@ -1091,13 +1091,12 @@ def test_gather_commit_inputs_spec_present_reads_content(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# compose_commit_message — plan.md → commit subject/body
+# compose_commit_message_from_content — plan.md content → commit subject/body
 # ---------------------------------------------------------------------------
 
 
-def test_compose_commit_message_from_context_section(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text(
+def test_compose_commit_message_from_content_context_section():
+    content = (
         "# Some title\n\n"
         "## Context\n\n"
         "Implement retry logic for flaky API calls\n\n"
@@ -1106,14 +1105,13 @@ def test_compose_commit_message_from_context_section(tmp_path):
         "- [x] Wire into client layer\n"
         "- [ ] Write docs\n"
     )
-    subject, body = _land.compose_commit_message(str(plan))
+    subject, body = _land.compose_commit_message_from_content(content)
     assert subject == "Retry logic for flaky API calls"
     assert body == "- Add backoff decorator\n- Wire into client layer"
 
 
-def test_compose_commit_message_from_goal_section(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text(
+def test_compose_commit_message_from_content_goal_section():
+    content = (
         "# Remove FakeClaudeClient — rename to FakeClient\n\n"
         "## Goal\n\n"
         "FakeClaudeClient is dead. Rename and move it out of the production package.\n\n"
@@ -1121,106 +1119,28 @@ def test_compose_commit_message_from_goal_section(tmp_path):
         "1. Move the file\n"
         "2. Rename the class\n"
     )
-    subject, body = _land.compose_commit_message(str(plan))
+    subject, body = _land.compose_commit_message_from_content(content)
     assert "FakeClaudeClient is dead" in subject
     assert body == ""
 
 
-def test_compose_commit_message_falls_back_to_title(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text(
-        "# Remove FakeClaudeClient — rename, move, kill special-casing\n\n"
-        "## Background\n\n"
-        "Some background text here.\n\n"
-        "## Design sketch\n\n"
-        "1. Step one\n"
-    )
-    subject, body = _land.compose_commit_message(str(plan))
-    assert "Remove FakeClaudeClient" in subject
-    assert body == ""
-
-
-def test_compose_commit_message_falls_back_to_title_with_leading_blank(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text(
-        "\n# Title after a blank line\n\n## Background\n\nSome background text here.\n"
-    )
-    subject, body = _land.compose_commit_message(str(plan))
-    assert "Title after a blank line" in subject
-    assert body == ""
-
-
-def test_compose_commit_message_prefers_context_over_goal(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text(
-        "# Some title\n\n"
-        "## Goal\n\n"
-        "Goal paragraph here.\n\n"
-        "## Context\n\n"
-        "Context paragraph here.\n\n"
-    )
-    subject, _ = _land.compose_commit_message(str(plan))
-    assert subject == "Context paragraph here."
-
-
-def test_compose_commit_message_strips_verb_prefixes(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text(
+def test_compose_commit_message_from_content_strips_verb_prefixes():
+    content = (
         "# Title\n\n## Context\n\nimplement caching layer for database queries\n\n"
     )
-    subject, _ = _land.compose_commit_message(str(plan))
+    subject, _ = _land.compose_commit_message_from_content(content)
     assert subject == "Caching layer for database queries"
 
 
-def test_compose_commit_message_long_title_truncated(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text(
+def test_compose_commit_message_from_content_long_title_truncated():
+    content = (
         "# Title\n\n"
         "## Context\n\n"
         "This is a very long paragraph that exceeds seventy two characters easily "
         "and must be truncated\n\n"
     )
-    subject, _ = _land.compose_commit_message(str(plan))
+    subject, _ = _land.compose_commit_message_from_content(content)
     assert len(subject) <= 72
-
-
-def test_compose_commit_message_no_file_returns_fallback(tmp_path):
-    subject, body = _land.compose_commit_message(str(tmp_path / "nonexistent.md"))
-    assert subject == "Land gremlin branch"
-    assert body == ""
-
-
-def test_compose_commit_message_empty_context_paragraph_falls_back(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text(
-        "# Final fallback title\n\n## Context\n\n\n\n## Other stuff\n\nblah\n"
-    )
-    subject, body = _land.compose_commit_message(str(plan))
-    assert subject == "Final fallback title"
-    assert body == ""
-
-
-def test_compose_commit_message_empty_file(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text("")
-    subject, body = _land.compose_commit_message(str(plan))
-    assert subject == "Land gremlin branch"
-    assert body == ""
-
-
-def test_compose_commit_message_tasks_without_checkboxes_empty_body(tmp_path):
-    plan = tmp_path / "plan.md"
-    plan.write_text(
-        "# Title\n\n"
-        "## Context\n\n"
-        "Context body.\n\n"
-        "## Tasks\n\n"
-        "- [ ] Not done\n"
-        "- [ ] Also not done\n"
-    )
-    subject, body = _land.compose_commit_message(str(plan))
-    assert subject == "Context body."
-    assert body == ""
 
 
 # ---------------------------------------------------------------------------

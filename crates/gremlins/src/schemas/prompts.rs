@@ -5,7 +5,7 @@ use crate::assets;
 use crate::schemas::error::SchemaError;
 use crate::schemas::expand::GREMLINS_PREFIX;
 
-pub fn read_prompts(
+pub(crate) fn read_prompts(
     prompt_field: &serde_yaml::Value,
     prompt_dir: &Path,
     named_prompts: &HashMap<String, Vec<String>>,
@@ -70,7 +70,7 @@ pub fn read_prompts(
     Ok(texts)
 }
 
-pub fn read_bundled_prompt(name: &str) -> Result<String, SchemaError> {
+pub(crate) fn read_bundled_prompt(name: &str) -> Result<String, SchemaError> {
     let text = assets::PROMPTS
         .get(name)
         .ok_or_else(|| SchemaError::PromptFileNotFound {
@@ -84,7 +84,7 @@ pub fn read_bundled_prompt(name: &str) -> Result<String, SchemaError> {
     Ok(text.to_string())
 }
 
-pub fn read_prompt_file(path: &std::path::PathBuf) -> Result<String, SchemaError> {
+pub(crate) fn read_prompt_file(path: &std::path::PathBuf) -> Result<String, SchemaError> {
     if !path.exists() {
         return Err(SchemaError::PromptFileNotFound {
             path: path.display().to_string(),
@@ -101,7 +101,7 @@ pub fn read_prompt_file(path: &std::path::PathBuf) -> Result<String, SchemaError
     Ok(text)
 }
 
-pub fn parse_named_prompts(
+pub(crate) fn parse_named_prompts(
     prompts_raw: Option<&serde_yaml::Value>,
     prompt_dir: &Path,
 ) -> Result<HashMap<String, Vec<String>>, SchemaError> {

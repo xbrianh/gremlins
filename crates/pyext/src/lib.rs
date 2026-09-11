@@ -4,12 +4,6 @@ pub mod schemas;
 
 use pyo3::prelude::*;
 
-/// The version of the native extension.
-#[pyfunction]
-fn __version__() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
 /// The `_gremlins_core` native extension module.
 #[pymodule(name = "_gremlins_core")]
 fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -68,6 +62,5 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // discovery submodule
     python::discovery::register_discovery_module(m)?;
 
-    m.add_function(wrap_pyfunction!(__version__, m)?)?;
     Ok(())
 }

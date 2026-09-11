@@ -6,7 +6,6 @@ import os
 import pathlib
 import subprocess
 import sys
-from collections.abc import AsyncIterator
 from typing import Any
 
 from _gremlins_core.utils.proc import (
@@ -143,35 +142,6 @@ async def run_quiet_async(
     await proc.wait()
     assert proc.returncode is not None
     return proc.returncode
-
-
-async def run_or_raise_async(
-    cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
-) -> str:
-    r = await run_async(cmd, cwd=cwd, check=True)
-    stdout = r.stdout
-    if isinstance(stdout, bytes):
-        return stdout.decode().strip()
-    return stdout.strip()
-
-
-async def iter_lines(
-    stream: asyncio.StreamReader,
-    *,
-    idle_timeout: float | None = None,
-) -> AsyncIterator[bytes]:
-    """Yield newline-terminated lines from stream without a per-line size limit."""
-    buf = b""
-    while True:
-        chunk = await asyncio.wait_for(stream.read(4096), timeout=idle_timeout)
-        if not chunk:
-            if buf:
-                yield buf
-            return
-        buf += chunk
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            yield line + b"\n"
 
 
 async def terminate_with_grace(

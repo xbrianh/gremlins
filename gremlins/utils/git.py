@@ -10,7 +10,6 @@ Conventions:
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import pathlib
 import secrets
@@ -74,20 +73,6 @@ def has_commits(cwd: str | os.PathLike[str] | None = None) -> bool:
         return False
 
 
-def rev_exists(rev: str, cwd: str | os.PathLike[str] | None = None) -> bool:
-    try:
-        return proc.run_ok(["git", "rev-parse", "--verify", rev], cwd=cwd)
-    except OSError:
-        return False
-
-
-def has_diff(ref_a: str, ref_b: str, cwd: str | os.PathLike[str] | None = None) -> bool:
-    try:
-        return not proc.run_ok(["git", "diff", "--quiet", ref_a, ref_b], cwd=cwd)
-    except OSError:
-        return False
-
-
 def current_branch(cwd: str | os.PathLike[str] | None = None) -> str:
     """Return current branch name, or '' for detached HEAD or on error."""
     try:
@@ -124,39 +109,6 @@ def resolve_base_ref(
     raise GitError(
         128, f"base_ref {name!r} does not resolve to a branch, tag, or commit"
     )
-
-
-def fetch_origin(
-    branch: str,
-    *,
-    cwd: str | os.PathLike[str] | None = None,
-    timeout: float | None = None,
-) -> None:
-    """Fetch refs/heads/<branch> from origin into refs/remotes/origin/<branch>. Raises GitError."""
-    refspec = f"refs/heads/{branch}:refs/remotes/origin/{branch}"
-    _run_git(["fetch", "origin", refspec], cwd=cwd, timeout=timeout)
-
-
-def remote_ref_sha(ref: str, cwd: str | os.PathLike[str] | None = None) -> str:
-    """Return the SHA of <ref> (e.g. refs/remotes/origin/main). Raises GitError."""
-    r = _run_git(["rev-parse", ref], cwd=cwd)
-    return r.stdout.strip()
-
-
-def diff_output(
-    args: list[str] | None = None,
-    *,
-    cwd: str | os.PathLike[str] | None = None,
-) -> str:
-    """Return stdout of `git diff [args]`. Raises GitError on failure."""
-    r = _run_git(["diff"] + (args or []), cwd=cwd)
-    return r.stdout
-
-
-def log_patch(rev_range: str, *, cwd: str | os.PathLike[str] | None = None) -> str:
-    """Return stdout of `git log --patch <rev_range>`. Raises GitError on failure."""
-    r = _run_git(["log", "--patch", rev_range], cwd=cwd)
-    return r.stdout
 
 
 def is_ancestor(
@@ -205,21 +157,6 @@ def ff_merge(ref: str, *, cwd: str | os.PathLike[str] | None = None) -> None:
     _run_git(["merge", "--ff-only", ref], cwd=cwd)
 
 
-def branch_exists(branch: str, *, cwd: str | os.PathLike[str] | None = None) -> bool:
-    try:
-        return proc.run_ok(
-            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=cwd
-        )
-    except OSError:
-        return False
-
-
-def delete_branch(
-    branch: str, *, force: bool = False, cwd: str | os.PathLike[str] | None = None
-) -> None:
-    _run_git(["branch", "-D" if force else "-d", branch], cwd=cwd)
-
-
 def try_fetch_all(
     remote: str = "origin",
     *,
@@ -263,30 +200,6 @@ def ls_others(*, cwd: str | os.PathLike[str] | None = None) -> str:
         return r.stdout.strip()
     except Exception:
         return ""
-
-
-@dataclasses.dataclass
-class Commit:
-    sha: str
-    subject: str
-
-
-def commits_since(
-    ref: str, *, cwd: str | os.PathLike[str] | None = None
-) -> list[Commit]:
-    """Return commits reachable from HEAD but not from ref, oldest first."""
-    r = _run_git(["log", f"{ref}..HEAD", "--format=%H %s", "--reverse"], cwd=cwd)
-    result: list[Commit] = []
-    for line in r.stdout.splitlines():
-        sha, _, subject = line.partition(" ")
-        if sha:
-            result.append(Commit(sha=sha, subject=subject))
-    return result
-
-
-def checkout_detach(ref: str, *, cwd: str | os.PathLike[str] | None = None) -> None:
-    """Detach HEAD to <ref>. Raises GitError on failure."""
-    _run_git(["checkout", "--detach", ref], cwd=cwd)
 
 
 def setup_detached_worktree(

@@ -24,10 +24,6 @@ class FleetRow:
     age: str
     client: str
     desc: str
-    project_root: str
-    gremlin_id: str
-    wdir: str
-    closed: bool
 
 
 def build_row(
@@ -40,7 +36,6 @@ def build_row(
         if pipeline_path
         else str(state.get("kind") or "unknown")
     )[:15]
-    pr = state.get("project_root", "")
     stage = state.get("stage") or "-"
     sub = state.get("sub_stage")
     desc = state.get("description") or state.get("instructions") or ""
@@ -89,10 +84,6 @@ def build_row(
         age=age,
         client=str(client),
         desc=str(desc_trim),
-        project_root=str(pr),
-        gremlin_id=gremlin_id,
-        wdir=wdir,
-        closed=closed,
     )
 
 
