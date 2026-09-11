@@ -304,22 +304,6 @@ impl PyExec {
         self.skip_if_exists = value;
     }
 
-    #[pyo3(signature = (text, state, extra = None))]
-    fn substitute_vars(
-        slf: PyRef<'_, Self>,
-        text: &str,
-        state: &Bound<'_, PyAny>,
-        extra: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<String> {
-        let str_opts = base::string_options(&slf.inner.options);
-        let extra_map: HashMap<String, String> = extra
-            .map(|d| d.extract().unwrap_or_default())
-            .unwrap_or_default();
-        let fw: HashMap<String, String> =
-            state.call_method1("framework_subs", (slf,))?.extract()?;
-        Ok(base::substitute_vars(text, &str_opts, &extra_map, &fw))
-    }
-
     fn _run_impl<'py>(
         slf: PyRef<'_, Self>,
         py: Python<'py>,
@@ -690,22 +674,6 @@ impl PyAgent {
     #[setter]
     fn set_skip_if_exists(&mut self, value: String) {
         self.skip_if_exists = value;
-    }
-
-    #[pyo3(signature = (text, state, extra = None))]
-    fn substitute_vars(
-        slf: PyRef<'_, Self>,
-        text: &str,
-        state: &Bound<'_, PyAny>,
-        extra: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<String> {
-        let str_opts = base::string_options(&slf.inner.options);
-        let extra_map: HashMap<String, String> = extra
-            .map(|d| d.extract().unwrap_or_default())
-            .unwrap_or_default();
-        let fw: HashMap<String, String> =
-            state.call_method1("framework_subs", (slf,))?.extract()?;
-        Ok(base::substitute_vars(text, &str_opts, &extra_map, &fw))
     }
 
     fn _run_impl<'py>(
