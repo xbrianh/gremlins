@@ -159,6 +159,23 @@ pub fn within_worktree(p: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
+fn roots_suffix(roots: &[PathBuf]) -> String {
+    // Normalized, to match the paths the containment checks actually compare
+    // against — raw roots read misleadingly under symlinked ancestors
+    // (/var -> /private/var).
+    let mut parts: Vec<String> = roots
+        .iter()
+        .filter_map(|r| normalize_path(r))
+        .map(|r| r.display().to_string())
+        .collect();
+    parts.sort();
+    parts.dedup();
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("\n→ sandbox roots: {}", parts.join(", "))
+}
+
 /// Lexical-leaf containment for [`bash_check`] ONLY.
 ///
 /// Resolves symlinked ancestor *directories* (so `/var` -> `/private/var` and
@@ -209,7 +226,10 @@ fn expand_user(s: &str) -> String {
 pub fn enforce(roots: &[PathBuf], pth: &str, cwd: Option<&Path>) -> Option<String> {
     let p = resolve(pth, cwd);
     if !within_worktree(&p, roots) {
-        return Some(format!("Error: path outside sandbox: {pth}"));
+        return Some(format!(
+            "Error: path outside sandbox: {pth}{}",
+            roots_suffix(roots)
+        ));
     }
     None
 }
@@ -239,8 +259,9 @@ pub fn io_enforce(path: &Path, roots: &[PathBuf]) -> Option<String> {
     }
     if !allowed {
         return Some(format!(
-            "Error: path outside sandbox (resolved): {}",
-            real.display()
+            "Error: path outside sandbox (resolved): {}{}",
+            real.display(),
+            roots_suffix(roots)
         ));
     }
     None
@@ -310,7 +331,11 @@ fn check_cd(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> 
         let expanded = expand_user(&arg.value);
         let p = resolve(&expanded, cwd);
         if !within_worktree(&p, roots) {
-            return Some(format!("Error: cd target outside sandbox: {}", arg.value));
+            return Some(format!(
+                "Error: cd target outside sandbox: {}{}",
+                arg.value,
+                roots_suffix(roots)
+            ));
         }
     }
     None
@@ -543,8 +568,10 @@ pub fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<St
         // within_worktree_lexical for the rationale and the anti-regression note.
         if !within_worktree_lexical(&p, &canonical_roots) {
             return Some(format!(
-                "Error: path outside sandbox (from {}): {}",
-                tok.raw, tok.value
+                "Error: path outside sandbox (from {}): {}{}",
+                tok.raw,
+                tok.value,
+                roots_suffix(roots)
             ));
         }
     }
@@ -2674,6 +2701,79 @@ mod tests {
         let outside_file = outside.join("bad.txt");
         let err = enforce(&roots, outside_file.to_str().unwrap(), None).unwrap();
         assert!(err.contains("outside sandbox"));
+    }
+
+    // Independent of `normalize_path`: for existing dirs it must agree with
+    // plain canonicalization, so tests comparing against it are not tautological.
+    fn canon(p: &Path) -> String {
+        std::fs::canonicalize(p).unwrap().display().to_string()
+    }
+
+    fn sorted_canon(roots: &[PathBuf]) -> String {
+        let mut v: Vec<String> = roots.iter().map(|r| canon(r)).collect();
+        v.sort();
+        v.join(", ")
+    }
+
+    #[test]
+    fn roots_suffix_sorted_and_empty() {
+        // Creation order is deliberately `b`, `a`; the names make `a` sort
+        // first, so this fails if the sort is dropped.
+        let parent = tmp();
+        let (a, b) = (parent.join("aaa"), parent.join("bbb"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        assert_eq!(
+            roots_suffix(&[b.clone(), a.clone()]),
+            format!("\n→ sandbox roots: {}, {}", canon(&a), canon(&b))
+        );
+        assert_eq!(roots_suffix(&[]), "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn roots_suffix_dedups_symlink_alias() {
+        let dir = tmp();
+        let link = tmp().join("alias");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert_eq!(
+            roots_suffix(&[dir.clone(), link]),
+            format!("\n→ sandbox roots: {}", canon(&dir))
+        );
+    }
+
+    #[test]
+    fn enforce_denial_appends_sorted_roots() {
+        let worktree = tmp();
+        let scratch = tmp();
+        let outside = tmp().join("bad.txt");
+        let err = enforce(
+            &[worktree.clone(), scratch.clone()],
+            outside.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            err,
+            format!(
+                "Error: path outside sandbox: {}\n→ sandbox roots: {}",
+                outside.display(),
+                sorted_canon(&[worktree, scratch])
+            )
+        );
+    }
+
+    #[test]
+    fn bash_check_denial_appends_sorted_roots() {
+        let worktree = tmp();
+        let err = bash_check(std::slice::from_ref(&worktree), "cat /etc/passwd", None).unwrap();
+        assert_eq!(
+            err,
+            format!(
+                "Error: path outside sandbox (from /etc/passwd): /etc/passwd\n→ sandbox roots: {}",
+                canon(&worktree)
+            )
+        );
     }
 
     #[test]
