@@ -380,15 +380,12 @@ def test_loop_iter_scoping_with_exec_isolates_iterations(tmp_path, monkeypatch):
                     p.write_text("done")
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    from _gremlins_core.stages import _set_exec_shell_hook
-
-    _set_exec_shell_hook(controlled_shell)
-
     exec_stage = Exec(
         "cmd",
         {"cmds": ["true"]},
         bind_map={"done?": "artifact://{loop_iter}/done"},
     )
+    exec_stage._shell_fn = controlled_shell
 
     loop = LoopStage(
         "verify",

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Mutex;
 
 use gremlins::stages::agent as rust_agent;
 use gremlins::stages::base;
@@ -102,17 +101,6 @@ _m.Bail.__str__ = _str
 }
 
 // --- Exec pyclass ---
-
-/// Module-level shell hook for tests that can't access individual Exec instances.
-static SHELL_HOOK: Mutex<Option<Py<PyAny>>> = Mutex::new(None);
-
-#[pyfunction]
-fn _set_exec_shell_hook(hook: Option<Py<PyAny>>) -> PyResult<()> {
-    *SHELL_HOOK
-        .lock()
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? = hook;
-    Ok(())
-}
 
 #[pyclass(name = "Exec", module = "_gremlins_core.stages", skip_from_py_object)]
 struct PyExec {
@@ -420,18 +408,12 @@ impl PyExec {
             return asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs));
         }
 
-        // Resolve shell hook: per-instance overrides module-level (test seam).
-        let module_hook: Option<Py<PyAny>> =
-            SHELL_HOOK.lock().unwrap().as_ref().map(|f| f.clone_ref(py));
-        let shell_fn = slf
-            ._shell_fn
-            .as_ref()
-            .map(|f| f.clone_ref(py))
-            .or(module_hook);
+        // Resolve shell hook: per-instance _shell_fn (test seam).
+        let shell_fn = slf._shell_fn.as_ref().map(|f| f.clone_ref(py));
 
         // Non-empty commands: production path calls Rust directly (no nested
         // future_into_py, no Python round-trip). Test path uses a Python hook
-        // set via _shell_fn or _set_exec_shell_hook.
+        // set via _shell_fn.
         pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
             let shell_result = if let Some(shell_fn) = shell_fn {
                 // Test path: call the Python hook (async function returning
@@ -1020,7 +1002,6 @@ async def _agent_run_async(stage, gremlin):\n    return await stage._run_impl(gr
     let keys: Vec<&str> = FRAMEWORK_KEYS.iter().copied().collect();
     m.add("FRAMEWORK_KEYS", PyFrozenSet::new(py, &keys)?)?;
     m.add_function(wrap_pyfunction!(_is_bail_uri, &m)?)?;
-    m.add_function(wrap_pyfunction!(_set_exec_shell_hook, &m)?)?;
     m.add_function(wrap_pyfunction!(substitute_vars_py, &m)?)?;
 
     Ok(())

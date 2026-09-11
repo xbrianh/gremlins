@@ -6,10 +6,11 @@ from typing import TYPE_CHECKING, cast
 from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.schemas import Pipeline
 from _gremlins_core.stages import Agent
-from conftest import MINIMAL_EVENTS, MockGremlin, ReviewCreatingClient
+from conftest import MINIMAL_EVENTS, MockGremlin
 
 from gremlins.executor.state import StateData, build_state
 from gremlins.utils.yaml_io import load_bundled_prompt
+from tests.fake_client import FakeClient
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
@@ -78,7 +79,7 @@ def _init_git_repo(path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_review_code_stage(client: ReviewCreatingClient) -> Agent:
+def _make_review_code_stage(client: FakeClient) -> Agent:
     return Agent(
         "review-code",
         [
@@ -94,11 +95,15 @@ def _make_review_code_stage(client: ReviewCreatingClient) -> Agent:
 def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
     """When state.worktree is set (parallel child), client.run gets cwd=worktree
     so the model reads/writes the isolated worktree, not the parent process cwd."""
-    client = ReviewCreatingClient(fixtures={"review-code": MINIMAL_EVENTS})
+    client = FakeClient(fixtures={"review-code": MINIMAL_EVENTS})
     worktree = tmp_path / "wt"
     worktree.mkdir()
     artifact_dir = tmp_path / "session"
     artifact_dir.mkdir()
+    # Pre-create the bound output file so verify_produced passes.
+    (artifact_dir / "review-code-fake.md").write_text(
+        "# Review\n\n## Findings\nNone.\n"
+    )
     stage = _make_review_code_stage(client)
     state = build_state(
         data=StateData(),
@@ -112,7 +117,7 @@ def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
 
 
 def test_review_code_stage_includes_style_from_prompts(tmp_path):
-    client = ReviewCreatingClient(fixtures={"review-code": MINIMAL_EVENTS})
+    client = FakeClient(fixtures={"review-code": MINIMAL_EVENTS})
     stage = Agent(
         "review-code",
         [
@@ -125,6 +130,10 @@ def test_review_code_stage_includes_style_from_prompts(tmp_path):
     )
     artifact_dir = tmp_path / "session"
     artifact_dir.mkdir()
+    # Pre-create the bound output file so verify_produced passes.
+    (artifact_dir / "review-code-fake.md").write_text(
+        "# Review\n\n## Findings\nNone.\n"
+    )
     state = _make_state(client, artifact_dir)
     asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
     assert "Be good." in client.calls[0].prompt
