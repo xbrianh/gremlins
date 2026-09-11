@@ -153,7 +153,6 @@ class FakeClient:
         return CompletedRun(
             exit_code=0,
             text_result=result_text,
-            events=[json.dumps(e) for e in events] if capture_events else None,
             cost_usd=cost_usd,
             token_usage=token_usage,
         )

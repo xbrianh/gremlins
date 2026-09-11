@@ -77,10 +77,6 @@ impl PyUsageStats {
 }
 
 /// Python-exposed completed run result.
-///
-/// Events are JSON-encoded strings (one per event emitted by the backend)
-/// rather than parsed dicts — downstream consumers should call
-/// ``json.loads()`` on each element if they need structured access.
 #[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyCompletedRun {
@@ -88,7 +84,6 @@ pub struct PyCompletedRun {
     exit_code: i32,
     #[pyo3(get)]
     text_result: Option<String>,
-    _events: Option<Vec<String>>,
     #[pyo3(get)]
     cost_usd: Option<f64>,
     #[pyo3(get)]
@@ -101,14 +96,12 @@ impl PyCompletedRun {
     fn new(
         exit_code: i32,
         text_result: Option<String>,
-        events: Option<Vec<String>>,
         cost_usd: Option<f64>,
         token_usage: Option<PyUsageStats>,
     ) -> Self {
         Self {
             exit_code,
             text_result,
-            _events: events,
             cost_usd,
             token_usage,
         }
@@ -459,18 +452,7 @@ impl PyCompletedRun {
                 u.turns,
             )
         });
-        let events: Option<Vec<String>> = r.events.as_ref().map(|evts| {
-            evts.iter()
-                .map(|e| serde_json::to_string(e).unwrap_or_default())
-                .collect()
-        });
-        let instance = PyCompletedRun::new(
-            r.exit_code,
-            r.text_result.clone(),
-            events,
-            r.cost_usd,
-            usage,
-        );
+        let instance = PyCompletedRun::new(r.exit_code, r.text_result.clone(), r.cost_usd, usage);
         Ok(Py::new(py, instance)?.into_any())
     }
 }

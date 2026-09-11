@@ -69,6 +69,10 @@ impl Done {
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other.is_instance_of::<Self>()
     }
+
+    fn __hash__(&self) -> isize {
+        0
+    }
 }
 
 // --- Bail exception ---
