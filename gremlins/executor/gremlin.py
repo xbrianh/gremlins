@@ -631,14 +631,12 @@ class Gremlin:
             for key, value in (stage_inputs or {}).items():
                 if key in source_keys:
                     continue
-                if value is not None and not self.registry.is_registered(
-                    f"artifact://{key}"
-                ):
+                if value is not None and not self.registry.is_live(f"artifact://{key}"):
                     # Write stage inputs as artifact files
                     self.registry.write_into_registry(
                         Uri.parse(f"artifact://{key}"), str(value)
                     )
-            if not self.registry.is_registered("artifact://base_sha"):
+            if not self.registry.is_live("artifact://base_sha"):
                 sha = _git_mod.head_sha(cwd=self.worktree_dir)
                 if sha:
                     self.registry.write_into_registry(

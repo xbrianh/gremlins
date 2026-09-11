@@ -213,9 +213,9 @@ class LoopStage(Stage):
                     resolved = self._stop_when_exists.replace(
                         "{loop_iter}", state.loop_iter
                     )
-                    if state.artifacts.is_registered(
-                        resolved
-                    ) or state.artifacts.is_registered(f"artifact://{resolved}"):
+                    if state.artifacts.is_live(resolved) or state.artifacts.is_live(
+                        f"artifact://{resolved}"
+                    ):
                         logger.info(
                             "loop %s: stopped after %d iteration(s) — artifact %r produced",
                             self.name,

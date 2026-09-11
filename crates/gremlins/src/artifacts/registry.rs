@@ -147,8 +147,9 @@ impl ArtifactRegistry {
         Ok(resolved.to_string_lossy().to_string())
     }
 
-    /// Bind `key` to `path` and persist. Idempotent for an identical binding;
-    /// a conflicting binding is a `DuplicateArtifact` error.
+    /// Bind `key` to `path` and persist. The file at `path` must already exist;
+    /// idempotent for an identical binding; a conflicting binding is a
+    /// `DuplicateArtifact` error.
     pub fn commit(&mut self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(existing) = self.data.get(key) {
             if existing == path {
@@ -160,6 +161,12 @@ impl ArtifactRegistry {
                 existing: existing.clone(),
                 incoming: path.to_string(),
             }));
+        }
+        if !Path::new(path).exists() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("artifact {key:?} has no file at {path}"),
+            )));
         }
         self.data.insert(key.to_string(), path.to_string());
         log::debug!("commit: {:?} -> {:?}", key, path);
@@ -236,6 +243,23 @@ impl ArtifactRegistry {
 
     pub fn is_registered(&self, key: &str) -> bool {
         self.data.contains_key(key)
+    }
+
+    /// True when `key` is registered and its file is still on disk.
+    /// Non-file values (git://…, raw strings) are live on membership alone.
+    pub fn is_live(&self, key: &str) -> bool {
+        let value = match self.data.get(key) {
+            Some(v) => v,
+            None => return false,
+        };
+        let p = if let Some(name) = value.strip_prefix("file://session/") {
+            self.artifact_dir.join(name)
+        } else if let Some(rest) = value.strip_prefix("file://") {
+            PathBuf::from(rest)
+        } else {
+            PathBuf::from(value)
+        };
+        !p.is_absolute() || fs::metadata(&p).is_ok()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &String> {
@@ -417,17 +441,63 @@ mod tests {
         let mut reg = ArtifactRegistry::new(artifact_dir);
         let uri = Uri::parse("artifact://a.txt").unwrap();
         let path = reg.path_for_uri(&uri).unwrap();
+        fs::write(&path, "").unwrap();
         reg.commit("artifact://a.txt", &path).unwrap();
         reg.commit("artifact://a.txt", &path).unwrap();
     }
 
     #[test]
+    fn test_commit_rejects_missing_file() {
+        let (tmp, artifact_dir) = setup();
+        let mut reg = ArtifactRegistry::new(artifact_dir);
+        let missing = tmp.path().join("does-not-exist.txt");
+        let err = reg
+            .commit("artifact://gone.txt", &missing.to_string_lossy())
+            .unwrap_err();
+        assert!(err.to_string().contains("has no file at"));
+        assert!(!reg.is_registered("artifact://gone.txt"));
+    }
+
+    #[test]
     fn test_commit_conflicting_path_raises() {
+        let (tmp, artifact_dir) = setup();
+        let mut reg = ArtifactRegistry::new(artifact_dir);
+        let one = tmp.path().join("one");
+        let two = tmp.path().join("two");
+        fs::write(&one, "").unwrap();
+        fs::write(&two, "").unwrap();
+        reg.commit("artifact://a.txt", &one.to_string_lossy())
+            .unwrap();
+        let err = reg
+            .commit("artifact://a.txt", &two.to_string_lossy())
+            .unwrap_err();
+        assert!(err.to_string().contains("duplicate artifact"));
+    }
+
+    #[test]
+    fn test_is_live_true_after_write() {
         let (_tmp, artifact_dir) = setup();
         let mut reg = ArtifactRegistry::new(artifact_dir);
-        reg.commit("artifact://a.txt", "/tmp/one").unwrap();
-        let err = reg.commit("artifact://a.txt", "/tmp/two").unwrap_err();
-        assert!(err.to_string().contains("duplicate artifact"));
+        write_file(&mut reg, "live.txt", "data");
+        assert!(reg.is_live("artifact://live.txt"));
+    }
+
+    #[test]
+    fn test_is_live_false_after_delete() {
+        let (_tmp, artifact_dir) = setup();
+        let mut reg = ArtifactRegistry::new(artifact_dir);
+        let path = write_file(&mut reg, "dead.txt", "data");
+        assert!(reg.is_live("artifact://dead.txt"));
+        fs::remove_file(&path).unwrap();
+        assert!(reg.is_registered("artifact://dead.txt"));
+        assert!(!reg.is_live("artifact://dead.txt"));
+    }
+
+    #[test]
+    fn test_is_live_false_for_unregistered_key() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        assert!(!reg.is_live("artifact://never"));
     }
 
     #[test]

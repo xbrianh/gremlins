@@ -163,6 +163,10 @@ impl ArtifactRegistry {
         self.inner.lock().unwrap().is_registered(key)
     }
 
+    fn is_live(&self, key: &str) -> bool {
+        self.inner.lock().unwrap().is_live(key)
+    }
+
     fn keys(&self) -> Vec<String> {
         self.inner.lock().unwrap().keys().cloned().collect()
     }

@@ -80,6 +80,28 @@ def test_loop_stops_when_stop_when_exists_artifact_is_bound(tmp_path):
     assert calls == ["run"]
 
 
+def test_loop_does_not_stop_on_stale_registered_done(tmp_path):
+    """A registered-but-deleted stop artifact must not stop the loop."""
+    loop_state = _loop_state(tmp_path)
+    _set_done(loop_state)
+    pathlib.Path(loop_state.artifacts.data_uri("artifact://done.txt")).unlink()
+    calls: list[str] = []
+
+    async def runner() -> Done:
+        calls.append("run")
+        return Done()
+
+    loop = LoopStage(
+        "loop",
+        body_runners=[runner],
+        max_iterations=2,
+        stop_when_exists="artifact://done.txt",
+    )
+    with pytest.raises(Bail):
+        asyncio.run(loop.run(_make_gremlin_wrapper(loop_state)))
+    assert calls == ["run", "run"]
+
+
 def test_loop_cmd_failure_then_fix_then_green(tmp_path):
     """Body runs fully each iteration. Fix sets done on second try."""
     loop_state = _loop_state(tmp_path)

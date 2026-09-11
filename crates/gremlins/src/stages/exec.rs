@@ -121,7 +121,8 @@ pub fn prepare_exec(
             name: name.clone(),
             detail: e.to_string(),
         })?;
-        if artifacts.is_registered(&uri_str) {
+        // Optional binds are skipped when a sibling already committed the URI.
+        if !optional && artifacts.is_registered(&uri_str) {
             return Err(ExecError::Generic {
                 name: name.clone(),
                 detail: format!("artifact {uri_str:?} is already registered — duplicate producer"),
@@ -361,6 +362,43 @@ impl crate::stages::base::Stage for Exec {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn test_commit_exec_optional_bind_ignores_duplicate_registration() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let mut registry = ArtifactRegistry::new(artifact_dir);
+
+        // A sibling already committed this URI.
+        let uri = Uri::parse("artifact://out.txt").unwrap();
+        registry.write_into_registry(&uri, "existing").unwrap();
+
+        let fw = HashMap::new();
+
+        // Optional bind: skipped, not an error.
+        let optional_exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
+        };
+        let prepared = prepare_exec(&optional_exec, &mut registry, "", &fw).unwrap();
+        assert_eq!(prepared.bind_uris[0].0, "out");
+        assert!(prepared.bind_uris[0].2);
+
+        // Non-optional bind: still a duplicate-producer error.
+        let non_optional_exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+        };
+        let err = prepare_exec(&non_optional_exec, &mut registry, "", &fw)
+            .err()
+            .expect("expected duplicate-producer error");
+        assert!(matches!(err, ExecError::Generic { .. }));
+    }
 
     #[test]
     fn test_commit_exec_missing_non_optional_errors() {

@@ -307,7 +307,7 @@ def test_single_file_out_missing_source_raises(tmp_path):
         asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
 
-# --- multi-file out: auto-management (best-effort) ---
+# --- multi-file out: auto-management ---
 
 
 def test_multi_file_out_prompt_gets_per_key_paths(tmp_path):
@@ -316,9 +316,9 @@ def test_multi_file_out_prompt_gets_per_key_paths(tmp_path):
     agent = _make_agent(
         prompts=["Write to {blah}, {foo}, {biz}"],
         bind_map={
-            "blah": "file://session/blah.md",
-            "foo": "file://session/foo.md",
-            "biz": "file://session/biz.md",
+            "blah?": "file://session/blah.md",
+            "foo?": "file://session/foo.md",
+            "biz?": "file://session/biz.md",
         },
     )
 
@@ -352,7 +352,7 @@ def test_multi_file_out_renames_only_written_files(tmp_path):
         bind_map={
             "blah": "file://session/blah.md",
             "foo": "file://session/foo.md",
-            "biz": "file://session/biz.md",
+            "biz?": "file://session/biz.md",
         },
     )
 
@@ -446,7 +446,22 @@ def test_child_state_falls_back_to_parent_when_not_explicit(tmp_path):
     assert child.client is not agent.client
 
 
-def test_multi_file_out_missing_files_do_not_raise(tmp_path):
+def test_multi_file_out_missing_optional_files_do_not_raise(tmp_path):
+    client = FakeClient(fixtures={"my-agent": MINIMAL_EVENTS})
+    state = _make_state(tmp_path, client)
+    agent = _make_agent(
+        prompts=["Write nothing"],
+        bind_map={
+            "blah?": "file://session/blah.md",
+            "foo?": "file://session/foo.md",
+        },
+    )
+
+    result = asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
+    assert isinstance(result, Done)
+
+
+def test_multi_file_out_missing_non_optional_raises(tmp_path):
     client = FakeClient(fixtures={"my-agent": MINIMAL_EVENTS})
     state = _make_state(tmp_path, client)
     agent = _make_agent(
@@ -457,8 +472,8 @@ def test_multi_file_out_missing_files_do_not_raise(tmp_path):
         },
     )
 
-    result = asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
-    assert isinstance(result, Done)
+    with pytest.raises(Bail, match="was not produced"):
+        asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
 
 # ---------------------------------------------------------------------------

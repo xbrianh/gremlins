@@ -58,6 +58,7 @@ def test_commit_idempotent_same_path(tmp_path: pathlib.Path) -> None:
     r = make_registry(tmp_path)
     uri = Uri.parse("artifact://x.md")
     path = r.path_for_uri(uri)
+    pathlib.Path(path).write_text("")
     r.commit(str(uri), path)
     r.commit(str(uri), path)
     assert r.data_uri(str(uri)) == path
@@ -66,10 +67,38 @@ def test_commit_idempotent_same_path(tmp_path: pathlib.Path) -> None:
 def test_commit_conflicting_path_raises(tmp_path: pathlib.Path) -> None:
     r = make_registry(tmp_path)
     uri = Uri.parse("artifact://x.md")
-    r.commit(str(uri), "/tmp/one")
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.write_text("")
+    two.write_text("")
+    r.commit(str(uri), str(one))
     with pytest.raises(DuplicateArtifact) as exc_info:
-        r.commit(str(uri), "/tmp/two")
+        r.commit(str(uri), str(two))
     assert str(uri) in str(exc_info.value)
+
+
+def test_commit_rejects_missing_file(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    with pytest.raises(ValueError):
+        r.commit("artifact://gone.md", str(tmp_path / "nope.md"))
+    assert not r.is_registered("artifact://gone.md")
+
+
+def test_is_live_true_after_write(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    uri = Uri.parse("artifact://live.md")
+    r.write_into_registry(uri, "data")
+    assert r.is_live(str(uri))
+
+
+def test_is_live_false_after_unlink(tmp_path: pathlib.Path) -> None:
+    r = make_registry(tmp_path)
+    uri = Uri.parse("artifact://dead.md")
+    path = r.write_into_registry(uri, "data")
+    assert r.is_live(str(uri))
+    pathlib.Path(path).unlink()
+    assert r.is_registered(str(uri))
+    assert not r.is_live(str(uri))
 
 
 def test_write_into_registry_writes_file(tmp_path: pathlib.Path) -> None:

@@ -98,7 +98,7 @@ def test_bind_file_scheme_binds_and_verifies(tmp_path):
     result = asyncio.run(stage.run(MockGremlin(state=state)))
     assert isinstance(result, Done)
     assert state.artifacts.is_registered("file://session/out.txt")
-    # register stores the resolved filesystem path, not the original URI
+    # the registry binds the resolved filesystem path, not the original URI
 
 
 def test_bind_file_scheme_missing_file_raises(tmp_path):
