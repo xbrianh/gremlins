@@ -570,9 +570,13 @@ def test_child_logs_survive_fan_in_cleanup(
     )
 
     stages = [_child_stage(k) for k in ("child-a", "child-b")]
+    child_ids = ("child-a", "child-b")
+    scratch_dirs = {
+        key: pathlib.Path(scratch_root(f"{gremlin_id}--g--{key}")) for key in child_ids
+    }
     states = []
-    for key in ("child-a", "child-b"):
-        session = pathlib.Path(scratch_root(f"{gremlin_id}--g--{key}")) / "artifacts"
+    for key in child_ids:
+        session = scratch_dirs[key] / "artifacts"
         session.mkdir(parents=True, exist_ok=True)
         child_data = StateData(gremlin_id=gremlin_id)
         child_data.state_file = sf
@@ -590,11 +594,15 @@ def test_child_logs_survive_fan_in_cleanup(
         )
     )
 
+    saved: dict[str, str] = {}
+
     async def _mock_exec(*args: Any, **_kwargs: Any) -> _FakeProcess:
+        if tuple(args[1:3]) != ("-m", "gremlins.spawn.child"):
+            return _FakeProcess(exit_code=0)
         spec_path = pathlib.Path(args[-1])
-        spec_path.parent.parent.joinpath("log").write_text(
-            f"stream failed for {spec_path.parent.name}\n", encoding="utf-8"
-        )
+        content = f"stream failed for {spec_path.name}\n"
+        saved[spec_path.parent.parent.name] = content
+        spec_path.parent.parent.joinpath("log").write_text(content, encoding="utf-8")
         result_path = pathlib.Path(str(spec_path) + ".result")
         result_path.write_text(
             json.dumps(
@@ -609,8 +617,12 @@ def test_child_logs_survive_fan_in_cleanup(
     asyncio.run(rt["g-fanin"]())
 
     logs_dir = state_dir / "logs"
-    assert (logs_dir / "child-a.log").exists()
-    assert (logs_dir / "child-b.log").exists()
+    assert len(saved) == 2
+    for key in child_ids:
+        assert (logs_dir / f"{key}.log").read_text(encoding="utf-8") == saved[
+            f"{gremlin_id}--g--{key}"
+        ]
+        assert not scratch_dirs[key].exists() or not list(scratch_dirs[key].iterdir())
 
 
 def test_terminate_with_grace_does_not_kill_descendants(
