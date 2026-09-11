@@ -1,10 +1,4 @@
-The plan for the implementation was:
-
-<plan>
-{plan}
-</plan>
-
-Address the following code review feedback:
+Address the following issues raised by the reviewers:
 
 ## Code review one
 
