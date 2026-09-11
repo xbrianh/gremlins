@@ -16,7 +16,7 @@ from conftest import make_parent_state
 
 from gremlins.executor.state import State, StateData, build_state, write_state
 from gremlins.stages import parallel as _parallel_mod
-from gremlins.stages.base import Stage
+from gremlins.stages.composite import StageAttrs
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils import proc as _proc_mod
 from tests.fake_client import FakeClient
@@ -92,10 +92,10 @@ def _patch_killpg(monkeypatch: pytest.MonkeyPatch) -> Any:
     _FAKE_PROCS.clear()
 
 
-def _child_stage(name: str) -> Stage:
+def _child_stage(name: str) -> StageAttrs:
     """Minimal stage with raw_dict set so _dispatch takes the subprocess path."""
 
-    class _Noop(Stage):
+    class _Noop(StageAttrs):
         type = "_resilience_noop"
 
         async def run(self, gremlin) -> Outcome:  # type: ignore[override]
@@ -116,7 +116,7 @@ def _child_state(artifact_dir: pathlib.Path) -> State:
 
 
 def _run_parallel(
-    stages: list[Stage],
+    stages: list[StageAttrs],
     states: list[State],
     parent_state: State,
     project_root: pathlib.Path,

@@ -67,8 +67,6 @@ impl Pipeline {
             )));
         }
 
-        py.import("gremlins._clients_init")?;
-
         // Determine project root: walk up parent chain to find .gremlins directory
         let project_root = {
             let mut p = path.parent();
@@ -108,7 +106,7 @@ impl Pipeline {
                         "default_client must be a non-empty string",
                     ));
                 }
-                let client_cls = py.import("_gremlins_core.clients")?.getattr("RustClient")?;
+                let client_cls = py.import("_gremlins_core.clients")?.getattr("Client")?;
                 let client: Py<PyAny> = client_cls.call_method1("parse", (s,))?.extract()?;
                 Ok(client)
             })
@@ -222,7 +220,7 @@ impl Pipeline {
         let default_client = match (default_client, default_client_override) {
             (Some(dc), _) => Some(dc),
             (None, Some(override_str)) => {
-                let client_cls = py.import("_gremlins_core.clients")?.getattr("RustClient")?;
+                let client_cls = py.import("_gremlins_core.clients")?.getattr("Client")?;
                 Some(
                     client_cls
                         .call_method1("parse", (override_str,))?
@@ -235,8 +233,7 @@ impl Pipeline {
                     .and_then(|cfg| cfg.default_client().map(String::from));
                 match cfg_default {
                     Some(client_str) => {
-                        let client_cls =
-                            py.import("_gremlins_core.clients")?.getattr("RustClient")?;
+                        let client_cls = py.import("_gremlins_core.clients")?.getattr("Client")?;
                         let client: Py<PyAny> =
                             client_cls.call_method1("parse", (client_str,))?.extract()?;
                         Some(client)

@@ -10,18 +10,16 @@ from collections.abc import Generator
 from typing import Any
 
 import pytest
-from _gremlins_core.clients import CLIENT_FACTORIES
 from _gremlins_core.schemas import STAGE_TYPES
 from _gremlins_core.stages import Bail, Done, Outcome
 
 import gremlins.spawn.child as _rc
-from gremlins.stages.base import Stage
-from tests.fake_client import FakeClient
+from gremlins.stages.composite import StageAttrs
 
 
-class _SimpleStage(Stage):
+class _SimpleStage(StageAttrs):
     @classmethod
-    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> Stage:
+    def with_dict(cls, d: dict[str, Any], depth: int = 0) -> StageAttrs:
         return cls(d["name"])
 
 
@@ -53,12 +51,7 @@ def _register_test_stages(
     monkeypatch.setitem(STAGE_TYPES, "_test_done", _DoneStage)
     monkeypatch.setitem(STAGE_TYPES, "_test_bail", _BailStage)
     monkeypatch.setitem(STAGE_TYPES, "_test_raise", _RaiseStage)
-
-    saved = dict(CLIENT_FACTORIES)
-    CLIENT_FACTORIES["fake"] = lambda _model, _extra=None: FakeClient(fixtures={})
     yield
-    CLIENT_FACTORIES.clear()
-    CLIENT_FACTORIES.update(saved)
 
 
 def _write_spec(
@@ -69,7 +62,7 @@ def _write_spec(
 ) -> pathlib.Path:
     spec: dict[str, Any] = {
         "stage_dict": {"name": "test-stage", "type": stage_type},
-        "client": "fake:fake",
+        "client": "cmd:fake",
         "artifact_dir": str(tmp_path / "artifacts"),
     }
     if extra:
@@ -115,7 +108,7 @@ def test_build_state_missing_artifact_dir() -> None:
     from gremlins.executor.gremlin import Gremlin
 
     with pytest.raises(ValueError, match="artifact_dir"):
-        Gremlin.from_subprocess({"client": "fake:fake"})
+        Gremlin.from_subprocess({"client": "cmd:fake"})
 
 
 def test_run_done(tmp_path: pathlib.Path) -> None:
@@ -149,7 +142,7 @@ def test_run_stage_raises(tmp_path: pathlib.Path) -> None:
 def test_run_bad_spec_missing_stage_dict(tmp_path: pathlib.Path) -> None:
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(
-        json.dumps({"client": "fake:fake", "artifact_dir": str(tmp_path)}),
+        json.dumps({"client": "cmd:fake", "artifact_dir": str(tmp_path)}),
         encoding="utf-8",
     )
     rc = asyncio.run(_rc._run(spec_path))

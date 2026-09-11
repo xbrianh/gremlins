@@ -5,7 +5,7 @@ import textwrap
 from typing import Any
 
 import pytest
-from _gremlins_core.clients import RustClient as Client
+from _gremlins_core.clients import Client
 from _gremlins_core.schemas import Pipeline
 from _gremlins_core.schemas import expand_pipeline as _expand_pipeline
 from _gremlins_core.schemas import fill_names as _fill_names

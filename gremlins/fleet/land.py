@@ -12,7 +12,7 @@ import time
 from typing import Any, cast
 
 from _gremlins_core.artifacts import ArtifactRegistry, MissingArtifact
-from _gremlins_core.clients import RustClient as Client
+from _gremlins_core.clients import Client
 from _gremlins_core.config import project_root as _project_root_fn
 from _gremlins_core.config import scratch_root as _scratch_root_fn
 from _gremlins_core.config import state_root as _state_root_fn

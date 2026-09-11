@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.stages import _BAIL_KEY, Bail, Done, Outcome
 
-from gremlins.stages.base import Stage, get_client_from_dict
+from gremlins.stages.composite import StageAttrs, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ def _do_bail(gremlin: Gremlin, artifacts: ArtifactRegistry, loop_iter: str) -> N
     raise Bail(reason)
 
 
-class LoopStage(Stage):
+class LoopStage(StageAttrs):
     """Iterate body stages until max_iterations or a stop condition is met.
 
     Body stages execute in order every iteration. After each full body run:
@@ -78,7 +78,7 @@ class LoopStage(Stage):
         self,
         name: str,
         *,
-        body: list[Stage] | None = None,
+        body: list[Any] | None = None,
         body_runners: list[Callable[[], Awaitable[Outcome]]] | None = None,
         max_iterations: int,
         stop_when_exists: str | None = None,

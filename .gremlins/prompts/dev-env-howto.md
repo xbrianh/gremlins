@@ -87,7 +87,7 @@ This project has an incremental Rust port. Two crates exist:
   Re-exported by `gremlins/utils/proc.py`. Most call sites use it.
   A few still use `subprocess` directly: `gremlins/env_file.py`, `gremlins/queue/core.py`,
   `gremlins/utils/spawn_logged_process.py`, and some helpers in `gremlins/utils/proc.py`.
-- **`_gremlins_core.clients.RustClient`** — LLM client backend. Wrapped in
+- **`_gremlins_core.clients.Client`** — LLM client backend. Wrapped in
   `gremlins/clients/__init__.py`. Handles all provider API calls.
 - **`_gremlins_core.config`** — Config accessors (`project_root`, `scratch_root`,
   `state_root`, `overlay_dirname`, `work_root`, etc.).

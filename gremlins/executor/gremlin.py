@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, cast
 
 from _gremlins_core.artifacts import ArtifactRegistry, Uri
-from _gremlins_core.clients import RustClient as Client
+from _gremlins_core.clients import Client
 from _gremlins_core.config import project_root, scratch_root, state_root
 from _gremlins_core.discovery import resolve_pipeline_path
 from _gremlins_core.schemas import Pipeline as _PipelineData
@@ -26,7 +26,6 @@ from gremlins.executor.state import (
     write_state,
 )
 from gremlins.protocols import StageProtocol
-from gremlins.stages.base import Stage
 from gremlins.utils import git as _git_mod
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 from gremlins.utils.yaml_io import dump_yaml_text
@@ -161,7 +160,7 @@ class Gremlin:
 
     def __init__(
         self,
-        stages: list[Stage],
+        stages: list[StageProtocol],
         *,
         state_dir: pathlib.Path,
         gremlin_id: str | None,
@@ -659,7 +658,6 @@ class Gremlin:
     @classmethod
     def from_subprocess(cls, spec: dict[str, Any]) -> Gremlin:
         """Create a Gremlin from a subprocess spec (spawn/child schema)."""
-        import gremlins._clients_init  # noqa: F401  # pyright: ignore[reportUnusedImport] — registers built-in providers
 
         client_label = spec.get("client")
         if not isinstance(client_label, str) or not client_label:

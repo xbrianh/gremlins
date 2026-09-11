@@ -10,7 +10,7 @@ import pathlib
 import sys
 from typing import Any
 
-from _gremlins_core.clients import RustClient as Client
+from _gremlins_core.clients import Client
 from _gremlins_core.config import get_config, state_root
 
 from gremlins.fleet.resolve import resolve_gremlin

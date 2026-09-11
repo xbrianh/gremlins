@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from _gremlins_core.stages import Done, Outcome
 
-from gremlins.stages.base import Stage, get_client_from_dict
+from gremlins.stages.composite import StageAttrs, get_client_from_dict
 from gremlins.stages.composite import child_state as _child_state
 
 logger = logging.getLogger(__name__)
@@ -16,12 +16,12 @@ if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
 
 
-class SequenceStage(Stage):
+class SequenceStage(StageAttrs):
     """Run body stages sequentially using child state derived from parent."""
 
     type = "sequence"
 
-    def __init__(self, name: str, *, body: list[Stage] | None = None) -> None:
+    def __init__(self, name: str, *, body: list[Any] | None = None) -> None:
         super().__init__(name)
         self.body = body or []
         for c in self.body:

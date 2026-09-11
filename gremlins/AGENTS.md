@@ -18,7 +18,7 @@ review / address pipelines, the fleet manager
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
 - `pipeline/` — `Pipeline` dataclass + `Pipeline.from_yaml(path)` classmethod; `resolve_pipeline_path`; supports parallel stage groups. `pipeline/loader.py` holds `STAGE_TYPES`, the explicit dispatch table mapping type-name strings to Stage classes. YAML expansion (resolving `include:`, `prompt:`, and `type: <name>` macros) is handled by the Rust `expand_pipeline` in `_gremlins_core.schemas`.
 - `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
-- `stages/base.py` — `Stage` Protocol + `StageContext` dataclass: shared `client`, `artifact_dir`, `gremlin_id` threaded into every stage.
+- `stages/composite.py` — `StageAttrs` (common stage attributes) + `get_client_from_dict` + `child_state` for composite stages.
 - `stages/` — per-stage bodies: `plan`, `review_code`, `github_address_pull_request_reviews`, `verify`, `github_wait_copilot`, `github_wait_ci`, `handoff`.
 - `executor/state.py` — `State` class: execution context + `state.json` I/O.
 - `executor/run.py` — `run_main`. Drives the local pipeline.
