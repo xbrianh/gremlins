@@ -105,7 +105,6 @@ stages:
     type: agent
     prompt: [style_guide.md, dev-env-howto.md, address.md]
     interpolation:
-      plan: content("artifact://plan.md")
       review_one: content("artifact://review-one.md")
       review_two: content("artifact://review-two.md")
 
