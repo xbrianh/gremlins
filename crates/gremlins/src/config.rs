@@ -9,11 +9,30 @@ use serde_json::Value;
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
 /// System prompt injected into every agent stage.
-pub(crate) const AGENT_SYSTEM_PROMPT: &str = "\
+pub(crate) fn agent_system_prompt(
+    state_root: &Path,
+    work_root: &Path,
+    scratch_root: &Path,
+    project_root: &Path,
+) -> String {
+    format!(
+        "\
 Keep your context lean: delegate every self-contained piece of work to a subagent. Subagents \
 have isolated context — they absorb the noise so you don't have to. When you have multiple \
 independent tasks, fan them out with the parallel tool. Plan the fan-out before you start; \
-parallel work is cheaper than serial drift.\n";
+parallel work is cheaper than serial drift.\n\n\
+Directories you may write to:\n  \
+  Project root:  {project}\n  \
+  Work root:     {work}\n  \
+  Scratch root:  {scratch}\n  \
+  State root:    {state}\
+",
+        project = project_root.display(),
+        work = work_root.display(),
+        scratch = scratch_root.display(),
+        state = state_root.display(),
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Path overrides from config.json "paths" section

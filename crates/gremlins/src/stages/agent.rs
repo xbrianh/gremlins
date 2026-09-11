@@ -241,11 +241,13 @@ impl AgentPrepared {
     /// Assemble the final prompt: system prompt + workspace preamble + stage prompt.
     pub fn final_prompt(&self) -> String {
         let preamble = build_workspace_preamble(&self.cwd, self.worktree.as_deref());
-        format!(
-            "{}\n\n{preamble}\n\n{}",
-            crate::config::AGENT_SYSTEM_PROMPT,
-            self.prompt
-        )
+        let sys = crate::config::agent_system_prompt(
+            &crate::config::state_root(),
+            &crate::config::work_root(),
+            &crate::config::scratch_root(None),
+            &crate::config::project_root(),
+        );
+        format!("{sys}\n\n{preamble}\n\n{}", self.prompt)
     }
 }
 

@@ -1410,7 +1410,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
     // Subagent is always available, even when a tool filter is set.
     all.push(ToolDefinition {
         name: "subagent".into(),
-        description: "Delegate a single self-contained task to a worker with a clean conversation context. Use subagents aggressively: whenever a piece of work can be described in one instruction and doesn't need results from another subagent, delegate it. Multiple subagent calls in the same message run concurrently before results are returned. Pass `cwd` to run in a different working directory within the worktree. Returns the subagent's final text output.".into(),
+        description: "Delegate a single self-contained task to a worker with a clean conversation context. Multiple subagent calls in the same message run concurrently before results are returned. Pass `cwd` to run in a different working directory within the worktree. Returns the subagent's final text output.".into(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1430,7 +1430,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
     // Parallel is always available, even when a tool filter is set.
     all.push(ToolDefinition {
         name: "parallel".into(),
-        description: format!("Run multiple independent subagent tasks in parallel (at most {PARALLEL_MAX_TASKS}). Use this aggressively: whenever you have two or more tasks that don't depend on each other, batch them into a single parallel call. All tasks execute concurrently before results are returned. Each task gets an isolated conversation context but shares the worktree and tools. Each task's output is truncated to {PARALLEL_OUTPUT_LIMIT} characters and marked with …[truncated] when cut."),
+        description: format!("Run multiple independent subagent tasks in parallel (at most {PARALLEL_MAX_TASKS}). All tasks execute concurrently before results are returned. Each task gets an isolated conversation context but shares the worktree and tools. Each task's output is truncated to {PARALLEL_OUTPUT_LIMIT} characters and marked with …[truncated] when cut."),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
