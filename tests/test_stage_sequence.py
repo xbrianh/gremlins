@@ -8,11 +8,11 @@ import pathlib
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from _gremlins_core.executor import State as RuntimeState
+from _gremlins_core.executor import StateData, build_state
 from _gremlins_core.stages import Bail, Done, Outcome
 from conftest import MockGremlin, _make_gremlin_wrapper
 
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData, build_state
 from gremlins.stages.composite import StageAttrs
 from gremlins.stages.sequence import SequenceStage
 from tests.fake_client import FakeClient

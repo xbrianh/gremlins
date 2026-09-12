@@ -4,8 +4,8 @@ Internal pipeline execution package.
 
 ## Modules
 
-- `state.py` — `State` class: execution context + `state.json` I/O
-  (`resolve_state_file`, `validate_gremlin_id`).
+- `state.py` — removed; `State`/`StateData` + `state.json` I/O moved to the
+  Rust `_gremlins_core.executor` (`resolve_state_file`, `locked_update`).
 - `run.py` — `run_pipeline`: unified pipeline entry point. Parses argv, loads
   the pipeline YAML, wires clients, and delegates to `Gremlin`.
   Called by `gremlins.spawn.pipeline` (the subprocess entry point).

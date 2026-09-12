@@ -9,9 +9,9 @@ import shutil
 import subprocess
 
 import pytest
+from _gremlins_core.executor import StateData
 
 from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import StateData
 
 TRIVIAL_PIPELINE = """\
 default_client: openai:gpt-4o

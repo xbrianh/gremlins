@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import pathlib
 
+from _gremlins_core.executor import StateData
+
 from gremlins.executor.parallel_state import ParallelGroupState
-from gremlins.executor.state import StateData
 
 
 def _make_state(state_root: pathlib.Path, gremlin_id: str) -> pathlib.Path:

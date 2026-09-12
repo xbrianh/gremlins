@@ -18,15 +18,15 @@ import pathlib
 import subprocess
 import threading
 
+import _gremlins_core.executor as state_mod
 import pytest
+from _gremlins_core.executor import State, StateData, build_state
+from _gremlins_core.executor import locked_update as _state_locked_update
 from _gremlins_core.stages import Bail
 from conftest import make_parent_state
 
-import gremlins.executor.state as state_mod
 from gremlins.executor.gremlin import run_stages
-from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.parallel import ParallelStage
-from gremlins.utils.state_file import locked_update as _state_locked_update
 from tests.fake_client import FakeClient
 
 # ---------------------------------------------------------------------------

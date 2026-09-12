@@ -20,7 +20,6 @@ review / address pipelines, the fleet manager
 - `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
 - `stages/composite.py` — `StageAttrs` (common stage attributes) + `get_client_from_dict` + `child_state` for composite stages.
 - `stages/` — per-stage bodies: `plan`, `review_code`, `github_address_pull_request_reviews`, `verify`, `github_wait_copilot`, `github_wait_ci`, `handoff`.
-- `executor/state.py` — `State` class: execution context + `state.json` I/O.
 - `executor/run.py` — `run_main`. Drives the local pipeline.
 - `executor/pipeline.py` — `StageRunner`. Sequences stages for a pipeline run.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).

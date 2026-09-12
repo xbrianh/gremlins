@@ -12,10 +12,10 @@ from _gremlins_core.artifacts import (
     Uri,
     resolve_interpolation_map,
 )
+from _gremlins_core.executor import StateData, build_state
 from _gremlins_core.stages import Agent, Done, Exec
 from conftest import MINIMAL_EVENTS, MockGremlin
 
-from gremlins.executor.state import StateData, build_state
 from tests.fake_client import FakeClient
 
 

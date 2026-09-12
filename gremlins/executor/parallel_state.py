@@ -10,7 +10,7 @@ import pathlib
 import secrets as _secrets
 from typing import Any
 
-from gremlins.executor.state import StateData
+from _gremlins_core.executor import StateData
 
 logger = logging.getLogger(__name__)
 
