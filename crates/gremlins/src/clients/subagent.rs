@@ -1,12 +1,34 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use rig_core::completion::CompletionModel;
 
 use super::tools::{self, ToolContext};
 
 const MAX_DEPTH: u32 = 3;
+
+/// Per-process monotonic source of subagent id segments. A clock-derived value
+/// cannot separate siblings spawned microseconds apart, and duplicate segments
+/// are exactly the log ambiguity this id exists to remove.
+static SUBAGENT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_segment() -> String {
+    format!("{:x}", SUBAGENT_SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Append a segment to the parent chain, so grandchildren carry full lineage.
+fn extend_chain(parent: &str, seg: &str) -> String {
+    if parent.is_empty() {
+        seg.to_string()
+    } else {
+        format!("{parent}.{seg}")
+    }
+}
+
+fn subagent_prefix(base: &str, chain: &str) -> String {
+    format!("{base}[sub.{chain}] ")
+}
 
 /// Build a subagent runner closure. Called once per backend before the agent loop.
 /// The returned closure captures the model, tool filter, cancel token,
@@ -69,19 +91,8 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 return format!("Error: subagent max depth ({MAX_DEPTH}) exceeded");
             }
 
-            let nanos = std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u32;
-            let my_seg = format!("{:04x}", nanos & 0xFFFF);
-
-            let new_chain = if id_chain.is_empty() {
-                my_seg.clone()
-            } else {
-                format!("{id_chain}.{my_seg}")
-            };
-
-            let sub_prefix = format!("{}[sub.{new_chain}] ", prefix);
+            let new_chain = extend_chain(&id_chain, &next_segment());
+            let sub_prefix = subagent_prefix(&prefix, &new_chain);
 
             // Inject a child runner one level deeper so a nested subagent can
             // recurse again, bounded by MAX_DEPTH along this call chain.
@@ -135,6 +146,224 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::HashSet;
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
+
+    /// Base prefix of the format tests, so their lines can be told apart from
+    /// any other line that reaches the shared stderr capture.
+    const TEST_BASE: &str = "[sub-test] ";
+
+    #[test]
+    fn segments_do_not_collide_in_rapid_succession() {
+        let segs: HashSet<String> = (0..1000).map(|_| next_segment()).collect();
+        assert_eq!(segs.len(), 1000, "sibling segments must be distinct");
+    }
+
+    #[test]
+    fn chain_appends_and_prefix_wraps() {
+        assert_eq!(extend_chain("", "a"), "a");
+        assert_eq!(extend_chain("a", "b"), "a.b");
+        assert_eq!(extend_chain("a.b", "c"), "a.b.c");
+        assert_eq!(subagent_prefix("[base] ", "a.b"), "[base] [sub.a.b] ");
+    }
+
+    // --- stderr capture -----------------------------------------------------
+    // libtest replaces the test thread's stderr with an in-memory buffer, and
+    // `std::thread::spawn` propagates that capture to children, so `eprintln!`
+    // from the agent loop cannot be observed on fd 2 from a test thread. A raw
+    // pthread inherits no capture state, so the work runs there with fd 2
+    // pointed at a temp file.
+
+    static CAPTURE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    /// Panic captured off the raw-`pthread` job, re-raised on the test thread.
+    type Panic = Box<dyn std::any::Any + Send>;
+
+    static PANIC: Mutex<Option<Panic>> = Mutex::new(None);
+
+    static JOB: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+    extern "C" fn run_job(_: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
+        let job = JOB.lock().unwrap().take().expect("job queued before spawn");
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+            *PANIC.lock().unwrap() = Some(panic);
+        }
+        std::ptr::null_mut()
+    }
+
+    /// fd 2 is process-wide, so capturing tests take turns.
+    static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn capture_stderr(job: impl FnOnce() + Send + 'static) -> Vec<String> {
+        let _serialized = CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = std::env::temp_dir().join(format!(
+            "gremlins-sub-log-{}-{}",
+            std::process::id(),
+            CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        std::io::stderr().flush().unwrap();
+        let saved = unsafe { libc::dup(2) };
+        assert!(saved >= 0, "dup(stderr) failed");
+        assert!(
+            unsafe { libc::dup2(file.as_raw_fd(), 2) } >= 0,
+            "dup2(stderr) failed"
+        );
+
+        *JOB.lock().unwrap() = Some(Box::new(job));
+        let mut thread: libc::pthread_t = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe {
+                libc::pthread_create(&mut thread, std::ptr::null(), run_job, std::ptr::null_mut())
+            },
+            0,
+            "pthread_create failed"
+        );
+        assert_eq!(
+            unsafe { libc::pthread_join(thread, std::ptr::null_mut()) },
+            0,
+            "pthread_join failed"
+        );
+
+        std::io::stderr().flush().unwrap();
+        unsafe { libc::dup2(saved, 2) };
+        unsafe { libc::close(saved) };
+
+        let mut buf = String::new();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut buf)
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        if let Some(panic) = PANIC.lock().unwrap().take() {
+            std::panic::resume_unwind(panic);
+        }
+        buf.lines().map(str::to_string).collect()
+    }
+
+    /// `[sub.<chain>]` of every begin line this test's runner logged.
+    fn sub_prefixes(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l.contains(TEST_BASE) && l.contains("subagent: begin"))
+            .map(|l| {
+                let chain = l.split_once("[sub.").expect("begin line carries an id").1;
+                format!("[sub.{}]", chain.split_once(']').unwrap().0)
+            })
+            .collect()
+    }
+
+    fn segments_of(prefixes: &[String]) -> Vec<String> {
+        prefixes
+            .iter()
+            .map(|p| {
+                p.trim_start_matches("[sub.")
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn block_on(fut: impl std::future::Future) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(fut);
+    }
+
+    fn turn_text(text: &str) -> Vec<rig_core::test_utils::MockStreamEvent> {
+        vec![
+            rig_core::test_utils::MockStreamEvent::text(text),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]
+    }
+
+    fn turn_subagent_call() -> Vec<rig_core::test_utils::MockStreamEvent> {
+        vec![
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "c1",
+                "subagent",
+                serde_json::json!({"task": "child task"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]
+    }
+
+    fn runner_with_turns(
+        turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>,
+    ) -> tools::SubagentFn {
+        make_runner(
+            rig_core::test_utils::MockCompletionModel::from_stream_turns(turns),
+            None,
+            super::super::agent_loop::CancelToken::new(),
+            depth_test_ctx(),
+            TEST_BASE.to_string(),
+            5.0,
+            10,
+        )
+    }
+
+    #[test]
+    fn sub_prefix_wraps_a_single_segment_at_depth_one() {
+        let lines = capture_stderr(|| {
+            let runner = runner_with_turns(vec![turn_text("only")]);
+            block_on(runner("task".into(), None));
+        });
+        let segments = segments_of(&sub_prefixes(&lines));
+        assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
+        assert!(
+            segments[0].chars().all(|c| c.is_ascii_hexdigit()),
+            "segment should be an id, got {segments:?}"
+        );
+    }
+
+    /// The child runner the parent injects is what a nested call runs, so its
+    /// prefix must carry the parent's segment as lineage.
+    #[test]
+    fn nested_sub_prefix_appends_to_the_parent_chain() {
+        let lines = capture_stderr(|| {
+            let runner = runner_with_turns(vec![
+                turn_subagent_call(),
+                turn_text("leaf"),
+                turn_text("done"),
+            ]);
+            block_on(runner("task".into(), None));
+        });
+        let segments = segments_of(&sub_prefixes(&lines));
+        assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
+        let (parent, child) = (&segments[0], &segments[1]);
+        assert_eq!(
+            child.split('.').count(),
+            2,
+            "{child} should be a two-segment chain"
+        );
+        assert!(
+            child.starts_with(&format!("{parent}.")),
+            "child {child} should extend parent {parent}"
+        );
+    }
+
+    /// Two invocations of the same runner are siblings: distinct ids, no shared
+    /// parent segment.
+    #[test]
+    fn sibling_invocations_get_distinct_segments() {
+        let lines = capture_stderr(|| {
+            let runner = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
+            block_on(async {
+                runner("one".into(), None).await;
+                runner("two".into(), None).await;
+            });
+        });
+        let segments = segments_of(&sub_prefixes(&lines));
+        assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
+        assert_ne!(segments[0], segments[1], "siblings must not share an id");
+    }
 
     #[tokio::test]
     async fn make_runner_invokes_and_sets_subagent_fn() {
