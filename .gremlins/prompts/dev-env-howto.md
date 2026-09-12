@@ -1,3 +1,16 @@
+<important>
+You MUST delegate self-contained pieces of work to the Task tool.
+Tasks have isolated context — they absorb the noise so you don't have to.
+When you have multiple independent subtasks, issue multiple Task calls in
+the same message; they run concurrently and return results together. Plan
+the fan-out before you start. Use Tasks as scouts to explore options and
+gather information before committing to a direction.
+
+Every turn you spend doing work yourself is a turn that inflates your
+context and degrades your reasoning. Push work into Tasks to keep your
+context lean.
+</important>
+
 ## Development environment
 
 A Python virtual environment is available at `.venv` in the working directory.
