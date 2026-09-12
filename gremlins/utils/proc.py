@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import logging
 import os
 import pathlib
+import re
 import subprocess
 import sys
 from typing import Any
@@ -151,23 +153,57 @@ async def terminate_with_grace(
     await _terminate_with_grace(p.pid, grace_s=grace_s)
 
 
+_MAX_PENDING_BYTES = 64 * 1024
+
+# One record is everything up to and including \r\n, \r or \n; trailing text with
+# no terminator is the pending remainder.
+_RECORD = re.compile(r".*?(?:\r\n|\r|\n)|.+\Z", re.S)
+
+
+def _emit_prefixed_line(prefix: str, line: str, log_file: Any) -> None:
+    """Write one complete line to stdout (flushed) and optionally *log_file*,
+    swallowing errors on either path so a broken stream cannot kill the pump."""
+    try:
+        sys.stdout.write(f"[{prefix}] {line}")
+        sys.stdout.flush()
+    except Exception:
+        pass
+    if log_file is not None:
+        try:
+            log_file.write(line)
+        except Exception:
+            pass
+
+
 async def _pump_prefixed(
     stream: asyncio.StreamReader, prefix: str, *, log_file: Any = None
 ) -> None:
     # Read in chunks so a child emitting a huge un-newlined blob cannot deadlock
-    # by filling the pipe buffer. Re-split on newlines for the [prefix] label.
+    # by filling the pipe buffer. Only a *trailing partial* record is carried
+    # across reads, so the [prefix] label is never inserted mid-line; it is
+    # relayed at EOF, or once it outgrows _MAX_PENDING_BYTES so a child that
+    # writes progress without newlines stays live instead of buffering forever.
+    # A trailing bare \r is also held back: it may be the first half of a CRLF
+    # split across the boundary, and emitting it now would put the prefix
+    # between the carriage return and the newline.
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    pending = ""
     while True:
         chunk = await stream.read(4096)
         if not chunk:
+            tail = pending + decoder.decode(chunk, True)
+            if tail:
+                _emit_prefixed_line(
+                    prefix, tail if tail.endswith("\r") else tail + "\n", log_file
+                )
             break
-        for line in chunk.decode("utf-8", "replace").splitlines(keepends=True):
-            sys.stdout.write(f"[{prefix}] {line}")
-            if log_file is not None:
-                try:
-                    log_file.write(line)
-                except Exception:
-                    pass
-        sys.stdout.flush()
+        records = _RECORD.findall(pending + decoder.decode(chunk))
+        pending = records.pop() if records and not records[-1].endswith("\n") else ""
+        for record in records:
+            _emit_prefixed_line(prefix, record, log_file)
+        if len(pending) > _MAX_PENDING_BYTES:
+            _emit_prefixed_line(prefix, pending + "\n", log_file)
+            pending = ""
 
 
 async def spawn_with_pumps(

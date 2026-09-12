@@ -514,12 +514,38 @@ class _ParallelExecutor:
         for entry in sr.iterdir():
             if entry.name.startswith(prefix) and entry.is_dir():
                 shutil.rmtree(entry, ignore_errors=True)
-        # Clean up child scratch dirs under scratch_root.
+        # Preserve per-child logs before scratch cleanup: child scratch lives
+        # outside state_root, so the rmtree below is the last chance to keep
+        # output that a failed stdout pump never relayed.
+        state_dir = pathlib.Path(state_root()) / parent_gid
+        preserve = state_dir.is_dir()
+        if not preserve:
+            logger.warning(
+                "parallel %s: parent state dir %s is missing, child logs not preserved",
+                self._group_name,
+                state_dir,
+            )
         for child_key in self._stages_by_key:
             child_id = f"{parent_gid}--{self._group_name}--{child_key}"
             child_scratch = pathlib.Path(scratch_root(child_id))
-            if child_scratch.is_dir():
-                shutil.rmtree(child_scratch, ignore_errors=True)
+            child_log = child_scratch / "log"
+            if preserve and child_log.is_file():
+                self._save_child_log(child_log, state_dir / "logs" / f"{child_key}.log")
+            shutil.rmtree(child_scratch, ignore_errors=True)
+
+    def _save_child_log(self, src: pathlib.Path, dest: pathlib.Path) -> None:
+        try:
+            dest.parent.mkdir(exist_ok=True)
+            shutil.copy2(src, dest)
+            logger.debug("parallel %s: saved child log %s", self._group_name, dest)
+        except OSError as exc:
+            logger.warning(
+                "parallel %s: could not preserve child log %s -> %s: %s",
+                self._group_name,
+                src,
+                dest,
+                exc,
+            )
 
     def _gather_child_artifacts(self) -> None:
         """Copy child artifact bindings into the parent registry before child dirs are removed."""
