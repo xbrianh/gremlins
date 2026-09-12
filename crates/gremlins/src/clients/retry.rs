@@ -46,7 +46,6 @@ pub(crate) fn validate_max_retries(max_retries: usize) -> Result<(), String> {
 const TRANSIENT_SUBSTRINGS: &[&str] = &[
     "capacity",
     "rate limit",
-    "rate_limit",
     "too many requests",
     "try again",
     "please retry",
@@ -68,6 +67,10 @@ const TRANSIENT_SUBSTRINGS: &[&str] = &[
 ];
 
 pub(crate) fn is_transient_stream_error(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    TRANSIENT_SUBSTRINGS.iter().any(|s| lower.contains(s))
+    // Normalize snake_case JSON error types (e.g. `"type":"server_error"`) to
+    // their space-delimited form so they match the list above without needing
+    // per-provider spellings. This keeps the classifier keyed to the stable
+    // API error schema, not to any specific error `message` text.
+    let normalized = message.to_lowercase().replace('_', " ");
+    TRANSIENT_SUBSTRINGS.iter().any(|s| normalized.contains(s))
 }
