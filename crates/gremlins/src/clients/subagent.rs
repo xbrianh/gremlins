@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use rig_core::completion::CompletionModel;
 
@@ -35,6 +36,7 @@ pub(crate) fn make_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
         idle_timeout,
         max_turns,
         0,
+        String::new(),
     )
 }
 
@@ -48,6 +50,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
     idle_timeout: f64,
     max_turns: usize,
     depth: u32,
+    id_chain: String,
 ) -> tools::SubagentFn {
     Arc::new(move |task: String, cwd: Option<PathBuf>| {
         let model = model.clone();
@@ -55,6 +58,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
         let cancel = cancel.clone();
         let mut sub_ctx = ctx.clone();
         let prefix = prefix.clone();
+        let id_chain = id_chain.clone();
 
         if let Some(cwd) = cwd {
             sub_ctx.cwd = Some(cwd);
@@ -65,17 +69,25 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 return format!("Error: subagent max depth ({MAX_DEPTH}) exceeded");
             }
 
-            let sub_prefix = if depth == 0 {
-                format!("{}[sub] ", prefix)
+            let nanos = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u32;
+            let my_seg = format!("{:04x}", nanos & 0xFFFF);
+
+            let new_chain = if id_chain.is_empty() {
+                my_seg.clone()
             } else {
-                format!("{}[sub{depth}] ", prefix)
+                format!("{id_chain}.{my_seg}")
             };
+
+            let sub_prefix = format!("{}[sub.{new_chain}] ", prefix);
 
             // Inject a child runner one level deeper so a nested subagent can
             // recurse again, bounded by MAX_DEPTH along this call chain.
             // Pass the original `prefix` (not `sub_prefix`) so prefixes don't
-            // stack across nesting levels — each depth computes its own notation
-            // from the same base prefix.
+            // stack across nesting levels — each level appends its own id
+            // segment to the chain instead.
             sub_ctx.subagent_fn = Some(make_runner_at_depth(
                 model.clone(),
                 tool_filter.clone(),
@@ -85,6 +97,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 idle_timeout,
                 max_turns,
                 depth + 1,
+                new_chain,
             ));
 
             let scratch = crate::config::scratch_dir(None)
@@ -253,8 +266,17 @@ mod tests {
         let ctx = depth_test_ctx();
         let model = PendingModel;
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner =
-            make_runner_at_depth(model, None, cancel, ctx, String::new(), 0.2, 10, MAX_DEPTH);
+        let runner = make_runner_at_depth(
+            model,
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            0.2,
+            10,
+            MAX_DEPTH,
+            String::new(),
+        );
 
         let blocked = runner("too deep".into(), None).await;
         assert!(
