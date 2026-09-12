@@ -24,17 +24,20 @@ sequencing logic of their own.
   and `git://range` out-URIs. Stage type `"exec"`.
   Rust `PyExec` class in `_gremlins_core.stages.Exec`.
 
+- `loop` (type `"loop"`) — Iterates a `body: list[Stage]` until a
+  `stop_when_exists` artifact is bound or `max_iterations` is exhausted.
+  Rust `PyLoop` class in `_gremlins_core.stages.Loop` (with_dict in
+  `crates/gremlins/src/stages/loop.rs`; the async `run()` is injected
+  Python in `crates/pyext/src/python/stages.rs`). Body stages execute in
+  order on every iteration. After each full body run: if a bail artifact
+  is set, raises `Bail`; if the `stop_when_exists` artifact is bound,
+  returns `Done()`; if `max_iterations` is reached without stopping, raises
+  `Bail`. The stopping condition is declared explicitly in the pipeline
+  YAML via `stop_when_exists: <artifact-key>`. No magic `status=needs_fix`
+  marker or `head_stable` predicate.
+
 ## Python stages
 
-- `loop.py` — `LoopStage(Stage)`. Iterates a `body: list[Stage]` (or raw
-  `body_runners` callables) until `stop_when_exists` artifact is bound or
-  `max_iterations` is exhausted. Body stages execute in order on every
-  iteration. After each full body run: if a bail artifact is set, raises
-  `Bail`; if the `stop_when_exists` artifact is bound, returns `Done()`;
-  if `max_iterations` is reached without stopping, raises `Bail`. The
-  stopping condition is declared explicitly in the pipeline YAML via
-  `stop_when_exists: <artifact-key>`. No magic `status=needs_fix` marker
-  or `head_stable` predicate.
 - `parallel.py` — `ParallelStage(Stage)`. Constructed by the orchestrator
   with pre-built child runners; call `build_runtime_stages()` to get the
   three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`)

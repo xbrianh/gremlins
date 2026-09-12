@@ -8,7 +8,7 @@ use gremlins::schemas::loader as core_loader;
 
 pub const STAGE_TYPES: &[(&str, &str, &str)] = &[
     ("agent", "_gremlins_core.stages", "Agent"),
-    ("loop", "gremlins.stages.loop", "LoopStage"),
+    ("loop", "_gremlins_core.stages", "Loop"),
     ("parallel", "gremlins.stages.parallel", "ParallelStage"),
     ("sequence", "_gremlins_core.stages", "Sequence"),
     ("exec", "_gremlins_core.stages", "Exec"),

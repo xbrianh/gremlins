@@ -12,9 +12,8 @@ from _gremlins_core.artifacts import Uri
 from _gremlins_core.executor import State as RuntimeState
 from _gremlins_core.executor import StateData, build_state
 from _gremlins_core.stages import Bail, Done
+from _gremlins_core.stages import Loop as LoopStage
 from conftest import MockGremlin, _make_gremlin_wrapper
-
-from gremlins.stages.loop import LoopStage
 
 if TYPE_CHECKING:
     from gremlins.executor.gremlin import Gremlin
@@ -271,36 +270,6 @@ def test_loop_stale_bail_cleared_on_resume(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# stop_when_exists from YAML
-# ---------------------------------------------------------------------------
-
-
-def test_stop_when_exists_from_yaml(tmp_path):
-    """with_dict parses stop_when_exists from YAML."""
-    loop = LoopStage.with_dict(
-        {
-            "type": "loop",
-            "stop_when_exists": "done",
-            "max-iterations": "3",
-            "body": [],
-        }
-    )
-    assert loop._stop_when_exists == "done"
-
-
-def test_no_stop_when_exists_defaults_to_none(tmp_path):
-    """with_dict leaves stop_when_exists None when not in YAML."""
-    loop = LoopStage.with_dict(
-        {
-            "type": "loop",
-            "max-iterations": "3",
-            "body": [],
-        }
-    )
-    assert loop._stop_when_exists is None
-
-
-# ---------------------------------------------------------------------------
 # loop_iteration written to state.json
 # ---------------------------------------------------------------------------
 
@@ -479,9 +448,7 @@ def test_loop_interval_sleeps_between_iterations(tmp_path, monkeypatch):
     async def fake_sleep(secs: float) -> None:
         sleep_calls.append(secs)
 
-    import gremlins.stages.loop as _loop_mod
-
-    monkeypatch.setattr(_loop_mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     loop_state = _loop_state(tmp_path)
     count = [0]
@@ -511,9 +478,7 @@ def test_loop_no_interval_no_sleep(tmp_path, monkeypatch):
     async def fake_sleep(secs: float) -> None:
         sleep_calls.append(secs)
 
-    import gremlins.stages.loop as _loop_mod
-
-    monkeypatch.setattr(_loop_mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     async def runner() -> Done:
         return Done()

@@ -1139,6 +1139,141 @@ impl PySequence {
     }
 }
 
+// --- Loop pyclass ---
+
+#[pyclass(name = "Loop", module = "_gremlins_core.stages", extends = PyStageAttrs, subclass, skip_from_py_object)]
+struct PyLoop {
+    max_iterations: u32,
+    stop_when_exists: Option<String>,
+    interval: Option<f64>,
+    /// Test seam: pre-built body runner callables, bypassing `body`.
+    body_runners: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PyLoop {
+    #[new]
+    #[pyo3(signature = (name, *, body = None, body_runners = None, max_iterations = 3, stop_when_exists = None, interval = None))]
+    fn new(
+        py: Python<'_>,
+        name: String,
+        body: Option<&Bound<'_, PyList>>,
+        body_runners: Option<&Bound<'_, PyAny>>,
+        max_iterations: u32,
+        stop_when_exists: Option<String>,
+        interval: Option<f64>,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        if max_iterations < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Loop {name:?}: max_iterations must be >= 1, got {max_iterations}"
+            )));
+        }
+        let body = body.cloned().unwrap_or_else(|| PyList::empty(py));
+        let mut attrs = RustStageAttrs::new(name.clone());
+        attrs.stage_type = "loop".to_string();
+        for child in body.iter() {
+            let Ok(child_name) = child.getattr("name").and_then(|n| n.extract::<String>()) else {
+                continue;
+            };
+            child.setattr("path", format!("{name}/{child_name}"))?;
+        }
+        let base = PyStageAttrs {
+            inner: attrs,
+            body: body.unbind(),
+            options: PyDict::new(py).unbind(),
+            bind_map: PyDict::new(py).unbind(),
+            client: None,
+            raw_dict: None,
+            gremlin: None,
+        };
+        Ok(PyClassInitializer::from(base).add_subclass(PyLoop {
+            max_iterations,
+            stop_when_exists,
+            interval,
+            body_runners: body_runners.map(|b| b.clone().unbind()),
+        }))
+    }
+
+    #[classmethod]
+    #[pyo3(signature = (d, depth = 0))]
+    fn with_dict(
+        cls: &Bound<'_, PyType>,
+        d: &Bound<'_, PyDict>,
+        depth: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let map = extract_json_value_dict(d)?;
+        let lp = gremlins::stages::r#loop::Loop::with_dict(&map)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        let py = d.py();
+        let raw_body = PyList::empty(py);
+        for child in &lp.body {
+            raw_body.append(json_value_to_py(py, child)?)?;
+        }
+        let parsed = loader::parse_stages(py, &raw_body, depth)?;
+
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("body", PyList::new(py, parsed)?)?;
+        kwargs.set_item("max_iterations", lp.max_iterations)?;
+        kwargs.set_item("stop_when_exists", lp.stop_when_exists)?;
+        kwargs.set_item("interval", lp.interval)?;
+        let obj = cls.call((lp.attrs.name.as_str(),), Some(&kwargs))?;
+
+        let client = match &lp.client {
+            Some(spec) => Some(
+                py.import("_gremlins_core.clients")?
+                    .getattr("Client")?
+                    .call_method1("parse", (spec.0.as_str(),))?
+                    .unbind(),
+            ),
+            None => None,
+        };
+        obj.setattr("client", client)?;
+        obj.setattr("client_explicit", lp.attrs.client_explicit)?;
+        Ok(obj.unbind())
+    }
+
+    #[getter]
+    fn max_iterations(&self) -> u32 {
+        self.max_iterations
+    }
+
+    #[setter]
+    fn set_max_iterations(&mut self, value: u32) {
+        self.max_iterations = value;
+    }
+
+    #[getter]
+    fn stop_when_exists(&self) -> Option<&str> {
+        self.stop_when_exists.as_deref()
+    }
+
+    #[setter]
+    fn set_stop_when_exists(&mut self, value: Option<String>) {
+        self.stop_when_exists = value;
+    }
+
+    #[getter]
+    fn interval(&self) -> Option<f64> {
+        self.interval
+    }
+
+    #[setter]
+    fn set_interval(&mut self, value: Option<f64>) {
+        self.interval = value;
+    }
+
+    #[getter]
+    fn body_runners(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.body_runners.as_ref().map(|p| p.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_body_runners(&mut self, value: Option<&Bound<'_, PyAny>>) {
+        self.body_runners = value.map(|v| v.clone().unbind());
+    }
+}
+
 // --- Free functions ---
 
 fn stage_name_from_dict(d: &Bound<'_, PyDict>) -> String {
@@ -1278,6 +1413,7 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAgent>()?;
     m.add_class::<PyStageAttrs>()?;
     m.add_class::<PySequence>()?;
+    m.add_class::<PyLoop>()?;
     m.add_class::<Done>()?;
     m.add_function(wrap_pyfunction!(get_client_from_dict_py, &m)?)?;
     m.add_function(wrap_pyfunction!(child_state_py, &m)?)?;
@@ -1294,11 +1430,16 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     // is deferred until the coroutine is awaited.
     let globals = PyDict::new(py);
     globals.set_item("_m", &m)?;
+    globals.set_item("_BAIL_KEY", BAIL_KEY)?;
     py.run(
         c"\
 async def _exec_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Exec.run = _exec_run_async\n\
 async def _agent_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Agent.run = _agent_run_async\n\
-async def _sequence_run_async(stage, gremlin):\n    from _gremlins_core.stages import Done, child_state as _child_state\n    state = gremlin.state\n    if state is None:\n        raise RuntimeError('sequence stage requires gremlin.state to be initialized')\n    key = stage.path or stage.name\n    done = state.done_for(key)\n    for child in stage.body:\n        if child.name in done:\n            continue\n        state.data.patch(active_children=[child.name])\n        runner = _child_state(state, child).make_runner(\n            child, gremlin, scope=stage.body, record_stage=False\n        )\n        try:\n            await runner()\n        finally:\n            state.data.patch(_delete=('active_children',))\n        state.mark_done(key, child.name)\n    return Done()\n_m.Sequence.run = _sequence_run_async\n",
+async def _sequence_run_async(stage, gremlin):\n    from _gremlins_core.stages import Done, child_state as _child_state\n    state = gremlin.state\n    if state is None:\n        raise RuntimeError('sequence stage requires gremlin.state to be initialized')\n    key = stage.path or stage.name\n    done = state.done_for(key)\n    for child in stage.body:\n        if child.name in done:\n            continue\n        state.data.patch(active_children=[child.name])\n        runner = _child_state(state, child).make_runner(\n            child, gremlin, scope=stage.body, record_stage=False\n        )\n        try:\n            await runner()\n        finally:\n            state.data.patch(_delete=('active_children',))\n        state.mark_done(key, child.name)\n    return Done()\n_m.Sequence.run = _sequence_run_async\n\
+import pathlib as _pathlib\n\
+def _bail_reason(artifacts, key):\n    if not artifacts.is_registered(key):\n        return None\n    raw = artifacts.data_uri(key)\n    if not (isinstance(raw, str) and raw.startswith('/')):\n        return str(raw).strip()\n    path = _pathlib.Path(raw)\n    if not path.exists():\n        return None\n    try:\n        return path.read_text(encoding='utf-8').strip()\n    except (OSError, ValueError):\n        return raw\n\
+def _is_bail_set(artifacts, loop_iter):\n    return (\n        _bail_reason(artifacts, f'artifact://{loop_iter}/bail') is not None\n        or _bail_reason(artifacts, _BAIL_KEY) is not None\n    )\n_m._bail_reason = _bail_reason\n_m._is_bail_set = _is_bail_set\n\
+async def _loop_run_async(stage, gremlin):\n    from _gremlins_core.stages import Done, Bail, _BAIL_KEY, child_state as _child_state\n    import asyncio, pathlib, logging\n    logger = logging.getLogger(__name__)\n    state = gremlin.state\n    if state is None:\n        raise RuntimeError('loop stage requires gremlin.state to be initialized')\n    state.push_loop(stage.path or stage.name)\n    try:\n        max_iterations = stage.max_iterations\n        stop_when_exists = stage.stop_when_exists\n        interval = stage.interval\n        for iteration in range(1, max_iterations + 1):\n            state.set_loop_iteration(iteration)\n            scoped_bail = f'artifact://{state.loop_iter}/bail'\n            if state.artifacts.is_registered(scoped_bail):\n                bail_path = state.artifacts.data_uri(scoped_bail)\n                if isinstance(bail_path, str):\n                    try:\n                        pathlib.Path(bail_path).unlink(missing_ok=True)\n                    except OSError:\n                        pass\n            logger.info('loop %s: iteration %d/%d starting', stage.name, iteration, max_iterations)\n            runners = stage.body_runners\n            if runners is None:\n                runners = []\n                for child in stage.body:\n                    cs = _child_state(state, child)\n                    base = cs.make_runner(child, gremlin, scope=stage.body, record_stage=False)\n                    child_name = child.name\n\n                    async def _tracked(r=base, n=child_name):\n                        state.data.patch(active_children=[n])\n                        try:\n                            return await r()\n                        finally:\n                            state.data.patch(_delete=('active_children',))\n\n                    runners.append(_tracked)\n            for runner in runners:\n                await runner()\n            if _is_bail_set(state.artifacts, state.loop_iter):\n                reason = _bail_reason(state.artifacts, f'artifact://{state.loop_iter}/bail')\n                if reason is None:\n                    reason = _bail_reason(state.artifacts, _BAIL_KEY) or ''\n                state.record_bail(reason)\n                raise Bail(reason)\n            if stop_when_exists is not None:\n                resolved = stop_when_exists.replace('{loop_iter}', state.loop_iter)\n                if state.artifacts.is_live(resolved) or state.artifacts.is_live(f'artifact://{resolved}'):\n                    return Done()\n            if iteration == max_iterations:\n                state.record_bail(f'loop exhausted {max_iterations} iterations')\n                raise Bail(f'loop exhausted {max_iterations} iterations')\n            if interval is not None:\n                await asyncio.sleep(interval)\n        raise RuntimeError(f'Loop.run() fell through: max_iterations={max_iterations}')\n    finally:\n        state.pop_loop()\n_m.Loop.run = _loop_run_async\n",
         Some(&globals),
         None,
     )?;
