@@ -52,3 +52,34 @@ def test_exec_with_dict_int_keys_in_options():
 def test_exec_with_dict_rejects_nonserializable():
     with pytest.raises(ValueError):
         Exec.with_dict({"name": "s", "options": {"obj": object()}})
+
+
+def test_int_beyond_u64_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        _round_trip(tmp_path, {"v": 2**64 + 1})
+
+
+def test_circular_list_rejected(tmp_path):
+    x = []
+    x.append(x)
+    with pytest.raises(ValueError):
+        _round_trip(tmp_path, {"v": x})
+
+
+def test_circular_dict_rejected(tmp_path):
+    x = {}
+    x["self"] = x
+    with pytest.raises(ValueError):
+        _round_trip(tmp_path, {"v": x})
+
+
+def test_repeated_noncyclic_container_allowed(tmp_path):
+    shared = [1, 2]
+    out = _round_trip(tmp_path, {"a": shared, "b": shared})
+    assert out["a"] == [1, 2] and out["b"] == [1, 2]
+
+
+def test_exponent_form_float_keys(tmp_path):
+    keys = {1e-6: "a", 1e20: "b", -1e-7: "c"}
+    out = _round_trip(tmp_path, {"v": keys})["v"]
+    assert out == json.loads(json.dumps(keys))
