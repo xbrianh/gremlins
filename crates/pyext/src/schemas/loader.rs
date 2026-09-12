@@ -10,7 +10,7 @@ pub const STAGE_TYPES: &[(&str, &str, &str)] = &[
     ("agent", "_gremlins_core.stages", "Agent"),
     ("loop", "gremlins.stages.loop", "LoopStage"),
     ("parallel", "gremlins.stages.parallel", "ParallelStage"),
-    ("sequence", "gremlins.stages.sequence", "SequenceStage"),
+    ("sequence", "_gremlins_core.stages", "Sequence"),
     ("exec", "_gremlins_core.stages", "Exec"),
 ];
 

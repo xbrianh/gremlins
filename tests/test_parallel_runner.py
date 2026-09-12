@@ -339,15 +339,13 @@ def test_build_parallel_stages_names() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SequenceStage as a parallel child — worktree propagation
+# Sequence as a parallel child — worktree propagation
 # ---------------------------------------------------------------------------
 
 
 def test_parallel_sequence_child_worktree_flows() -> None:
-    """SequenceStage inside a parallel group sees the fanout worktree in all sub-stages."""
-    from _gremlins_core.stages import Done, Outcome, StageAttrs
-
-    from gremlins.stages.sequence import SequenceStage
+    """Sequence inside a parallel group sees the fanout worktree in all sub-stages."""
+    from _gremlins_core.stages import Done, Outcome, Sequence, StageAttrs
 
     observed: list[pathlib.Path | None] = []
 
@@ -359,7 +357,7 @@ def test_parallel_sequence_child_worktree_flows() -> None:
             observed.append(gremlin.state.worktree)
             return Done()
 
-    seq_stage = SequenceStage("seq", body=[_CaptureStage("a"), _CaptureStage("b")])
+    seq_stage = Sequence("seq", body=[_CaptureStage("a"), _CaptureStage("b")])
 
     seq_ctx = build_state(
         data=StateData(),

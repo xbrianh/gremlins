@@ -39,12 +39,12 @@ sequencing logic of their own.
   with pre-built child runners; call `build_runtime_stages()` to get the
   three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`)
   that implement fan-out/fan-in execution.
-- `sequence.py` — `SequenceStage(Stage)`. Runs `body: list[Stage]`
-  sequentially in order, inheriting parent state (no fan-out). Child stages
-  share artifacts and execution scope with the parent; client override is
-  applied if the child declares one. Useful for bundling multi-stage units
-  (e.g., the `handoff` recipe) that should appear as a single iteration in
-  a parent loop. Stage type `"sequence"`.
+- `sequence` — `Sequence` (Rust, `_gremlins_core.stages`). Runs
+  `body: list[Stage]` sequentially in order, inheriting parent state (no
+  fan-out). Child stages share artifacts and execution scope with the
+  parent; client override is applied if the child declares one. Useful for
+  bundling multi-stage units (e.g., the `handoff` recipe) that should
+  appear as a single iteration in a parent loop. Stage type `"sequence"`.
 - `composite.py` — Shared helpers for composite stages (`Loop`, `Sequence`,
   `Parallel`): `child_state(parent, child, fan_out=False, child_id=None)`
   derives child state from parent, handling client override and optional
