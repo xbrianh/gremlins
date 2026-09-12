@@ -604,7 +604,8 @@ stages:
     body:
       - name: handoff
         type: sequence
-        body: []
+        body:
+          - {type: exec, name: handoff-step}
       - { include: local }
 """,
     )

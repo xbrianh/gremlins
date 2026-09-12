@@ -16,7 +16,7 @@ pub fn get_client_from_dict(
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::String(s)) => Ok(Some(ClientSpec(s.clone()))),
         Some(v) => Err(format!(
-            "stage {stage_name:?}: 'client' must be a string, got {v:?}"
+            "stage '{stage_name}': 'client' must be a string, got {v:?}"
         )),
     }
 }

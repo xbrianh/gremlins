@@ -69,8 +69,8 @@ from `_gremlins_core.schemas`.
 
 | Rust export | Status |
 |---|---|
-| `parse_stage` | **Active**. Imported in `gremlins/spawn/child.py` and `gremlins/stages/sequence.py`. |
-| `parse_stages` | **Active**. Imported in `gremlins/stages/sequence.py`, `gremlins/stages/loop.py`, `gremlins/stages/parallel.py`. |
+| `parse_stage` | **Active**. Imported in `gremlins/spawn/child.py` and `_gremlins_core.stages` (sequence). |
+| `parse_stages` | **Active**. Imported in `_gremlins_core.stages` (sequence), `gremlins/stages/loop.py`, `gremlins/stages/parallel.py`. |
 | `fill_names` | **Active**. Imported in `gremlins/launcher.py`. |
 | `check_duplicate_producers` | **Active**. Imported in `_gremlins_core.schemas.Pipeline.from_yaml`. |
 | `expand_pipeline` | **Active**. Imported in `gremlins/launcher.py`. |

@@ -1,4 +1,4 @@
-"""Tests for SequenceStage."""
+"""Tests for Sequence."""
 
 from __future__ import annotations
 
@@ -10,10 +10,9 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from _gremlins_core.executor import State as RuntimeState
 from _gremlins_core.executor import StateData, build_state
-from _gremlins_core.stages import Bail, Done, Outcome, StageAttrs
+from _gremlins_core.stages import Bail, Done, Outcome, Sequence, StageAttrs
 from conftest import MockGremlin, _make_gremlin_wrapper
 
-from gremlins.stages.sequence import SequenceStage
 from tests.fake_client import FakeClient
 
 if TYPE_CHECKING:
@@ -52,7 +51,7 @@ def test_sequence_runs_body_in_order() -> None:
             log.append(self._label)
             return Done()
 
-    stage = SequenceStage("seq", body=[_LogStage("a"), _LogStage("b"), _LogStage("c")])
+    stage = Sequence("seq", body=[_LogStage("a"), _LogStage("b"), _LogStage("c")])
     asyncio.run(stage.run(_make_gremlin_wrapper(_state())))
     assert log == ["a", "b", "c"]
 
@@ -72,7 +71,7 @@ def test_sequence_stops_on_exception() -> None:
                 raise RuntimeError("boom")
             return Done()
 
-    stage = SequenceStage(
+    stage = Sequence(
         "seq",
         body=[_LogStage("a"), _LogStage("b", fail=True), _LogStage("c")],
     )
@@ -84,7 +83,7 @@ def test_sequence_stops_on_exception() -> None:
 def test_sequence_propagates_worktree() -> None:
     wt = pathlib.Path("/tmp/fake-worktree")
     child = _FakeStage("child")
-    stage = SequenceStage("seq", body=[child])
+    stage = Sequence("seq", body=[child])
     asyncio.run(stage.run(_make_gremlin_wrapper(_state(worktree=wt))))
     assert child.received is not None
     assert child.received.worktree == wt
@@ -92,7 +91,7 @@ def test_sequence_propagates_worktree() -> None:
 
 def test_sequence_propagates_child_key() -> None:
     child = _FakeStage("child")
-    stage = SequenceStage("seq", body=[child])
+    stage = Sequence("seq", body=[child])
     asyncio.run(stage.run(_make_gremlin_wrapper(_state(child_key="my-child"))))
     assert child.received is not None
     assert child.received.child_key == "my-child"
@@ -101,7 +100,7 @@ def test_sequence_propagates_child_key() -> None:
 def test_sequence_propagates_artifact_dir() -> None:
     shard_dir = pathlib.Path("/tmp/shard-session")
     child = _FakeStage("child")
-    stage = SequenceStage("seq", body=[child])
+    stage = Sequence("seq", body=[child])
     asyncio.run(stage.run(_make_gremlin_wrapper(_state(artifact_dir=shard_dir))))
     assert child.received is not None
     assert child.received.artifact_dir == shard_dir
@@ -136,7 +135,7 @@ def test_sequence_resume_skips_completed_children(sandbox) -> None:
             return Done()
 
     state = _stateful(sandbox.state, "gr-seq-resume")
-    seq = SequenceStage(
+    seq = Sequence(
         "seq", body=[_TrackedStage("a"), _TrackedStage("b"), _TrackedStage("c")]
     )
 
@@ -163,8 +162,8 @@ def test_sibling_sequences_done_sets_are_independent(sandbox) -> None:
             return Done()
 
     state = _stateful(sandbox.state, "gr-seq-siblings")
-    seq1 = SequenceStage("seq1", body=[_LogStage("a")])
-    seq2 = SequenceStage("seq2", body=[_LogStage("a")])
+    seq1 = Sequence("seq1", body=[_LogStage("a")])
+    seq2 = Sequence("seq2", body=[_LogStage("a")])
     seq1.path = "pipeline/seq1"
     seq2.path = "pipeline/seq2"
 

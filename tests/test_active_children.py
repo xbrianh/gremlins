@@ -10,14 +10,13 @@ from typing import Any
 import pytest
 from _gremlins_core.artifacts import Uri
 from _gremlins_core.executor import State, StateData, build_state
-from _gremlins_core.stages import Done, Outcome, StageAttrs
+from _gremlins_core.stages import Done, Outcome, Sequence, StageAttrs
 from conftest import MockGremlin
 
 from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
-from gremlins.stages.sequence import SequenceStage
 from tests.fake_client import FakeClient
 
 
@@ -53,7 +52,7 @@ def test_sequence_active_children_cleared_after_run(tmp_path: pathlib.Path) -> N
             _Spy.captured = _read_state(tmp_path).get("active_children")
             return Done()
 
-    seq = SequenceStage("seq", body=[_Spy("child-a")])
+    seq = Sequence("seq", body=[_Spy("child-a")])
     asyncio.run(seq.run(gremlin))
 
     assert _Spy.captured == ["child-a"]
@@ -67,7 +66,7 @@ def test_sequence_active_children_cleared_on_exception(tmp_path: pathlib.Path) -
         async def run(self, gremlin: Any) -> Outcome:
             raise RuntimeError("boom")
 
-    seq = SequenceStage("seq", body=[_Boom("child-a")])
+    seq = Sequence("seq", body=[_Boom("child-a")])
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(seq.run(gremlin))
 
