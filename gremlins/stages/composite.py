@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from _gremlins_core.clients import Client
 from _gremlins_core.config import scratch_root
+from _gremlins_core.stages import compute_child_params
 
 from gremlins.protocols import GremlinProtocol
 
@@ -70,15 +71,17 @@ def child_state(
         if str(client) != new_state.data.client:
             new_state.data.patch(client=str(client))
         return new_state
-    if child_id:
-        artifact_dir = pathlib.Path(scratch_root(child_id)) / "artifacts"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        artifact_dir = parent.artifact_dir / child.name
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+    params = compute_child_params(
+        parent_artifact_dir=str(parent.artifact_dir),
+        child_name=child.name,
+        child_id=child_id,
+        scratch_root=str(scratch_root(child_id)) if child_id else "",
+    )
+    artifact_dir = pathlib.Path(params["artifact_dir"])
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     return dataclasses.replace(
         parent,
         client=client,
         artifact_dir=artifact_dir,
-        child_key=child.name,
+        child_key=params["child_key"],
     )

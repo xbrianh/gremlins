@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use gremlins::stages::agent as rust_agent;
 use gremlins::stages::base;
+use gremlins::stages::composite;
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec as rust_exec;
 use gremlins::stages::outcome::Done as RustDone;
@@ -885,6 +886,32 @@ fn substitute_vars_py(
     base::substitute_vars(text, &string_options, &extra, &framework_subs)
 }
 
+#[pyfunction]
+#[pyo3(name = "compute_child_params", signature = (
+    parent_artifact_dir, child_name, child_id, scratch_root
+))]
+fn compute_child_params_py(
+    py: Python<'_>,
+    parent_artifact_dir: &str,
+    child_name: &str,
+    child_id: Option<&str>,
+    scratch_root: &str,
+) -> PyResult<Py<PyDict>> {
+    let result = composite::compute_child_params(
+        Path::new(parent_artifact_dir),
+        child_name,
+        child_id,
+        Path::new(scratch_root),
+    );
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "artifact_dir",
+        result.artifact_dir.to_string_lossy().to_string(),
+    )?;
+    dict.set_item("child_key", result.child_key)?;
+    Ok(dict.unbind())
+}
+
 // --- Module registration ---
 
 pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -920,6 +947,7 @@ async def _agent_run_async(stage, gremlin):\n    return await stage._run_impl(gr
     let keys: Vec<&str> = FRAMEWORK_KEYS.iter().copied().collect();
     m.add("FRAMEWORK_KEYS", PyFrozenSet::new(py, &keys)?)?;
     m.add_function(wrap_pyfunction!(substitute_vars_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(compute_child_params_py, &m)?)?;
 
     Ok(())
 }
