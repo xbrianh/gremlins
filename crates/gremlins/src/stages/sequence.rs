@@ -22,10 +22,13 @@ impl Sequence {
             .to_string();
 
         let body = match d.get("body") {
-            Some(Value::Array(arr)) => arr.clone(),
+            Some(Value::Array(arr)) if !arr.is_empty() => arr.clone(),
+            Some(Value::Array(_)) => {
+                return Err(format!("stage '{name}': 'body' must not be empty"))
+            }
             // Single-quoted like Python's `{name!r}` in the pre-port stage.
             Some(_) => return Err(format!("stage '{name}': 'body' must be a list")),
-            None => Vec::new(),
+            None => return Err(format!("stage '{name}': 'body' is required")),
         };
 
         let client = get_client_from_dict(d, &name)?;
@@ -73,15 +76,19 @@ mod tests {
     }
 
     #[test]
-    fn with_dict_no_body() {
+    fn with_dict_no_body_is_error() {
         let d = dict(&[("name", json!("minimal"))]);
-        let seq = Sequence::with_dict(&d).unwrap();
-        assert!(seq.body.is_empty());
+        let err = Sequence::with_dict(&d).unwrap_err();
+        assert!(err.contains("required"));
     }
 
     #[test]
     fn with_dict_client() {
-        let d = dict(&[("name", json!("s")), ("client", json!("xai:grok-5"))]);
+        let d = dict(&[
+            ("name", json!("s")),
+            ("client", json!("xai:grok-5")),
+            ("body", json!([{"type": "exec", "name": "step"}])),
+        ]);
         let seq = Sequence::with_dict(&d).unwrap();
         assert_eq!(seq.client, Some(ClientSpec("xai:grok-5".into())));
         assert!(seq.attrs.client_explicit);
@@ -89,10 +96,27 @@ mod tests {
 
     #[test]
     fn with_dict_client_none() {
-        let d = dict(&[("name", json!("s"))]);
+        let d = dict(&[
+            ("name", json!("s")),
+            ("body", json!([{"type": "exec", "name": "step"}])),
+        ]);
         let seq = Sequence::with_dict(&d).unwrap();
         assert_eq!(seq.client, None);
         assert!(!seq.attrs.client_explicit);
+    }
+
+    #[test]
+    fn with_dict_body_null_is_error() {
+        let d = dict(&[("name", json!("s")), ("body", Value::Null)]);
+        let err = Sequence::with_dict(&d).unwrap_err();
+        assert!(err.contains("must be a list"));
+    }
+
+    #[test]
+    fn with_dict_body_empty_is_error() {
+        let d = dict(&[("name", json!("s")), ("body", json!([]))]);
+        let err = Sequence::with_dict(&d).unwrap_err();
+        assert!(err.contains("must not be empty"));
     }
 
     #[test]
