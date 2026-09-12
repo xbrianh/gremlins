@@ -16,16 +16,53 @@ from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import load_state
 from gremlins.utils.yaml_io import render_bundled_prompt
 
+_LOG_MAX_BYTES = 50_000
+_ARTIFACT_MAX_BYTES = 20_000
+
 
 def _read_log(log_path: pathlib.Path) -> str:
-    """Read the entire log file."""
+    """Read the log file, truncating large logs to the tail."""
     if not log_path.is_file():
         return "(no log file)"
 
     try:
-        return log_path.read_text(encoding="utf-8", errors="replace")
+        raw = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return "(log unreadable)"
+
+    if not raw:
+        return "(empty log)"
+
+    if len(raw) > _LOG_MAX_BYTES:
+        raw = "(log truncated — showing tail)\n\n…\n\n" + raw[-_LOG_MAX_BYTES:]
+
+    return raw
+
+
+def _read_artifacts(artifacts_dir: pathlib.Path) -> str:
+    """Read artifact files from the artifacts directory, inlining content."""
+    if not artifacts_dir.is_dir():
+        return "(no artifacts directory)"
+
+    entries = sorted(artifacts_dir.iterdir())
+    if not entries:
+        return ""
+
+    parts: list[str] = []
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        try:
+            content = entry.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if len(content) > _ARTIFACT_MAX_BYTES:
+            content = content[:_ARTIFACT_MAX_BYTES] + "\n… (truncated)"
+
+        parts.append(f"--- {entry.name} ---\n{content}")
+
+    return "\n\n".join(parts)
 
 
 def _resolve_client(client_spec: str | None, state: dict[str, Any]) -> Client:
@@ -101,11 +138,19 @@ def analyze_main(argv: list[str]) -> int:
     log_path = pathlib.Path(wdir) / "log"
     log_text = _read_log(log_path)
 
+    artifacts_text = _read_artifacts(pathlib.Path(wdir) / "artifacts")
+
     prompt = render_bundled_prompt(
         "analyze.md",
         state_json=state_json,
         log_text=log_text,
     )
+
+    if artifacts_text:
+        prompt += (
+            "\n\nHere are the artifacts produced by the gremlin run:\n\n"
+            + artifacts_text
+        )
 
     try:
         client = _resolve_client(args.client, state)
