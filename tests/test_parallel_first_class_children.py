@@ -45,9 +45,7 @@ def test_parallel_run_cleans_up_child_state_dirs(sandbox) -> None:
     gremlin_id = "parent-gremlin-abc"
     parent = _make_parent_state(sandbox, gremlin_id)
 
-    from _gremlins_core.stages import Done, Outcome
-
-    from gremlins.stages.composite import StageAttrs
+    from _gremlins_core.stages import Done, Outcome, StageAttrs
 
     class _NoopStage(StageAttrs):
         type = "_test_noop_v2"
@@ -81,9 +79,7 @@ def test_parallel_run_no_gremlin_id_uses_old_layout(sandbox) -> None:
         artifact_dir=artifact_dir,
     )
 
-    from _gremlins_core.stages import Done, Outcome
-
-    from gremlins.stages.composite import StageAttrs
+    from _gremlins_core.stages import Done, Outcome, StageAttrs
 
     class _NoopStage(StageAttrs):
         type = "_test_noop_v3"
@@ -222,9 +218,9 @@ def test_fork_uses_parent_not_child_state_as_source(sandbox) -> None:
     import subprocess
 
     from _gremlins_core.schemas import Pipeline
+    from _gremlins_core.stages import StageAttrs, child_state
 
     from gremlins.executor.gremlin import Gremlin
-    from gremlins.stages.composite import StageAttrs, child_state
 
     # Create a temporary git repo
     tmp_repo = sandbox.root / "repo"

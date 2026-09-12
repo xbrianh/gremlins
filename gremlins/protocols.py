@@ -37,7 +37,7 @@ class StageProtocol(Protocol):
     client: Any
     # Whether ``client`` was explicitly set from YAML or prefix baking,
     # vs inherited from a parent stage.  Controls child-state client
-    # inheritance in composite stages (see gremlins/stages/composite.py
+    # inheritance in composite stages (see _gremlins_core.stages
     # child_state()).
     client_explicit: bool
     skip_if_exists: str

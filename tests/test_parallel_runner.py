@@ -345,9 +345,8 @@ def test_build_parallel_stages_names() -> None:
 
 def test_parallel_sequence_child_worktree_flows() -> None:
     """SequenceStage inside a parallel group sees the fanout worktree in all sub-stages."""
-    from _gremlins_core.stages import Done, Outcome
+    from _gremlins_core.stages import Done, Outcome, StageAttrs
 
-    from gremlins.stages.composite import StageAttrs
     from gremlins.stages.sequence import SequenceStage
 
     observed: list[pathlib.Path | None] = []
@@ -409,9 +408,7 @@ def test_run_stages_async_callable_executes() -> None:
 
 
 def test_make_runner_returns_async_for_any_stage() -> None:
-    from _gremlins_core.stages import Done, Outcome
-
-    from gremlins.stages.composite import StageAttrs
+    from _gremlins_core.stages import Done, Outcome, StageAttrs
 
     class AStage(StageAttrs):
         type = "a-test"
@@ -428,9 +425,7 @@ def test_make_runner_returns_async_for_any_stage() -> None:
 
 
 def test_stages_run_in_order_via_make_runner() -> None:
-    from _gremlins_core.stages import Done, Outcome
-
-    from gremlins.stages.composite import StageAttrs
+    from _gremlins_core.stages import Done, Outcome, StageAttrs
 
     executed: list[str] = []
 

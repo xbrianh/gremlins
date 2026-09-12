@@ -9,10 +9,9 @@ from typing import Any
 from _gremlins_core.artifacts import ArtifactRegistry, Uri
 from _gremlins_core.executor import State, StateData, build_state
 from _gremlins_core.schemas import Pipeline
-from _gremlins_core.stages import Agent, Done, Outcome
+from _gremlins_core.stages import Agent, Done, Outcome, StageAttrs
 from conftest import MockGremlin
 
-from gremlins.stages.composite import StageAttrs
 from tests.fake_client import FakeClient
 
 _PIPELINE = Pipeline(

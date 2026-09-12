@@ -10,12 +10,11 @@ from typing import Any
 import pytest
 from _gremlins_core.artifacts import Uri
 from _gremlins_core.executor import State, StateData, build_state
-from _gremlins_core.stages import Done, Outcome
+from _gremlins_core.stages import Done, Outcome, StageAttrs
 from conftest import MockGremlin
 
 from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
-from gremlins.stages.composite import StageAttrs
 from gremlins.stages.loop import LoopStage
 from gremlins.stages.parallel import ParallelStage
 from gremlins.stages.sequence import SequenceStage
