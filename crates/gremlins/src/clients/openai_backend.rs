@@ -395,6 +395,24 @@ mod tests {
             map_stream_error("Http client error: connection reset".into()),
             ClientError::ApiServerError { .. }
         ));
+        // Snake_case JSON error types (e.g. server_error, rate_limit) are
+        // classified as transient via underscore normalization, not by
+        // matching any specific `message` text. Changing the message has no
+        // effect as long as the `type` field remains the same.
+        let xai_500 = r#"RuntimeError: ProviderResponseError: {"error":{"message":"Internal error during token generation","type":"server_error","code":"internal"}}"#;
+        assert!(retry::is_transient_stream_error(xai_500));
+        assert!(matches!(
+            map_stream_error(xai_500.into()),
+            ClientError::ApiServerError { .. }
+        ));
+        // Same server_error type, different message — still retries
+        assert!(retry::is_transient_stream_error(
+            r#"{"error":{"message":"Something else entirely","type":"server_error","code":"internal"}}"#
+        ));
+        // Underscore normalization: rate_limit also maps to "rate limit"
+        assert!(retry::is_transient_stream_error(
+            r#"{"error":{"message":"Out of credits","type":"rate_limit","code":"insufficient_quota"}}"#
+        ));
     }
 
     #[test]
