@@ -1056,18 +1056,17 @@ impl PyStageAttrs {
 
 // --- Sequence pyclass ---
 
-#[pyclass(name = "Sequence", module = "_gremlins_core.stages", extends = PyStageAttrs, skip_from_py_object)]
+#[pyclass(name = "Sequence", module = "_gremlins_core.stages", extends = PyStageAttrs, subclass, skip_from_py_object)]
 struct PySequence;
 
-impl PyStageAttrs {
-    /// Build from a Rust StageAttrs + pre-parsed body list, propagating the
-    /// parent path onto each child. Used by PySequence so the Rust struct is
-    /// the single source of truth for name / type / client_explicit.
+impl PySequence {
+    /// Build from Rust StageAttrs + pre-parsed body, propagating the parent
+    /// path onto each child.
     fn from_rust(
         py: Python<'_>,
         attrs: &RustStageAttrs,
         body: &Bound<'_, PyList>,
-    ) -> PyResult<Self> {
+    ) -> PyResult<PyStageAttrs> {
         for child in body.iter() {
             let Ok(name) = child.getattr("name").and_then(|n| n.extract::<String>()) else {
                 continue;
@@ -1098,17 +1097,17 @@ impl PySequence {
         let body = body.cloned().unwrap_or_else(|| PyList::empty(py));
         let mut attrs = RustStageAttrs::new(name);
         attrs.stage_type = "sequence".to_string();
-        let base = PyStageAttrs::from_rust(py, &attrs, &body)?;
+        let base = Self::from_rust(py, &attrs, &body)?;
         Ok(PyClassInitializer::from(base).add_subclass(PySequence))
     }
 
     #[classmethod]
     #[pyo3(signature = (d, depth = 0))]
     fn with_dict(
-        _cls: &Bound<'_, PyType>,
+        cls: &Bound<'_, PyType>,
         d: &Bound<'_, PyDict>,
         depth: usize,
-    ) -> PyResult<Py<PySequence>> {
+    ) -> PyResult<Py<PyAny>> {
         let map = extract_json_value_dict(d)?;
         let seq = gremlins::stages::sequence::Sequence::with_dict(&map)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
@@ -1119,9 +1118,12 @@ impl PySequence {
             raw_body.append(json_value_to_py(py, child)?)?;
         }
         let parsed = loader::parse_stages(py, &raw_body, depth)?;
-        let body = PyList::new(py, parsed)?;
 
-        let base = PyStageAttrs::from_rust(py, &seq.attrs, &body)?;
+        // Construct through `cls` so subclasses get their own type.
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("body", PyList::new(py, parsed)?)?;
+        let obj = cls.call((seq.attrs.name.as_str(),), Some(&kwargs))?;
+
         let client = match &seq.client {
             Some(spec) => Some(
                 py.import("_gremlins_core.clients")?
@@ -1131,10 +1133,9 @@ impl PySequence {
             ),
             None => None,
         };
-
-        let obj = Py::new(py, (PySequence, base))?;
-        obj.setattr(py, "client", client)?;
-        Ok(obj)
+        obj.setattr("client", client)?;
+        obj.setattr("client_explicit", seq.attrs.client_explicit)?;
+        Ok(obj.unbind())
     }
 }
 
@@ -1297,28 +1298,7 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         c"\
 async def _exec_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Exec.run = _exec_run_async\n\
 async def _agent_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Agent.run = _agent_run_async\n\
-async def _sequence_run_async(stage, gremlin):
-    from _gremlins_core.stages import Done, child_state as _child_state
-    state = gremlin.state
-    if state is None:
-        raise RuntimeError('sequence stage requires gremlin.state to be initialized')
-    key = stage.path or stage.name
-    done = state.done_for(key)
-    for child in stage.body:
-        if child.name in done:
-            continue
-        state.data.patch(active_children=[child.name])
-        runner = _child_state(state, child).make_runner(
-            child, gremlin, scope=stage.body, record_stage=False
-        )
-        try:
-            await runner()
-        finally:
-            state.data.patch(_delete=('active_children',))
-        state.mark_done(key, child.name)
-    return Done()
-_m.Sequence.run = _sequence_run_async
-",
+async def _sequence_run_async(stage, gremlin):\n    from _gremlins_core.stages import Done, child_state as _child_state\n    state = gremlin.state\n    if state is None:\n        raise RuntimeError('sequence stage requires gremlin.state to be initialized')\n    key = stage.path or stage.name\n    done = state.done_for(key)\n    for child in stage.body:\n        if child.name in done:\n            continue\n        state.data.patch(active_children=[child.name])\n        runner = _child_state(state, child).make_runner(\n            child, gremlin, scope=stage.body, record_stage=False\n        )\n        try:\n            await runner()\n        finally:\n            state.data.patch(_delete=('active_children',))\n        state.mark_done(key, child.name)\n    return Done()\n_m.Sequence.run = _sequence_run_async\n",
         Some(&globals),
         None,
     )?;

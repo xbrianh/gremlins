@@ -23,11 +23,12 @@ impl Sequence {
 
         let body = match d.get("body") {
             Some(Value::Array(arr)) => arr.clone(),
-            Some(_) => return Err(format!("stage {name:?}: 'body' must be a list")),
+            // Single-quoted like Python's `{name!r}` in the pre-port stage.
+            Some(_) => return Err(format!("stage '{name}': 'body' must be a list")),
             None => Vec::new(),
         };
 
-        let client = get_client_from_dict(d, &name).map_err(|e| format!("stage {name:?}: {e}"))?;
+        let client = get_client_from_dict(d, &name)?;
         let client_explicit = client.is_some();
 
         let mut attrs = StageAttrs::new(name);
