@@ -10,10 +10,9 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from _gremlins_core.executor import State as RuntimeState
 from _gremlins_core.executor import StateData, build_state
-from _gremlins_core.stages import Bail, Done, Outcome
+from _gremlins_core.stages import Bail, Done, Outcome, StageAttrs
 from conftest import MockGremlin, _make_gremlin_wrapper
 
-from gremlins.stages.composite import StageAttrs
 from gremlins.stages.sequence import SequenceStage
 from tests.fake_client import FakeClient
 

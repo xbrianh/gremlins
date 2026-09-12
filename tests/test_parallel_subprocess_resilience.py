@@ -13,11 +13,10 @@ from typing import Any
 import pytest
 from _gremlins_core.config import scratch_root
 from _gremlins_core.executor import State, StateData, build_state, write_state
-from _gremlins_core.stages import Done, Outcome
+from _gremlins_core.stages import Done, Outcome, StageAttrs
 from conftest import make_parent_state
 
 from gremlins.stages import parallel as _parallel_mod
-from gremlins.stages.composite import StageAttrs
 from gremlins.stages.parallel import ParallelStage
 from gremlins.utils import proc as _proc_mod
 from tests.fake_client import FakeClient

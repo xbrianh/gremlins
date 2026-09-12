@@ -5,13 +5,17 @@ use std::pin::Pin;
 
 use gremlins::stages::agent as rust_agent;
 use gremlins::stages::base;
+use gremlins::stages::composite::{
+    compute_child_params, get_client_from_dict as rust_get_client_from_dict,
+    StageAttrs as RustStageAttrs,
+};
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec as rust_exec;
 use gremlins::stages::outcome::Done as RustDone;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFrozenSet, PyType};
+use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple, PyType};
 
 use crate::python::artifacts::ArtifactRegistry;
 
@@ -22,22 +26,26 @@ type PyAwaitable = Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>>;
 
 // --- Helpers ---
 
+fn py_to_json(val: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+    let json_str: String = val
+        .py()
+        .import("json")?
+        .call_method1("dumps", (val,))?
+        .extract()?;
+    serde_json::from_str(&json_str).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("value cannot be represented as JSON: {e}"))
+    })
+}
+
 /// Convert a PyDict of string keys to a HashMap<String, serde_json::Value>
 /// by serializing each value via Python's json module.
 fn extract_json_value_dict(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, serde_json::Value>> {
-    // Import json module
-    let json_mod = obj.py().import("json")?;
     let dict = obj.cast::<PyDict>()?;
     let mut map = HashMap::new();
     for (key, val) in dict.iter() {
         let k: String = key.extract()?;
-        // Serialize Python value to JSON string, then parse back to serde_json::Value
-        let json_str: String = json_mod.call_method1("dumps", (val,))?.extract()?;
-        let v: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "option {k:?}: value cannot be represented as JSON: {e}"
-            ))
-        })?;
+        let v = py_to_json(&val)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("option {k:?}: {e}")))?;
         map.insert(k, v);
     }
     Ok(map)
@@ -872,7 +880,296 @@ impl PyAgent {
     }
 }
 
+// --- StageAttrs pyclass ---
+
+/// Base attributes for composite stages (Loop, Sequence, Parallel) and
+/// duck-typed test stages. Subclassable from Python.
+#[pyclass(
+    name = "StageAttrs",
+    module = "_gremlins_core.stages",
+    subclass,
+    skip_from_py_object
+)]
+struct PyStageAttrs {
+    inner: RustStageAttrs,
+    body: Py<PyList>,
+    options: Py<PyDict>,
+    bind_map: Py<PyDict>,
+    client: Option<Py<PyAny>>,
+    raw_dict: Option<Py<PyAny>>,
+    gremlin: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PyStageAttrs {
+    // Tolerant of extra args: Python subclasses pass their own ctor args
+    // through to tp_new (which receives *all* constructor arguments).
+    #[new]
+    #[pyo3(signature = (name, *args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        name: String,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> Self {
+        let _ = (args, kwargs);
+        PyStageAttrs {
+            inner: RustStageAttrs::new(name),
+            body: PyList::empty(py).unbind(),
+            options: PyDict::new(py).unbind(),
+            bind_map: PyDict::new(py).unbind(),
+            client: None,
+            raw_dict: None,
+            gremlin: None,
+        }
+    }
+
+    // Python subclasses call super().__init__(name); tolerate their extra args.
+    #[pyo3(signature = (name, *args, **kwargs))]
+    fn __init__(
+        &mut self,
+        name: String,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) {
+        let _ = (args, kwargs);
+        self.inner.name = name;
+    }
+
+    #[getter]
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    #[setter]
+    fn set_name(&mut self, value: String) {
+        self.inner.name = value;
+    }
+
+    #[getter]
+    fn r#type(&self) -> &str {
+        &self.inner.stage_type
+    }
+
+    #[setter]
+    fn set_type(&mut self, value: String) {
+        self.inner.stage_type = value;
+    }
+
+    #[getter]
+    fn path(&self) -> &str {
+        &self.inner.path
+    }
+
+    #[setter]
+    fn set_path(&mut self, py: Python<'_>, value: String) {
+        self.inner.path = value.clone();
+        for child in self.body.bind(py).iter() {
+            let Ok(child_name) = child.getattr("name").and_then(|n| n.extract::<String>()) else {
+                continue;
+            };
+            let _ = child.setattr("path", format!("{value}/{child_name}"));
+        }
+    }
+
+    #[getter]
+    fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        self.body.bind(py).clone()
+    }
+
+    #[setter]
+    fn set_body(&mut self, value: &Bound<'_, PyList>) {
+        self.body = value.clone().unbind();
+    }
+
+    #[getter]
+    fn client(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.client.as_ref().map(|c| c.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_client(&mut self, value: Option<&Bound<'_, PyAny>>) {
+        self.client = value.map(|v| v.clone().unbind());
+    }
+
+    #[getter]
+    fn client_explicit(&self) -> bool {
+        self.inner.client_explicit
+    }
+
+    #[setter]
+    fn set_client_explicit(&mut self, value: bool) {
+        self.inner.client_explicit = value;
+    }
+
+    #[getter]
+    fn skip_if_exists(&self) -> &str {
+        &self.inner.skip_if_exists
+    }
+
+    #[setter]
+    fn set_skip_if_exists(&mut self, value: String) {
+        self.inner.skip_if_exists = value;
+    }
+
+    #[getter]
+    fn raw_dict(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.raw_dict.as_ref().map(|p| p.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_raw_dict(&mut self, value: &Bound<'_, PyAny>) {
+        self.raw_dict = Some(value.clone().unbind());
+    }
+
+    #[getter]
+    fn gremlin(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.gremlin.as_ref().map(|p| p.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_gremlin(&mut self, value: &Bound<'_, PyAny>) {
+        self.gremlin = Some(value.clone().unbind());
+    }
+
+    #[getter]
+    fn options<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
+        self.options.bind(py).clone()
+    }
+
+    #[setter]
+    fn set_options(&mut self, value: &Bound<'_, PyDict>) {
+        self.options = value.clone().unbind();
+    }
+
+    #[getter]
+    fn bind_map<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
+        self.bind_map.bind(py).clone()
+    }
+
+    #[setter]
+    fn set_bind_map(&mut self, value: &Bound<'_, PyDict>) {
+        self.bind_map = value.clone().unbind();
+    }
+}
+
 // --- Free functions ---
+
+fn stage_name_from_dict(d: &Bound<'_, PyDict>) -> String {
+    for key in ["name", "type"] {
+        if let Ok(Some(v)) = d.get_item(key) {
+            if let Ok(s) = v.extract::<String>() {
+                if !s.is_empty() {
+                    return s;
+                }
+            }
+        }
+    }
+    "?".to_string()
+}
+
+#[pyfunction]
+#[pyo3(name = "get_client_from_dict")]
+fn get_client_from_dict_py(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Option<Py<PyAny>>> {
+    // Only the `client` key is inspected: other stage keys may hold values
+    // that are not JSON-convertible.
+    let mut map = HashMap::new();
+    if let Some(raw) = d.get_item("client")? {
+        if !raw.is_none() {
+            // Any non-string collapses to a value the core rejects; the error
+            // below names the real Python type.
+            let encoded = match raw.is_instance_of::<PyString>() {
+                true => serde_json::Value::String(raw.extract()?),
+                false => serde_json::Value::Bool(false),
+            };
+            map.insert("client".to_string(), encoded);
+        }
+    }
+    let name = stage_name_from_dict(d);
+    match rust_get_client_from_dict(&map, &name) {
+        Ok(Some(spec)) => {
+            let parsed = py
+                .import("_gremlins_core.clients")?
+                .getattr("Client")?
+                .call_method1("parse", (spec.0,))?;
+            Ok(Some(parsed.unbind()))
+        }
+        Ok(None) => Ok(None),
+        // Render the offending Python type, as the pre-port helper did.
+        Err(_) => {
+            let kind = match d.get_item("client")? {
+                Some(raw) => raw.get_type().repr()?.to_string(),
+                None => "NoneType".to_string(),
+            };
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "stage '{name}': 'client' must be a string, got {kind}"
+            )))
+        }
+    }
+}
+
+#[pyfunction]
+#[pyo3(name = "child_state", signature = (parent, child, *, fan_out = false, child_id = None))]
+fn child_state_py(
+    py: Python<'_>,
+    parent: &Bound<'_, PyAny>,
+    child: &Bound<'_, PyAny>,
+    fan_out: bool,
+    child_id: Option<String>,
+) -> PyResult<Py<PyAny>> {
+    // A child's explicitly-set client wins; otherwise inherit the parent's.
+    let child_client = child.getattr("client")?;
+    let child_explicit: bool = child.getattr("client_explicit")?.extract()?;
+    let client = if !child_client.is_none() && child_explicit {
+        child_client
+    } else {
+        parent.getattr("client")?
+    };
+
+    let replace = py.import("dataclasses")?.getattr("replace")?;
+
+    if !fan_out {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("client", &client)?;
+        let new_state = replace.call((parent,), Some(&kwargs))?;
+
+        let client_str: String = client.str()?.extract()?;
+        let data_client: String = new_state.getattr("data")?.getattr("client")?.extract()?;
+        if client_str != data_client {
+            let patch = PyDict::new(py);
+            patch.set_item("client", client_str.as_str())?;
+            new_state
+                .getattr("data")?
+                .call_method("patch", (), Some(&patch))?;
+        }
+        return Ok(new_state.unbind());
+    }
+
+    let parent_artifact_dir: PathBuf = parent.getattr("artifact_dir")?.extract()?;
+    let child_name: String = child.getattr("name")?.extract()?;
+    let child_scratch: Option<PathBuf> = match child_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(cid) => Some(PathBuf::from(
+            py.import("_gremlins_core.config")?
+                .getattr("scratch_root")?
+                .call1((cid,))?
+                .extract::<String>()?,
+        )),
+        None => None,
+    };
+    let params = compute_child_params(&parent_artifact_dir, &child_name, child_scratch.as_deref());
+    std::fs::create_dir_all(&params.artifact_dir)?;
+    let artifact_dir_py = py
+        .import("pathlib")?
+        .getattr("Path")?
+        .call1((params.artifact_dir.to_string_lossy().as_ref(),))?;
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("client", &client)?;
+    kwargs.set_item("artifact_dir", &artifact_dir_py)?;
+    kwargs.set_item("child_key", params.child_key.as_str())?;
+    let new_state = replace.call((parent,), Some(&kwargs))?;
+    Ok(new_state.unbind())
+}
 
 #[pyfunction]
 #[pyo3(name = "substitute_vars", signature = (text, string_options, extra, framework_subs))]
@@ -893,7 +1190,10 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<PyExec>()?;
     m.add_class::<PyAgent>()?;
+    m.add_class::<PyStageAttrs>()?;
     m.add_class::<Done>()?;
+    m.add_function(wrap_pyfunction!(get_client_from_dict_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(child_state_py, &m)?)?;
     m.add("Bail", m.py().get_type::<Bail>())?;
 
     parent.add_submodule(&m)?;

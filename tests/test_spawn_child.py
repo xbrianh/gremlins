@@ -11,10 +11,9 @@ from typing import Any
 
 import pytest
 from _gremlins_core.schemas import STAGE_TYPES
-from _gremlins_core.stages import Bail, Done, Outcome
+from _gremlins_core.stages import Bail, Done, Outcome, StageAttrs
 
 import gremlins.spawn.child as _rc
-from gremlins.stages.composite import StageAttrs
 
 # Inert client spec: parsed by Gremlin.from_subprocess but never invoked — the
 # stages under test return Done/Bail/raise without calling the backend.

@@ -17,11 +17,10 @@ from typing import TYPE_CHECKING, Any
 
 from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.config import project_root, scratch_root, state_root
-from _gremlins_core.stages import Bail, Done, Outcome
+from _gremlins_core.stages import Bail, Done, Outcome, StageAttrs
+from _gremlins_core.stages import child_state as _child_state
 
 from gremlins.executor.parallel_state import ParallelGroupState
-from gremlins.stages.composite import StageAttrs
-from gremlins.stages.composite import child_state as _child_state
 from gremlins.utils import git, parallel_bail, proc
 
 if TYPE_CHECKING:
