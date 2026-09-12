@@ -1,0 +1,212 @@
+maturin develop
+🐍 Found CPython 3.14 at /private/var/folders/2g/5r4bmp5519g7vtv8w_lm8gjw0000gn/T/gremlins/aibg-gremlin.b66619fc7391/.venv/bin/python
+🔗 Found pyo3 bindings
+📡 Using build options features from pyproject.toml
+Audited 6 packages in 9ms
+   Compiling gremlins v0.0.0 (/private/var/folders/2g/5r4bmp5519g7vtv8w_lm8gjw0000gn/T/gremlins/aibg-gremlin.b66619fc7391/crates/gremlins)
+   Compiling gremlins-pyext v0.0.0 (/private/var/folders/2g/5r4bmp5519g7vtv8w_lm8gjw0000gn/T/gremlins/aibg-gremlin.b66619fc7391/crates/pyext)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.89s
+📦 Built wheel for CPython 3.14 to /var/folders/2g/5r4bmp5519g7vtv8w_lm8gjw0000gn/T/.tmpO6C4IP/gremlins_ai-0.0.0-cp314-cp314-macosx_11_0_arm64.whl
+✏️ Setting installed package as editable
+🛠 Installed gremlins-ai-0.0.0
+cargo test -q -p gremlins --lib && cargo test -q -p gremlins-pyext --lib
+python -m pytest -q --tb=short tests/test_active_children.py
+python -m pytest -q --tb=short tests/test_argbuilder.py
+python -m pytest -q --tb=short tests/test_artifact_resolve.py
+python -m pytest -q --tb=short tests/test_bootstrap.py
+python -m pytest -q --tb=short tests/test_cli_analyze.py
+python -m pytest -q --tb=short tests/test_cli_artifacts.py
+python -m pytest -q --tb=short tests/test_cli_clean.py
+
+running 464 tests
+....................................................................................... 87/464
+....................................................................................... 174/464
+....................................................................................... 261/464
+....................................................................................... 348/464
+....................................................................................... 435/464
+....................................
+test result: ok. 464 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
+
+..............................                                                                   [100%]
+6 passed in 1.34s
+....python -m pytest -q --tb=short tests/test_cli_launch.py
+......                                                                  [100%]
+7 passed in 1.64s
+python -m pytest -q --tb=short tests/test_cli_validate.py
+.............                                                               [100%]...
+10 passed in 2.28s
+python -m pytest -q --tb=short tests/test_cli.py
+......                                                              [100%]
+11 passed in 2.61s
+.python -m pytest -q --tb=short tests/test_env_file.py
+..............                                                            [100%]
+13 passed in 3.19s
+.python -m pytest -q --tb=short tests/test_executor_run.py
+...                                                           [100%]
+14 passed in 3.37s
+.python -m pytest -q --tb=short tests/test_fleet.py
+.                                                                  [100%].
+7 passed in 1.77s
+..                                                                   [100%]python -m pytest -q --tb=short tests/test_git_remove_worktrees.py
+
+6 passed in 1.49s
+python -m pytest -q --tb=short tests/test_git_worktree_default_parent.py
+.................                                                                        [100%]
+1 passed in 0.44s
+python -m pytest -q --tb=short tests/test_gremlin_fork.py
+...                                                                   [100%].
+6 passed in 1.45s
+python -m pytest -q --tb=short tests/test_gremlin_open.py
+..                                                                       [100%]
+2 passed in 0.71s
+.python -m pytest -q --tb=short tests/test_gremlin_smoke.py
+......                                                     [100%]
+20 passed in 4.92s
+.python -m pytest -q --tb=short tests/test_input_sources.py
+........................                                                                       [100%].
+2 passed in 1.07s
+python -m pytest -q --tb=short tests/test_interpolation_validation.py
+..........                                                             [100%]
+12 passed in 2.92s
+.python -m pytest -q --tb=short tests/test_launcher_graft.py
+...                                                                     [100%].
+4 passed in 1.95s
+.python -m pytest -q --tb=short tests/test_launcher_input_sources.py
+....                                                                  [100%].
+7 passed in 2.13s
+python -m pytest -q --tb=short tests/test_launcher_persist_pipeline.py
+...............
+running 13 tests
+.............
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+python -m pytest -q --tb=short tests/test_launcher.py
+............                                                             [100%]
+12 passed in 2.68s
+..                                                                  [100%]..
+7 passed in 1.65s
+python -m pytest -q --tb=short tests/test_logging_setup.py
+python -m pytest -q --tb=short tests/test_orchestrator_boss.py
+..............                                                                  [100%]
+7 passed in 1.56s
+..python -m pytest -q --tb=short tests/test_parallel_bail_shards.py
+.........                                                                   [100%].
+6 passed in 1.76s
+..python -m pytest -q --tb=short tests/test_parallel_bail.py
+.......                                                                    [100%].                                                                      [100%]
+5 passed in 1.09s
+
+3 passed in 1.10s
+python -m pytest -q --tb=short tests/test_parallel_done.py
+python -m pytest -q --tb=short tests/test_parallel_fanin_artifacts.py
+..........................................                                                                    [100%]
+5 passed in 1.15s
+.python -m pytest -q --tb=short tests/test_parallel_first_class_children.py
+..............                                                                    [100%]
+5 passed in 1.75s
+python -m pytest -q --tb=short tests/test_parallel_group_state.py
+..                                                    [100%].
+21 passed in 4.80s
+.python -m pytest -q --tb=short tests/test_parallel_runner.py
+...                                [100%]
+41 passed in 9.16s
+.python -m pytest -q --tb=short tests/test_parallel_subprocess_resilience.py
+.....................                                                          [100%].
+15 passed in 3.33s
+.python -m pytest -q --tb=short tests/test_pipeline_args.py
+.........................                                                                     [100%]
+4 passed in 2.62s
+python -m pytest -q --tb=short tests/test_pipeline_loader.py
+..                                                               [100%].
+10 passed in 2.14s
+.python -m pytest -q --tb=short tests/test_pipeline_yaml_load.py
+....................................................                                                            [100%]
+13 passed in 2.92s
+python -m pytest -q --tb=short tests/test_pipeline.py
+...............................                                                        [100%]
+17 passed in 5.21s
+python -m pytest -q --tb=short tests/test_prefix_clients.py
+..........                                                       [100%].
+18 passed in 8.54s
+python -m pytest -q --tb=short tests/test_proc.py
+......................                                                 [100%]
+24 passed in 6.07s
+...python -m pytest -q --tb=short tests/test_prompt_for_assistant.py
+.............................................                                                              [100%]
+11 passed in 2.36s
+python -m pytest -q --tb=short tests/test_queue.py
+... [ 92%]
+...                                                                   [100%]
+6 passed in 1.36s
+.python -m pytest -q --tb=short tests/test_recipe_verify.py
+..................................                                                    [100%]
+21 passed in 4.75s
+..python -m pytest -q --tb=short tests/test_resolve_gremlin.py
+..                                                                   [100%]..
+78 passed in 17.52s
+.python -m pytest -q --tb=short tests/test_resolve_interpolation_map.py
+....                                         [100%]..
+32 passed in 7.19s
+.python -m pytest -q --tb=short tests/test_resolve_pipeline_name.py
+...........                                                                 [100%].
+8 passed in 1.75s
+..python -m pytest -q --tb=short tests/test_session_summary.py
+......                                                                     [100%].
+4 passed in 0.87s
+python -m pytest -q --tb=short tests/test_skills_python_sh.py
+...                                                                      [100%].
+3 passed in 0.68s
+.python -m pytest -q --tb=short tests/test_skip_if_exists.py
+..................................                                                                     [100%].
+4 passed in 0.98s
+..python -m pytest -q --tb=short tests/test_spawn_child.py
+...s                                                                     [100%].
+3 passed, 1 skipped in 1.40s
+.python -m pytest -q --tb=short tests/test_stage_agent_e2e.py
+..........                                                            [100%]
+13 passed in 2.85s
+.python -m pytest -q --tb=short tests/test_stage_agent.py
+..                                             [100%]
+28 passed in 6.67s
+.python -m pytest -q --tb=short tests/test_stage_attrs.py
+.......                                                                       [100%].
+2 passed in 0.51s
+.python -m pytest -q --tb=short tests/test_stage_exec.py
+.....                        [100%].
+49 passed in 10.92s
+python -m pytest -q --tb=short tests/test_stage_implement.py
+...............................................................                                                              [100%].
+11 passed in 2.36s
+.python -m pytest -q --tb=short tests/test_stage_loop_bail.py
+.                                                  [100%]
+23 passed in 4.97s
+...                                                                    [100%].python -m pytest -q --tb=short tests/test_stage_loop.py
+
+5 passed in 1.93s
+.python -m pytest -q --tb=short tests/test_stage_sequence.py
+..                                                         [100%]..
+16 passed in 3.46s
+python -m pytest -q --tb=short tests/test_stages_local.py
+.................                                                            [100%].
+13 passed in 3.14s
+.python -m pytest -q --tb=short tests/test_state_isolation.py
+..                                                                       [100%].
+2 passed in 0.93s
+python -m pytest -q --tb=short tests/test_subprocess_sandbox.py
+....                                                                      [100%].
+3 passed in 0.77s
+.................                                                                  [100%]
+7 passed in 1.54s
+...............                                                                     [100%].
+4 passed in 0.95s
+.....................                                                                [100%].
+9 passed in 1.79s
+...                                [100%]
+41 passed in 22.79s
+....                                           [100%].
+30 passed in 6.04s
+......                                                     [100%].
+20 passed in 3.54s
+................. [ 80%]
+................                                                        [100%]
+89 passed in 15.02s

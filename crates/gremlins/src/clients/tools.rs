@@ -1245,7 +1245,6 @@ fn glob_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     }
 }
 
-pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> String {
 /// Used by `validate_tool_args` to produce rich error messages when
 /// the model sends malformed tool-call arguments.
 fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str)>> {
@@ -1318,38 +1317,35 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
         }
     }
     // Nested constraints for tools with structured array items.
-    match name {
-        "Edit" => {
-            if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
-                if edits.is_empty() {
-                    return Some("Error: 'edits' array must not be empty for Edit tool".into());
+    if name == "Edit" {
+        if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
+            if edits.is_empty() {
+                return Some("Error: 'edits' array must not be empty for Edit tool".into());
+            }
+            for (i, edit) in edits.iter().enumerate() {
+                let obj = match edit.as_object() {
+                    Some(o) => o,
+                    None => {
+                        return Some(format!(
+                            "Error: edit {} in 'edits' must be an object for Edit tool",
+                            i + 1
+                        ));
+                    }
+                };
+                if !obj.contains_key("old_string") {
+                    return Some(format!(
+                        "Error: edit {} missing 'old_string' for Edit tool",
+                        i + 1
+                    ));
                 }
-                for (i, edit) in edits.iter().enumerate() {
-                    let obj = match edit.as_object() {
-                        Some(o) => o,
-                        None => {
-                            return Some(format!(
-                                "Error: edit {} in 'edits' must be an object for Edit tool",
-                                i + 1
-                            ));
-                        }
-                    };
-                    if !obj.contains_key("old_string") {
-                        return Some(format!(
-                            "Error: edit {} missing 'old_string' for Edit tool",
-                            i + 1
-                        ));
-                    }
-                    if !obj.contains_key("new_string") {
-                        return Some(format!(
-                            "Error: edit {} missing 'new_string' for Edit tool",
-                            i + 1
-                        ));
-                    }
+                if !obj.contains_key("new_string") {
+                    return Some(format!(
+                        "Error: edit {} missing 'new_string' for Edit tool",
+                        i + 1
+                    ));
                 }
             }
         }
-        _ => {}
     }
     None
 }
@@ -1406,7 +1402,10 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
         "Glob" => glob_invoke(ctx, args_json).await,
         "Task" => {
             if let Some(f) = &ctx.task_fn {
-                let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let description = args
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
                 if prompt.is_empty() {
                     return "Error: Task prompt is required".to_string();
@@ -1833,7 +1832,11 @@ mod tests {
         .is_none());
         assert!(validate_tool_args("Grep", &serde_json::json!({"pattern": "fn"})).is_none());
         assert!(validate_tool_args("Glob", &serde_json::json!({"pattern": "*.rs"})).is_none());
-        assert!(validate_tool_args("Task", &serde_json::json!({"description": "d", "prompt": "do it"})).is_none());
+        assert!(validate_tool_args(
+            "Task",
+            &serde_json::json!({"description": "d", "prompt": "do it"})
+        )
+        .is_none());
     }
 
     #[test]
@@ -1873,8 +1876,7 @@ mod tests {
 
     #[test]
     fn validate_tool_args_task_missing_prompt() {
-        let err =
-            validate_tool_args("Task", &serde_json::json!({"description": "d"})).unwrap();
+        let err = validate_tool_args("Task", &serde_json::json!({"description": "d"})).unwrap();
         assert!(err.contains("missing 'prompt'"));
         assert!(err.contains("Task"));
     }
@@ -2653,8 +2655,9 @@ mod tests {
     #[tokio::test]
     async fn task_empty_prompt_returns_error() {
         let dir = tmp();
-        let task_fn: TaskFn =
-            Arc::new(|_description, _prompt| Box::pin(async move { "should not be called".to_string() }));
+        let task_fn: TaskFn = Arc::new(|_description, _prompt| {
+            Box::pin(async move { "should not be called".to_string() })
+        });
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,

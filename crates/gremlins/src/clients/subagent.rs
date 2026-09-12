@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -62,7 +61,7 @@ pub(crate) fn make_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
     prefix: String,
     idle_timeout: f64,
     max_turns: usize,
-) -> tools::SubagentFn {
+) -> tools::TaskFn {
     make_runner_at_depth(
         model,
         tool_filter,
@@ -87,18 +86,14 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
     max_turns: usize,
     depth: u32,
     id_chain: String,
-) -> tools::SubagentFn {
-    Arc::new(move |task: String, cwd: Option<PathBuf>| {
+) -> tools::TaskFn {
+    Arc::new(move |_description: String, task: String| {
         let model = model.clone();
         let tool_filter = tool_filter.clone();
         let cancel = cancel.clone();
         let mut sub_ctx = ctx.clone();
         let prefix = prefix.clone();
         let id_chain = id_chain.clone();
-
-        if let Some(cwd) = cwd {
-            sub_ctx.cwd = Some(cwd);
-        }
 
         Box::pin(async move {
             if depth >= MAX_DEPTH {
@@ -113,7 +108,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
             // Pass the original `prefix` (not `sub_prefix`) so prefixes don't
             // stack across nesting levels — each level appends its own id
             // segment to the chain instead.
-            sub_ctx.subagent_fn = Some(make_runner_at_depth(
+            sub_ctx.task_fn = Some(make_runner_at_depth(
                 model.clone(),
                 tool_filter.clone(),
                 cancel.clone(),
@@ -207,13 +202,13 @@ mod tests {
             allowed_roots: vec![dir],
             audit_log: None,
             allowed_tools: None,
-            subagent_fn: None,
+            task_fn: None,
             audit_lock: None,
         }
     }
 
     #[tokio::test]
-    async fn make_runner_invokes_and_sets_subagent_fn() {
+    async fn make_runner_invokes_and_sets_task_fn() {
         let ctx = depth_test_ctx();
 
         // Model that returns a single text response in one turn.
@@ -226,7 +221,7 @@ mod tests {
         let runner = make_runner(model.clone(), None, cancel, ctx, String::new(), 5.0, 10);
 
         // First invocation: depth 0 < 3, should succeed.
-        let output = runner("first call".into(), None).await;
+        let output = runner("label".into(), "first call".into()).await;
         assert!(
             !output.contains("max depth"),
             "depth 0 should not hit guard, got: {output}"
@@ -236,7 +231,7 @@ mod tests {
         for req in model.requests() {
             match req.chat_history.first() {
                 Message::System { content } => assert!(
-                    content.contains("fan them out with the parallel tool"),
+                    content.contains("fan them out with parallel Task calls"),
                     "unexpected system prompt: {content}"
                 ),
                 other => panic!("subagent must inject a system prompt, got: {other:?}"),
@@ -296,7 +291,7 @@ mod tests {
         // Ten concurrent siblings at depth 0 — none should be rejected as
         // "max depth" even though they overlap in time.
         let handles: Vec<_> = (0..10)
-            .map(|i| tokio::spawn(runner.clone()(format!("call {i}"), None)))
+            .map(|i| tokio::spawn(runner.clone()(format!("label {i}"), format!("call {i}"))))
             .collect();
         for h in handles {
             let out = h.await.unwrap();
@@ -326,7 +321,7 @@ mod tests {
             String::new(),
         );
 
-        let blocked = runner("too deep".into(), None).await;
+        let blocked = runner("label".into(), "too deep".into()).await;
         assert!(
             blocked.contains("max depth (3) exceeded"),
             "call at MAX_DEPTH should be rejected, got: {blocked}"
@@ -463,12 +458,12 @@ mod tests {
             ]
         }
 
-        fn turn_subagent_call() -> Vec<rig_core::test_utils::MockStreamEvent> {
+        fn turn_task_call() -> Vec<rig_core::test_utils::MockStreamEvent> {
             vec![
                 rig_core::test_utils::MockStreamEvent::tool_call(
                     "c1",
-                    "subagent",
-                    serde_json::json!({"task": "child task"}),
+                    "Task",
+                    serde_json::json!({"description": "child", "prompt": "child task"}),
                 ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ]
@@ -476,7 +471,7 @@ mod tests {
 
         fn runner_with_turns(
             turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>,
-        ) -> tools::SubagentFn {
+        ) -> tools::TaskFn {
             make_runner(
                 rig_core::test_utils::MockCompletionModel::from_stream_turns(turns),
                 None,
@@ -492,7 +487,7 @@ mod tests {
         fn sub_prefix_wraps_a_single_segment_at_depth_one() {
             let lines = capture_stderr(|| {
                 let runner = runner_with_turns(vec![turn_text("only")]);
-                block_on(runner("task".into(), None));
+                block_on(runner("label".into(), "task".into()));
             });
             let segments = segments_of(&sub_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
@@ -512,12 +507,9 @@ mod tests {
         #[test]
         fn nested_sub_prefix_appends_to_the_parent_chain() {
             let lines = capture_stderr(|| {
-                let runner = runner_with_turns(vec![
-                    turn_subagent_call(),
-                    turn_text("leaf"),
-                    turn_text("done"),
-                ]);
-                block_on(runner("task".into(), None));
+                let runner =
+                    runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
+                block_on(runner("label".into(), "task".into()));
             });
             let segments = segments_of(&sub_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
@@ -540,8 +532,8 @@ mod tests {
             let lines = capture_stderr(|| {
                 let runner = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
                 block_on(async {
-                    runner("one".into(), None).await;
-                    runner("two".into(), None).await;
+                    runner("one".into(), "one".into()).await;
+                    runner("two".into(), "two".into()).await;
                 });
             });
             let segments = segments_of(&sub_prefixes(&lines));

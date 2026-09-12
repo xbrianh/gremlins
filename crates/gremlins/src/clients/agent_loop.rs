@@ -145,12 +145,12 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         allowed_roots,
         audit_log,
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
-        subagent_fn: None,
+        task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter);
 
-    // Wire up the subagent runner before entering the turn loop.
+    // Wire up the Task runner before entering the turn loop.
     let runner = super::subagent::make_runner(
         model.clone(),
         opts.tool_filter.map(|f| f.to_vec()),
@@ -160,7 +160,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         idle_timeout,
         max_turns,
     );
-    tool_ctx.subagent_fn = Some(runner);
+    tool_ctx.task_fn = Some(runner);
 
     run_agent_loop_core(
         model,
@@ -185,7 +185,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
 /// Nested agent loop — same logic as the parent loop but without raw transcript
 /// writes, captured-event pushes, or final/summary stream emissions.
 /// Stream events (think, text, tool, result, turn metrics) are emitted.
-/// Used by the subagent tool.
+/// Used by the Task tool.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: &M,
@@ -622,7 +622,14 @@ pub(crate) fn assistant_tool_message(text: &str, tool_calls: &[ToolCall]) -> Mes
 
 pub(crate) fn key_arg(args: &serde_json::Value) -> String {
     if let Some(obj) = args.as_object() {
-        for k in ["file_path", "command", "pattern", "url", "output_file"] {
+        for k in [
+            "file_path",
+            "command",
+            "pattern",
+            "url",
+            "output_file",
+            "description",
+        ] {
             if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
                     return v.to_string();
@@ -641,7 +648,7 @@ pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
             "command",
             "pattern",
             "path",
-            "task",
+            "description",
             "url",
             "output_file",
         ] {
@@ -784,7 +791,7 @@ mod tests {
     fn ledger_key_arg_covers_extra_fields_and_truncates() {
         assert_eq!(ledger_key_arg(&serde_json::json!({"path": "/tmp"})), "/tmp");
         assert_eq!(
-            ledger_key_arg(&serde_json::json!({"task": "fix it"})),
+            ledger_key_arg(&serde_json::json!({"description": "fix it"})),
             "fix it"
         );
         assert_eq!(ledger_key_arg(&serde_json::json!({"pattern": ""})), "");

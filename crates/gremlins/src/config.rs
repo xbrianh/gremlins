@@ -17,16 +17,16 @@ pub(crate) fn agent_system_prompt(
     format!(
         "\
 <important>\n\
-Keep your context lean: delegate self-contained pieces of work to subagents. Subagents \
+Keep your context lean: delegate self-contained pieces of work to Task calls. Task calls \
 have isolated context — they absorb the noise so you don't have to. When you have multiple \
-independent tasks, fan them out with the parallel tool. Plan the fan-out before you start. \
-Use subagents as scouts to explore options and gather information.\n\n\
-You MUST delegate tasks to subagents to maintain a clean context.\n\n\
+independent tasks, fan them out with parallel Task calls. Plan the fan-out before you start. \
+Use Task calls as scouts to explore options and gather information.\n\n\
+You MUST delegate tasks to maintain a clean context.\n\n\
 </important>\n\n\
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Bash (shell commands), subagent, parallel\n\
+by pattern), Bash (shell commands), Task\n\
 </tools>\n\n\
 <directories>\n\
 Project root:  {project}\n\
@@ -51,13 +51,13 @@ pub(crate) fn subagent_system_prompt(
     format!(
         "\
 <gremlins:info>\n\
-When you have multiple independent tasks, fan them out with the parallel tool. Plan the fan-out \
+When you have multiple independent tasks, fan them out with parallel Task calls. Plan the fan-out \
 before you start; parallel work is cheaper than serial drift.\n\
 </gremlins:info>\n\n\
 <gremlins:tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Bash (shell commands), subagent, parallel\n\
+by pattern), Bash (shell commands), Task\n\
 </gremlins:tools>\n\n\
 <gremlins:directories>\n\
 Project root:  {project}\n\
@@ -1181,7 +1181,7 @@ mod tests {
             Path::new("/project"),
         );
         assert!(
-            prompt.contains("delegate self-contained pieces of work to subagents"),
+            prompt.contains("delegate self-contained pieces of work to Task calls"),
             "agent prompt must include delegation guidance"
         );
     }
@@ -1209,7 +1209,7 @@ mod tests {
             Path::new("/project"),
         );
         assert!(
-            !prompt.contains("delegate self-contained pieces of work to subagents"),
+            !prompt.contains("delegate self-contained pieces of work to Task calls"),
             "subagent prompt must not include delegation guidance — subagents are already delegates"
         );
     }
