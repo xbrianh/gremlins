@@ -6,27 +6,88 @@ use gremlins::executor::state::{self as rust_state, StateData};
 use gremlins::stages::constants::FRAMEWORK_KEYS;
 use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFrozenSet, PyList};
+use pyo3::types::{PyBool, PyDict, PyFrozenSet, PyList};
 
 fn value_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>> {
-    let json = py.import("json")?;
-    let s = serde_json::to_string(v).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(json.call_method1("loads", (s,))?.unbind())
+    match v {
+        serde_json::Value::Null => Ok(py.None()),
+        serde_json::Value::Bool(b) => Ok(PyBool::new(py, *b).to_owned().into_any().unbind()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i.into_pyobject(py)?.into_any().unbind())
+            } else if let Some(f) = n.as_f64() {
+                Ok(f.into_pyobject(py)?.into_any().unbind())
+            } else {
+                Err(PyValueError::new_err("unsupported JSON number"))
+            }
+        }
+        serde_json::Value::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<Py<PyAny>> = arr
+                .iter()
+                .map(|item| value_to_py(py, item))
+                .collect::<PyResult<_>>()?;
+            Ok(PyList::new(py, items)?.into())
+        }
+        serde_json::Value::Object(obj) => {
+            let dict = PyDict::new(py);
+            for (k, v) in obj {
+                dict.set_item(k, value_to_py(py, v)?)?;
+            }
+            Ok(dict.into())
+        }
+    }
 }
 
 fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
-    let json = obj.py().import("json")?;
-    let s: String = json.call_method1("dumps", (obj,))?.extract()?;
-    serde_json::from_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))
+    if obj.is_none() {
+        return Ok(serde_json::Value::Null);
+    }
+    // bool before i64 — Python bool is a subclass of int
+    if let Ok(b) = obj.extract::<bool>() {
+        return Ok(serde_json::Value::Bool(b));
+    }
+    if let Ok(i) = obj.extract::<i64>() {
+        return Ok(serde_json::Value::Number(i.into()));
+    }
+    if let Ok(f) = obj.extract::<f64>() {
+        if f.is_finite() {
+            return serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| PyValueError::new_err("cannot represent float as JSON"));
+        }
+        return Err(PyValueError::new_err(
+            "JSON does not support NaN or Infinity",
+        ));
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(serde_json::Value::String(s));
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        let mut vals = Vec::new();
+        for item in list.iter() {
+            vals.push(py_to_value(&item)?);
+        }
+        return Ok(serde_json::Value::Array(vals));
+    }
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        let mut map = serde_json::Map::new();
+        for (k, v) in dict.iter() {
+            let key: String = k.extract()?;
+            map.insert(key, py_to_value(&v)?);
+        }
+        return Ok(serde_json::Value::Object(map));
+    }
+    Err(PyValueError::new_err("value cannot be represented as JSON"))
 }
 
 fn py_dict_to_map(d: &Bound<'_, PyDict>) -> PyResult<serde_json::Map<String, serde_json::Value>> {
-    let json = d.py().import("json")?;
-    let s: String = json.call_method1("dumps", (d,))?.extract()?;
-    match serde_json::from_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))? {
-        serde_json::Value::Object(m) => Ok(m),
-        _ => Ok(serde_json::Map::new()),
+    let mut map = serde_json::Map::new();
+    for (k, v) in d.iter() {
+        let key: String = k.extract()?;
+        map.insert(key, py_to_value(&v)?);
     }
+    Ok(map)
 }
 
 fn map_to_py_dict(
