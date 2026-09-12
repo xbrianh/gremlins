@@ -576,7 +576,6 @@ def test_model_kwarg_forwarded(tmp_path):
     assert state.client.calls[0].model == "haiku"
 
 
-
 def test_token_usage_accumulated_into_state(tmp_path):
     usage_events = [
         {
