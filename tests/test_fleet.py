@@ -1215,7 +1215,7 @@ def test_log_main_full_flag_accepted(sandbox, tmp_path, monkeypatch, capsys):
     assert "cat not found" in capsys.readouterr().err
 
 
-def test_log_main_no_full_defaults_to_tail(sandbox, tmp_path, monkeypatch, capsys):
+def test_log_main_no_full_defaults_to_less(sandbox, tmp_path, monkeypatch, capsys):
     gr_dir, _ = _setup_dead_gremlin(sandbox, tmp_path)
     log_path = gr_dir / "log"
     log_path.write_text("log content")
@@ -1226,4 +1226,4 @@ def test_log_main_no_full_defaults_to_tail(sandbox, tmp_path, monkeypatch, capsy
     monkeypatch.setattr(os, "execvp", fake_execvp)
     rc = _fleet_cli.log_main(["test-id-aabb12"])
     assert rc == 1
-    assert "tail not found" in capsys.readouterr().err
+    assert "less not found" in capsys.readouterr().err
