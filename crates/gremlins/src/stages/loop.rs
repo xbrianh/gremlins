@@ -27,18 +27,20 @@ fn truthy(v: &Value) -> bool {
     }
 }
 
-/// Python-style `int(v)`: integers, integral floats, and numeric strings.
+/// Python-style `int(v)`: bools, integers, integral floats, and numeric strings.
 fn as_int(v: &Value) -> Option<i64> {
     match v {
+        Value::Bool(b) => Some(*b as i64),
         Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
         Value::String(s) => s.trim().parse::<i64>().ok(),
         _ => None,
     }
 }
 
-/// Python-style `float(v)`: numbers and numeric strings.
+/// Python-style `float(v)`: bools, numbers and numeric strings.
 fn as_float(v: &Value) -> Option<f64> {
     match v {
+        Value::Bool(b) => Some(*b as i64 as f64),
         Value::Number(n) => n.as_f64(),
         Value::String(s) => s.trim().parse::<f64>().ok(),
         _ => None,
@@ -74,7 +76,12 @@ impl Loop {
                         "Loop '{name}': max_iterations must be >= 1, got {n}"
                     ));
                 }
-                n as u32
+                u32::try_from(n).map_err(|_| {
+                    format!(
+                        "stage '{name}': 'max_iterations' must be <= {}, got {n}",
+                        u32::MAX
+                    )
+                })?
             }
             None => 3,
         };
@@ -97,8 +104,9 @@ impl Loop {
         };
 
         let body = match d.get("body") {
-            Some(Value::Array(arr)) if !arr.is_empty() => arr.clone(),
-            _ => return Err(format!("stage '{name}': 'body' must not be empty")),
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(arr)) => arr.clone(),
+            Some(v) => return Err(format!("stage '{name}': 'body' must be a list, got {v:?}")),
         };
 
         let client = get_client_from_dict(d, &name)?;
@@ -183,6 +191,16 @@ mod tests {
     }
 
     #[test]
+    fn with_dict_parses_bool_interval() {
+        // Python's float(True) == 1.0.
+        let d = dict(&[
+            ("name", json!("lp")),
+            ("options", json!({"interval": true})),
+        ]);
+        assert_eq!(Loop::with_dict(&d).unwrap().interval, Some(1.0));
+    }
+
+    #[test]
     fn with_dict_parses_string_interval() {
         let d = dict(&[
             ("name", json!("lp")),
@@ -263,24 +281,39 @@ mod tests {
     }
 
     #[test]
-    fn with_dict_rejects_empty_body() {
+    fn with_dict_allows_empty_body() {
         let d = dict(&[("name", json!("lp")), ("body", json!([]))]);
-        let err = Loop::with_dict(&d).unwrap_err();
-        assert!(err.contains("must not be empty"));
+        assert!(Loop::with_dict(&d).unwrap().body.is_empty());
     }
 
     #[test]
-    fn with_dict_rejects_missing_body() {
+    fn with_dict_allows_missing_body() {
         let d = dict(&[("name", json!("lp"))]);
-        let err = Loop::with_dict(&d).unwrap_err();
-        assert!(err.contains("must not be empty"));
+        assert!(Loop::with_dict(&d).unwrap().body.is_empty());
     }
 
     #[test]
     fn with_dict_rejects_non_list_body() {
         let d = dict(&[("name", json!("lp")), ("body", json!("not-a-list"))]);
         let err = Loop::with_dict(&d).unwrap_err();
-        assert!(err.contains("must not be empty"));
+        assert!(err.contains("'body' must be a list"));
+    }
+
+    #[test]
+    fn with_dict_accepts_bool_max_iterations() {
+        // Python's int(True) == 1.
+        let d = dict(&[("name", json!("lp")), ("max-iterations", json!(true))]);
+        assert_eq!(Loop::with_dict(&d).unwrap().max_iterations, 1);
+    }
+
+    #[test]
+    fn with_dict_rejects_max_iterations_above_u32() {
+        let d = dict(&[
+            ("name", json!("lp")),
+            ("options", json!({"max_iterations": u32::MAX as i64 + 1})),
+        ]);
+        let err = Loop::with_dict(&d).unwrap_err();
+        assert!(err.contains("must be <="), "{err}");
     }
 
     #[test]

@@ -1431,6 +1431,9 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let globals = PyDict::new(py);
     globals.set_item("_m", &m)?;
     globals.set_item("_BAIL_KEY", BAIL_KEY)?;
+    // Injected `run()` bodies call logging.getLogger(__name__); without this
+    // the lookup falls through to builtins and logs under "builtins".
+    globals.set_item("__name__", "_gremlins_core.stages")?;
     py.run(
         c"\
 async def _exec_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Exec.run = _exec_run_async\n\
