@@ -62,7 +62,6 @@ impl CancelToken {
 #[derive(Clone)]
 pub(crate) struct RunContext {
     pub(crate) params: RunParams,
-    pub(crate) system_prompt: Option<String>,
     pub(crate) prefix: String,
     pub(crate) idle_timeout: f64,
     pub(crate) expected_artifact_paths: Vec<PathBuf>,
@@ -166,7 +165,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     run_agent_loop_core(
         model,
         prompt,
-        ctx.system_prompt.clone(),
+        ctx.params.system_prompt.clone(),
         &tool_ctx,
         &tool_defs,
         &cancel,
@@ -865,7 +864,6 @@ mod tests {
                 artifact_reminder_count: 0,
                 system_prompt: None,
             },
-            system_prompt: None,
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
             expected_artifact_paths: vec![],
@@ -1303,7 +1301,7 @@ mod tests {
         let mut ctx = test_ctx(Some(dir.clone()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
-        ctx.system_prompt = Some("you are a harness".into());
+        ctx.params.system_prompt = Some("you are a harness".into());
         let cancel = CancelToken::new();
         let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None))
             .await

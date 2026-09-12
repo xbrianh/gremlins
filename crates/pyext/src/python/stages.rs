@@ -785,9 +785,10 @@ impl PyAgent {
                 kwargs.set_item("artifact_reminder_count", 3)?;
                 kwargs.set_item("system_prompt", system_prompt.as_str())?;
 
-                // Pass through remaining options (except "model") as kwargs to client.run()
+                // Pass through remaining options (except "model") as kwargs to client.run(),
+                // reserving "system_prompt" so a user option can never clobber the harness prompt.
                 for (k, v) in &agent.options {
-                    if k == "model" {
+                    if k == "model" || k == "system_prompt" {
                         continue;
                     }
                     let py_val = json_value_to_py(py, v)?;
