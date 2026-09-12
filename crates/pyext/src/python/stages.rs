@@ -888,20 +888,18 @@ fn substitute_vars_py(
 
 #[pyfunction]
 #[pyo3(name = "compute_child_params", signature = (
-    parent_artifact_dir, child_name, child_id, scratch_root
+    parent_artifact_dir, child_name, child_scratch_dir
 ))]
 fn compute_child_params_py(
     py: Python<'_>,
     parent_artifact_dir: &str,
     child_name: &str,
-    child_id: Option<&str>,
-    scratch_root: &str,
+    child_scratch_dir: Option<&str>,
 ) -> PyResult<Py<PyDict>> {
     let result = composite::compute_child_params(
         Path::new(parent_artifact_dir),
         child_name,
-        child_id,
-        Path::new(scratch_root),
+        child_scratch_dir.map(Path::new),
     );
     let dict = PyDict::new(py);
     dict.set_item(

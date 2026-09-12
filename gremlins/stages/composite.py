@@ -74,8 +74,7 @@ def child_state(
     params = compute_child_params(
         parent_artifact_dir=str(parent.artifact_dir),
         child_name=child.name,
-        child_id=child_id,
-        scratch_root=str(scratch_root(child_id)) if child_id else "",
+        child_scratch_dir=str(scratch_root(child_id)) if child_id else None,
     )
     artifact_dir = pathlib.Path(params["artifact_dir"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
