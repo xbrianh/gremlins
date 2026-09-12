@@ -332,7 +332,6 @@ mod tests {
     /// are Unix-only as a unit; the format tests above stay portable.
     #[cfg(unix)]
     mod capture {
-        use super::super::*;
         use super::*;
 
         use std::io::{Read, Write};
