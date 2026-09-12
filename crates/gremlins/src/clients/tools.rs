@@ -11,6 +11,11 @@ use tokio::process::Command;
 
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
+/// Cap on Task calls spawned from a single model message, and on how much of
+/// one Task's result is carried into the next context. Without both, one
+/// response could fan out unbounded child loops and overflow the context.
+pub(crate) const TASK_MAX_PER_TURN: usize = 8;
+pub(crate) const TASK_OUTPUT_LIMIT: usize = 2000;
 const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", "target"];
 
 /// Tools that stay available even when a tool filter is set. `task_fn`
@@ -22,10 +27,22 @@ fn always_available(name: &str) -> bool {
     ALWAYS_AVAILABLE.contains(&name)
 }
 
-type SubagentFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
+type TaskFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
 
 /// Callback that `invoke` calls for Task tool invocations.
-pub(crate) type TaskFn = Arc<dyn Fn(String, String) -> SubagentFuture + Send + Sync>;
+pub(crate) type TaskFn = Arc<dyn Fn(String, String) -> TaskFuture + Send + Sync>;
+
+/// Bound one Task result before it becomes part of the next turn's context.
+pub(crate) fn truncate_task_output(body: &str) -> String {
+    match body.char_indices().nth(TASK_OUTPUT_LIMIT) {
+        Some((i, _)) => format!(
+            "{}…[truncated: {} chars total]",
+            &body[..i],
+            body.chars().count()
+        ),
+        None => body.to_string(),
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ToolContext {
@@ -1410,7 +1427,13 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
                 if prompt.is_empty() {
                     return "Error: Task prompt is required".to_string();
                 }
-                f(description.to_string(), prompt.to_string()).await
+                let out = f(description.to_string(), prompt.to_string()).await;
+                // Label the result so concurrent Task outputs can be told apart.
+                if description.is_empty() {
+                    out
+                } else {
+                    format!("# {description}\n\n{out}")
+                }
             } else {
                 "Error: Task not available for this backend".to_string()
             }
@@ -1536,13 +1559,13 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
     // Task is always available, even when a tool filter is set.
     all.push(ToolDefinition {
         name: "Task".into(),
-        description: "Delegate a self-contained task to a worker with a clean conversation context. Multiple Task calls in the same message run concurrently. Returns the worker's final text output.".into(),
+        description: format!("Delegate a self-contained task to a worker with a clean conversation context. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message. Returns the worker's final text output, truncated to {TASK_OUTPUT_LIMIT} characters and marked with …[truncated] when cut."),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Short label for this task (used in logs and result headers)"
+                    "description": "Short label for this task, used in logs and as the result header"
                 },
                 "prompt": {
                     "type": "string",
@@ -2675,6 +2698,34 @@ mod tests {
         let args2 = serde_json::json!({"description": "d"}).to_string();
         let result2 = invoke("Task", &c, &args2).await;
         assert!(result2.contains("missing 'prompt'"), "got: {result2}");
+    }
+
+    #[tokio::test]
+    async fn task_result_is_headered_with_description() {
+        let dir = tmp();
+        let task_fn: TaskFn = Arc::new(|_d, _p| Box::pin(async move { "body".to_string() }));
+        let c = ToolContext {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            allowed_roots: vec![dir.clone()],
+            audit_log: None,
+            allowed_tools: None,
+            task_fn: Some(task_fn),
+            audit_lock: None,
+        };
+        let args = serde_json::json!({"description": "scout docs", "prompt": "go"}).to_string();
+        assert_eq!(invoke("Task", &c, &args).await, "# scout docs\n\nbody");
+    }
+
+    #[test]
+    fn task_output_is_truncated_past_the_limit() {
+        let long = "x".repeat(TASK_OUTPUT_LIMIT + 10);
+        let out = truncate_task_output(&long);
+        assert!(out.ends_with(&format!(
+            "…[truncated: {} chars total]",
+            TASK_OUTPUT_LIMIT + 10
+        )));
+        assert_eq!(truncate_task_output("short"), "short");
     }
 
     // --- Part 4: IO containment tests (symlink-aware) ---

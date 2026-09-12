@@ -7,20 +7,17 @@ use super::tools::{self, ToolContext};
 
 const MAX_DEPTH: u32 = 3;
 
-/// Per-process monotonic source of subagent id segments. A clock-derived value
+/// Per-process monotonic source of task id segments. A clock-derived value
 /// cannot separate siblings spawned microseconds apart, and duplicate segments
 /// are exactly the log ambiguity this id exists to remove.
-static SUBAGENT_SEQ: AtomicU64 = AtomicU64::new(0);
+static TASK_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Segments are always four lowercase hex digits (`[sub.a3f1]`), so the counter
-/// is truncated to its low 16 bits and ids repeat every 65 536 subagent
-/// invocations. A repeat can only alias a sibling spawned that many invocations
-/// later — no worse than the bare `[sub]` prefix this replaced.
+/// Segments are always four lowercase hex digits (`[task.a3f1]`), so the counter
+/// draws from its low 16 bits and ids repeat every 65 536 task invocations. A
+/// repeat can only alias a sibling spawned that many invocations later, which is
+/// fine for runs well under that many tasks.
 fn next_segment() -> String {
-    format!(
-        "{:04x}",
-        SUBAGENT_SEQ.fetch_add(1, Ordering::Relaxed) & 0xffff
-    )
+    format!("{:04x}", TASK_SEQ.fetch_add(1, Ordering::Relaxed) & 0xffff)
 }
 
 /// Append a segment to the parent chain, so grandchildren carry full lineage.
@@ -32,28 +29,28 @@ fn extend_chain(parent: &str, seg: &str) -> String {
     }
 }
 
-/// Chain of a subagent spawned under `parent`; empty parent means a first-level one.
+/// Chain of a task spawned under `parent`; empty parent means a first-level one.
 fn child_chain(parent: &str) -> String {
     extend_chain(parent, &next_segment())
 }
 
-/// Log prefix of a subagent: `<base>[sub.<seg>[.<seg>…]] `, one 4-hex-digit
+/// Log prefix of a task: `<base>[task.<seg>[.<seg>…]] `, one 4-hex-digit
 /// segment per nesting level.
-fn subagent_prefix(base: &str, chain: &str) -> String {
-    format!("{base}[sub.{chain}] ")
+fn task_prefix(base: &str, chain: &str) -> String {
+    format!("{base}[task.{chain}] ")
 }
 
-/// Build a subagent runner closure. Called once per backend before the agent loop.
+/// Build a task runner closure. Called once per backend before the agent loop.
 /// The returned closure captures the model, tool filter, cancel token,
 /// context prefix, and the original `ToolContext` — everything needed to run
 /// a nested agent loop.
 ///
-/// Recursive subagents are supported and bounded by `MAX_DEPTH`. Depth is a
+/// Recursive tasks are supported and bounded by `MAX_DEPTH`. Depth is a
 /// true per-call-chain recursion bound, not a concurrency cap: each invocation
 /// injects a child runner at `depth + 1` into the sub-context, so N sibling
-/// subagents launched from one parent all share the same depth and never
+/// tasks launched from one parent all share the same depth and never
 /// exhaust the bound between them. Only genuine nesting increments depth.
-pub(crate) fn make_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
+pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: M,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
@@ -62,7 +59,7 @@ pub(crate) fn make_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
     idle_timeout: f64,
     max_turns: usize,
 ) -> tools::TaskFn {
-    make_runner_at_depth(
+    make_task_runner_at_depth(
         model,
         tool_filter,
         cancel,
@@ -76,7 +73,7 @@ pub(crate) fn make_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
+fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: M,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
@@ -91,28 +88,28 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
         let model = model.clone();
         let tool_filter = tool_filter.clone();
         let cancel = cancel.clone();
-        let mut sub_ctx = ctx.clone();
+        let mut child_ctx = ctx.clone();
         let prefix = prefix.clone();
         let id_chain = id_chain.clone();
 
         Box::pin(async move {
             if depth >= MAX_DEPTH {
-                return format!("Error: subagent max depth ({MAX_DEPTH}) exceeded");
+                return format!("Error: task max depth ({MAX_DEPTH}) exceeded");
             }
 
             let new_chain = child_chain(&id_chain);
-            let sub_prefix = subagent_prefix(&prefix, &new_chain);
+            let child_prefix = task_prefix(&prefix, &new_chain);
 
-            // Inject a child runner one level deeper so a nested subagent can
+            // Inject a child runner one level deeper so a nested task can
             // recurse again, bounded by MAX_DEPTH along this call chain.
-            // Pass the original `prefix` (not `sub_prefix`) so prefixes don't
+            // Pass the original `prefix` (not `child_prefix`) so prefixes don't
             // stack across nesting levels — each level appends its own id
             // segment to the chain instead.
-            sub_ctx.task_fn = Some(make_runner_at_depth(
+            child_ctx.task_fn = Some(make_task_runner_at_depth(
                 model.clone(),
                 tool_filter.clone(),
                 cancel.clone(),
-                sub_ctx.clone(),
+                child_ctx.clone(),
                 prefix.clone(),
                 idle_timeout,
                 max_turns,
@@ -122,7 +119,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
 
             let scratch = crate::config::scratch_dir(None)
                 .unwrap_or_else(|| crate::config::scratch_root(None));
-            let system_prompt = Some(crate::config::subagent_system_prompt(
+            let system_prompt = Some(crate::config::task_system_prompt(
                 &crate::config::work_root(),
                 &scratch,
                 &crate::config::project_root(),
@@ -132,10 +129,10 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
                 &model,
                 &task,
                 system_prompt,
-                &sub_ctx,
+                &child_ctx,
                 &cancel,
                 tool_filter.as_deref(),
-                &sub_prefix,
+                &child_prefix,
                 idle_timeout,
                 max_turns,
             )
@@ -143,7 +140,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
 
             match result {
                 Ok(completed) => completed.text_result.unwrap_or_default(),
-                Err(e) => format!("Subagent error: {e}"),
+                Err(e) => format!("Task error: {e}"),
             }
         })
     })
@@ -175,8 +172,8 @@ mod tests {
         assert_eq!(child_chain("a.b").split('.').count(), 3);
         assert!(child_chain("a").starts_with("a."));
         assert_eq!(
-            subagent_prefix("[base] ", "a3f1.b72e"),
-            "[base] [sub.a3f1.b72e] "
+            task_prefix("[base] ", "a3f1.b72e"),
+            "[base] [task.a3f1.b72e] "
         );
     }
 
@@ -208,7 +205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn make_runner_invokes_and_sets_task_fn() {
+    async fn make_task_runner_invokes_and_sets_task_fn() {
         let ctx = depth_test_ctx();
 
         // Model that returns a single text response in one turn.
@@ -218,7 +215,7 @@ mod tests {
         ]]);
 
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_runner(model.clone(), None, cancel, ctx, String::new(), 5.0, 10);
+        let runner = make_task_runner(model.clone(), None, cancel, ctx, String::new(), 5.0, 10);
 
         // First invocation: depth 0 < 3, should succeed.
         let output = runner("label".into(), "first call".into()).await;
@@ -227,19 +224,19 @@ mod tests {
             "depth 0 should not hit guard, got: {output}"
         );
 
-        // The subagent harness prompt must reach the model as a leading system message.
+        // The task harness prompt must reach the model as a leading system message.
         for req in model.requests() {
             match req.chat_history.first() {
                 Message::System { content } => assert!(
-                    content.contains("fan them out with parallel Task calls"),
+                    content.contains("<gremlins:tools>"),
                     "unexpected system prompt: {content}"
                 ),
-                other => panic!("subagent must inject a system prompt, got: {other:?}"),
+                other => panic!("task must inject a system prompt, got: {other:?}"),
             }
         }
     }
 
-    /// A model whose stream never resolves — used to keep subagent calls
+    /// A model whose stream never resolves — used to keep task calls
     /// in-flight so concurrent siblings overlap in time.
     #[derive(Clone)]
     struct PendingModel;
@@ -281,12 +278,12 @@ mod tests {
     /// Concurrent siblings share one depth level: N calls from the same parent
     /// must not exhaust the recursion bound between them.
     #[tokio::test]
-    async fn make_runner_concurrent_siblings_do_not_exhaust_depth() {
+    async fn make_task_runner_concurrent_siblings_do_not_exhaust_depth() {
         let ctx = depth_test_ctx();
         // Hangs forever so all siblings overlap in time.
         let model = PendingModel;
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_runner(model, None, cancel, ctx, String::new(), 0.2, 10);
+        let runner = make_task_runner(model, None, cancel, ctx, String::new(), 0.2, 10);
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
         // "max depth" even though they overlap in time.
@@ -305,11 +302,11 @@ mod tests {
     /// The recursion bound is enforced per call chain: a runner already at
     /// MAX_DEPTH rejects, standing in for a chain nested that many levels deep.
     #[tokio::test]
-    async fn make_runner_rejects_at_max_depth() {
+    async fn make_task_runner_rejects_at_max_depth() {
         let ctx = depth_test_ctx();
         let model = PendingModel;
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_runner_at_depth(
+        let runner = make_task_runner_at_depth(
             model,
             None,
             cancel,
@@ -345,7 +342,7 @@ mod tests {
 
         /// Base prefix of the format tests, so their lines can be told apart
         /// from any other line that reaches the shared stderr capture.
-        const TEST_BASE: &str = "[sub-test] ";
+        const TEST_BASE: &str = "[task-test] ";
 
         static CAPTURE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -420,14 +417,14 @@ mod tests {
             buf.lines().map(str::to_string).collect()
         }
 
-        /// `[sub.<chain>]` of every begin line this test's runner logged.
-        fn sub_prefixes(lines: &[String]) -> Vec<String> {
+        /// `[task.<chain>]` of every begin line this test's runner logged.
+        fn task_prefixes(lines: &[String]) -> Vec<String> {
             lines
                 .iter()
-                .filter(|l| l.contains(TEST_BASE) && l.contains("subagent: begin"))
+                .filter(|l| l.contains(TEST_BASE) && l.contains("task: begin"))
                 .map(|l| {
-                    let chain = l.split_once("[sub.").expect("begin line carries an id").1;
-                    format!("[sub.{}]", chain.split_once(']').unwrap().0)
+                    let chain = l.split_once("[task.").expect("begin line carries an id").1;
+                    format!("[task.{}]", chain.split_once(']').unwrap().0)
                 })
                 .collect()
         }
@@ -436,7 +433,7 @@ mod tests {
             prefixes
                 .iter()
                 .map(|p| {
-                    p.trim_start_matches("[sub.")
+                    p.trim_start_matches("[task.")
                         .trim_end_matches(']')
                         .to_string()
                 })
@@ -472,7 +469,7 @@ mod tests {
         fn runner_with_turns(
             turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>,
         ) -> tools::TaskFn {
-            make_runner(
+            make_task_runner(
                 rig_core::test_utils::MockCompletionModel::from_stream_turns(turns),
                 None,
                 super::super::super::agent_loop::CancelToken::new(),
@@ -484,12 +481,12 @@ mod tests {
         }
 
         #[test]
-        fn sub_prefix_wraps_a_single_segment_at_depth_one() {
+        fn task_prefix_wraps_a_single_segment_at_depth_one() {
             let lines = capture_stderr(|| {
                 let runner = runner_with_turns(vec![turn_text("only")]);
                 block_on(runner("label".into(), "task".into()));
             });
-            let segments = segments_of(&sub_prefixes(&lines));
+            let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
             assert_eq!(
                 segments[0].len(),
@@ -505,13 +502,13 @@ mod tests {
         /// The child runner the parent injects is what a nested call runs, so
         /// its prefix must carry the parent's segment as lineage.
         #[test]
-        fn nested_sub_prefix_appends_to_the_parent_chain() {
+        fn nested_task_prefix_appends_to_the_parent_chain() {
             let lines = capture_stderr(|| {
                 let runner =
                     runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
                 block_on(runner("label".into(), "task".into()));
             });
-            let segments = segments_of(&sub_prefixes(&lines));
+            let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
             let (parent, child) = (&segments[0], &segments[1]);
             assert_eq!(
@@ -536,7 +533,7 @@ mod tests {
                     runner("two".into(), "two".into()).await;
                 });
             });
-            let segments = segments_of(&sub_prefixes(&lines));
+            let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
             assert_ne!(segments[0], segments[1], "siblings must not share an id");
         }

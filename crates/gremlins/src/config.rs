@@ -8,7 +8,9 @@ use serde_json::Value;
 /// Default name of the project-local overlay directory.
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
-/// System prompt injected into every agent stage.
+/// System prompt injected into every agent stage. Carries only the tool roster
+/// and directory layout — behavioral guidance lives in the pipeline's prompt
+/// files, since the runtime is an unopinionated workflow engine.
 pub(crate) fn agent_system_prompt(
     work_root: &Path,
     scratch_root: &Path,
@@ -16,13 +18,6 @@ pub(crate) fn agent_system_prompt(
 ) -> String {
     format!(
         "\
-<important>\n\
-Keep your context lean: delegate self-contained pieces of work to Task calls. Task calls \
-have isolated context — they absorb the noise so you don't have to. When you have multiple \
-independent tasks, fan them out with parallel Task calls. Plan the fan-out before you start. \
-Use Task calls as scouts to explore options and gather information.\n\n\
-You MUST delegate tasks to maintain a clean context.\n\n\
-</important>\n\n\
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
@@ -41,19 +36,15 @@ Scratch root:  {scratch}\n\
     )
 }
 
-/// System prompt injected into every subagent (nested agent) invocation.
-/// Omits the delegation guidance — subagents are already delegates.
-pub(crate) fn subagent_system_prompt(
+/// System prompt injected into every nested (Task) agent invocation. Omits any
+/// delegation guidance — the tool roster is all a child needs.
+pub(crate) fn task_system_prompt(
     work_root: &Path,
     scratch_root: &Path,
     project_root: &Path,
 ) -> String {
     format!(
         "\
-<gremlins:info>\n\
-When you have multiple independent tasks, fan them out with parallel Task calls. Plan the fan-out \
-before you start; parallel work is cheaper than serial drift.\n\
-</gremlins:info>\n\n\
 <gremlins:tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
@@ -1174,21 +1165,21 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_system_prompt_includes_delegation_guidance() {
+    fn test_agent_system_prompt_omits_delegation_policy() {
         let prompt = agent_system_prompt(
             Path::new("/work"),
             Path::new("/scratch"),
             Path::new("/project"),
         );
         assert!(
-            prompt.contains("delegate self-contained pieces of work to Task calls"),
-            "agent prompt must include delegation guidance"
+            !prompt.contains("<important>"),
+            "agent prompt must not inject behavioral policy; got: {prompt}"
         );
     }
 
     #[test]
-    fn test_subagent_system_prompt_renders_directory_paths() {
-        let prompt = subagent_system_prompt(
+    fn test_task_system_prompt_renders_directory_paths() {
+        let prompt = task_system_prompt(
             Path::new("/tmp/gremlins"),
             Path::new("/tmp/scratch"),
             Path::new("/home/user/project"),
@@ -1202,15 +1193,15 @@ mod tests {
     }
 
     #[test]
-    fn test_subagent_system_prompt_omits_delegation_guidance() {
-        let prompt = subagent_system_prompt(
+    fn test_task_system_prompt_omits_delegation_guidance() {
+        let prompt = task_system_prompt(
             Path::new("/work"),
             Path::new("/scratch"),
             Path::new("/project"),
         );
         assert!(
-            !prompt.contains("delegate self-contained pieces of work to Task calls"),
-            "subagent prompt must not include delegation guidance — subagents are already delegates"
+            !prompt.contains("<important>") && !prompt.contains("<gremlins:info>"),
+            "child prompt must not inject delegation guidance; got: {prompt}"
         );
     }
 }

@@ -151,7 +151,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     let tool_defs = tools::tool_definitions(opts.tool_filter);
 
     // Wire up the Task runner before entering the turn loop.
-    let runner = super::task::make_runner(
+    let runner = super::task::make_task_runner(
         model.clone(),
         opts.tool_filter.map(|f| f.to_vec()),
         cancel.clone(),
@@ -199,7 +199,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     max_turns: usize,
 ) -> Result<CompletedRun, ClientError> {
     eprintln!(
-        "{} {}subagent: begin (max_turns={})",
+        "{} {}task: begin (max_turns={})",
         stream::ts_internal(),
         prefix,
         max_turns
@@ -229,7 +229,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         0,
     )
     .await;
-    eprintln!("{} {}subagent: end", stream::ts_internal(), prefix);
+    eprintln!("{} {}task: end", stream::ts_internal(), prefix);
     result
 }
 
@@ -273,6 +273,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         name: String,
         args: String,
         key: String,
+        over_cap: bool,
     }
 
     for _ in 0..max_turns {
@@ -499,6 +500,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         // Phase 1: emit tool-start events, collect owned data for concurrent execution
         let mut jobs: Vec<Job> = Vec::new();
+        let mut task_count: usize = 0;
         for tc in &tool_calls {
             let args_json =
                 serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".into());
@@ -516,17 +518,41 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 name: tc.function.name.clone(),
                 args: args_json,
                 key: ledger_key_arg(&tc.function.arguments),
+                over_cap: tc.function.name == "Task" && {
+                    task_count += 1;
+                    task_count > tools::TASK_MAX_PER_TURN
+                },
             });
         }
 
-        // Phase 2: concurrent execution
+        // Phase 2: concurrent execution. Over-cap Task calls short-circuit so a
+        // single response cannot spawn an unbounded number of child loops.
         let ctx = tool_ctx.clone();
-        let results = join_all(jobs.iter().map(|j| tools::invoke(&j.name, &ctx, &j.args))).await;
+        let results = join_all(jobs.iter().map(|j| {
+            let ctx = &ctx;
+            async move {
+                if j.over_cap {
+                    format!(
+                        "Error: at most {} Task calls per message",
+                        tools::TASK_MAX_PER_TURN
+                    )
+                } else {
+                    tools::invoke(&j.name, ctx, &j.args).await
+                }
+            }
+        }))
+        .await;
 
         // Phase 3: emit results in order
         let mut result_msgs = Vec::new();
         let mut ledger = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
+            // Bound each Task result: every one lands in the next context.
+            let output = if job.name == "Task" {
+                tools::truncate_task_output(&output)
+            } else {
+                output
+            };
             stream::emit_result(prefix, &output, false);
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
@@ -1606,5 +1632,80 @@ mod tests {
         assert_eq!(result.text_result.as_deref(), Some("just text"));
         // Only one request — no reminder loop.
         assert_eq!(model.requests().len(), 1);
+    }
+
+    /// A single message can request at most `TASK_MAX_PER_TURN` Task calls;
+    /// the excess short-circuit instead of spawning more child loops.
+    #[tokio::test]
+    async fn task_calls_are_capped_per_message() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-task-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let over = tools::TASK_MAX_PER_TURN + 1;
+        let mut turn = Vec::new();
+        for i in 0..over {
+            turn.push(rig_core::test_utils::MockStreamEvent::tool_call(
+                format!("c{i}"),
+                "Task",
+                serde_json::json!({"description": format!("d{i}"), "prompt": format!("p{i}")}),
+            ));
+        }
+        turn.push(rig_core::test_utils::MockStreamEvent::final_response_with_default_usage());
+        // Each permitted Task runs a nested loop, so script enough text turns
+        // for all of them plus the outer loop's wrap-up turn.
+        let mut turns = vec![turn];
+        turns.extend((0..over + 1).map(|_| {
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("ok"),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ]
+        }));
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns(turns);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        run_agent_loop(&model, "fan out", &ctx, cancel, loop_opts(None))
+            .await
+            .unwrap();
+
+        let reqs = model.requests();
+        // The outer loop's second request carries every Task result.
+        let results: Vec<String> = reqs
+            .last()
+            .unwrap()
+            .chat_history
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::ToolResult(r) => Some(
+                            r.content
+                                .iter()
+                                .filter_map(|rc| match rc {
+                                    rig_core::completion::message::ToolResultContent::Text(t) => {
+                                        Some(t.text.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<String>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .collect();
+        assert_eq!(results.len(), over, "every call must get a result");
+        let rejected = results.iter().filter(|r| r.contains("at most")).count();
+        assert_eq!(rejected, 1, "only the call past the cap is rejected");
     }
 }
