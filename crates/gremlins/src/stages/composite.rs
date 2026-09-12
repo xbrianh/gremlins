@@ -5,8 +5,9 @@ pub struct ChildStateResult {
     pub child_key: String,
 }
 
-/// Fan-out children write under `<child_scratch_dir>/artifacts`; non-fan-out
-/// children reuse the parent's artifact dir keyed by name.
+/// Fan-out children with a scratch dir write under `<child_scratch_dir>/artifacts`;
+/// fan-out children without one fall back to the legacy
+/// `<parent_artifact_dir>/<child_name>` layout.
 pub fn compute_child_params(
     parent_artifact_dir: &Path,
     child_name: &str,
@@ -39,7 +40,7 @@ mod tests {
     }
 
     #[test]
-    fn non_fan_out_child() {
+    fn fan_out_child_without_scratch_dir() {
         let r = compute_child_params(Path::new("/tmp/artifacts"), "child1", None);
         assert_eq!(r.artifact_dir, Path::new("/tmp/artifacts/child1"));
         assert_eq!(r.child_key, "child1");
