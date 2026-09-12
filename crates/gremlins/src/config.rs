@@ -18,6 +18,9 @@ pub(crate) fn agent_system_prompt(
 ) -> String {
     format!(
         "\
+<important>\n\
+You MUST delegate to Task to maintain a clean context. Multiple Task calls run concurrently.\n\
+</important>\n\
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
@@ -45,17 +48,17 @@ pub(crate) fn task_system_prompt(
 ) -> String {
     format!(
         "\
-<gremlins:tools>\n\
+<tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Task\n\
-</gremlins:tools>\n\n\
-<gremlins:directories>\n\
+</tools>\n\n\
+<directories>\n\
 Project root:  {project}\n\
 Work root:     {work}\n\
 Scratch root:  {scratch}\n\
 (use scratch for test cruft and temporary files)\n\
-</gremlins:directories>\
+</directories>\
 ",
         project = project_root.display(),
         work = work_root.display(),
@@ -1200,7 +1203,7 @@ mod tests {
             Path::new("/project"),
         );
         assert!(
-            !prompt.contains("<important>") && !prompt.contains("<gremlins:info>"),
+            !prompt.contains("<important>") && !prompt.contains("<important>"),
             "child prompt must not inject delegation guidance; got: {prompt}"
         );
     }
