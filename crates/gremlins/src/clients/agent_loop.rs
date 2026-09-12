@@ -151,7 +151,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     let tool_defs = tools::tool_definitions(opts.tool_filter);
 
     // Wire up the Task runner before entering the turn loop.
-    let runner = super::subagent::make_runner(
+    let runner = super::task::make_runner(
         model.clone(),
         opts.tool_filter.map(|f| f.to_vec()),
         cancel.clone(),

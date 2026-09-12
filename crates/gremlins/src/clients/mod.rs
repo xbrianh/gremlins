@@ -6,5 +6,5 @@ pub mod protocol;
 pub(crate) mod retry;
 pub(crate) mod stream;
 pub(crate) mod stream_json;
-pub(crate) mod subagent;
+pub(crate) mod task;
 pub(crate) mod tools;
