@@ -289,7 +289,7 @@ impl Client {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (prompt, label, model=None, raw_path=None, capture_events=false, on_timeout_prompt=None, max_retries=3, cwd=None, artifact_dir=None, idle_timeout=None, extra_env=None, expected_artifact_paths=None, artifact_reminder_count=0))]
+    #[pyo3(signature = (prompt, label, model=None, raw_path=None, capture_events=false, on_timeout_prompt=None, max_retries=3, cwd=None, artifact_dir=None, idle_timeout=None, extra_env=None, expected_artifact_paths=None, artifact_reminder_count=0, system_prompt=None))]
     fn run<'py>(
         &self,
         py: Python<'py>,
@@ -306,6 +306,7 @@ impl Client {
         extra_env: Option<HashMap<String, String>>,
         expected_artifact_paths: Option<Vec<PathBuf>>,
         artifact_reminder_count: usize,
+        system_prompt: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let backend = self.get_or_build_backend()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -323,6 +324,7 @@ impl Client {
                 extra_env,
                 expected_artifact_paths: expected_artifact_paths.unwrap_or_default(),
                 artifact_reminder_count,
+                system_prompt,
             };
             let result = backend.run(params).await.map_err(map_error)?;
             Python::attach(|py| PyCompletedRun::from_rust(py, &result))

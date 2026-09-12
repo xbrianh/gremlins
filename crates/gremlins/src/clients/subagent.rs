@@ -127,19 +127,16 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
 
             let scratch = crate::config::scratch_dir(None)
                 .unwrap_or_else(|| crate::config::scratch_root(None));
-            let subagent_prompt = format!(
-                "{}\n\n{}",
-                crate::config::subagent_system_prompt(
-                    &crate::config::work_root(),
-                    &scratch,
-                    &crate::config::project_root(),
-                ),
-                task,
-            );
+            let system_prompt = Some(crate::config::subagent_system_prompt(
+                &crate::config::work_root(),
+                &scratch,
+                &crate::config::project_root(),
+            ));
 
             let result = crate::clients::agent_loop::run_agent_loop_nested(
                 &model,
-                &subagent_prompt,
+                &task,
+                system_prompt,
                 &sub_ctx,
                 &cancel,
                 tool_filter.as_deref(),
@@ -160,6 +157,7 @@ fn make_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::completion::Message;
 
     use std::collections::HashSet;
 
@@ -225,7 +223,7 @@ mod tests {
         ]]);
 
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_runner(model, None, cancel, ctx, String::new(), 5.0, 10);
+        let runner = make_runner(model.clone(), None, cancel, ctx, String::new(), 5.0, 10);
 
         // First invocation: depth 0 < 3, should succeed.
         let output = runner("first call".into(), None).await;
@@ -233,6 +231,17 @@ mod tests {
             !output.contains("max depth"),
             "depth 0 should not hit guard, got: {output}"
         );
+
+        // The subagent harness prompt must reach the model as a leading system message.
+        for req in model.requests() {
+            match req.chat_history.first() {
+                Message::System { content } => assert!(
+                    content.contains("fan them out with the parallel tool"),
+                    "unexpected system prompt: {content}"
+                ),
+                other => panic!("subagent must inject a system prompt, got: {other:?}"),
+            }
+        }
     }
 
     /// A model whose stream never resolves — used to keep subagent calls

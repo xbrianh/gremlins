@@ -90,6 +90,7 @@ class FakeClient:
         extra_env: dict[str, str] | None = None,
         expected_artifact_paths: list[pathlib.Path] | None = None,
         artifact_reminder_count: int = 0,
+        system_prompt: str | None = None,
     ) -> CompletedRun:
         del on_timeout_prompt, max_retries, idle_timeout, extra_env, artifact_dir
         del expected_artifact_paths, artifact_reminder_count
@@ -101,6 +102,7 @@ class FakeClient:
                 "raw_path": raw_path,
                 "capture_events": capture_events,
                 "cwd": cwd,
+                "system_prompt": system_prompt,
             }
         )
         self.calls.append(
@@ -111,6 +113,7 @@ class FakeClient:
                 raw_path=pathlib.Path(raw_path) if raw_path is not None else None,
                 capture_events=capture_events,
                 cwd=pathlib.Path(cwd) if cwd is not None else None,
+                system_prompt=system_prompt,
             )
         )
 
@@ -168,4 +171,5 @@ class FakeClient:
             raw_path=ctx["raw_path"],
             capture_events=ctx["capture_events"],
             cwd=ctx["cwd"],
+            system_prompt=ctx["system_prompt"],
         )

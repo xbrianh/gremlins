@@ -453,6 +453,13 @@ impl Backend for CmdBackend {
         validate_max_retries(params.max_retries)
             .map_err(|m| ClientError::Runtime { message: m })?;
 
+        // Concatenation of harness system prompt and pipeline user content —
+        // this is the single string bound for the child process's stdin.
+        let effective_prompt = match &params.system_prompt {
+            Some(sys) => format!("{}\n\n{}", sys, params.prompt),
+            None => params.prompt.clone(),
+        };
+
         let idle_timeout = params
             .idle_timeout
             .unwrap_or_else(crate::config::stream_idle_timeout);
@@ -465,7 +472,7 @@ impl Backend for CmdBackend {
         {
             let mut ctx = self.ctx.lock().unwrap();
             *ctx = Some(CmdContext {
-                prompt: params.prompt.clone(),
+                prompt: effective_prompt.clone(),
                 label: params.label.clone(),
                 model: params.model.clone(),
                 raw_path: params.raw_path.clone(),
@@ -481,7 +488,7 @@ impl Backend for CmdBackend {
             });
         }
 
-        let result = self.attempt(&params.prompt, None).await;
+        let result = self.attempt(&effective_prompt, None).await;
 
         match result {
             Ok(r) => {
