@@ -14,10 +14,28 @@ fn value_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>> {
     Ok(json.call_method1("loads", (s,))?.unbind())
 }
 
-fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
-    let json = obj.py().import("json")?;
-    let s: String = json.call_method1("dumps", (obj,))?.extract()?;
-    serde_json::from_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))
+// The conversions below are best-effort: `None` instead of raising. Their callers
+// mirror Python methods that wrapped everything in `try/except: pass`, and state
+// bookkeeping must never crash a running gremlin on a bad argument.
+fn try_py_to_value(obj: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
+    let json = obj.py().import("json").ok()?;
+    let s: String = json.call_method1("dumps", (obj,)).ok()?.extract().ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+fn try_string_seq(obj: &Bound<'_, PyAny>) -> Option<Vec<String>> {
+    obj.try_iter()
+        .ok()?
+        .map(|i| i.ok()?.extract().ok())
+        .collect()
+}
+
+/// `None` = unconvertible (caller must no-op), `Some(None)` = no sub_stage given.
+fn opt_sub_stage(obj: Option<&Bound<'_, PyAny>>) -> Option<Option<serde_json::Value>> {
+    match obj.filter(|s| !s.is_none()) {
+        Some(s) => try_py_to_value(s).map(Some),
+        None => Some(None),
+    }
 }
 
 fn py_dict_to_map(d: &Bound<'_, PyDict>) -> PyResult<serde_json::Map<String, serde_json::Value>> {
@@ -137,15 +155,18 @@ impl PyStateData {
         _delete: Option<&Bound<'_, PyAny>>,
         fields: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let delete: Vec<String> = match _delete {
-            Some(d) if !d.is_none() => d
-                .try_iter()?
-                .map(|i| i.and_then(|x| x.extract::<String>()))
-                .collect::<PyResult<_>>()?,
-            _ => Vec::new(),
+        let delete = match _delete.filter(|d| !d.is_none()) {
+            Some(d) => match try_string_seq(d) {
+                Some(v) => v,
+                None => return Ok(()),
+            },
+            None => Vec::new(),
         };
         let map = match fields {
-            Some(d) => py_dict_to_map(d)?,
+            Some(d) => match py_dict_to_map(d) {
+                Ok(m) => m,
+                Err(_) => return Ok(()),
+            },
             None => serde_json::Map::new(),
         };
         self.with(|d| d.patch(&delete, &map));
@@ -163,9 +184,8 @@ impl PyStateData {
         sub_stage: Option<&Bound<'_, PyAny>>,
         parent_stage: &str,
     ) -> PyResult<()> {
-        let sub = match sub_stage {
-            Some(s) if !s.is_none() => Some(py_to_value(s)?),
-            _ => None,
+        let Some(sub) = opt_sub_stage(sub_stage) else {
+            return Ok(());
         };
         self.with(|d| d.set_stage(stage, sub.as_ref(), parent_stage));
         Ok(())
@@ -441,9 +461,8 @@ impl PyState {
         sub_stage: Option<&Bound<'_, PyAny>>,
         parent_stage: &str,
     ) -> PyResult<()> {
-        let sub = match sub_stage {
-            Some(s) if !s.is_none() => Some(py_to_value(s)?),
-            _ => None,
+        let Some(sub) = opt_sub_stage(sub_stage) else {
+            return Ok(());
         };
         self.data
             .bind(py)

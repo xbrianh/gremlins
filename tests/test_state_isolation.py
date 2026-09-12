@@ -208,3 +208,27 @@ def test_write_bail_file_noop_when_attempt_empty(sandbox):
     StateData(gremlin_id).write_bail_file("other")
     bail_files = list((sandbox.state / gremlin_id).glob("bail_*.json"))
     assert not bail_files
+
+
+# ---------------------------------------------------------------------------
+# Malformed arguments are swallowed, not raised
+# ---------------------------------------------------------------------------
+
+
+def test_patch_ignores_unconvertible_delete(sandbox):
+    """A malformed _delete must no-op rather than raise."""
+    gremlin_id = "gr-patch-bad-delete"
+    sf = _make_state_dir(sandbox.state, gremlin_id)
+    StateData(gremlin_id).patch(_delete=5, attempt="x")
+    assert "attempt" not in json.loads(sf.read_text())
+    StateData(gremlin_id).patch(_delete=[object()], attempt="x")
+    assert "attempt" not in json.loads(sf.read_text())
+
+
+def test_set_stage_ignores_unserializable_sub_stage(sandbox):
+    gremlin_id = "gr-substage-bad"
+    sf = _make_state_dir(sandbox.state, gremlin_id)
+    StateData(gremlin_id).set_stage("implement", sub_stage=object())
+    data = json.loads(sf.read_text())
+    assert "sub_stage" not in data
+    assert "stage_updated_at" not in data
