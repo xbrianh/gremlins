@@ -1,11 +1,10 @@
-"""``gremlins analyze`` — analyze a gremlin's log and artifacts with an LLM."""
+"""``gremlins analyze`` — analyze a gremlin's log with an LLM."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import os
 import pathlib
 import sys
 from typing import Any
@@ -18,101 +17,52 @@ from gremlins.fleet.state import load_state
 from gremlins.utils.yaml_io import render_bundled_prompt
 
 _LOG_MAX_BYTES = 50_000
-_LOG_TAIL_LINES = 2_000
-_ARTIFACT_MAX_SIZE = 4_000
-_ARTIFACT_MAX_COUNT = 20
+_ARTIFACT_MAX_BYTES = 20_000
 
 
-def _read_log_tail(log_path: pathlib.Path) -> str:
-    """Read the tail of the log file, up to _LOG_MAX_BYTES."""
+def _read_log(log_path: pathlib.Path) -> str:
+    """Read the log file, truncating large logs to the tail."""
     if not log_path.is_file():
         return "(no log file)"
 
     try:
-        size = log_path.stat().st_size
+        raw = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return "(log unreadable)"
 
-    if size == 0:
+    if not raw:
         return "(empty log)"
 
-    if size <= _LOG_MAX_BYTES:
-        try:
-            return log_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return "(log unreadable)"
+    if len(raw) > _LOG_MAX_BYTES:
+        raw = "(log truncated — showing tail)\n\n…\n\n" + raw[-_LOG_MAX_BYTES:]
 
-    try:
-        with open(log_path, "rb") as f:
-            f.seek(-_LOG_MAX_BYTES, os.SEEK_END)
-            chunk = f.read(_LOG_MAX_BYTES)
-    except OSError:
-        # Log may have been truncated/rotated between stat and seek —
-        # fall back to reading from the start.
-        try:
-            with open(log_path, "rb") as f:
-                chunk = f.read(_LOG_MAX_BYTES)
-        except OSError:
-            return "(log unreadable)"
-
-    text = chunk.decode("utf-8", errors="replace")
-    # Drop the partial first line if we started mid-line.
-    if text.startswith("\n"):
-        text = text[1:]
-    else:
-        nl = text.find("\n")
-        if nl > 0:
-            text = text[nl + 1 :]
-    lines = text.splitlines()
-    if len(lines) > _LOG_TAIL_LINES:
-        text = "\n".join(lines[-_LOG_TAIL_LINES:])
-    return text
+    return raw
 
 
-def _read_artifact_listing(wdir: str) -> str:
-    """Build a listing of artifacts with truncated content previews."""
-    artifacts_dir = pathlib.Path(wdir) / "artifacts"
+def _read_artifacts(artifacts_dir: pathlib.Path) -> str:
+    """Read artifact files from the artifacts directory, inlining content."""
     if not artifacts_dir.is_dir():
         return "(no artifacts directory)"
 
-    entries = sorted(p for p in artifacts_dir.iterdir() if p.is_file())
+    entries = sorted(artifacts_dir.iterdir())
     if not entries:
-        return "(no artifact files)"
-
-    if len(entries) > _ARTIFACT_MAX_COUNT:
-        entries = entries[:_ARTIFACT_MAX_COUNT]
-        truncated = True
-    else:
-        truncated = False
+        return ""
 
     parts: list[str] = []
-    for fpath in entries:
+    for entry in entries:
+        if not entry.is_file():
+            continue
         try:
-            size = fpath.stat().st_size
+            content = entry.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            content = "(binary or unreadable)"
-        else:
-            if size > _ARTIFACT_MAX_SIZE:
-                try:
-                    with open(fpath, "rb") as f:
-                        content = f.read(_ARTIFACT_MAX_SIZE).decode(
-                            "utf-8", errors="replace"
-                        )
-                except OSError:
-                    content = "(binary or unreadable)"
-                else:
-                    content += "\n... [truncated]"
-            else:
-                try:
-                    content = fpath.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    content = "(binary or unreadable)"
-        parts.append(f"### {fpath.name}\n\n```\n{content}\n```")
+            continue
 
-    result = "\n\n".join(parts)
-    if truncated:
-        result += f"\n\n... (showing first {_ARTIFACT_MAX_COUNT} of more artifacts)"
-    return result
+        if len(content) > _ARTIFACT_MAX_BYTES:
+            content = content[:_ARTIFACT_MAX_BYTES] + "\n… (truncated)"
+
+        parts.append(f"--- {entry.name} ---\n{content}")
+
+    return "\n\n".join(parts)
 
 
 def _resolve_client(client_spec: str | None, state: dict[str, Any]) -> Client:
@@ -157,7 +107,7 @@ async def _run_analysis(client: Client, prompt: str) -> str:
 def analyze_main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
         prog="gremlins analyze",
-        description="Analyze a gremlin's log and artifacts with an LLM.",
+        description="Analyze a gremlin's log with an LLM.",
     )
     p.add_argument("gremlin_id", metavar="gremlin-id", help="Gremlin to analyze.")
     p.add_argument(
@@ -186,15 +136,21 @@ def analyze_main(argv: list[str]) -> int:
     # Build the prompt data.
     state_json = json.dumps(state, indent=2, default=str)
     log_path = pathlib.Path(wdir) / "log"
-    log_tail = _read_log_tail(log_path)
-    artifact_listing = _read_artifact_listing(wdir)
+    log_text = _read_log(log_path)
+
+    artifacts_text = _read_artifacts(pathlib.Path(wdir) / "artifacts")
 
     prompt = render_bundled_prompt(
         "analyze.md",
         state_json=state_json,
-        log_tail=log_tail,
-        artifact_listing=artifact_listing,
+        log_text=log_text,
     )
+
+    if artifacts_text:
+        prompt += (
+            "\n\nHere are the artifacts produced by the gremlin run:\n\n"
+            + artifacts_text
+        )
 
     try:
         client = _resolve_client(args.client, state)

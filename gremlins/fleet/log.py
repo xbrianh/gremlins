@@ -7,9 +7,8 @@ from gremlins.fleet.resolve import resolve_gremlin
 
 
 def do_log(target: str, *, full: bool = False) -> bool:
-    """Tail (default) or dump (--full) the gremlin's log file. Execs ``tail -F``
-    or ``cat`` so Ctrl-C handling and rotation/truncation behavior are whatever
-    the tool provides — the wrapper just resolves the id and prints the path."""
+    """Follow (default) or dump (--full) the gremlin's log file. Execs ``less +F``
+    or ``cat`` — the wrapper just resolves the id and prints the path."""
     match = resolve_gremlin(target)
     if match is None:
         return False
@@ -37,10 +36,10 @@ def do_log(target: str, *, full: bool = False) -> bool:
             return False
 
     try:
-        os.execvp("tail", ["tail", "-F", log_path])
+        os.execvp("less", ["less", "+F", log_path])
     except FileNotFoundError:
-        sys.stderr.write("error: tail not found in PATH\n")
+        sys.stderr.write("error: less not found in PATH\n")
         return False
     except OSError as e:
-        sys.stderr.write(f"error: could not exec tail: {e}\n")
+        sys.stderr.write(f"error: could not exec less: {e}\n")
         return False

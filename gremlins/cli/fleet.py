@@ -168,7 +168,7 @@ def close_main(argv: list[str]) -> int:
 def log_main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
         prog="gremlins log",
-        description="Tail the gremlin's log file (tail -F). Ctrl-C exits.",
+        description="Follow the gremlin's log file (less +F). Ctrl-C stops following; q exits.",
     )
     p.add_argument("id_prefix", metavar="id-prefix")
     p.add_argument(
