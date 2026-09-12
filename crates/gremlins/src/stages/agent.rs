@@ -238,17 +238,21 @@ pub(crate) fn build_workspace_preamble(cwd: &str, worktree: Option<&str>) -> Str
 }
 
 impl AgentPrepared {
-    /// Assemble the final prompt: system prompt + workspace preamble + stage prompt.
-    pub fn final_prompt(&self) -> String {
-        let preamble = build_workspace_preamble(&self.cwd, self.worktree.as_deref());
+    /// The harness system prompt — the full output of agent_system_prompt().
+    pub fn system_prompt(&self) -> String {
         let scratch =
             crate::config::scratch_dir(None).unwrap_or_else(|| crate::config::scratch_root(None));
-        let sys = crate::config::agent_system_prompt(
+        crate::config::agent_system_prompt(
             &crate::config::work_root(),
             &scratch,
             &crate::config::project_root(),
-        );
-        format!("{sys}\n\n{preamble}\n\n{}", self.prompt)
+        )
+    }
+
+    /// Workspace preamble + stage prompt (no harness system content).
+    pub fn user_prompt(&self) -> String {
+        let preamble = build_workspace_preamble(&self.cwd, self.worktree.as_deref());
+        format!("{preamble}\n\n{}", self.prompt)
     }
 }
 

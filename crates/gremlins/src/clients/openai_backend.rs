@@ -116,6 +116,7 @@ impl OpenAiBackend {
         let model = self.client.completion_model(&model_name);
         let mut ctx = ctx.clone();
         ctx.params.model = Some(model_name);
+        ctx.system_prompt = ctx.params.system_prompt.clone();
         run_agent_loop(
             &model,
             prompt,
@@ -200,6 +201,7 @@ impl Backend for OpenAiBackend {
         };
         let ctx = RunContext {
             params: params.clone(),
+            system_prompt: params.system_prompt.clone(),
             prefix: prefix.clone(),
             idle_timeout,
             expected_artifact_paths: params.expected_artifact_paths.clone(),

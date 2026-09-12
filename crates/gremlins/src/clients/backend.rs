@@ -20,6 +20,7 @@ pub struct RunParams {
     pub extra_env: Option<HashMap<String, String>>,
     pub expected_artifact_paths: Vec<PathBuf>,
     pub artifact_reminder_count: usize,
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug)]

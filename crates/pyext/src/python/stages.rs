@@ -733,8 +733,11 @@ impl PyAgent {
         prepared.worktree = worktree_str.clone();
         prepared.artifact_dir = artifact_dir.to_string_lossy().to_string();
 
-        // Assemble full prompt (system prompt + workspace preamble + stage prompt)
-        let full_prompt = prepared.final_prompt();
+        // Harness system prompt and pipeline user content are passed
+        // separately; the client routes the system prompt through the
+        // provider's native system role.
+        let system_prompt = prepared.system_prompt();
+        let user_prompt = prepared.user_prompt();
 
         let raw_path = artifact_dir.join(format!("stream-{}.jsonl", prepared.name));
 
@@ -780,6 +783,7 @@ impl PyAgent {
                     expected_artifact_paths.as_slice(),
                 )?;
                 kwargs.set_item("artifact_reminder_count", 3)?;
+                kwargs.set_item("system_prompt", system_prompt.as_str())?;
 
                 // Pass through remaining options (except "model") as kwargs to client.run()
                 for (k, v) in &agent.options {
@@ -790,7 +794,7 @@ impl PyAgent {
                     kwargs.set_item(k.as_str(), py_val)?;
                 }
 
-                let coro = client_obj.call_method("run", (&full_prompt,), Some(&kwargs))?;
+                let coro = client_obj.call_method("run", (&user_prompt,), Some(&kwargs))?;
                 let fut = pyo3_async_runtimes::tokio::into_future(coro)?;
                 Ok(Box::pin(fut))
             })?;

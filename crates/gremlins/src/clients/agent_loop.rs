@@ -62,6 +62,7 @@ impl CancelToken {
 #[derive(Clone)]
 pub(crate) struct RunContext {
     pub(crate) params: RunParams,
+    pub(crate) system_prompt: Option<String>,
     pub(crate) prefix: String,
     pub(crate) idle_timeout: f64,
     pub(crate) expected_artifact_paths: Vec<PathBuf>,
@@ -165,6 +166,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     run_agent_loop_core(
         model,
         prompt,
+        ctx.system_prompt.clone(),
         &tool_ctx,
         &tool_defs,
         &cancel,
@@ -189,6 +191,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
 pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: &M,
     prompt: &str,
+    system_prompt: Option<String>,
     tool_ctx: &ToolContext,
     cancel: &CancelToken,
     tool_filter: Option<&[String]>,
@@ -212,6 +215,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     let result = run_agent_loop_core(
         model,
         prompt,
+        system_prompt,
         tool_ctx,
         &tool_defs,
         cancel,
@@ -234,6 +238,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
 async fn run_agent_loop_core<M: CompletionModel>(
     model: &M,
     prompt: &str,
+    system_prompt: Option<String>,
     tool_ctx: &ToolContext,
     tool_defs: &[ToolDefinition],
     cancel: &CancelToken,
@@ -287,6 +292,9 @@ async fn run_agent_loop_core<M: CompletionModel>(
             .messages(history.clone())
             .tools(tool_defs.to_vec())
             .temperature(DEFAULT_TEMPERATURE);
+        if let Some(ref sys) = system_prompt {
+            builder = builder.preamble(sys.clone());
+        }
         if let Some(params) = opts.extra.clone() {
             builder = builder.additional_params(params);
         }
@@ -855,7 +863,9 @@ mod tests {
                 extra_env: None,
                 expected_artifact_paths: vec![],
                 artifact_reminder_count: 0,
+                system_prompt: None,
             },
+            system_prompt: None,
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
             expected_artifact_paths: vec![],
@@ -1275,11 +1285,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loop_system_prompt_injected_as_preamble() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-sys-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.system_prompt = Some("you are a harness".into());
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None))
+            .await
+            .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("ok"));
+
+        let requests = model.requests();
+        assert!(!requests.is_empty());
+        for req in requests {
+            match req.chat_history.first() {
+                Message::System { content } => assert_eq!(content, "you are a harness"),
+                other => panic!("system prompt must lead the history, got: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn loop_no_system_preamble_injected() {
-        // The harness must never inject a system message or preamble into
-        // the completion request — the pipeline's prompt is the complete
-        // instruction set. This guards against a future refactor silently
-        // reintroducing one.
+        // With no system_prompt set, the harness must not inject a preamble.
         let dir = std::env::temp_dir().join(format!(
             "gremlins-oa-nosys-{}-{}",
             std::process::id(),

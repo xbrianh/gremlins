@@ -90,9 +90,10 @@ class FakeClient:
         extra_env: dict[str, str] | None = None,
         expected_artifact_paths: list[pathlib.Path] | None = None,
         artifact_reminder_count: int = 0,
+        system_prompt: str | None = None,
     ) -> CompletedRun:
         del on_timeout_prompt, max_retries, idle_timeout, extra_env, artifact_dir
-        del expected_artifact_paths, artifact_reminder_count
+        del expected_artifact_paths, artifact_reminder_count, system_prompt
         self._ctx.set(
             {
                 "prompt": prompt,
