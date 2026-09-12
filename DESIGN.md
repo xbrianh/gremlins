@@ -14,12 +14,19 @@ without re-deriving the trade-offs each time.
 Gremlins is an agentic *workflow language*, not a workflow. The pipeline YAML
 is the program; the harness is only its runtime. The runtime supplies
 mechanics — stage sequencing, resumption, worktrees, artifact plumbing, bail
-bookkeeping, client construction — and injects no opinion of its own into any
-model: no system prompt, no preamble, no operational norms. A stage's model
-sees exactly the prompts the pipeline author declared, plus the artifacts the
-pipeline passed through, and nothing else. Any behavioral opinion (what to
-re-check, how to communicate, when to bail) is the pipeline author's to write
-in the pipeline's own prompt files — not the harness's to impose.
+bookkeeping, client construction — and keeps injected opinion to a minimum.
+A stage's model sees the prompts the pipeline author declared, the artifacts
+the pipeline passed through, and a thin harness system prompt that carries
+essential tool/directory framing. Any major behavioral opinion (what to
+re-check, how to communicate, when to bail) still belongs in the pipeline's
+own prompt files — not the harness's.
+
+> **Exception — current state:** The harness system prompt currently includes
+> some opinionated guidance (e.g. delegation instructions). This is not ideal
+> for a workflow language, but pragmatic for now. In the future, model-specific
+> guidance will need to live in the harness system prompt; per-pipeline
+> behavioral norms should move back into pipeline prompt files as the boundary
+> firms up.
 
 ## 1. The shape of a gremlin
 
@@ -231,11 +238,12 @@ A reviewer does not see the planner's prompt. The implementer does not see
 the reviewer's lens. Each stage is given its own job in its own words, and
 upstream output crosses the boundary as data, not as context.
 
-There is no other input. Gremlins injects no system prompt or preamble of its
-own: the composed prompt above is the complete instruction set the model
-receives. This is a load-bearing property of the workflow language — if the
-harness began adding operational norms behind the pipeline's back, a pipeline
-would no longer be a self-describing program.
+Beyond the pipeline's own prompts and artifacts, the harness injects a thin
+system prompt carrying tool definitions, directory layout, and — currently —
+some opinionated guidance (e.g. delegation policy). This is a compromise: the
+ideal is zero harness opinion, but pragmatic model steering is needed today.
+Over time model-specific guidance will stay in the system prompt while
+pipeline-appropriate norms move back into pipeline files.
 
 ### 3.3 The worktree is the workspace
 

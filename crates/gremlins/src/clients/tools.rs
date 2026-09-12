@@ -11,23 +11,38 @@ use tokio::process::Command;
 
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
+/// Cap on Task calls spawned from a single model message, and on how much of
+/// one Task's result is carried into the next context. Without both, one
+/// response could fan out unbounded child loops and overflow the context.
+pub(crate) const TASK_MAX_PER_TURN: usize = 8;
+pub(crate) const TASK_OUTPUT_LIMIT: usize = 2000;
 const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", "target"];
-const PARALLEL_MAX_TASKS: usize = 8;
-const PARALLEL_OUTPUT_LIMIT: usize = 2000;
 
-/// Tools that stay available even when a tool filter is set. `subagent_fn`
+/// Tools that stay available even when a tool filter is set. `task_fn`
 /// re-applies both the tool filter and `allowed_roots` to every nested agent,
 /// so bypassing the filter here cannot escape containment.
-const ALWAYS_AVAILABLE: &[&str] = &["subagent", "parallel"];
+const ALWAYS_AVAILABLE: &[&str] = &["Task"];
 
 fn always_available(name: &str) -> bool {
     ALWAYS_AVAILABLE.contains(&name)
 }
 
-type SubagentFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
+type TaskFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
 
-/// Callback that `invoke` calls for subagent tool invocations.
-pub(crate) type SubagentFn = Arc<dyn Fn(String, Option<PathBuf>) -> SubagentFuture + Send + Sync>;
+/// Callback that `invoke` calls for Task tool invocations.
+pub(crate) type TaskFn = Arc<dyn Fn(String, String) -> TaskFuture + Send + Sync>;
+
+/// Bound one Task result before it becomes part of the next turn's context.
+pub(crate) fn truncate_task_output(body: &str) -> String {
+    match body.char_indices().nth(TASK_OUTPUT_LIMIT) {
+        Some((i, _)) => format!(
+            "{}…[truncated: {} chars total]",
+            &body[..i],
+            body.chars().count()
+        ),
+        None => body.to_string(),
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ToolContext {
@@ -36,7 +51,7 @@ pub(crate) struct ToolContext {
     pub(crate) allowed_roots: Vec<PathBuf>,
     pub(crate) audit_log: Option<PathBuf>,
     pub(crate) allowed_tools: Option<Vec<String>>,
-    pub(crate) subagent_fn: Option<SubagentFn>,
+    pub(crate) task_fn: Option<TaskFn>,
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
 }
 
@@ -652,18 +667,7 @@ fn audit_key_arg(args_json: &str) -> String {
         return String::new();
     };
     if let Some(obj) = d.as_object() {
-        // parallel: the first task description stands in as the key arg.
-        let first_task = obj
-            .get("tasks")
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|t| t.get("task"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        if let Some(task) = first_task {
-            return task.to_string();
-        }
-        for k in ["file_path", "command", "pattern", "path"] {
+        for k in ["file_path", "command", "pattern", "path", "description"] {
             if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
                     return v.to_string();
@@ -1258,57 +1262,6 @@ fn glob_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     }
 }
 
-pub(crate) async fn parallel_invoke(ctx: &ToolContext, args_json: &str) -> String {
-    let Some(f) = &ctx.subagent_fn else {
-        return "Error: subagent not available for this backend".to_string();
-    };
-    let args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let Some(tasks) = args.get("tasks").and_then(|v| v.as_array()) else {
-        return "Error: 'tasks' array required".to_string();
-    };
-    if tasks.is_empty() {
-        return "Error: 'tasks' must not be empty".to_string();
-    }
-    if tasks.len() > PARALLEL_MAX_TASKS {
-        return format!("Error: at most {PARALLEL_MAX_TASKS} tasks per parallel call");
-    }
-
-    // join_all over the raw futures keeps cancellation propagating: dropping
-    // the parent future drops every in-flight subagent.
-    let futures_iter = tasks.iter().map(|t| {
-        let task = t
-            .get("task")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let cwd = t.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
-        f(task, cwd)
-    });
-
-    let mut out = String::new();
-    for (body, t) in futures::future::join_all(futures_iter)
-        .await
-        .into_iter()
-        .zip(tasks)
-    {
-        let label = t.get("task").and_then(|v| v.as_str()).unwrap_or("?");
-        let body = match body.char_indices().nth(PARALLEL_OUTPUT_LIMIT) {
-            Some((i, _)) => format!(
-                "{}…[truncated: {} chars total]",
-                &body[..i],
-                body.chars().count()
-            ),
-            None => body,
-        };
-        out.push_str(&format!("# {label}\n\n{body}\n\n"));
-    }
-    out
-}
-
-/// Returns the required fields and their JSON types for a tool.
 /// Used by `validate_tool_args` to produce rich error messages when
 /// the model sends malformed tool-call arguments.
 fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str)>> {
@@ -1319,8 +1272,7 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str)>> {
         "Write" => Some(vec![("file_path", "string"), ("content", "string")]),
         "Grep" => Some(vec![("pattern", "string")]),
         "Glob" => Some(vec![("pattern", "string")]),
-        "subagent" => Some(vec![("task", "string")]),
-        "parallel" => Some(vec![("tasks", "array")]),
+        "Task" => Some(vec![("description", "string"), ("prompt", "string")]),
         _ => None,
     }
 }
@@ -1382,62 +1334,35 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
         }
     }
     // Nested constraints for tools with structured array items.
-    match name {
-        "Edit" => {
-            if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
-                if edits.is_empty() {
-                    return Some("Error: 'edits' array must not be empty for Edit tool".into());
+    if name == "Edit" {
+        if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
+            if edits.is_empty() {
+                return Some("Error: 'edits' array must not be empty for Edit tool".into());
+            }
+            for (i, edit) in edits.iter().enumerate() {
+                let obj = match edit.as_object() {
+                    Some(o) => o,
+                    None => {
+                        return Some(format!(
+                            "Error: edit {} in 'edits' must be an object for Edit tool",
+                            i + 1
+                        ));
+                    }
+                };
+                if !obj.contains_key("old_string") {
+                    return Some(format!(
+                        "Error: edit {} missing 'old_string' for Edit tool",
+                        i + 1
+                    ));
                 }
-                for (i, edit) in edits.iter().enumerate() {
-                    let obj = match edit.as_object() {
-                        Some(o) => o,
-                        None => {
-                            return Some(format!(
-                                "Error: edit {} in 'edits' must be an object for Edit tool",
-                                i + 1
-                            ));
-                        }
-                    };
-                    if !obj.contains_key("old_string") {
-                        return Some(format!(
-                            "Error: edit {} missing 'old_string' for Edit tool",
-                            i + 1
-                        ));
-                    }
-                    if !obj.contains_key("new_string") {
-                        return Some(format!(
-                            "Error: edit {} missing 'new_string' for Edit tool",
-                            i + 1
-                        ));
-                    }
+                if !obj.contains_key("new_string") {
+                    return Some(format!(
+                        "Error: edit {} missing 'new_string' for Edit tool",
+                        i + 1
+                    ));
                 }
             }
         }
-        "parallel" => {
-            if let Some(tasks) = args.get("tasks").and_then(|v| v.as_array()) {
-                if tasks.is_empty() {
-                    return Some("Error: 'tasks' array must not be empty for parallel tool".into());
-                }
-                for (i, task) in tasks.iter().enumerate() {
-                    let obj = match task.as_object() {
-                        Some(o) => o,
-                        None => {
-                            return Some(format!(
-                                "Error: task {} in 'tasks' must be an object for parallel tool",
-                                i + 1
-                            ));
-                        }
-                    };
-                    if !obj.contains_key("task") {
-                        return Some(format!(
-                            "Error: task {} missing 'task' for parallel tool",
-                            i + 1
-                        ));
-                    }
-                }
-            }
-        }
-        _ => {}
     }
     None
 }
@@ -1492,19 +1417,27 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
         "Write" => write_invoke(ctx, args_json).await,
         "Grep" => grep_invoke(ctx, args_json).await,
         "Glob" => glob_invoke(ctx, args_json).await,
-        "subagent" => {
-            if let Some(f) = &ctx.subagent_fn {
-                let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
-                if task.is_empty() {
-                    return "Error: subagent task is required".to_string();
+        "Task" => {
+            if let Some(f) = &ctx.task_fn {
+                let description = args
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                if prompt.is_empty() {
+                    return "Error: Task prompt is required".to_string();
                 }
-                let cwd = args.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
-                f(task.to_string(), cwd).await
+                let out = f(description.to_string(), prompt.to_string()).await;
+                // Label the result so concurrent Task outputs can be told apart.
+                if description.is_empty() {
+                    out
+                } else {
+                    format!("# {description}\n\n{out}")
+                }
             } else {
-                "Error: subagent not available for this backend".to_string()
+                "Error: Task not available for this backend".to_string()
             }
         }
-        "parallel" => parallel_invoke(ctx, args_json).await,
         other => format!("Error: unknown tool {other}"),
     };
     audit(
@@ -1623,55 +1556,23 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
             }),
         },
     ];
-    // Subagent is always available, even when a tool filter is set.
+    // Task is always available, even when a tool filter is set.
     all.push(ToolDefinition {
-        name: "subagent".into(),
-        description: "Delegate a single self-contained task to a worker with a clean conversation context. Multiple subagent calls in the same message run concurrently before results are returned. Pass `cwd` to run in a different working directory within the worktree. Returns the subagent's final text output.".into(),
+        name: "Task".into(),
+        description: format!("Delegate a self-contained task to a worker with a clean conversation context. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message. Returns the worker's final text output, truncated to {TASK_OUTPUT_LIMIT} characters and marked with …[truncated] when cut."),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
-                "task": {
+                "description": {
                     "type": "string",
-                    "description": "Task description for the subagent"
+                    "description": "Short label for this task, used in logs and as the result header"
                 },
-                "cwd": {
+                "prompt": {
                     "type": "string",
-                    "description": "Optional working directory override"
+                    "description": "Task instructions for the worker"
                 }
             },
-            "required": ["task"],
-            "additionalProperties": false
-        }),
-    });
-    // Parallel is always available, even when a tool filter is set.
-    all.push(ToolDefinition {
-        name: "parallel".into(),
-        description: format!("Run multiple independent subagent tasks in parallel (at most {PARALLEL_MAX_TASKS}). All tasks execute concurrently before results are returned. Each task gets an isolated conversation context but shares the worktree and tools. Each task's output is truncated to {PARALLEL_OUTPUT_LIMIT} characters and marked with …[truncated] when cut."),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "tasks": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": PARALLEL_MAX_TASKS,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "task": {
-                                "type": "string",
-                                "description": "Task description for this subagent"
-                            },
-                            "cwd": {
-                                "type": "string",
-                                "description": "Optional working directory override"
-                            }
-                        },
-                        "required": ["task"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["tasks"],
+            "required": ["description", "prompt"],
             "additionalProperties": false
         }),
     });
@@ -1712,7 +1613,7 @@ mod tests {
             allowed_roots: vec![cwd.to_path_buf()],
             audit_log: None,
             allowed_tools: None,
-            subagent_fn: None,
+            task_fn: None,
             audit_lock: None,
         }
     }
@@ -1783,7 +1684,7 @@ mod tests {
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,
-            subagent_fn: None,
+            task_fn: None,
             audit_lock: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
@@ -1808,7 +1709,7 @@ mod tests {
             allowed_roots: vec![std::env::current_dir().unwrap()],
             audit_log: None,
             allowed_tools: None,
-            subagent_fn: None,
+            task_fn: None,
             audit_lock: None,
         };
         let expected = std::env::current_dir().unwrap();
@@ -1904,19 +1805,18 @@ mod tests {
     #[test]
     fn tool_definitions_filter() {
         let all = tool_definitions(None);
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 7);
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
-        // subagent and parallel are always available regardless of the filter.
-        assert_eq!(names, ["Read", "Bash", "subagent", "parallel"]);
+        // Task is always available regardless of the filter.
+        assert_eq!(names, ["Read", "Bash", "Task"]);
     }
 
     #[test]
-    fn parallel_is_always_available() {
+    fn task_is_always_available() {
         let filtered = tool_definitions(Some(&["Read".to_string()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"parallel"), "got: {names:?}");
-        assert!(names.contains(&"subagent"), "got: {names:?}");
+        assert!(names.contains(&"Task"), "got: {names:?}");
         assert!(names.contains(&"Read"), "got: {names:?}");
     }
 
@@ -1955,11 +1855,11 @@ mod tests {
         .is_none());
         assert!(validate_tool_args("Grep", &serde_json::json!({"pattern": "fn"})).is_none());
         assert!(validate_tool_args("Glob", &serde_json::json!({"pattern": "*.rs"})).is_none());
-        assert!(validate_tool_args("subagent", &serde_json::json!({"task": "do it"})).is_none());
-        assert!(
-            validate_tool_args("parallel", &serde_json::json!({"tasks": [{"task": "a"}]}))
-                .is_none()
-        );
+        assert!(validate_tool_args(
+            "Task",
+            &serde_json::json!({"description": "d", "prompt": "do it"})
+        )
+        .is_none());
     }
 
     #[test]
@@ -1998,16 +1898,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_tool_args_parallel_empty_array() {
-        let err = validate_tool_args("parallel", &serde_json::json!({"tasks": []})).unwrap();
-        assert!(err.contains("must not be empty"));
-    }
-
-    #[test]
-    fn validate_tool_args_parallel_missing_task() {
-        let err = validate_tool_args("parallel", &serde_json::json!({"tasks": [{}]})).unwrap();
-        assert!(err.contains("missing 'task'"));
-        assert!(err.contains("task 1"));
+    fn validate_tool_args_task_missing_prompt() {
+        let err = validate_tool_args("Task", &serde_json::json!({"description": "d"})).unwrap();
+        assert!(err.contains("missing 'prompt'"));
+        assert!(err.contains("Task"));
     }
 
     #[test]
@@ -2343,7 +2237,7 @@ mod tests {
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: Some(vec!["Read".into()]),
-            subagent_fn: None,
+            task_fn: None,
             audit_lock: None,
         };
         let write_args =
@@ -2737,10 +2631,10 @@ mod tests {
         assert!(result.contains("missing 'edits'"));
     }
 
-    // --- Part 3: Subagent tests ---
+    // --- Part 3: Task tests ---
 
     #[tokio::test]
-    async fn subagent_no_callback_returns_error() {
+    async fn task_no_callback_returns_error() {
         let dir = tmp();
         let c = ToolContext {
             cwd: Some(dir.clone()),
@@ -2748,22 +2642,22 @@ mod tests {
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,
-            subagent_fn: None,
+            task_fn: None,
             audit_lock: None,
         };
-        let args = serde_json::json!({"task": "do something"}).to_string();
-        let result = invoke("subagent", &c, &args).await;
-        assert!(result.contains("subagent not available"));
+        let args = serde_json::json!({"description": "d", "prompt": "do something"}).to_string();
+        let result = invoke("Task", &c, &args).await;
+        assert!(result.contains("Task not available"));
     }
 
     #[tokio::test]
-    async fn subagent_callback_called_when_set() {
+    async fn task_callback_called_when_set() {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let subagent_fn: SubagentFn = Arc::new(move |task, cwd| {
+        let task_fn: TaskFn = Arc::new(move |description, prompt| {
             *called2.lock().unwrap() = true;
-            Box::pin(async move { format!("subagent result: {task} cwd={cwd:?}") })
+            Box::pin(async move { format!("task result: {description} / {prompt}") })
         });
         let c = ToolContext {
             cwd: Some(dir.clone()),
@@ -2771,79 +2665,21 @@ mod tests {
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,
-            subagent_fn: Some(subagent_fn),
+            task_fn: Some(task_fn),
             audit_lock: None,
         };
-        let args = serde_json::json!({"task": "do something", "cwd": "/tmp/x"}).to_string();
-        let result = invoke("subagent", &c, &args).await;
+        let args =
+            serde_json::json!({"description": "label", "prompt": "do something"}).to_string();
+        let result = invoke("Task", &c, &args).await;
         assert!(*called.lock().unwrap());
-        assert!(result.contains("subagent result"));
-        assert!(result.contains("/tmp/x"));
+        assert!(result.contains("task result: label / do something"));
     }
 
     #[tokio::test]
-    async fn subagent_empty_task_returns_error() {
+    async fn task_empty_prompt_returns_error() {
         let dir = tmp();
-        let subagent_fn: SubagentFn =
-            Arc::new(|_task, _cwd| Box::pin(async move { "should not be called".to_string() }));
-        let c = ToolContext {
-            cwd: Some(dir.clone()),
-            extra_env: None,
-            allowed_roots: vec![dir.clone()],
-            audit_log: None,
-            allowed_tools: None,
-            subagent_fn: Some(subagent_fn),
-            audit_lock: None,
-        };
-        // Empty task string.
-        let args = serde_json::json!({"task": ""}).to_string();
-        let result = invoke("subagent", &c, &args).await;
-        assert!(result.contains("subagent task is required"));
-
-        // Missing task key entirely — caught by schema validation.
-        let args2 = serde_json::json!({}).to_string();
-        let result2 = invoke("subagent", &c, &args2).await;
-        assert!(result2.contains("missing 'task'"), "got: {result2}");
-    }
-
-    // --- Part 3b: Parallel tests ---
-
-    #[tokio::test]
-    async fn parallel_invoke_runs_multiple_tasks() {
-        let dir = tmp();
-        let subagent_fn: SubagentFn =
-            Arc::new(|task, _cwd| Box::pin(async move { format!("done: {task}") }));
-        let c = ToolContext {
-            cwd: Some(dir.clone()),
-            extra_env: None,
-            allowed_roots: vec![dir.clone()],
-            audit_log: None,
-            allowed_tools: None,
-            subagent_fn: Some(subagent_fn),
-            audit_lock: None,
-        };
-        let args = serde_json::json!({
-            "tasks": [{"task": "alpha"}, {"task": "beta"}, {"task": "gamma"}]
-        })
-        .to_string();
-        let result = parallel_invoke(&c, &args).await;
-        assert!(result.contains("done: alpha"));
-        assert!(result.contains("done: beta"));
-        assert!(result.contains("done: gamma"));
-    }
-
-    /// Sibling tasks must be in flight simultaneously. Each task blocks on a
-    /// barrier that only releases once all three have entered.
-    #[tokio::test]
-    async fn parallel_invoke_tasks_run_concurrently() {
-        let dir = tmp();
-        let barrier = Arc::new(tokio::sync::Barrier::new(3));
-        let subagent_fn: SubagentFn = Arc::new(move |task, _cwd| {
-            let barrier = barrier.clone();
-            Box::pin(async move {
-                barrier.wait().await;
-                format!("done: {task}")
-            })
+        let task_fn: TaskFn = Arc::new(|_description, _prompt| {
+            Box::pin(async move { "should not be called".to_string() })
         });
         let c = ToolContext {
             cwd: Some(dir.clone()),
@@ -2851,80 +2687,45 @@ mod tests {
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,
-            subagent_fn: Some(subagent_fn),
+            task_fn: Some(task_fn),
             audit_lock: None,
         };
-        let args = serde_json::json!({
-            "tasks": [{"task": "alpha"}, {"task": "beta"}, {"task": "gamma"}]
-        })
-        .to_string();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            parallel_invoke(&c, &args),
-        )
-        .await
-        .expect("tasks deadlocked: not running concurrently");
-        assert!(result.contains("done: alpha"));
-        assert!(result.contains("done: beta"));
-        assert!(result.contains("done: gamma"));
+        let args = serde_json::json!({"description": "d", "prompt": ""}).to_string();
+        let result = invoke("Task", &c, &args).await;
+        assert!(result.contains("Task prompt is required"));
+
+        // Missing prompt key entirely — caught by schema validation.
+        let args2 = serde_json::json!({"description": "d"}).to_string();
+        let result2 = invoke("Task", &c, &args2).await;
+        assert!(result2.contains("missing 'prompt'"), "got: {result2}");
     }
 
     #[tokio::test]
-    async fn parallel_invoke_rejects_oversized_batch() {
+    async fn task_result_is_headered_with_description() {
         let dir = tmp();
-        let subagent_fn: SubagentFn =
-            Arc::new(|_task, _cwd| Box::pin(async move { "should not be called".to_string() }));
+        let task_fn: TaskFn = Arc::new(|_d, _p| Box::pin(async move { "body".to_string() }));
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,
-            subagent_fn: Some(subagent_fn),
+            task_fn: Some(task_fn),
             audit_lock: None,
         };
-        let tasks: Vec<_> = (0..PARALLEL_MAX_TASKS + 1)
-            .map(|i| serde_json::json!({"task": format!("t{i}")}))
-            .collect();
-        let args = serde_json::json!({ "tasks": tasks }).to_string();
-        let result = parallel_invoke(&c, &args).await;
-        assert!(result.contains("at most"), "got: {result}");
+        let args = serde_json::json!({"description": "scout docs", "prompt": "go"}).to_string();
+        assert_eq!(invoke("Task", &c, &args).await, "# scout docs\n\nbody");
     }
 
-    #[tokio::test]
-    async fn parallel_invoke_truncates_long_output() {
-        let dir = tmp();
-        let subagent_fn: SubagentFn =
-            Arc::new(|_task, _cwd| Box::pin(async move { "x".repeat(PARALLEL_OUTPUT_LIMIT + 10) }));
-        let c = ToolContext {
-            cwd: Some(dir.clone()),
-            extra_env: None,
-            allowed_roots: vec![dir.clone()],
-            audit_log: None,
-            allowed_tools: None,
-            subagent_fn: Some(subagent_fn),
-            audit_lock: None,
-        };
-        let args = serde_json::json!({"tasks": [{"task": "big"}]}).to_string();
-        let result = parallel_invoke(&c, &args).await;
-        assert!(result.contains("…[truncated:"), "got: {result}");
-    }
-
-    #[tokio::test]
-    async fn parallel_invoke_no_subagent_fn() {
-        let dir = tmp();
-        let c = ToolContext {
-            cwd: Some(dir.clone()),
-            extra_env: None,
-            allowed_roots: vec![dir.clone()],
-            audit_log: None,
-            allowed_tools: None,
-            subagent_fn: None,
-            audit_lock: None,
-        };
-        let args = serde_json::json!({"tasks": [{"task": "a"}]}).to_string();
-        let result = parallel_invoke(&c, &args).await;
-        assert!(result.contains("subagent not available"));
+    #[test]
+    fn task_output_is_truncated_past_the_limit() {
+        let long = "x".repeat(TASK_OUTPUT_LIMIT + 10);
+        let out = truncate_task_output(&long);
+        assert!(out.ends_with(&format!(
+            "…[truncated: {} chars total]",
+            TASK_OUTPUT_LIMIT + 10
+        )));
+        assert_eq!(truncate_task_output("short"), "short");
     }
 
     // --- Part 4: IO containment tests (symlink-aware) ---
