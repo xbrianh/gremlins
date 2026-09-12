@@ -228,7 +228,7 @@ mod tests {
         for req in model.requests() {
             match req.chat_history.first() {
                 Message::System { content } => assert!(
-                    content.contains("<gremlins:tools>"),
+                    content.contains("<tools>"),
                     "unexpected system prompt: {content}"
                 ),
                 other => panic!("task must inject a system prompt, got: {other:?}"),

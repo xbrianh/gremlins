@@ -8,9 +8,10 @@ use serde_json::Value;
 /// Default name of the project-local overlay directory.
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
-/// System prompt injected into every agent stage. Carries only the tool roster
-/// and directory layout — behavioral guidance lives in the pipeline's prompt
-/// files, since the runtime is an unopinionated workflow engine.
+/// System prompt injected into every agent stage. Carries the tool roster,
+/// directory layout, and pragmatic guidance (e.g. delegation policy).
+/// Model-specific guidance will need to live here in the future; for now,
+/// some opinionated bits are included as a temporary compromise.
 pub(crate) fn agent_system_prompt(
     work_root: &Path,
     scratch_root: &Path,
@@ -1168,15 +1169,15 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_system_prompt_omits_delegation_policy() {
+    fn test_agent_system_prompt_includes_delegation_policy() {
         let prompt = agent_system_prompt(
             Path::new("/work"),
             Path::new("/scratch"),
             Path::new("/project"),
         );
         assert!(
-            !prompt.contains("<important>"),
-            "agent prompt must not inject behavioral policy; got: {prompt}"
+            prompt.contains("<important>"),
+            "agent prompt must inject delegation policy; got: {prompt}"
         );
     }
 

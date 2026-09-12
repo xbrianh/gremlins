@@ -2,7 +2,9 @@
 
 Background orchestration for Claude Code: a gremlin is a detached process that runs a YAML-defined pipeline (plan → implement → review → address → open-PR …) against a goal or GitHub issue, writing artifacts to a per-user state directory.
 
-Gremlins is an **unopinionated agentic workflow language**: the pipeline YAML is the program, and the harness is only its runtime. The harness injects no system prompt, preamble, or operational norms of its own — a stage's model sees exactly the prompts the pipeline declares plus the artifacts passed through. Behavioral opinions (what to re-check, how to communicate, when to bail) belong in the pipeline's own prompt files, never in harness code or a bundled default.
+Gremlins is an **unopinionated agentic workflow language**: the pipeline YAML is the program, and the harness is only its runtime. The harness keeps injected opinion to a minimum — a thin system prompt carries tool definitions, directory layout, and (for now) some pragmatic guidance like delegation policy. Major behavioral opinions (what to re-check, how to communicate, when to bail) belong in the pipeline's own prompt files, never in harness code or a bundled default.
+
+> **Note:** model-specific guidance will need to live in the harness system prompt in the future. The current opinionated bits (e.g. `<important>` delegation block) are a temporary compromise; the boundary will firm up as we learn what each model needs.
 
 This file is the entry-point orientation for an agent working on this codebase. Per-subpackage detail lives in `gremlins/<pkg>/AGENTS.md`. The user-facing project doc is `README.md`. Design notes live in `DESIGN.md` and `plans/`.
 
@@ -69,7 +71,7 @@ The `Makefile` sets `MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || npr
 
 ## Project-wide conventions
 
-- **Unopinionated workflow language.** The harness supplies mechanics (sequencing, worktrees, artifacts, bail bookkeeping, client plumbing) and injects no system prompt or operational norms into any model. A stage's model sees only the prompts its pipeline declares. Do not add hard-coded system prompting or behavioral instructions to the harness — put them in the pipeline's own prompt files, where the pipeline author owns them.
+- **Unopinionated workflow language.** The harness supplies mechanics (sequencing, worktrees, artifacts, bail bookkeeping, client plumbing) and keeps injected opinion to a minimum. A thin harness system prompt carries tool definitions, directory layout, and pragmatic guidance (e.g. delegation policy). Major behavioral instructions still belong in the pipeline's own prompt files where the pipeline author owns them. Model-specific guidance will live in the harness system prompt as a long-term necessity; for now, some opinionated bits are in the harness as a temporary compromise.
 - **No re-export facades.** Package `__init__.py` files do not import from submodules and re-publish via `__all__`. Imports name the defining submodule directly: `from gremlins.cli.fleet import fleet_main`, not `from gremlins.cli import fleet_main`. The sole exceptions are `__init__.py` files that *define* something (e.g. `gremlins/__init__.py` defines `PACKAGE_ROOT`).
 - **No backwards-compatibility shims.** No legacy aliases, no deprecation paths, no compat decorators. Replace at every call site.
 - **No inheritance.** Composition only. Single inheritance is almost always the wrong tool; multiple inheritance is never acceptable.
