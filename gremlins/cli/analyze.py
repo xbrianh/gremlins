@@ -16,6 +16,7 @@ from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import load_state
 from gremlins.utils.yaml_io import render_bundled_prompt
 
+
 def _read_log(log_path: pathlib.Path) -> str:
     """Read the entire log file."""
     if not log_path.is_file():
