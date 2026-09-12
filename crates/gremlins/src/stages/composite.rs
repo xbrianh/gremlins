@@ -28,11 +28,8 @@ pub struct StageAttrs {
     pub name: String,
     pub stage_type: String,
     pub path: String,
-    pub client: Option<String>,
     pub client_explicit: bool,
     pub skip_if_exists: String,
-    pub options: HashMap<String, serde_json::Value>,
-    pub bind_map: HashMap<String, String>,
 }
 
 impl StageAttrs {
@@ -41,11 +38,8 @@ impl StageAttrs {
             name,
             stage_type: String::new(),
             path: String::new(),
-            client: None,
             client_explicit: false,
             skip_if_exists: String::new(),
-            options: HashMap::new(),
-            bind_map: HashMap::new(),
         }
     }
 }
@@ -84,11 +78,8 @@ mod tests {
         assert_eq!(s.name, "my-stage");
         assert_eq!(s.stage_type, "");
         assert_eq!(s.path, "");
-        assert_eq!(s.client, None);
         assert!(!s.client_explicit);
         assert_eq!(s.skip_if_exists, "");
-        assert!(s.options.is_empty());
-        assert!(s.bind_map.is_empty());
     }
 
     #[test]

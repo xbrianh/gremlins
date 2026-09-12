@@ -15,7 +15,7 @@ use gremlins::stages::outcome::Done as RustDone;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFrozenSet, PyList, PyTuple, PyType};
+use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple, PyType};
 
 use crate::python::artifacts::ArtifactRegistry;
 
@@ -26,22 +26,26 @@ type PyAwaitable = Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>>;
 
 // --- Helpers ---
 
+fn py_to_json(val: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+    let json_str: String = val
+        .py()
+        .import("json")?
+        .call_method1("dumps", (val,))?
+        .extract()?;
+    serde_json::from_str(&json_str).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("value cannot be represented as JSON: {e}"))
+    })
+}
+
 /// Convert a PyDict of string keys to a HashMap<String, serde_json::Value>
 /// by serializing each value via Python's json module.
 fn extract_json_value_dict(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, serde_json::Value>> {
-    // Import json module
-    let json_mod = obj.py().import("json")?;
     let dict = obj.cast::<PyDict>()?;
     let mut map = HashMap::new();
     for (key, val) in dict.iter() {
         let k: String = key.extract()?;
-        // Serialize Python value to JSON string, then parse back to serde_json::Value
-        let json_str: String = json_mod.call_method1("dumps", (val,))?.extract()?;
-        let v: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "option {k:?}: value cannot be represented as JSON: {e}"
-            ))
-        })?;
+        let v = py_to_json(&val)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("option {k:?}: {e}")))?;
         map.insert(k, v);
     }
     Ok(map)
@@ -889,6 +893,8 @@ impl PyAgent {
 struct PyStageAttrs {
     inner: RustStageAttrs,
     body: Py<PyList>,
+    options: Py<PyDict>,
+    bind_map: Py<PyDict>,
     client: Option<Py<PyAny>>,
     raw_dict: Option<Py<PyAny>>,
     gremlin: Option<Py<PyAny>>,
@@ -910,6 +916,8 @@ impl PyStageAttrs {
         PyStageAttrs {
             inner: RustStageAttrs::new(name),
             body: PyList::empty(py).unbind(),
+            options: PyDict::new(py).unbind(),
+            bind_map: PyDict::new(py).unbind(),
             client: None,
             raw_dict: None,
             gremlin: None,
@@ -1025,17 +1033,23 @@ impl PyStageAttrs {
     }
 
     #[getter]
-    fn bind_map(&self) -> HashMap<String, String> {
-        self.inner.bind_map.clone()
+    fn options<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
+        self.options.bind(py).clone()
+    }
+
+    #[setter]
+    fn set_options(&mut self, value: &Bound<'_, PyDict>) {
+        self.options = value.clone().unbind();
     }
 
     #[getter]
-    fn options<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let d = PyDict::new(py);
-        for (k, v) in &self.inner.options {
-            d.set_item(k, json_value_to_py(py, v)?)?;
-        }
-        Ok(d)
+    fn bind_map<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
+        self.bind_map.bind(py).clone()
+    }
+
+    #[setter]
+    fn set_bind_map(&mut self, value: &Bound<'_, PyDict>) {
+        self.bind_map = value.clone().unbind();
     }
 }
 
@@ -1057,7 +1071,20 @@ fn stage_name_from_dict(d: &Bound<'_, PyDict>) -> String {
 #[pyfunction]
 #[pyo3(name = "get_client_from_dict")]
 fn get_client_from_dict_py(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Option<Py<PyAny>>> {
-    let map = extract_json_value_dict(d)?;
+    // Only the `client` key is inspected: other stage keys may hold values
+    // that are not JSON-convertible.
+    let mut map = HashMap::new();
+    if let Some(raw) = d.get_item("client")? {
+        if !raw.is_none() {
+            // Any non-string collapses to a value the core rejects; the error
+            // below names the real Python type.
+            let encoded = match raw.is_instance_of::<PyString>() {
+                true => serde_json::Value::String(raw.extract()?),
+                false => serde_json::Value::Bool(false),
+            };
+            map.insert("client".to_string(), encoded);
+        }
+    }
     let name = stage_name_from_dict(d);
     match rust_get_client_from_dict(&map, &name) {
         Ok(Some(spec)) => {
@@ -1068,7 +1095,16 @@ fn get_client_from_dict_py(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Op
             Ok(Some(parsed.unbind()))
         }
         Ok(None) => Ok(None),
-        Err(msg) => Err(pyo3::exceptions::PyValueError::new_err(msg)),
+        // Render the offending Python type, as the pre-port helper did.
+        Err(_) => {
+            let kind = match d.get_item("client")? {
+                Some(raw) => raw.get_type().repr()?.to_string(),
+                None => "NoneType".to_string(),
+            };
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "stage '{name}': 'client' must be a string, got {kind}"
+            )))
+        }
     }
 }
 
@@ -1111,11 +1147,11 @@ fn child_state_py(
 
     let parent_artifact_dir: PathBuf = parent.getattr("artifact_dir")?.extract()?;
     let child_name: String = child.getattr("name")?.extract()?;
-    let child_scratch: Option<PathBuf> = match &child_id {
+    let child_scratch: Option<PathBuf> = match child_id.as_deref().filter(|s| !s.is_empty()) {
         Some(cid) => Some(PathBuf::from(
             py.import("_gremlins_core.config")?
                 .getattr("scratch_root")?
-                .call1((cid.as_str(),))?
+                .call1((cid,))?
                 .extract::<String>()?,
         )),
         None => None,
