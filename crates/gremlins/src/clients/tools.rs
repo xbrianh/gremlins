@@ -1569,7 +1569,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Task instructions for the worker"
+                    "description": "Full task briefing for the worker. The worker starts with a clean conversation context and sees nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field."
                 }
             },
             "required": ["description", "prompt"],
