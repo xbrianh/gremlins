@@ -8,25 +8,14 @@ use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList};
 
-fn value_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>> {
-    let json = py.import("json")?;
-    let s = serde_json::to_string(v).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(json.call_method1("loads", (s,))?.unbind())
-}
-
-fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
-    let json = obj.py().import("json")?;
-    let s: String = json.call_method1("dumps", (obj,))?.extract()?;
-    serde_json::from_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))
-}
+use crate::python::json_conv::{key_to_string, py_to_value, value_to_py};
 
 fn py_dict_to_map(d: &Bound<'_, PyDict>) -> PyResult<serde_json::Map<String, serde_json::Value>> {
-    let json = d.py().import("json")?;
-    let s: String = json.call_method1("dumps", (d,))?.extract()?;
-    match serde_json::from_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))? {
-        serde_json::Value::Object(m) => Ok(m),
-        _ => Ok(serde_json::Map::new()),
+    let mut map = serde_json::Map::new();
+    for (k, v) in d.iter() {
+        map.insert(key_to_string(&k)?, py_to_value(&v)?);
     }
+    Ok(map)
 }
 
 fn map_to_py_dict(

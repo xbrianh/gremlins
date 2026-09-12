@@ -18,6 +18,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple, PyType};
 
 use crate::python::artifacts::ArtifactRegistry;
+use crate::python::json_conv::{py_to_value as py_to_json, value_to_py as json_value_to_py};
 use crate::schemas::loader;
 
 // Type alias for the future returned by into_future
@@ -27,19 +28,7 @@ type PyAwaitable = Pin<Box<dyn Future<Output = PyResult<Py<PyAny>>> + Send>>;
 
 // --- Helpers ---
 
-fn py_to_json(val: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
-    let json_str: String = val
-        .py()
-        .import("json")?
-        .call_method1("dumps", (val,))?
-        .extract()?;
-    serde_json::from_str(&json_str).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("value cannot be represented as JSON: {e}"))
-    })
-}
-
-/// Convert a PyDict of string keys to a HashMap<String, serde_json::Value>
-/// by serializing each value via Python's json module.
+/// Convert a PyDict of string keys to a HashMap<String, serde_json::Value>.
 fn extract_json_value_dict(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, serde_json::Value>> {
     let dict = obj.cast::<PyDict>()?;
     let mut map = HashMap::new();
@@ -52,15 +41,7 @@ fn extract_json_value_dict(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, s
     Ok(map)
 }
 
-/// Convert a serde_json::Value to a Python object using json module
-fn json_value_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>> {
-    let json_mod = py.import("json")?;
-    let json_str = serde_json::to_string(v).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("JSON serialization error: {e}"))
-    })?;
-    let py_obj = json_mod.call_method1("loads", (json_str,))?;
-    Ok(py_obj.unbind())
-}
+/// Convert a serde_json::Value to a Python object.
 
 // --- Done pyclass ---
 
