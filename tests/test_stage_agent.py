@@ -584,9 +584,9 @@ def test_harness_system_prompt_sent_separately(tmp_path):
     asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
     call = state.client.calls[0]
-    assert "<gremlins:info>" in call.system_prompt
+    assert "<directories>" in call.system_prompt
     assert "hello" in call.prompt
-    assert "<gremlins:info>" not in call.prompt
+    assert "<directories>" not in call.prompt
 
 
 def test_system_prompt_option_cannot_override_harness(tmp_path):
@@ -596,7 +596,7 @@ def test_system_prompt_option_cannot_override_harness(tmp_path):
     asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
 
     assert state.client.calls[0].system_prompt != "evil"
-    assert "<gremlins:info>" in state.client.calls[0].system_prompt
+    assert "<directories>" in state.client.calls[0].system_prompt
 
 
 def test_token_usage_accumulated_into_state(tmp_path):
