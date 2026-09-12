@@ -8,8 +8,8 @@ import pathlib
 
 import pytest
 from _gremlins_core.artifacts import Uri
+from _gremlins_core.executor import State, StateData, build_state
 
-from gremlins.executor.state import State, StateData, build_state
 from gremlins.stages.composite import StageAttrs
 from gremlins.stages.parallel import ParallelStage, _ParallelExecutor
 from tests.fake_client import FakeClient

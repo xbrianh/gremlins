@@ -3,6 +3,7 @@ pub(crate) mod assets;
 pub(crate) mod clients;
 pub(crate) mod config;
 pub(crate) mod discovery;
+pub(crate) mod executor;
 pub(crate) mod schemas;
 pub(crate) mod stages;
 pub(crate) mod utils;

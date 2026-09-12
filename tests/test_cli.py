@@ -7,10 +7,10 @@ import os
 import pathlib
 from unittest.mock import MagicMock
 
+import _gremlins_core.executor as state_mod
 import pytest
 
 import gremlins.cli as cli_mod
-import gremlins.executor.state as state_mod
 from gremlins.cli import main
 from gremlins.spawn.pipeline import main as run_pipeline_main
 from gremlins.utils.yaml_io import YamlLoadError
@@ -144,7 +144,7 @@ def test_run_pipeline_rejects_invalid_gremlin_id(tmp_path, monkeypatch, bad_id):
 def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
     monkeypatch.setattr("gremlins.executor.run.run_pipeline", lambda *a, **kw: 0)
     monkeypatch.setattr(
-        "gremlins.executor.state.StateData.write_terminal_state",
+        "_gremlins_core.executor.StateData.write_terminal_state",
         lambda self, exit_code: None,
     )
     with pytest.raises(SystemExit):
@@ -157,7 +157,7 @@ def test_run_pipeline_forwards_gremlin_id_to_orchestrator(
     gremlin_id = "test-pipeline-gr"
     state_dir = make_state_dir(gremlin_id)
 
-    from gremlins.executor.state import StateData
+    from _gremlins_core.executor import StateData
 
     async def fake_run_pipeline(pipeline_path, *, argv, gremlin_id=None, client=None):
         StateData(gremlin_id).set_stage("implement")
@@ -165,7 +165,7 @@ def test_run_pipeline_forwards_gremlin_id_to_orchestrator(
 
     monkeypatch.setattr("gremlins.executor.run.run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(
-        "gremlins.executor.state.StateData.write_terminal_state",
+        "_gremlins_core.executor.StateData.write_terminal_state",
         lambda self, exit_code: None,
     )
 

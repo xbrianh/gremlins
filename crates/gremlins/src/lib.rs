@@ -4,5 +4,6 @@ pub mod assets;
 pub mod clients;
 pub mod config;
 pub mod core;
+pub mod executor;
 pub mod schemas;
 pub mod stages;

@@ -515,7 +515,7 @@ def test_run_pipeline_writes_terminal_state_on_failure(lenv, monkeypatch):
 
 def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_path):
     """On success, worktree is NOT removed for gh-mode pipelines (only explicit close/land removes it)."""
-    from gremlins.executor.state import StateData
+    from _gremlins_core.executor import StateData
 
     removed = []
     monkeypatch.setattr(
@@ -539,7 +539,7 @@ def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_p
 
 def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tmp_path):
     """On success, worktree is NOT removed for local-mode pipelines."""
-    from gremlins.executor.state import StateData
+    from _gremlins_core.executor import StateData
 
     removed = []
     monkeypatch.setattr(
@@ -564,7 +564,7 @@ def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tm
 
 def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp_path):
     """On success, worktree is NOT removed for boss-mode pipelines."""
-    from gremlins.executor.state import StateData
+    from _gremlins_core.executor import StateData
 
     removed = []
     monkeypatch.setattr(

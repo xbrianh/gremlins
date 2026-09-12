@@ -52,6 +52,11 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // _gremlins_core.config.
     python::config::register_config_module(m)?;
 
+    // executor submodule — must be registered before schemas because
+    // STAGE_TYPES construction imports gremlins.stages.parallel, which
+    // imports _gremlins_core.executor.
+    python::executor::register_executor_module(m)?;
+
     // stages submodule — must be registered before schemas because
     // register_schemas_module builds STAGE_TYPES from _gremlins_core.stages.
     python::stages::register_stages_module(m)?;

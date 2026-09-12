@@ -7,10 +7,10 @@ import pathlib
 
 import pytest
 from _gremlins_core.artifacts import MissingArtifact, Uri
+from _gremlins_core.executor import StateData, build_state
 from _gremlins_core.stages import Bail, Done, Exec
 from conftest import MockGremlin
 
-from gremlins.executor.state import StateData, build_state
 from tests.fake_client import FakeClient
 
 

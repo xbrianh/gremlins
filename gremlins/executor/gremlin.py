@@ -16,15 +16,15 @@ from _gremlins_core.artifacts import ArtifactRegistry, Uri
 from _gremlins_core.clients import Client
 from _gremlins_core.config import project_root, scratch_root, state_root
 from _gremlins_core.discovery import resolve_pipeline_path
-from _gremlins_core.schemas import Pipeline as _PipelineData
-
-from gremlins.executor.state import (
+from _gremlins_core.executor import (
     State,
     StateData,
     build_state,
     read_state_json,
     write_state,
 )
+from _gremlins_core.schemas import Pipeline as _PipelineData
+
 from gremlins.protocols import StageProtocol
 from gremlins.utils import git as _git_mod
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError

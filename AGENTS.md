@@ -97,7 +97,7 @@ These values are persisted to `state.json` and read by other writers (the fleet 
 | Understand fleet operations | `gremlins/fleet/AGENTS.md` |
 | Understand the executor | `gremlins/executor/AGENTS.md` |
 | Understand artifact registry + URIs | `gremlins/artifacts/AGENTS.md` |
-| Investigate a state-dir layout | `gremlins/paths.py` resolves dirs; `gremlins/executor/state.py` manages state.json. Per-gremlin layout under `platformdirs.user_state_dir("gremlins")/<gremlin_id>/` |
+| Investigate a state-dir layout | `gremlins/paths.py` resolves dirs; `_gremlins_core.executor` manages state.json. Per-gremlin layout under `platformdirs.user_state_dir("gremlins")/<gremlin_id>/` |
 | Find the design backlog | `plans/` (rough notes, not authoritative) |
 | Find open work | GitHub issues, `gh issue list --repo xbrianh/gremlins` |
 
@@ -109,7 +109,7 @@ Stages that invoke `claude` go through an injected `Client` (in `gremlins/client
 
 ## State and bail bookkeeping
 
-`State.set_stage` (in `executor/state.py`) writes stage info to `state.json` atomically via `State.patch` (which uses `locked_update`).
+`State.set_stage` (in `_gremlins_core.executor`) writes stage info to `state.json` atomically via `State.patch` (which uses `locked_update`).
 `State.write_bail_file` writes `bail_{attempt}.json` to the state dir. When a stage
 detects a recorded bail (via `state.json`), it raises a `Bail` exception.
 Both helpers no-op without `GREMLINS_GREMLIN_ID` and never raise —

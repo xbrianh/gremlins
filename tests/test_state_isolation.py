@@ -33,7 +33,7 @@ import subprocess
 import sys
 import textwrap
 
-from gremlins.executor.state import StateData
+from _gremlins_core.executor import StateData
 
 
 def test_autouse_isolate_gremlin_id_unsets_gremlin_id_under_inherited_env(

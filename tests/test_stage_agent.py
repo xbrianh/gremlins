@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from _gremlins_core.artifacts import ArtifactRegistry, MissingArtifact, Uri
+from _gremlins_core.executor import State, StateData, build_state
 from _gremlins_core.stages import Agent, Bail, Done
 from conftest import MINIMAL_EVENTS, MockGremlin
 
-from gremlins.executor.state import State, StateData, build_state
 from tests.fake_client import FakeClient
 
 if TYPE_CHECKING:

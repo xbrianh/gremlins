@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from _gremlins_core.artifacts import Uri
+from _gremlins_core.executor import State as RuntimeState
+from _gremlins_core.executor import StateData, build_state
 from _gremlins_core.stages import Bail, Done
 from conftest import MockGremlin, _make_gremlin_wrapper
 
-from gremlins.executor.state import State as RuntimeState
-from gremlins.executor.state import StateData, build_state
 from gremlins.stages.loop import LoopStage
 
 if TYPE_CHECKING:
@@ -203,7 +203,7 @@ def test_loop_bail_propagates_immediately(tmp_path):
 
 
 def test_loop_exhausted_emits_bail_to_state(tmp_path, make_state_dir):
-    import gremlins.executor.state as state_mod
+    import _gremlins_core.executor as state_mod
 
     gremlin_id = "loop-test-gr"
     state_dir = make_state_dir(gremlin_id)

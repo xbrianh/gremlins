@@ -6,11 +6,11 @@ import subprocess
 
 import pytest
 from _gremlins_core.artifacts import ArtifactRegistry, Uri
+from _gremlins_core.executor import StateData, build_state
 from _gremlins_core.schemas import Pipeline
 from _gremlins_core.stages import Exec
 
 from gremlins.executor.gremlin import Gremlin
-from gremlins.executor.state import StateData, build_state
 from tests.fake_client import FakeClient
 
 
