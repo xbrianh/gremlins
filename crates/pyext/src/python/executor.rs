@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use gremlins::executor::state::{self as rust_state, StateData};
+use gremlins::stages::constants::FRAMEWORK_KEYS;
 use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyFrozenSet, PyList};
 
 fn value_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>> {
     let json = py.import("json")?;
@@ -79,6 +80,13 @@ impl PyStateData {
         self.with(|d| d.gremlin_id.clone())
     }
 
+    #[setter]
+    fn set_gremlin_id(&self, value: Option<String>) {
+        let mut d = self.lock();
+        d.gremlin_id = value;
+        d.invalidate();
+    }
+
     #[getter]
     fn state_file(&self) -> Option<PathBuf> {
         self.with(|d| d.state_file.clone())
@@ -86,7 +94,9 @@ impl PyStateData {
 
     #[setter]
     fn set_state_file(&self, value: Option<PathBuf>) {
-        self.inner.lock().unwrap().state_file = value;
+        let mut d = self.lock();
+        d.state_file = value;
+        d.invalidate();
     }
 
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
@@ -104,6 +114,15 @@ impl PyStateData {
     }
 
     fn persist(&self, state_dir: PathBuf, data: &Bound<'_, PyDict>) -> PyResult<()> {
+        let gid = self.with(|d| d.gremlin_id.clone());
+        match &gid {
+            Some(id) => data.set_item("id", id)?,
+            None => {
+                return Err(PyValueError::new_err(
+                    "cannot persist StateData with no gremlin_id",
+                ))
+            }
+        }
         let map = py_dict_to_map(data)?;
         self.inner
             .lock()
@@ -134,11 +153,7 @@ impl PyStateData {
     }
 
     fn read_str(&self, field: &str) -> String {
-        self.with(|d| match d.read_field(field) {
-            Some(serde_json::Value::String(s)) => s,
-            Some(serde_json::Value::Number(n)) => n.to_string(),
-            _ => String::new(),
-        })
+        self.with(|d| d.read_str(field))
     }
 
     #[pyo3(signature = (stage, sub_stage=None, *, parent_stage=""))]
@@ -165,8 +180,11 @@ impl PyStateData {
         self.with(|d| d.accumulate_token_usage(&usage));
     }
 
-    fn read_bail_info(&self) -> Option<HashMap<String, String>> {
-        self.with(|d| d.read_bail_info())
+    fn read_bail_info(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match self.with(|d| d.read_bail_info()) {
+            Some(m) => Ok(Some(map_to_py_dict(py, &m)?)),
+            None => Ok(None),
+        }
     }
 
     #[pyo3(signature = (group_name, base_head=None, paths=None))]
@@ -222,8 +240,10 @@ pub struct PyState {
     args: Py<PyAny>,
     #[pyo3(get, set)]
     pipeline_data: Option<Py<PyAny>>,
+    // Live Python lists, not freshly built copies: Python mutates them in place
+    // (`state.current_scope.append(...)`) and assignment must hit the real state.
     #[pyo3(get, set)]
-    current_scope: Vec<Py<PyAny>>,
+    current_scope: Py<PyList>,
     #[pyo3(get, set)]
     child_key: Option<String>,
     #[pyo3(get, set)]
@@ -235,7 +255,7 @@ pub struct PyState {
     #[pyo3(get, set)]
     base_ref: String,
     #[pyo3(get, set)]
-    loop_stack: Vec<(String, i32)>,
+    loop_stack: Py<PyList>,
 }
 
 #[pymethods]
@@ -281,39 +301,62 @@ impl PyState {
             cwd,
             args,
             pipeline_data,
-            current_scope: current_scope.unwrap_or_default(),
+            current_scope: PyList::new(py, current_scope.unwrap_or_default())?.unbind(),
             child_key,
             parent_stage,
             worktree,
             worktree_parent,
             base_ref,
-            loop_stack: loop_stack.unwrap_or_default(),
+            loop_stack: match loop_stack {
+                Some(v) => PyList::new(py, v)?.unbind(),
+                None => PyList::empty(py).unbind(),
+            },
         })
     }
 
     #[getter]
-    fn loop_iter(&self) -> String {
-        if self.loop_stack.is_empty() {
-            return "1".to_string();
+    fn loop_iter(&self, py: Python<'_>) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for item in self.loop_stack.bind(py).iter() {
+            // Lenient: this getter runs through getattr during stage setup, a
+            // panic here aborts the whole process.
+            if let Ok((name, n)) = item.extract::<(String, i32)>() {
+                parts.push(format!("{name}~{n}"));
+            }
         }
-        self.loop_stack
-            .iter()
-            .map(|(name, n)| format!("{name}~{n}"))
-            .collect::<Vec<_>>()
-            .join("~")
+        if parts.is_empty() {
+            "1".to_string()
+        } else {
+            parts.join("~")
+        }
     }
 
-    fn push_loop(&mut self, stage_path: &str) {
-        self.loop_stack.push((stage_path.replace('/', "-"), 1));
+    fn push_loop(&mut self, py: Python<'_>, stage_path: &str) {
+        let _ = self
+            .loop_stack
+            .bind(py)
+            .append((stage_path.replace('/', "-"), 1));
     }
 
-    fn pop_loop(&mut self) {
-        self.loop_stack.pop();
+    fn pop_loop(&mut self, py: Python<'_>) {
+        let list = self.loop_stack.bind(py);
+        let len = list.len();
+        if len > 0 {
+            let _ = list.del_item(len - 1);
+        }
     }
 
-    fn set_loop_iteration(&mut self, n: i32) {
-        if let Some(last) = self.loop_stack.last_mut() {
-            last.1 = n;
+    fn set_loop_iteration(&mut self, py: Python<'_>, n: i32) {
+        let list = self.loop_stack.bind(py);
+        let len = list.len();
+        if len == 0 {
+            return;
+        }
+        if let Ok((name, _)) = list
+            .get_item(len - 1)
+            .and_then(|i| i.extract::<(String, i32)>())
+        {
+            let _ = list.set_item(len - 1, (name, n));
         }
     }
 
@@ -323,13 +366,25 @@ impl PyState {
         stage: &Bound<'_, PyAny>,
     ) -> PyResult<HashMap<String, String>> {
         let name: String = stage.getattr("name")?.extract()?;
-        let model: String = self.client.bind(py).getattr("model")?.extract()?;
-        Ok(HashMap::from([
-            ("name".to_string(), name),
-            ("model".to_string(), model),
-            ("cwd".to_string(), self.cwd.clone()),
-            ("base_ref".to_string(), self.base_ref.clone()),
-        ]))
+        let model: String = self
+            .client
+            .bind(py)
+            .getattr("model")?
+            .extract::<Option<String>>()
+            .unwrap_or_default()
+            .unwrap_or_default();
+        let mut out = HashMap::new();
+        for key in FRAMEWORK_KEYS.iter() {
+            let value = match *key {
+                "name" => name.clone(),
+                "model" => model.clone(),
+                "cwd" => self.cwd.clone(),
+                "base_ref" => self.base_ref.clone(),
+                _ => continue,
+            };
+            out.insert((*key).to_string(), value);
+        }
+        Ok(out)
     }
 
     #[staticmethod]
@@ -398,13 +453,11 @@ impl PyState {
         Ok(())
     }
 
-    #[pyo3(signature = (entry, gremlin, scope=None, record_stage=true))]
-    #[allow(unused_variables)]
+    #[pyo3(signature = (entry, scope=None, record_stage=true))]
     fn _make_runner_impl(
         &self,
         py: Python<'_>,
         entry: &Bound<'_, PyAny>,
-        gremlin: &Bound<'_, PyAny>,
         scope: Option<&Bound<'_, PyAny>>,
         record_stage: bool,
     ) -> PyResult<Py<PyState>> {
@@ -467,6 +520,12 @@ impl PyState {
                 .collect::<PyResult<_>>()?,
             _ => Vec::new(),
         };
+        // Child copies, not shared handles: the child must not mutate the parent.
+        let current_scope = PyList::new(py, scope_list)?.unbind();
+        let loop_stack = PyList::empty(py);
+        for item in self.loop_stack.bind(py).iter() {
+            loop_stack.append(item)?;
+        }
 
         Py::new(
             py,
@@ -478,15 +537,38 @@ impl PyState {
                 cwd: self.cwd.clone(),
                 args: self.args.clone_ref(py),
                 pipeline_data: self.pipeline_data.as_ref().map(|p| p.clone_ref(py)),
-                current_scope: scope_list,
+                current_scope,
                 child_key: self.child_key.clone(),
                 parent_stage: self.parent_stage.clone(),
                 worktree: self.worktree.clone(),
                 worktree_parent: self.worktree_parent.clone(),
                 base_ref: self.base_ref.clone(),
-                loop_stack: self.loop_stack.clone(),
+                loop_stack: loop_stack.unbind(),
             },
         )
+    }
+
+    #[pyo3(signature = (entry, gremlin, scope=None, *, record_stage=true))]
+    fn make_runner(
+        slf: pyo3::PyRef<'_, Self>,
+        py: Python<'_>,
+        entry: &Bound<'_, PyAny>,
+        gremlin: &Bound<'_, PyAny>,
+        scope: Option<&Bound<'_, PyAny>>,
+        record_stage: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let this: Py<PyState> = slf.into();
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("record_stage", record_stage)?;
+        let scope = match scope {
+            Some(s) if !s.is_none() => s.clone(),
+            _ => py.None().into_bound(py),
+        };
+        Ok(py
+            .import("_gremlins_core.executor")?
+            .getattr("_make_runner_factory")?
+            .call((this, entry, gremlin, scope), Some(&kwargs))?
+            .unbind())
     }
 }
 
@@ -547,11 +629,14 @@ fn build_state(
 ) -> PyResult<Py<PyState>> {
     let artifacts: Py<PyAny> = match artifacts {
         Some(a) => a,
-        None => py
-            .import("_gremlins_core.artifacts")?
-            .getattr("ArtifactRegistry")?
-            .call1((artifact_dir.clone(),))?
-            .unbind(),
+        None => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("artifact_dir", artifact_dir.clone())?;
+            py.import("_gremlins_core.artifacts")?
+                .getattr("ArtifactRegistry")?
+                .call((), Some(&kwargs))?
+                .unbind()
+        }
     };
     let args = match args {
         Some(a) => a,
@@ -580,13 +665,13 @@ fn build_state(
             cwd,
             args,
             pipeline_data,
-            current_scope: Vec::new(),
+            current_scope: PyList::empty(py).unbind(),
             child_key,
             parent_stage: parent_stage.to_string(),
             worktree,
             worktree_parent,
             base_ref: base_ref.to_string(),
-            loop_stack: Vec::new(),
+            loop_stack: PyList::empty(py).unbind(),
         },
     )
 }
@@ -611,43 +696,39 @@ pub fn register_executor_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 
     let globals = PyDict::new(py);
     globals.set_item("_m", &m)?;
+
+    let field_defaults = PyDict::new(py);
+    for name in rust_state::field_names() {
+        let default = rust_state::default_for(name)
+            .ok_or_else(|| PyValueError::new_err(format!("no default for {name}")))?;
+        field_defaults.set_item(name, value_to_py(py, &default)?)?;
+    }
+    globals.set_item("_field_defaults", &field_defaults)?;
+
+    let framework_keys: Vec<&str> = FRAMEWORK_KEYS.iter().copied().collect();
+    globals.set_item("_framework_keys", PyFrozenSet::new(py, &framework_keys)?)?;
+
     py.run(
         &std::ffi::CString::new(
             r#"
 import copy as _copy
 import dataclasses as _dc
 import logging as _logging
-import types as _types
 
-_m.StateData.FIELD_DEFAULTS = {
-    "attempt": "", "kind": "", "project_root": "", "workdir": "",
-    "setup_kind": "", "worktree_base": "", "status": "", "started_at": "",
-    "description": "", "parent_id": "", "pipeline_args": [], "client": "",
-    "pipeline_path": "", "stage": "", "pid": None, "stage_inputs": {},
-    "group_name": "", "child_key": "", "exit_code": None,
-}
-_m.State.FRAMEWORK_KEYS = frozenset(["name", "model", "cwd", "base_ref"])
+_m.StateData.FIELD_DEFAULTS = _field_defaults
+_m.State.FRAMEWORK_KEYS = _framework_keys
 
-def _field(n):
-    return _types.SimpleNamespace(
-        name=n, type=None, default=_dc.MISSING, default_factory=_dc.MISSING,
-        init=True, repr=True, hash=None, compare=True, metadata=None,
-        kw_only=False, _field_type=_dc._FIELD,
-    )
-
-_m.State.__dataclass_fields__ = {
-    n: _field(n)
-    for n in [
-        "data", "client", "artifact_dir", "artifacts", "cwd", "args",
-        "pipeline_data", "current_scope", "child_key", "parent_stage",
-        "worktree", "worktree_parent", "base_ref", "loop_stack",
-    ]
-}
+_StateFields = _dc.make_dataclass("_StateFields", [
+    "data", "client", "artifact_dir", "artifacts", "cwd", "args",
+    "pipeline_data", "current_scope", "child_key", "parent_stage",
+    "worktree", "worktree_parent", "base_ref", "loop_stack",
+])
+_m.State.__dataclass_fields__ = dict(_StateFields.__dataclass_fields__)
 
 _logger = _logging.getLogger("gremlins.executor.state")
 
 
-def _state_make_runner(state, entry, gremlin, scope=None, *, record_stage=True):
+def _make_runner_factory(state, entry, gremlin, scope=None, *, record_stage=True):
     async def _run_async():
         skip = getattr(entry, "skip_if_exists", "") or ""
         if skip:
@@ -657,7 +738,7 @@ def _state_make_runner(state, entry, gremlin, scope=None, *, record_stage=True):
                 _logger.info("stage skipped (artifact exists): %s", entry.name)
                 return Done()
         child_gremlin = _copy.copy(gremlin)
-        prepared = state._make_runner_impl(entry, gremlin, scope, record_stage)
+        prepared = state._make_runner_impl(entry, scope, record_stage)
         child_gremlin.state = prepared
         child_gremlin.registry = prepared.artifacts
         _logger.info("stage starting: %s (type=%s)", entry.name, entry.type)
@@ -672,7 +753,8 @@ def _state_make_runner(state, entry, gremlin, scope=None, *, record_stage=True):
                     pass
     return _run_async
 
-_m.State.make_runner = _state_make_runner
+
+_m._make_runner_factory = _make_runner_factory
 "#,
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))?,

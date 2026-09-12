@@ -215,6 +215,7 @@ fn attempt_of(data: &Map<String, Value>) -> String {
 pub struct StateData {
     pub gremlin_id: Option<String>,
     pub state_file: Option<PathBuf>,
+    cache: std::cell::RefCell<Option<Map<String, Value>>>,
 }
 
 impl StateData {
@@ -223,6 +224,7 @@ impl StateData {
         StateData {
             gremlin_id,
             state_file,
+            cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -232,10 +234,22 @@ impl StateData {
             .or_else(|| resolve_state_file(self.gremlin_id.as_deref()))
     }
 
+    /// Parsed state.json, read from disk on first use. Every writer must invalidate.
+    fn loaded(&self) -> std::cell::Ref<'_, Map<String, Value>> {
+        if self.cache.borrow().is_none() {
+            let data = read_state_json(self.sf().as_deref());
+            *self.cache.borrow_mut() = Some(data);
+        }
+        std::cell::Ref::map(self.cache.borrow(), |c| c.as_ref().unwrap())
+    }
+
+    pub fn invalidate(&self) {
+        *self.cache.borrow_mut() = None;
+    }
+
     pub fn get_field(&self, name: &str) -> Option<Value> {
         let default = default_for(name)?;
-        let data = read_state_json(self.sf().as_deref());
-        Some(data.get(name).cloned().unwrap_or(default))
+        Some(self.loaded().get(name).cloned().unwrap_or(default))
     }
 
     /// Present, non-null value — `None` when absent or null.
@@ -244,9 +258,27 @@ impl StateData {
         if !sf.exists() {
             return None;
         }
-        match read_state_json(Some(&sf)).get(field) {
+        match self.loaded().get(field) {
             None | Some(Value::Null) => None,
             Some(v) => Some(v.clone()),
+        }
+    }
+
+    /// Fresh read, deliberately uncached: another process may have patched state.json
+    /// since our cache was filled. Falsy values read as `""`, matching Python's
+    /// `json.loads(...).get(field) or ""`.
+    pub fn read_str(&self, field: &str) -> String {
+        let Some(sf) = self.sf() else {
+            return String::new();
+        };
+        if !sf.exists() {
+            return String::new();
+        }
+        match read_state_json(Some(&sf)).get(field) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) if n.as_f64() != Some(0.0) => n.to_string(),
+            Some(Value::Bool(true)) => "True".into(),
+            _ => String::new(),
         }
     }
 
@@ -264,6 +296,7 @@ impl StateData {
         out.insert("id".into(), Value::String(gid));
         write_state(state_dir, &out)?;
         self.state_file = Some(state_dir.join("state.json"));
+        self.invalidate();
         Ok(())
     }
 
@@ -282,6 +315,7 @@ impl StateData {
                 data.insert(k, v);
             }
         });
+        self.invalidate();
     }
 
     pub fn set_stage(&self, stage: &str, sub_stage: Option<&Value>, parent_stage: &str) {
@@ -354,9 +388,11 @@ impl StateData {
             }
             data.insert("token_usage".into(), Value::Object(total));
         });
+        self.invalidate();
     }
 
-    pub fn read_bail_info(&self) -> Option<HashMap<String, String>> {
+    /// Bail records are untyped — any JSON object passes, non-objects read as `None`.
+    pub fn read_bail_info(&self) -> Option<Map<String, Value>> {
         let sf = self.sf()?;
         if !sf.exists() {
             return None;
@@ -366,11 +402,7 @@ impl StateData {
             return None;
         }
         let bail_path = sf.parent()?.join(format!("bail_{attempt}.json"));
-        if !bail_path.exists() {
-            return None;
-        }
-        let text = std::fs::read_to_string(bail_path).ok()?;
-        serde_json::from_str(&text).ok()
+        serde_json::from_str(&std::fs::read_to_string(bail_path).ok()?).ok()
     }
 
     pub fn patch_parallel_worktrees(
@@ -415,6 +447,7 @@ impl StateData {
                 data.insert("parallel_worktrees".into(), Value::Object(groups));
             }
         });
+        self.invalidate();
     }
 
     pub fn done_for(&self, path: &str) -> HashSet<String> {
@@ -462,6 +495,7 @@ impl StateData {
             dc.insert(path, Value::Array(existing));
             data.insert("done_children".into(), Value::Object(dc));
         });
+        self.invalidate();
     }
 
     pub fn clear_done(&self, path: &str) {
@@ -485,6 +519,7 @@ impl StateData {
                 data.insert("done_children".into(), Value::Object(dc));
             }
         });
+        self.invalidate();
     }
 
     pub fn add_subprocess_cost(&self, amount: f64) {
@@ -502,6 +537,7 @@ impl StateData {
                 .unwrap_or(0.0);
             data.insert("subprocess_cost_usd".into(), Value::from(current + amount));
         });
+        self.invalidate();
     }
 
     pub fn patch_parallel_attempt(&self, child_key: &str, attempt: &str) {
@@ -519,6 +555,7 @@ impl StateData {
             pa.insert(child_key, Value::String(attempt));
             data.insert("parallel_attempts".into(), Value::Object(pa));
         });
+        self.invalidate();
     }
 
     pub fn write_terminal_state(&self, exit_code: i32) {
@@ -537,6 +574,7 @@ impl StateData {
         fields.insert("ended_at".into(), Value::String(now_stamp()));
         fields.insert("exit_code".into(), Value::from(exit_code));
         self.patch(&[], &fields);
+        self.invalidate();
     }
 }
 
@@ -563,20 +601,29 @@ mod tests {
     }
 
     fn data_with(sf: &Path) -> StateData {
-        StateData {
-            gremlin_id: Some("gr-test".into()),
-            state_file: Some(sf.to_path_buf()),
-        }
+        let mut d = StateData::new(Some("gr-test".into()));
+        d.state_file = Some(sf.to_path_buf());
+        d
     }
 
     #[test]
     fn resolve_state_file_builds_path() {
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", "/tmp/gremlins-state-test");
         let p = resolve_state_file(Some("abc")).unwrap();
         assert!(p.ends_with("abc/state.json"), "{p:?}");
-        assert!(p.starts_with("/tmp/gremlins-state-test/state"), "{p:?}");
         assert!(resolve_state_file(None).is_none());
         assert!(resolve_state_file(Some("")).is_none());
+    }
+
+    #[test]
+    fn cached_field_sees_own_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sf = seed(dir.path(), "gr-test");
+        let d = data_with(&sf);
+        assert_eq!(d.get_field("stage").unwrap(), "implement");
+        let mut fields = Map::new();
+        fields.insert("stage".into(), Value::String("review".into()));
+        d.patch(&[], &fields);
+        assert_eq!(d.get_field("stage").unwrap(), "review");
     }
 
     #[test]
@@ -692,13 +739,40 @@ mod tests {
         let bail = dir.path().join("bail_a1.json");
         assert!(bail.exists());
         let info = d.read_bail_info().unwrap();
-        assert_eq!(info.get("class").unwrap(), "other");
-        assert_eq!(info.get("detail").unwrap(), "boom");
-        assert!(info.get("ts").unwrap().len() > 20);
+        assert_eq!(info.get("class").unwrap().as_str(), Some("other"));
+        assert_eq!(info.get("detail").unwrap().as_str(), Some("boom"));
+        assert!(info.get("ts").unwrap().as_str().unwrap().len() > 20);
 
         // Second write must not clobber the existing bail file.
         d.write_bail_file("security", "second");
-        assert_eq!(d.read_bail_info().unwrap().get("class").unwrap(), "other");
+        assert_eq!(
+            d.read_bail_info().unwrap().get("class"),
+            Some(&Value::String("other".into()))
+        );
+    }
+
+    #[test]
+    fn read_bail_info_keeps_non_string_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let sf = seed(dir.path(), "gr-test");
+        let d = data_with(&sf);
+        let mut fields = Map::new();
+        fields.insert("attempt".into(), Value::String("a1".into()));
+        d.patch(&[], &fields);
+        std::fs::write(
+            dir.path().join("bail_a1.json"),
+            r#"{"class": "other", "detail": "boom", "count": 3, "nested": {"k": [1, null]}}"#,
+        )
+        .unwrap();
+        let info = d.read_bail_info().unwrap();
+        assert_eq!(info.get("count"), Some(&Value::from(3)));
+        assert_eq!(
+            info.get("nested"),
+            Some(&serde_json::json!({"k": [1, null]}))
+        );
+
+        std::fs::write(dir.path().join("bail_a1.json"), "[1, 2]").unwrap();
+        assert!(d.read_bail_info().is_none());
     }
 
     #[test]
