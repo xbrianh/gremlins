@@ -1141,6 +1141,15 @@ impl PySequence {
 
 // --- Loop pyclass ---
 
+fn check_max_iterations(name: &str, value: u32) -> PyResult<()> {
+    if value < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Loop {name:?}: max_iterations must be >= 1, got {value}"
+        )));
+    }
+    Ok(())
+}
+
 #[pyclass(name = "Loop", module = "_gremlins_core.stages", extends = PyStageAttrs, subclass, skip_from_py_object)]
 struct PyLoop {
     max_iterations: u32,
@@ -1163,11 +1172,7 @@ impl PyLoop {
         stop_when_exists: Option<String>,
         interval: Option<f64>,
     ) -> PyResult<PyClassInitializer<Self>> {
-        if max_iterations < 1 {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Loop {name:?}: max_iterations must be >= 1, got {max_iterations}"
-            )));
-        }
+        check_max_iterations(&name, max_iterations)?;
         let body = body.cloned().unwrap_or_else(|| PyList::empty(py));
         let mut attrs = RustStageAttrs::new(name.clone());
         attrs.stage_type = "loop".to_string();
@@ -1238,9 +1243,14 @@ impl PyLoop {
         self.max_iterations
     }
 
+    /// Mirror the constructor's invariant; assigning 0 would otherwise skip
+    /// the loop and hit run()'s fall-through RuntimeError.
     #[setter]
-    fn set_max_iterations(&mut self, value: u32) {
-        self.max_iterations = value;
+    fn set_max_iterations(mut slf: PyRefMut<'_, Self>, value: u32) -> PyResult<()> {
+        let name = slf.as_super().inner.name.clone();
+        check_max_iterations(&name, value)?;
+        slf.max_iterations = value;
+        Ok(())
     }
 
     #[getter]

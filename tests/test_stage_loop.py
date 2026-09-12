@@ -437,6 +437,15 @@ def test_loop_iter_not_in_framework_subs(tmp_path):
     assert "loop_iteration" not in subs
 
 
+def test_max_iterations_setter_validates() -> None:
+    loop = LoopStage("test", body_runners=[])
+    loop.max_iterations = 5
+    assert loop.max_iterations == 5
+    with pytest.raises(ValueError):
+        loop.max_iterations = 0
+    assert loop.max_iterations == 5
+
+
 # ---------------------------------------------------------------------------
 # interval option
 # ---------------------------------------------------------------------------
