@@ -16,23 +16,24 @@ pub(crate) fn agent_system_prompt(
 ) -> String {
     format!(
         "\
-<gremlins:info>\n\
+<important>\n\
 Keep your context lean: delegate self-contained pieces of work to subagents. Subagents \
 have isolated context — they absorb the noise so you don't have to. When you have multiple \
 independent tasks, fan them out with the parallel tool. Plan the fan-out before you start. \
 Use subagents as scouts to explore options and gather information.\n\n\
-</gremlins:info>\n\n\
-<gremlins:tools>\n\
+You MUST delegate tasks to subagents to maintain a clean context.\n\n\
+</important>\n\n\
+<tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), subagent, parallel\n\
-</gremlins:tools>\n\n\
-<gremlins:directories>\n\
+</tools>\n\n\
+<directories>\n\
 Project root:  {project}\n\
 Work root:     {work}\n\
 Scratch root:  {scratch}\n\
 (use scratch for test cruft and temporary files)\n\
-</gremlins:directories>\
+</directories>\
 ",
         project = project_root.display(),
         work = work_root.display(),

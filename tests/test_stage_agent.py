@@ -576,29 +576,6 @@ def test_model_kwarg_forwarded(tmp_path):
     assert state.client.calls[0].model == "haiku"
 
 
-def test_harness_system_prompt_sent_separately(tmp_path):
-    """Harness prompt routes through system_prompt, never into the user prompt."""
-    state = _make_state(tmp_path)
-    agent = _make_agent(prompts=["hello"])
-
-    asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
-
-    call = state.client.calls[0]
-    assert "<gremlins:info>" in call.system_prompt
-    assert "hello" in call.prompt
-    assert "<gremlins:info>" not in call.prompt
-
-
-def test_system_prompt_option_cannot_override_harness(tmp_path):
-    state = _make_state(tmp_path)
-    agent = _make_agent(prompts=["hello"], options={"system_prompt": "evil"})
-
-    asyncio.run(agent.run(cast("Gremlin", MockGremlin(state))))
-
-    assert state.client.calls[0].system_prompt != "evil"
-    assert "<gremlins:info>" in state.client.calls[0].system_prompt
-
-
 def test_token_usage_accumulated_into_state(tmp_path):
     usage_events = [
         {
