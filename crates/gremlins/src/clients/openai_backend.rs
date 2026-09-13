@@ -204,6 +204,7 @@ impl Backend for OpenAiBackend {
             idle_timeout,
             expected_artifact_paths: params.expected_artifact_paths.clone(),
             reminder_budget: crate::config::artifact_reminder_budget(),
+            completion_nudge_budget: crate::config::completion_nudge_budget(),
         };
         *self.last_ctx.lock().unwrap() = Some(ctx.clone());
 

@@ -80,6 +80,7 @@ pub(crate) struct RunContext {
     pub(crate) idle_timeout: f64,
     pub(crate) expected_artifact_paths: Vec<PathBuf>,
     pub(crate) reminder_budget: usize,
+    pub(crate) completion_nudge_budget: usize,
 }
 
 pub(crate) struct LoopOpts<'a> {
@@ -192,6 +193,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         false,
         &ctx.expected_artifact_paths,
         ctx.reminder_budget,
+        ctx.completion_nudge_budget,
     )
     .await
 }
@@ -241,6 +243,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         true,
         &[],
         0,
+        0,
     )
     .await;
     eprintln!("{} {}task: end", stream::ts_internal(), prefix);
@@ -264,6 +267,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
     nested: bool,
     expected_artifact_paths: &[PathBuf],
     mut reminder_budget: usize,
+    mut completion_nudge_budget: usize,
 ) -> Result<CompletedRun, ClientError> {
     let mut history: Vec<Message> = Vec::new();
     let mut next_prompt = Message::user(prompt.to_string());
@@ -273,9 +277,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
     let mut timed_out = false;
     let mut stream_error: Option<CompletionError> = None;
     let loop_start = Instant::now();
-
-    // Harness-level nudge budgets — read once from env, decremented across turns.
-    let mut completion_nudge_budget = crate::config::completion_nudge_budget();
 
     // Accumulated token totals (summed across turns)
     let mut total_prompt_tokens: u64 = 0;
@@ -889,10 +890,6 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
 mod tests {
     use super::*;
     use rig_core::message::UserContent;
-    use std::sync::Mutex as StdMutex;
-
-    // Serialize env-var tests to prevent races.
-    static ENV_MUTEX: StdMutex<()> = StdMutex::new(());
 
     #[test]
     fn event_shapes() {
@@ -1011,6 +1008,7 @@ mod tests {
             idle_timeout: 0.05,
             expected_artifact_paths: vec![],
             reminder_budget: 0,
+            completion_nudge_budget: 0,
         }
     }
 
@@ -1723,6 +1721,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.expected_artifact_paths = vec![target.clone()];
         ctx.reminder_budget = 1;
+        ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
             .await
@@ -1745,10 +1744,6 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        {
-            let _guard = ENV_MUTEX.lock().unwrap();
-            std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "0");
-        }
         let target = dir.join("never-written.md");
 
         // Turn 1: text-only → reminder injected.
@@ -1769,6 +1764,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.expected_artifact_paths = vec![target.clone()];
         ctx.reminder_budget = 1;
+        ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
             .await
@@ -1827,10 +1823,6 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        {
-            let _guard = ENV_MUTEX.lock().unwrap();
-            std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "0");
-        }
 
         let over = tools::TASK_MAX_PER_TURN + 1;
         let mut turn = Vec::new();
