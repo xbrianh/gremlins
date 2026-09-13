@@ -7,22 +7,34 @@ use std::time::{Duration, Instant};
 use futures::future::join_all;
 use futures::StreamExt;
 use rig_core::completion::message::{AssistantContent, ToolCall};
-use rig_core::completion::{CompletionModel, GetTokenUsage, Message, ToolDefinition, Usage};
+use rig_core::completion::{
+    CompletionError, CompletionModel, GetTokenUsage, Message, ToolDefinition, Usage,
+};
 use rig_core::streaming::StreamedAssistantContent;
 use rig_core::OneOrMany;
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
 use super::protocol::{CompletedRun, UsageStats};
-use super::retry;
 use super::stream;
 use super::tools::{self, ToolContext};
 
-pub(crate) fn map_stream_error(msg: String) -> ClientError {
-    if retry::is_transient_stream_error(&msg) {
-        ClientError::ApiServerError { message: msg }
+pub(crate) fn map_stream_error(err: CompletionError) -> ClientError {
+    if let Some(status) = err.provider_response_status() {
+        let code = status.as_u16();
+        // 4xx (except 429) = client error, don't retry
+        if (400..500).contains(&code) && code != 429 {
+            return ClientError::Runtime {
+                message: err.to_string(),
+            };
+        }
     } else {
-        ClientError::Runtime { message: msg }
+        // No HTTP status — mid-stream SSE error (e.g. X.AI response.failed).
+        // Retry it; log at WARNING so we can spot provider patterns later.
+        log::warn!("retrying provider error (no HTTP status): {}", err);
+    }
+    ClientError::ApiServerError {
+        message: err.to_string(),
     }
 }
 
@@ -257,7 +269,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
     let mut turn_num: usize = 0;
     let mut final_text = String::new();
     let mut timed_out = false;
-    let mut stream_error: Option<String> = None;
+    let mut stream_error: Option<CompletionError> = None;
     let loop_start = Instant::now();
 
     // Accumulated token totals (summed across turns)
@@ -302,7 +314,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         let mut response = match builder.stream().await {
             Ok(s) => s,
             Err(e) => {
-                stream_error = Some(e.to_string());
+                stream_error = Some(e);
                 break;
             }
         };
@@ -340,7 +352,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     break;
                 }
                 Ok(Some(Err(e))) => {
-                    stream_error = Some(e.to_string());
+                    stream_error = Some(e);
                     break;
                 }
                 Ok(Some(Ok(chunk))) => {
@@ -603,8 +615,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
             message: "stream idle timeout".into(),
         });
     }
-    if let Some(msg) = stream_error {
-        return Err(map_stream_error(msg));
+    if let Some(err) = stream_error {
+        return Err(map_stream_error(err));
     }
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),

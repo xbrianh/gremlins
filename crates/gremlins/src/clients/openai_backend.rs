@@ -267,6 +267,8 @@ impl Backend for OpenAiBackend {
 mod tests {
     use super::*;
     use crate::clients::agent_loop::map_stream_error;
+    use http::StatusCode;
+    use rig_core::completion::CompletionError;
 
     #[test]
     fn provider_identity() {
@@ -372,46 +374,45 @@ mod tests {
 
     #[test]
     fn transient_classifier() {
-        assert!(retry::is_transient_stream_error(
-            "The model is currently at capacity"
-        ));
-        assert!(retry::is_transient_stream_error("rate limit exceeded"));
-        assert!(!retry::is_transient_stream_error("Invalid API key"));
+        // Status-code based: 5xx → retryable
+        let http_503 = CompletionError::from_http_response(StatusCode::SERVICE_UNAVAILABLE, "boom");
         assert!(matches!(
-            map_stream_error("rate limit exceeded".into()),
+            map_stream_error(http_503),
             ClientError::ApiServerError { .. }
         ));
+
+        // Status-code based: 429 → retryable
+        let http_429 =
+            CompletionError::from_http_response(StatusCode::TOO_MANY_REQUESTS, "slow down");
         assert!(matches!(
-            map_stream_error("Invalid API key".into()),
+            map_stream_error(http_429),
+            ClientError::ApiServerError { .. }
+        ));
+
+        // Status-code based: 4xx (non-429) → NOT retryable
+        let http_400 = CompletionError::from_http_response(StatusCode::BAD_REQUEST, "bad prompt");
+        assert!(matches!(
+            map_stream_error(http_400),
             ClientError::Runtime { .. }
         ));
-        assert!(retry::is_transient_stream_error(
-            "Http client error: error sending request for url (https://openrouter.ai/v1/chat/completions)"
-        ));
-        assert!(retry::is_transient_stream_error(
-            "Http client error: error decoding response body"
-        ));
+        let http_401 = CompletionError::from_http_response(StatusCode::UNAUTHORIZED, "bad key");
         assert!(matches!(
-            map_stream_error("Http client error: connection reset".into()),
+            map_stream_error(http_401),
+            ClientError::Runtime { .. }
+        ));
+
+        // No HTTP status (mid-stream SSE, ProviderError, etc.) → retryable
+        let provider_err = CompletionError::ProviderError("something broke".into());
+        assert!(matches!(
+            map_stream_error(provider_err),
             ClientError::ApiServerError { .. }
         ));
-        // Snake_case JSON error types (e.g. server_error, rate_limit) are
-        // classified as transient via underscore normalization, not by
-        // matching any specific `message` text. Changing the message has no
-        // effect as long as the `type` field remains the same.
-        let xai_500 = r#"RuntimeError: ProviderResponseError: {"error":{"message":"Internal error during token generation","type":"server_error","code":"internal"}}"#;
-        assert!(retry::is_transient_stream_error(xai_500));
+        let xai_err = CompletionError::from_provider_body(
+            r#"{"error":{"message":"Internal error during token generation","type":"server_error","code":"internal"}}"#,
+        );
         assert!(matches!(
-            map_stream_error(xai_500.into()),
+            map_stream_error(xai_err),
             ClientError::ApiServerError { .. }
-        ));
-        // Same server_error type, different message — still retries
-        assert!(retry::is_transient_stream_error(
-            r#"{"error":{"message":"Something else entirely","type":"server_error","code":"internal"}}"#
-        ));
-        // Underscore normalization: rate_limit also maps to "rate limit"
-        assert!(retry::is_transient_stream_error(
-            r#"{"error":{"message":"Out of credits","type":"rate_limit","code":"insufficient_quota"}}"#
         ));
     }
 
