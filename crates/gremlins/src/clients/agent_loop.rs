@@ -19,7 +19,7 @@ use super::protocol::{CompletedRun, UsageStats};
 use super::stream;
 use super::tools::{self, ToolContext};
 
-pub(crate) type ErrorClassifier = Arc<dyn Fn(CompletionError) -> ClientError + Send + Sync>;
+pub(crate) type ErrorClassifier = fn(CompletionError) -> ClientError;
 
 pub(crate) fn default_classify(err: CompletionError) -> ClientError {
     if let Some(status) = err.provider_response_status() {
@@ -803,11 +803,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         });
     }
     if let Some(err) = stream_error {
-        let classify = opts
-            .classify_error
-            .as_ref()
-            .map(|c| c.as_ref())
-            .unwrap_or(&default_classify);
+        let classify = opts.classify_error.unwrap_or(default_classify);
         return Err(classify(err));
     }
     Err(ClientError::Runtime {

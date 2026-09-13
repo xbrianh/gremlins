@@ -173,12 +173,12 @@ fn default_native_block() -> HashMap<String, Vec<String>> {
     )])
 }
 
-fn resolve_api_key_for_provider(name: &str, env_var: &str) -> Option<String> {
+fn resolve_api_key_for_provider(env_var: &str, name: &str) -> Option<String> {
     gremlins::config::api_key(env_var, name)
 }
 
 fn resolve_api_key(kind: OpenAiProvider) -> Option<String> {
-    resolve_api_key_for_provider(kind.name(), kind.api_key_env())
+    resolve_api_key_for_provider(kind.api_key_env(), kind.name())
 }
 
 fn build_openai_backend(
@@ -220,7 +220,7 @@ fn build_openrouter_backend(
     native_block: &HashMap<String, Vec<String>>,
     extra_params: &IndexMap<String, String>,
 ) -> PyResult<Arc<dyn Backend>> {
-    let api_key = resolve_api_key_for_provider("openrouter", "OPENROUTER_API_KEY").ok_or_else(
+    let api_key = resolve_api_key_for_provider("OPENROUTER_API_KEY", "openrouter").ok_or_else(
         || {
             let path = gremlins::config::user_config_root().join("providers.json");
             pyo3::exceptions::PyRuntimeError::new_err(format!(

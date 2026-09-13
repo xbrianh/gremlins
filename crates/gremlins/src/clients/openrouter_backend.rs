@@ -36,38 +36,33 @@ const TRANSIENT_SUBSTRINGS: &[&str] = &[
 ];
 
 fn classify_openrouter_error(err: CompletionError) -> ClientError {
+    let message = err.to_string();
     // Phase 1: status codes (same as default).
     if let Some(status) = err.provider_response_status() {
         let code = status.as_u16();
         if (500..600).contains(&code) || code == 429 {
-            return ClientError::ApiServerError {
-                message: err.to_string(),
-            };
+            return ClientError::ApiServerError { message };
         }
-        // 4xx — fall through to Phase 2.
+        // Only 4xx falls through to Phase 2; anything else is fatal.
+        if !(400..500).contains(&code) {
+            return ClientError::Runtime { message };
+        }
     } else {
         // No HTTP status — mid-stream SSE drop.
         log::warn!("retrying provider error (no HTTP status): {}", err);
-        return ClientError::ApiServerError {
-            message: err.to_string(),
-        };
+        return ClientError::ApiServerError { message };
     }
 
     // Phase 2: substring backstop for 4xx.
-    let body = err.to_string().to_lowercase();
-    if body_contains_transient(&body) {
+    if body_contains_transient(&message.to_lowercase()) {
         log::warn!(
             "retrying provider error (OpenRouter substring match): {}",
             err
         );
-        return ClientError::ApiServerError {
-            message: err.to_string(),
-        };
+        return ClientError::ApiServerError { message };
     }
 
-    ClientError::Runtime {
-        message: err.to_string(),
-    }
+    ClientError::Runtime { message }
 }
 
 fn body_contains_transient(body: &str) -> bool {
@@ -134,7 +129,7 @@ impl OpenRouterBackend {
         cancel: Arc<CancelToken>,
     ) -> Result<CompletedRun, ClientError> {
         let model_name = self.effective_model(ctx.params.model.as_deref());
-        let classify: ErrorClassifier = Arc::new(classify_openrouter_error);
+        let classify: ErrorClassifier = classify_openrouter_error;
         run_with_agent_loop(
             &self.client,
             &model_name,
@@ -321,6 +316,18 @@ mod tests {
             classify_openrouter_error(err),
             ClientError::Runtime { .. }
         ));
+    }
+
+    #[test]
+    fn phase2_non_4xx_never_retryable() {
+        // A 2xx/3xx whose body contains a transient keyword must not be retried.
+        for status in [StatusCode::OK, StatusCode::MOVED_PERMANENTLY] {
+            let err = CompletionError::from_http_response(status, "upstream server error");
+            assert!(matches!(
+                classify_openrouter_error(err),
+                ClientError::Runtime { .. }
+            ));
+        }
     }
 
     #[test]
