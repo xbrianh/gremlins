@@ -101,7 +101,13 @@ async def _run_analysis(client: Client, prompt: str) -> str:
         capture_events=False,
         max_retries=1,
     )
-    return completed.text_result or "(no output from model)"
+    text = completed.text_result
+    if text is None:
+        return "(no output from model)"
+    if not text.strip():
+        turns = completed.token_usage.turns if completed.token_usage else 0
+        return f"(empty response — stream ended after {turns} turn(s) with no text)"
+    return text
 
 
 def analyze_main(argv: list[str]) -> int:

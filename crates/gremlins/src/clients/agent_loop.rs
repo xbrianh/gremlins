@@ -639,7 +639,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             }
 
             // Empty turn — nudge if budget remains, otherwise fall through to final.
-            if !text.is_empty() && completion_nudge_budget > 0 {
+            if (!text.is_empty() || !reasoning.is_empty()) && completion_nudge_budget > 0 {
                 completion_nudge_budget -= 1;
                 log::info!(
                     target: "_gremlins_core.clients.agent_loop",
@@ -648,9 +648,15 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 );
                 // Record the nudge in raw and captured streams so the
                 // transcript accurately reflects the interaction.
-                let nudge_msg = "You produced text but no tool calls. If your work is complete, \
+                let nudge_msg = if text.is_empty() {
+                    "You produced reasoning but no text or tool calls. If your analysis is \
+                     complete, call the Done tool. If you still need to make changes, \
+                     use the appropriate tool now."
+                } else {
+                    "You produced text but no tool calls. If your work is complete, \
                      call the Done tool. If you still need to make changes, use the \
-                     appropriate tool now.";
+                     appropriate tool now."
+                };
                 write_raw(
                     raw,
                     &serde_json::json!({"type": "reminder", "message": nudge_msg}),
