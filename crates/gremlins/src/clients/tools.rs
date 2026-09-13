@@ -972,6 +972,10 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         Ok(s) => s,
         Err(e) => return e,
     };
+    let timeout_secs = args
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(BASH_TIMEOUT_SECS);
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command);
     cmd.stdout(Stdio::piped());
@@ -989,12 +993,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
-    match tokio::time::timeout(
-        Duration::from_secs(BASH_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
         Err(_) => "[timeout]".into(),
         Ok(Err(e)) => format!("Error: {e}"),
         Ok(Ok(output)) => {
@@ -1068,6 +1067,7 @@ fn scan_file(
     path: &Path,
     roots: &[PathBuf],
     pattern: &Regex,
+    max_matches: usize,
     matches: &mut Vec<String>,
     truncated: &mut bool,
 ) {
@@ -1085,7 +1085,7 @@ fn scan_file(
     for (i, line) in content.lines().enumerate() {
         if pattern.is_match(line) {
             matches.push(format!("{}:{}:{line}", path.display(), i + 1));
-            if matches.len() >= GREP_MAX_LINES {
+            if matches.len() >= max_matches {
                 *truncated = true;
                 return;
             }
@@ -1098,6 +1098,7 @@ fn walk_grep(
     roots: &[PathBuf],
     pattern: &Regex,
     glob_filter: Option<&str>,
+    max_matches: usize,
     matches: &mut Vec<String>,
     truncated: &mut bool,
 ) {
@@ -1133,7 +1134,7 @@ fn walk_grep(
                 continue;
             }
         }
-        scan_file(&path, roots, pattern, matches, truncated);
+        scan_file(&path, roots, pattern, max_matches, matches, truncated);
     }
     for d in dirs {
         if *truncated {
@@ -1143,7 +1144,15 @@ fn walk_grep(
         if io_enforce(&d, roots).is_some() {
             continue;
         }
-        walk_grep(&d, roots, pattern, glob_filter, matches, truncated);
+        walk_grep(
+            &d,
+            roots,
+            pattern,
+            glob_filter,
+            max_matches,
+            matches,
+            truncated,
+        );
     }
 }
 
@@ -1176,6 +1185,11 @@ fn grep_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         .get("glob")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
+    let max_matches = args
+        .get("max_matches")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(GREP_MAX_LINES);
     let mut matches = Vec::new();
     let mut truncated = false;
     if base.is_file() {
@@ -1192,7 +1206,7 @@ fn grep_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
                     for (i, line) in content.lines().enumerate() {
                         if pattern.is_match(line) {
                             matches.push(format!("{}:{}:{line}", base.display(), i + 1));
-                            if matches.len() >= GREP_MAX_LINES {
+                            if matches.len() >= max_matches {
                                 truncated = true;
                                 break;
                             }
@@ -1208,6 +1222,7 @@ fn grep_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
             roots,
             &pattern,
             glob_filter,
+            max_matches,
             &mut matches,
             &mut truncated,
         );
@@ -1217,7 +1232,7 @@ fn grep_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     }
     let mut result = matches.join("\n");
     if truncated {
-        result.push_str(&format!("\n[truncated at {GREP_MAX_LINES} matches]"));
+        result.push_str(&format!("\n[truncated at {max_matches} matches]"));
     }
     result
 }
@@ -1454,18 +1469,21 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
     let mut all = vec![
         ToolDefinition {
             name: "Read".into(),
-            description: "Read a file from the filesystem.".into(),
+            description: "Read the contents of a file. Paths outside the sandbox are rejected. Use offset/limit to paginate large files — continue reading with offset until you have the whole file.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Absolute or relative path"
+                        "description": "Path to the file to read (relative or absolute)"
                     },
-                    "limit": {"type": "integer", "description": "Max lines to read"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to read"
+                    },
                     "offset": {
                         "type": "integer",
-                        "description": "Line offset to start from"
+                        "description": "Line number to start reading from (1-indexed)"
                     }
                 },
                 "required": ["file_path"],
@@ -1478,15 +1496,24 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to edit (relative or absolute)"
+                    },
                     "edits": {
                         "type": "array",
                         "minItems": 1,
                         "items": {
                             "type": "object",
                             "properties": {
-                                "old_string": {"type": "string"},
-                                "new_string": {"type": "string"}
+                                "old_string": {
+                                    "type": "string",
+                                    "description": "Exact text to replace — must be unique in the file"
+                                },
+                                "new_string": {
+                                    "type": "string",
+                                    "description": "Replacement text"
+                                }
                             },
                             "required": ["old_string", "new_string"],
                             "additionalProperties": false
@@ -1499,11 +1526,18 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Bash".into(),
-            description: "Run a shell command and return combined stdout/stderr.".into(),
+            description: "Execute a shell command via `sh -c`. Returns combined stdout and stderr. Exit codes are reported as `[exit N]`; commands exceeding the timeout return `[timeout]`. Runs in the gremlin's working directory with no stdin. Path arguments are checked against the sandbox before execution — escapes return an error without running the command. Default timeout is 120 seconds.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string"}
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute (run via sh -c)"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (optional, default 120)"
+                    }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -1511,12 +1545,18 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Write".into(),
-            description: "Write content to a file, creating it if necessary.".into(),
+            description: "Write content to a file, creating it if necessary. Overwrites the file if it already exists. Parent directories are created as needed.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
-                    "content": {"type": "string"}
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to write (relative or absolute)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write to the file"
+                    }
                 },
                 "required": ["file_path", "content"],
                 "additionalProperties": false
@@ -1524,16 +1564,26 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Grep".into(),
-            description: "Search file contents using a regex pattern.".into(),
+            description: "Search file contents using a Rust regex pattern. Returns matches in `path:line_number:line_content` format. Binaries and dot-directories are skipped, as are common build dirs (node_modules, target, __pycache__). Results are truncated at max_matches (default 2000). The regex engine does NOT support lookahead or lookbehind.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string"},
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to search for (Rust regex syntax — no lookahead/lookbehind)"
+                    },
                     "path": {
                         "type": "string",
-                        "description": "Directory or file to search"
+                        "description": "Directory or file to search (default: current directory)"
                     },
-                    "glob": {"type": "string", "description": "Glob filter for file names"}
+                    "glob": {
+                        "type": "string",
+                        "description": "Glob filter for file names (e.g. `*.rs`)"
+                    },
+                    "max_matches": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return (optional, default 2000)"
+                    }
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
@@ -1541,14 +1591,17 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Glob".into(),
-            description: "Find files matching a glob pattern.".into(),
+            description: "Find files matching a glob pattern. Supports `**` for recursive matching. Returns sorted paths, one per line.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string"},
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (e.g. `**/*.rs`, `src/**/mod.rs`)"
+                    },
                     "path": {
                         "type": "string",
-                        "description": "Base directory to search in"
+                        "description": "Base directory to search in (default: current directory)"
                     }
                 },
                 "required": ["pattern"],
@@ -1670,6 +1723,35 @@ mod tests {
         assert_eq!(bash_invoke(&c, &env_args).await, "abc");
         let fail = serde_json::json!({"command": "exit 7"}).to_string();
         assert!(bash_invoke(&c, &fail).await.starts_with("[exit 7]"));
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_from_args() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"command": "echo ok", "timeout": 5}).to_string();
+        let out = bash_invoke(&c, &args).await;
+        assert_eq!(out.trim(), "ok");
+        assert!(!out.contains("[timeout]"));
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_kills_slow_command() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"command": "sleep 10", "timeout": 1}).to_string();
+        let out = bash_invoke(&c, &args).await;
+        assert_eq!(out, "[timeout]");
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_defaults_to_120() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"command": "echo ok"}).to_string();
+        let out = bash_invoke(&c, &args).await;
+        assert_eq!(out.trim(), "ok");
+        assert!(!out.contains("[timeout]"));
     }
 
     #[tokio::test]
@@ -1800,6 +1882,45 @@ mod tests {
         assert!(grep_invoke(&c, &bad)
             .await
             .starts_with("Error: invalid regex"));
+    }
+
+    #[tokio::test]
+    async fn grep_max_matches_from_args() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let body: String = (0..50).map(|i| format!("hit {i}\n")).collect();
+        std::fs::write(dir.join("hits.txt"), body).unwrap();
+        let args = serde_json::json!({"pattern": "hit", "max_matches": 10}).to_string();
+        let out = grep_invoke(&c, &args).await;
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 11, "got: {out}");
+        assert!(out.ends_with("[truncated at 10 matches]"));
+    }
+
+    #[tokio::test]
+    async fn grep_max_matches_defaults_to_2000() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let body: String = (0..2100).map(|i| format!("hit {i}\n")).collect();
+        std::fs::write(dir.join("hits.txt"), body).unwrap();
+        let args = serde_json::json!({"pattern": "hit"}).to_string();
+        let out = grep_invoke(&c, &args).await;
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 2001, "got {} lines", lines.len());
+        assert!(out.ends_with("[truncated at 2000 matches]"));
+    }
+
+    #[tokio::test]
+    async fn grep_max_matches_larger_than_default() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let body: String = (0..3000).map(|i| format!("hit {i}\n")).collect();
+        std::fs::write(dir.join("hits.txt"), body).unwrap();
+        let args = serde_json::json!({"pattern": "hit", "max_matches": 5000}).to_string();
+        let out = grep_invoke(&c, &args).await;
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 3000, "got {} lines", lines.len());
+        assert!(!out.contains("[truncated"));
     }
 
     #[test]
