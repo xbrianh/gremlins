@@ -2,6 +2,7 @@ pub(crate) mod agent_loop;
 pub mod backend;
 pub mod cmd_backend;
 pub mod openai_backend;
+pub mod openrouter_backend;
 pub mod protocol;
 pub(crate) mod retry;
 pub(crate) mod stream;

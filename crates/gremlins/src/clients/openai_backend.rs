@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use rig_core::client::CompletionClient;
 use rig_core::providers::openai;
 
-use super::agent_loop::{run_agent_loop, CancelToken, LoopOpts, RunContext};
+use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
 use super::backend::{Backend, ClientError, RunParams};
 use super::protocol::CompletedRun;
 use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
@@ -16,7 +16,6 @@ use super::stream;
 pub enum OpenAiProvider {
     OpenAi,
     Xai,
-    OpenRouter,
 }
 
 impl OpenAiProvider {
@@ -24,7 +23,6 @@ impl OpenAiProvider {
         match self {
             Self::OpenAi => "openai",
             Self::Xai => "xai",
-            Self::OpenRouter => "openrouter",
         }
     }
 
@@ -32,7 +30,6 @@ impl OpenAiProvider {
         match self {
             Self::OpenAi => "OPENAI_API_KEY",
             Self::Xai => "XAI_API_KEY",
-            Self::OpenRouter => "OPENROUTER_API_KEY",
         }
     }
 
@@ -40,13 +37,12 @@ impl OpenAiProvider {
         match self {
             Self::OpenAi => "https://api.openai.com/v1",
             Self::Xai => "https://api.x.ai/v1",
-            Self::OpenRouter => "https://openrouter.ai/api/v1",
         }
     }
 
     pub(crate) fn default_model(self) -> &'static str {
         match self {
-            Self::OpenAi | Self::OpenRouter => "gpt-4o",
+            Self::OpenAi => "gpt-4o",
             Self::Xai => "grok-4",
         }
     }
@@ -113,24 +109,51 @@ impl OpenAiBackend {
         cancel: Arc<CancelToken>,
     ) -> Result<CompletedRun, ClientError> {
         let model_name = self.effective_model(ctx.params.model.as_deref());
-        let model = self.client.completion_model(&model_name);
-        let mut ctx = ctx.clone();
-        ctx.params.model = Some(model_name);
-        run_agent_loop(
-            &model,
+        run_with_agent_loop(
+            &self.client,
+            &model_name,
             prompt,
-            &ctx,
+            ctx,
             cancel,
-            LoopOpts {
-                extra: self.extra_params(),
-                tool_filter: self.tool_filter.as_deref(),
-            },
+            self.extra_params(),
+            self.tool_filter.as_deref(),
+            None, // default classifier
         )
         .await
     }
 }
 
-fn build_extra_params(client_params: &HashMap<String, String>) -> Option<serde_json::Value> {
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_with_agent_loop(
+    client: &openai::CompletionsClient,
+    model_name: &str,
+    prompt: &str,
+    ctx: &RunContext,
+    cancel: Arc<CancelToken>,
+    extra: Option<serde_json::Value>,
+    tool_filter: Option<&[String]>,
+    classify_error: Option<ErrorClassifier>,
+) -> Result<CompletedRun, ClientError> {
+    let model = client.completion_model(model_name);
+    let mut ctx = ctx.clone();
+    ctx.params.model = Some(model_name.to_string());
+    run_agent_loop(
+        &model,
+        prompt,
+        &ctx,
+        cancel,
+        LoopOpts {
+            extra,
+            tool_filter,
+            classify_error,
+        },
+    )
+    .await
+}
+
+pub(crate) fn build_extra_params(
+    client_params: &HashMap<String, String>,
+) -> Option<serde_json::Value> {
     let mut params = serde_json::Map::new();
 
     params.insert("parallel_tool_calls".into(), serde_json::Value::Bool(true));
@@ -267,26 +290,14 @@ impl Backend for OpenAiBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::agent_loop::map_stream_error;
-    use http::StatusCode;
-    use rig_core::completion::CompletionError;
 
     #[test]
     fn provider_identity() {
         assert_eq!(OpenAiProvider::OpenAi.name(), "openai");
         assert_eq!(OpenAiProvider::Xai.name(), "xai");
-        assert_eq!(OpenAiProvider::OpenRouter.name(), "openrouter");
         assert_eq!(OpenAiProvider::OpenAi.api_key_env(), "OPENAI_API_KEY");
         assert_eq!(OpenAiProvider::Xai.api_key_env(), "XAI_API_KEY");
-        assert_eq!(
-            OpenAiProvider::OpenRouter.api_key_env(),
-            "OPENROUTER_API_KEY"
-        );
         assert_eq!(OpenAiProvider::Xai.base_url(), "https://api.x.ai/v1");
-        assert_eq!(
-            OpenAiProvider::OpenRouter.base_url(),
-            "https://openrouter.ai/api/v1"
-        );
         assert_eq!(OpenAiProvider::Xai.default_model(), "grok-4");
     }
 
@@ -371,69 +382,6 @@ mod tests {
         assert_eq!(p["thinking"], "deepseek");
         // xai auto-inserts parallel_tool_calls alongside reasoning + passthrough
         assert_eq!(p["parallel_tool_calls"], true);
-    }
-
-    #[test]
-    fn transient_classifier() {
-        // Status-code based: 5xx → retryable
-        let http_503 = CompletionError::from_http_response(StatusCode::SERVICE_UNAVAILABLE, "boom");
-        assert!(matches!(
-            map_stream_error(http_503),
-            ClientError::ApiServerError { .. }
-        ));
-
-        // Status-code based: 429 → retryable
-        let http_429 =
-            CompletionError::from_http_response(StatusCode::TOO_MANY_REQUESTS, "slow down");
-        assert!(matches!(
-            map_stream_error(http_429),
-            ClientError::ApiServerError { .. }
-        ));
-
-        // Status-code based: 4xx (non-429) → NOT retryable
-        let http_400 = CompletionError::from_http_response(StatusCode::BAD_REQUEST, "bad prompt");
-        assert!(matches!(
-            map_stream_error(http_400),
-            ClientError::Runtime { .. }
-        ));
-        let http_401 = CompletionError::from_http_response(StatusCode::UNAUTHORIZED, "bad key");
-        assert!(matches!(
-            map_stream_error(http_401),
-            ClientError::Runtime { .. }
-        ));
-
-        // Status-code based: 3xx, 2xx, 1xx → NOT retryable
-        let http_302 = CompletionError::from_http_response(StatusCode::FOUND, "redirect");
-        assert!(matches!(
-            map_stream_error(http_302),
-            ClientError::Runtime { .. }
-        ));
-        let http_200 =
-            CompletionError::from_http_response(StatusCode::OK, "unexpected success body");
-        assert!(matches!(
-            map_stream_error(http_200),
-            ClientError::Runtime { .. }
-        ));
-        let http_101 =
-            CompletionError::from_http_response(StatusCode::SWITCHING_PROTOCOLS, "protocol");
-        assert!(matches!(
-            map_stream_error(http_101),
-            ClientError::Runtime { .. }
-        ));
-
-        // No HTTP status (mid-stream SSE, ProviderError, etc.) → retryable
-        let provider_err = CompletionError::ProviderError("something broke".into());
-        assert!(matches!(
-            map_stream_error(provider_err),
-            ClientError::ApiServerError { .. }
-        ));
-        let xai_err = CompletionError::from_provider_body(
-            r#"{"error":{"message":"Internal error during token generation","type":"server_error","code":"internal"}}"#,
-        );
-        assert!(matches!(
-            map_stream_error(xai_err),
-            ClientError::ApiServerError { .. }
-        ));
     }
 
     #[test]

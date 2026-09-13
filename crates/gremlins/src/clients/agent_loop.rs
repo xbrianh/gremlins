@@ -19,7 +19,9 @@ use super::protocol::{CompletedRun, UsageStats};
 use super::stream;
 use super::tools::{self, ToolContext};
 
-pub(crate) fn map_stream_error(err: CompletionError) -> ClientError {
+pub(crate) type ErrorClassifier = Arc<dyn Fn(CompletionError) -> ClientError + Send + Sync>;
+
+pub(crate) fn default_classify(err: CompletionError) -> ClientError {
     if let Some(status) = err.provider_response_status() {
         let code = status.as_u16();
         // Only retry 5xx and 429.
@@ -86,6 +88,7 @@ pub(crate) struct RunContext {
 pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,
+    pub(crate) classify_error: Option<ErrorClassifier>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -225,6 +228,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     let opts = LoopOpts {
         extra: None,
         tool_filter,
+        classify_error: None,
     };
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;
@@ -799,7 +803,12 @@ async fn run_agent_loop_core<M: CompletionModel>(
         });
     }
     if let Some(err) = stream_error {
-        return Err(map_stream_error(err));
+        let classify = opts
+            .classify_error
+            .as_ref()
+            .map(|c| c.as_ref())
+            .unwrap_or(&default_classify);
+        return Err(classify(err));
     }
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
@@ -976,7 +985,40 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::StatusCode;
     use rig_core::message::UserContent;
+
+    #[test]
+    fn default_classifier() {
+        // 5xx → retryable
+        let err = CompletionError::from_http_response(StatusCode::SERVICE_UNAVAILABLE, "boom");
+        assert!(matches!(
+            default_classify(err),
+            ClientError::ApiServerError { .. }
+        ));
+
+        // 429 → retryable
+        let err = CompletionError::from_http_response(StatusCode::TOO_MANY_REQUESTS, "slow down");
+        assert!(matches!(
+            default_classify(err),
+            ClientError::ApiServerError { .. }
+        ));
+
+        // 400 → NOT retryable
+        let err = CompletionError::from_http_response(StatusCode::BAD_REQUEST, "bad prompt");
+        assert!(matches!(default_classify(err), ClientError::Runtime { .. }));
+
+        // 401 → NOT retryable
+        let err = CompletionError::from_http_response(StatusCode::UNAUTHORIZED, "bad key");
+        assert!(matches!(default_classify(err), ClientError::Runtime { .. }));
+
+        // No HTTP status → retryable
+        let err = CompletionError::ProviderError("something broke".into());
+        assert!(matches!(
+            default_classify(err),
+            ClientError::ApiServerError { .. }
+        ));
+    }
 
     #[test]
     fn event_shapes() {
@@ -1068,6 +1110,7 @@ mod tests {
         LoopOpts {
             extra: None,
             tool_filter: filter,
+            classify_error: None,
         }
     }
 
