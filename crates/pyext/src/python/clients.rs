@@ -9,6 +9,7 @@ use pyo3::types::PyList;
 use gremlins::clients::backend::{Backend, ClientError, RunParams};
 use gremlins::clients::cmd_backend::CmdBackend;
 use gremlins::clients::openai_backend::{OpenAiBackend, OpenAiProvider};
+use gremlins::clients::openrouter_backend::OpenRouterBackend;
 use gremlins::clients::protocol::CompletedRun;
 use rig_core::providers::openai;
 
@@ -172,8 +173,12 @@ fn default_native_block() -> HashMap<String, Vec<String>> {
     )])
 }
 
+fn resolve_api_key_for_provider(env_var: &str, name: &str) -> Option<String> {
+    gremlins::config::api_key(env_var, name)
+}
+
 fn resolve_api_key(kind: OpenAiProvider) -> Option<String> {
-    gremlins::config::api_key(kind.api_key_env(), kind.name())
+    resolve_api_key_for_provider(kind.api_key_env(), kind.name())
 }
 
 fn build_openai_backend(
@@ -207,6 +212,44 @@ fn build_openai_backend(
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
+    )))
+}
+
+fn build_openrouter_backend(
+    model: &str,
+    native_block: &HashMap<String, Vec<String>>,
+    extra_params: &IndexMap<String, String>,
+) -> PyResult<Arc<dyn Backend>> {
+    let api_key = resolve_api_key_for_provider("OPENROUTER_API_KEY", "openrouter").ok_or_else(
+        || {
+            let path = gremlins::config::user_config_root().join("providers.json");
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "no API key for provider 'openrouter': set OPENROUTER_API_KEY or add an entry in {}",
+                path.display(),
+            ))
+        },
+    )?;
+    let client = openai::Client::builder()
+        .api_key(rig_core::client::BearerAuth::from(api_key))
+        .base_url("https://openrouter.ai/api/v1")
+        .build()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        .completions_api();
+    let tool_filter = native_block.get("allowed_tools").cloned();
+    let client_params: HashMap<String, String> = extra_params
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let model = if model.is_empty() {
+        "gpt-4o".to_string()
+    } else {
+        model.to_string()
+    };
+    Ok(Arc::new(OpenRouterBackend::new(
+        client,
+        model,
+        tool_filter,
+        client_params,
     )))
 }
 
@@ -363,7 +406,13 @@ impl Client {
             }
             "openai" => OpenAiProvider::OpenAi,
             "xai" => OpenAiProvider::Xai,
-            "openrouter" => OpenAiProvider::OpenRouter,
+            "openrouter" => {
+                return build_openrouter_backend(
+                    &self.model,
+                    &self.native_block,
+                    &self.extra_params,
+                );
+            }
             other => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "unknown provider '{other}'"
