@@ -174,6 +174,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         prefix.clone(),
         idle_timeout,
         max_turns,
+        ctx.completion_nudge_budget,
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -213,6 +214,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     prefix: &str,
     idle_timeout: f64,
     max_turns: usize,
+    completion_nudge_budget: usize,
 ) -> Result<CompletedRun, ClientError> {
     eprintln!(
         "{} {}task: begin (max_turns={})",
@@ -243,7 +245,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         true,
         &[],
         0,
-        0,
+        completion_nudge_budget,
     )
     .await;
     eprintln!("{} {}task: end", stream::ts_internal(), prefix);
