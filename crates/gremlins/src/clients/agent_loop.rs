@@ -429,21 +429,31 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         // Check for explicit Done — the only valid completion signal.
         // Done must be the sole tool call in a turn; mixing it with other
-        // calls (e.g. Write + Done) is rejected so non-Done work isn't
-        // silently dropped when parallel tool calls are enabled.
+        // calls (e.g. Write + Done) makes the turn incoherent.  Reject the
+        // whole turn so the model retries cleanly.
         let has_non_done = tool_calls.iter().any(|tc| tc.function.name != "Done");
         let done_call = tool_calls.iter().find(|tc| tc.function.name == "Done");
 
-        // Capture Done for error injection when it's mixed with other tools.
-        let mixed_done: Option<ToolCall> = if done_call.is_some() && has_non_done {
-            done_call.cloned()
-        } else {
-            None
-        };
-
-        // Solo Done — accept or reject based on artifact validation.
         if let Some(done_tc) = done_call {
-            if !has_non_done {
+            if has_non_done {
+                // Mixed Done — reject immediately, do not execute any tools.
+                history.push(next_prompt);
+                history.push(assistant_tool_message(&text, &tool_calls));
+                history.push(Message::tool_result_with_call_id(
+                    done_tc.id.clone(),
+                    done_tc.call_id.clone(),
+                    "Error: Done must be called alone — do not combine Done with other \
+                     tool calls in the same message. Re-issue your tool calls without \
+                     Done, then call Done by itself when finished.",
+                ));
+                next_prompt = Message::user(
+                    "Done was rejected because it was combined with other tool calls. \
+                     Try again — this time either use tools, or call Done. Never both.",
+                );
+                continue;
+            }
+            // Solo Done — accept or reject based on artifact validation.
+            {
                 // Verify expected artifacts before accepting completion.
                 if !nested && !expected_artifact_paths.is_empty() {
                     let missing: Vec<&PathBuf> = expected_artifact_paths
@@ -560,8 +570,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         // Tool calls from this point forward are for execution only — Done
         // was handled above (accepted or rejected). Filter Done out so it
-        // never reaches invoke(). When Done was mixed with other tools, the
-        // error is injected after tool results below.
+        // never reaches invoke().
         let tool_calls: Vec<ToolCall> = tool_calls
             .into_iter()
             .filter(|tc| tc.function.name != "Done")
@@ -759,27 +768,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // Every tool result lands in history so the results stay adjacent to the
         // assistant tool_calls message; the ledger becomes the next turn's prompt,
         // trailing the complete result block instead of splitting it.
-        // If Done was mixed with other tool calls, inject a Done error
-        // result so the model sees the rejection.
-        if let Some(done_tc) = &mixed_done {
-            let error_msg = "Error: Done must be called alone — do not combine Done with other \
-                 tool calls in the same message. Re-issue your tool calls without \
-                 Done, then call Done by itself when finished.";
-            stream::emit_result(prefix, error_msg, false);
-            if !nested {
-                let result_evt = tool_result_event(&done_tc.id, error_msg);
-                write_raw(raw, &result_evt);
-                if let Some(evts) = captured.as_mut() {
-                    evts.push(result_evt);
-                }
-            }
-            ledger.push(ledger_line("Done", "", error_msg));
-            result_msgs.push(Message::tool_result_with_call_id(
-                done_tc.id.clone(),
-                done_tc.call_id.clone(),
-                error_msg,
-            ));
-        }
         history.extend(result_msgs);
         next_prompt = Message::user(ledger_message(&ledger));
     }
@@ -1922,7 +1910,7 @@ mod tests {
             e["type"] == "reminder"
                 && e["message"]
                     .as_str()
-                    .map_or(false, |m| m.contains("call the Done tool"))
+                    .is_some_and(|m| m.contains("call the Done tool"))
         });
         assert!(
             nudge_evt.is_some(),
@@ -1933,7 +1921,7 @@ mod tests {
     #[tokio::test]
     async fn mixed_done_with_other_tools_is_rejected() {
         // Done mixed with other tool calls in the same turn must be
-        // rejected with an error while the other tools still execute.
+        // rejected with an error; no tools from that turn may execute.
         let dir = std::env::temp_dir().join(format!(
             "gremlins-oa-mixed-{}-{}",
             std::process::id(),
@@ -1945,8 +1933,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("out.txt");
 
-        // Turn 1: Write + Done mixed in one turn.
-        // Turn 2: Done solo → completes.
+        // Turn 1: Write + Done mixed → rejected, nothing executes.
+        // Turn 2: Write solo → writes the file.
+        // Turn 3: Done solo → completes.
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
             vec![
                 rig_core::test_utils::MockStreamEvent::tool_call(
@@ -1965,7 +1954,18 @@ mod tests {
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
             vec![
-                rig_core::test_utils::MockStreamEvent::text("fixed"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c2",
+                    "Write",
+                    serde_json::json!({
+                        "file_path": target.to_str().unwrap(),
+                        "content": "hello"
+                    }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("done"),
                 rig_core::test_utils::MockStreamEvent::tool_call(
                     "done2",
                     "Done",
@@ -1981,26 +1981,27 @@ mod tests {
         let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
             .await
             .unwrap();
-        // Write still executed; text_result is the model's text (not Done summary,
-        // since text was non-empty).
+        // File was written on the retry, not in the mixed turn.
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
-        assert_eq!(result.text_result.as_deref(), Some("fixed"));
-        // Verify the Done error appears in captured events.
+        assert_eq!(result.text_result.as_deref(), Some("done"));
+        // The Done error was recorded in captured events.
         let events = result.events.unwrap();
         let done_error = events.iter().find(|e| {
             e["message"]["content"][0]["type"] == "tool_result"
                 && e["message"]["content"][0]["tool_use_id"] == "done1"
         });
         assert!(
-            done_error.is_some(),
-            "Done error must appear in captured events"
+            done_error.is_none(),
+            "mixed-turn Done does not produce a captured tool result — the rejection is in history only"
         );
-        let content = done_error.unwrap()["message"]["content"][0]["content"]
-            .as_str()
-            .unwrap();
+        // The Write also did not produce a captured event from the mixed turn.
         assert!(
-            content.contains("Done must be called alone"),
-            "Done error must state the rule; got: {content}"
+            !events.iter().any(|e| {
+                e["message"]["content"][0]
+                    .get("tool_use_id")
+                    .is_some_and(|id| id == "c1")
+            }),
+            "mixed-turn Write must not appear in captured events"
         );
     }
 
