@@ -385,11 +385,27 @@ async fn run_agent_loop_core<M: CompletionModel>(
         }
 
         if timed_out || stream_error.is_some() {
+            log::debug!(
+                target: "_gremlins_core.clients.agent_loop",
+                "stream ended: timed_out={timed_out} stream_error={stream_error:?} turn={turn_num}",
+            );
             break;
         }
         if !ended && tool_calls.is_empty() && text.is_empty() {
+            log::debug!(
+                target: "_gremlins_core.clients.agent_loop",
+                "stream ended: not-ended empty-turn turn={turn_num}",
+            );
             break;
         }
+
+        log::debug!(
+            target: "_gremlins_core.clients.agent_loop",
+            "turn complete: turn={turn_num} text_len={} reasoning_len={} tool_calls={} ended={ended}",
+            text.len(),
+            reasoning.len(),
+            tool_calls.len(),
+        );
 
         if !reasoning.is_empty() {
             stream::emit_think(prefix, &reasoning);
@@ -581,6 +597,14 @@ async fn run_agent_loop_core<M: CompletionModel>(
             .collect();
 
         if tool_calls.is_empty() {
+            // Log every empty turn before any nudge / fall-through logic.
+            log::warn!(
+                target: "_gremlins_core.clients.agent_loop",
+                "empty turn: turn={turn_num} text_empty={} reasoning_empty={} budget={completion_nudge_budget}",
+                text.is_empty(),
+                reasoning.is_empty(),
+            );
+
             // Check for missing expected artifacts — inject a reminder if budget remains.
             // Only inject when the model wrote text this turn (no point reminding if
             // the model produced nothing, and an empty assistant message may be rejected).
@@ -639,6 +663,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
             }
 
             // Empty turn — nudge if budget remains, otherwise fall through to final.
+            // Only nudge when there is text — reasoning-only nudges produce empty
+            // assistant messages that providers may reject.
             if !text.is_empty() && completion_nudge_budget > 0 {
                 completion_nudge_budget -= 1;
                 log::info!(
@@ -664,6 +690,12 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 continue;
             }
             // Budget exhausted or empty text — fall through to final.
+            log::warn!(
+                target: "_gremlins_core.clients.agent_loop",
+                "empty-turn exhausted: turn={turn_num} text_empty={} reasoning_empty={} budget={completion_nudge_budget}",
+                text.is_empty(),
+                reasoning.is_empty(),
+            );
             if !nested {
                 stream::flush();
                 emit_final(prefix, turns, " (exhausted)");

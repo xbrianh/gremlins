@@ -22,7 +22,9 @@ Here is the gremlin's log:
 {log_text}
 ```
 
-Produce a report with the following sections:
+Produce a report with the following sections. Write the full report as your
+final message, then call Done(summary) with a one-line summary to finish.
+Do not use any tools other than Done — this is a read-only analysis task.
 
 ## Summary
 One-sentence summary of what happened and whether it succeeded.

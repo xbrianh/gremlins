@@ -27,7 +27,7 @@ Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Task, Done\n\
 </tools>\n\
-Call Done(summary) when your work is complete. The harness ignores empty turns.\n\
+Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Project root:  {project}\n\
 Work root:     {work}\n\
@@ -55,7 +55,7 @@ Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Task, Done\n\
 </tools>\n\
-Call Done(summary) when your work is complete. The harness ignores empty turns.\n\
+Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Project root:  {project}\n\
 Work root:     {work}\n\
@@ -367,12 +367,12 @@ pub(crate) fn artifact_reminder_budget() -> usize {
 }
 
 /// GREMLINS_COMPLETION_NUDGE_BUDGET — how many empty-turn nudges to inject
-/// before giving up. Default 3.
+/// before giving up. Default 11.
 pub(crate) fn completion_nudge_budget() -> usize {
     std::env::var("GREMLINS_COMPLETION_NUDGE_BUDGET")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(3)
+        .unwrap_or(11)
 }
 
 /// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
@@ -1241,7 +1241,7 @@ mod tests {
             "agent prompt must include Done in tool roster; got: {prompt}"
         );
         assert!(
-            prompt.contains("Call Done(summary) when your work is complete"),
+            prompt.contains("Call Done(summary) alongside your final message"),
             "agent prompt must include Done instruction; got: {prompt}"
         );
     }
@@ -1258,7 +1258,7 @@ mod tests {
             "task prompt must include Done in tool roster; got: {prompt}"
         );
         assert!(
-            prompt.contains("Call Done(summary) when your work is complete"),
+            prompt.contains("Call Done(summary) alongside your final message"),
             "task prompt must include Done instruction; got: {prompt}"
         );
     }
@@ -1286,7 +1286,7 @@ mod tests {
     fn test_completion_nudge_budget_default() {
         let _guard = ENV_MUTEX.lock().unwrap();
         std::env::remove_var("GREMLINS_COMPLETION_NUDGE_BUDGET");
-        assert_eq!(completion_nudge_budget(), 3);
+        assert_eq!(completion_nudge_budget(), 11);
     }
 
     #[test]
