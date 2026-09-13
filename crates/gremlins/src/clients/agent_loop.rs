@@ -1088,6 +1088,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("wrote it"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1138,6 +1143,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("saw it"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1193,6 +1203,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("blocked"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1249,6 +1264,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("ok"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1299,6 +1319,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("both read"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1373,6 +1398,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1440,6 +1470,11 @@ mod tests {
 
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
             rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let mut ctx = test_ctx(Some(dir.clone()), None);
@@ -1477,6 +1512,11 @@ mod tests {
 
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
             rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let mut ctx = test_ctx(Some(dir.clone()), None);
@@ -1523,6 +1563,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1593,6 +1638,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1641,6 +1691,11 @@ mod tests {
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
             vec![
                 rig_core::test_utils::MockStreamEvent::text("here is the content"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
             vec![
@@ -1656,6 +1711,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1686,10 +1746,12 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "0");
         let target = dir.join("never-written.md");
 
         // Turn 1: text-only → reminder injected.
-        // Turn 2: text-only again → budget exhausted, returns normally.
+        // Turn 2: text-only again → budget exhausted (reminder + nudge both 0),
+        // falls through and returns.
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
             vec![
                 rig_core::test_utils::MockStreamEvent::text("first try"),
@@ -1728,6 +1790,11 @@ mod tests {
 
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
             rig_core::test_utils::MockStreamEvent::text("just text"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let mut ctx = test_ctx(Some(dir.clone()), None);
@@ -1758,6 +1825,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "0");
 
         let over = tools::TASK_MAX_PER_TURN + 1;
         let mut turn = Vec::new();
@@ -1775,6 +1843,11 @@ mod tests {
         turns.extend((0..over + 1).map(|_| {
             vec![
                 rig_core::test_utils::MockStreamEvent::text("ok"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ]
         }));
