@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
+import copy
 import json
 import logging
 import math
@@ -177,9 +177,8 @@ class ParallelStage(StageAttrs):
                 "parallel stage requires gremlin.state to be initialized"
             )
         parent_id = state.data.gremlin_id or ""
-        group_state = dataclasses.replace(
-            state, parent_stage=state.parent_stage or self.name
-        )
+        group_state = copy.copy(state)
+        group_state.parent_stage = state.parent_stage or self.name
         done = state.data.done_for(self.path or self.name)
         child_runners: list[tuple[str, State, Callable[[], Any]]] = []
         for child in self.body:

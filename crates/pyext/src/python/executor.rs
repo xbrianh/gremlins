@@ -257,7 +257,7 @@ impl PyState {
         base_ref="".to_string(), loop_stack=None,
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub fn new(
         py: Python<'_>,
         data: Py<PyStateData>,
         client: Py<PyAny>,
@@ -274,14 +274,7 @@ impl PyState {
         base_ref: String,
         loop_stack: Option<Vec<(String, i32)>>,
     ) -> PyResult<Self> {
-        let args = match args {
-            Some(a) => a,
-            None => py
-                .import("argparse")?
-                .getattr("Namespace")?
-                .call0()?
-                .unbind(),
-        };
+        let args = args.unwrap_or_else(|| py.None());
         Ok(PyState {
             data,
             client,
@@ -333,6 +326,28 @@ impl PyState {
         if len > 0 {
             let _ = list.del_item(len - 1);
         }
+    }
+
+    fn __copy__(&self, py: Python<'_>) -> PyResult<Py<PyState>> {
+        Py::new(
+            py,
+            PyState {
+                data: self.data.clone_ref(py),
+                client: self.client.clone_ref(py),
+                artifact_dir: self.artifact_dir.clone(),
+                artifacts: self.artifacts.clone_ref(py),
+                cwd: self.cwd.clone(),
+                args: self.args.clone_ref(py),
+                pipeline_data: self.pipeline_data.as_ref().map(|p| p.clone_ref(py)),
+                current_scope: self.current_scope.clone_ref(py),
+                child_key: self.child_key.clone(),
+                parent_stage: self.parent_stage.clone(),
+                worktree: self.worktree.clone(),
+                worktree_parent: self.worktree_parent.clone(),
+                base_ref: self.base_ref.clone(),
+                loop_stack: self.loop_stack.clone_ref(py),
+            },
+        )
     }
 
     fn set_loop_iteration(&mut self, py: Python<'_>, n: i32) {
@@ -627,14 +642,7 @@ fn build_state(
                 .unbind()
         }
     };
-    let args = match args {
-        Some(a) => a,
-        None => py
-            .import("argparse")?
-            .getattr("Namespace")?
-            .call0()?
-            .unbind(),
-    };
+    let args = args.unwrap_or_else(|| py.None());
     let cwd = if !cwd.is_empty() {
         cwd.to_string()
     } else if let Some(wt) = &worktree {
@@ -701,18 +709,10 @@ pub fn register_executor_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         &std::ffi::CString::new(
             r#"
 import copy as _copy
-import dataclasses as _dc
 import logging as _logging
 
 _m.StateData.FIELD_DEFAULTS = _field_defaults
 _m.State.FRAMEWORK_KEYS = _framework_keys
-
-_StateFields = _dc.make_dataclass("_StateFields", [
-    "data", "client", "artifact_dir", "artifacts", "cwd", "args",
-    "pipeline_data", "current_scope", "child_key", "parent_stage",
-    "worktree", "worktree_parent", "base_ref", "loop_stack",
-])
-_m.State.__dataclass_fields__ = dict(_StateFields.__dataclass_fields__)
 
 _logger = _logging.getLogger("gremlins.executor.state")
 

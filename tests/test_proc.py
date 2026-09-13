@@ -1,9 +1,9 @@
 import asyncio
 import io
-import subprocess
 import sys
 
 import pytest
+from _gremlins_core.utils.proc import CalledProcessError, TimeoutExpired
 
 from gremlins.utils import proc
 
@@ -130,7 +130,7 @@ def test_run_async_nonzero_exit():
 
 
 def test_run_async_check_raises():
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(CalledProcessError):
         run(proc.run_async(["false"], check=True))
 
 
@@ -145,7 +145,7 @@ def test_run_async_captures_stderr():
 
 
 def test_run_async_timeout():
-    with pytest.raises(subprocess.TimeoutExpired):
+    with pytest.raises(TimeoutExpired):
         run(proc.run_async(["sleep", "10"], timeout=0.05))
 
 
@@ -215,7 +215,7 @@ def test_run_async_timeout_kills_grandchildren():
     # Shell forks a grandchild that inherits the pipe write end. Without killpg,
     # the grandchild keeps the pipe open after the parent exits and communicate()
     # hangs past the timeout. This verifies the timeout is actually enforced.
-    with pytest.raises(subprocess.TimeoutExpired):
+    with pytest.raises(TimeoutExpired):
         run(proc.run_async(["sh", "-c", "sleep 60 & sleep 60"], timeout=0.1))
 
 
