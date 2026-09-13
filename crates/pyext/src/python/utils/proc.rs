@@ -94,7 +94,8 @@ fn called_process_error(
     let val = err.value(py);
     val.setattr("returncode", returncode)?;
     val.setattr("cmd", cmd)?;
-    val.setattr("stdout", stdout)?;
+    val.setattr("stdout", stdout.clone_ref(py))?;
+    val.setattr("output", stdout)?;
     val.setattr("stderr", stderr)?;
     Ok(err)
 }
@@ -110,7 +111,8 @@ fn timeout_expired(
     let val = err.value(py);
     val.setattr("cmd", cmd)?;
     val.setattr("timeout", timeout)?;
-    val.setattr("stdout", stdout)?;
+    val.setattr("stdout", stdout.clone_ref(py))?;
+    val.setattr("output", stdout)?;
     val.setattr("stderr", stderr)?;
     Ok(err)
 }

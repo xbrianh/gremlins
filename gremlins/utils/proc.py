@@ -55,13 +55,13 @@ def run(
     except CalledProcessError as e:
         if text:
             e.cmd = _decode(e.cmd)
-            e.stdout = _decode(e.stdout)
+            e.stdout = e.output = _decode(e.stdout)
             e.stderr = _decode(e.stderr)
         raise
     except TimeoutExpired as e:
         if text:
             e.cmd = _decode(e.cmd)
-            e.stdout = _decode(e.stdout)
+            e.stdout = e.output = _decode(e.stdout)
             e.stderr = _decode(e.stderr)
         raise
     if text:

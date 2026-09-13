@@ -63,6 +63,19 @@ def test_run_or_raise_raises_on_failure():
         proc.run_or_raise(["false"])
 
 
+def test_called_process_error_output_alias():
+    with pytest.raises(CalledProcessError) as exc:
+        proc.run(["sh", "-c", "echo out; exit 1"], check=True)
+    assert exc.value.output == exc.value.stdout == "out\n"
+
+
+def test_timeout_expired_output_alias():
+    with pytest.raises(TimeoutExpired) as exc:
+        proc.run(["sh", "-c", "echo start; sleep 10"], timeout=0.1)
+    assert exc.value.output == exc.value.stdout
+    assert "start" in exc.value.output
+
+
 def test_run_timeout_raises():
     with pytest.raises(TimeoutExpired) as exc:
         proc.run(["sleep", "10"], timeout=0.05)
