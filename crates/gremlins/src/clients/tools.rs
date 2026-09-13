@@ -21,7 +21,7 @@ const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", "target"];
 /// Tools that stay available even when a tool filter is set. `task_fn`
 /// re-applies both the tool filter and `allowed_roots` to every nested agent,
 /// so bypassing the filter here cannot escape containment.
-const ALWAYS_AVAILABLE: &[&str] = &["Task"];
+const ALWAYS_AVAILABLE: &[&str] = &["Task", "Done"];
 
 fn always_available(name: &str) -> bool {
     ALWAYS_AVAILABLE.contains(&name)
@@ -1289,6 +1289,7 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str)>> {
         "Grep" => Some(vec![("pattern", "string")]),
         "Glob" => Some(vec![("pattern", "string")]),
         "Task" => Some(vec![("description", "string"), ("prompt", "string")]),
+        "Done" => Some(vec![("summary", "string")]),
         _ => None,
     }
 }
@@ -1454,6 +1455,13 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
                 "Error: Task not available for this backend".to_string()
             }
         }
+        "Done" => {
+            let summary = args
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("Done. {summary}")
+        }
         other => format!("Error: unknown tool {other}"),
     };
     audit(
@@ -1611,6 +1619,23 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
     ];
     // Task is always available, even when a tool filter is set.
+    all.push(ToolDefinition {
+        name: "Done".into(),
+        description: "Signal that your work is complete. The harness ignores empty \
+turns — you must call Done to finish. Provide a brief summary of what you \
+accomplished.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Brief summary of what was accomplished"
+                }
+            },
+            "required": ["summary"],
+            "additionalProperties": false
+        }),
+    });
     all.push(ToolDefinition {
         name: "Task".into(),
         description: format!("Delegate a self-contained task to a worker with a clean conversation context. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message. Returns the worker's final text output, truncated to {TASK_OUTPUT_LIMIT} characters and marked with …[truncated] when cut."),
@@ -1968,18 +1993,19 @@ mod tests {
     #[test]
     fn tool_definitions_filter() {
         let all = tool_definitions(None);
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 8);
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
-        // Task is always available regardless of the filter.
-        assert_eq!(names, ["Read", "Bash", "Task"]);
+        // Task and Done are always available regardless of the filter.
+        assert_eq!(names, ["Read", "Bash", "Done", "Task"]);
     }
 
     #[test]
-    fn task_is_always_available() {
+    fn task_and_done_always_available() {
         let filtered = tool_definitions(Some(&["Read".to_string()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Task"), "got: {names:?}");
+        assert!(names.contains(&"Done"), "got: {names:?}");
         assert!(names.contains(&"Read"), "got: {names:?}");
     }
 
@@ -2889,6 +2915,24 @@ mod tests {
             TASK_OUTPUT_LIMIT + 10
         )));
         assert_eq!(truncate_task_output("short"), "short");
+    }
+
+    #[tokio::test]
+    async fn done_invoke_returns_summary() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"summary": "wrote three files and fixed tests"}).to_string();
+        let result = invoke("Done", &c, &args).await;
+        assert_eq!(result, "Done. wrote three files and fixed tests");
+    }
+
+    #[tokio::test]
+    async fn done_invoke_empty_summary() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"summary": ""}).to_string();
+        let result = invoke("Done", &c, &args).await;
+        assert_eq!(result, "Done. ");
     }
 
     // --- Part 4: IO containment tests (symlink-aware) ---

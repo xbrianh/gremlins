@@ -289,7 +289,7 @@ impl Client {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (prompt, label, model=None, raw_path=None, capture_events=false, on_timeout_prompt=None, max_retries=3, cwd=None, artifact_dir=None, idle_timeout=None, extra_env=None, expected_artifact_paths=None, artifact_reminder_count=0, system_prompt=None))]
+    #[pyo3(signature = (prompt, label, model=None, raw_path=None, capture_events=false, on_timeout_prompt=None, max_retries=3, cwd=None, artifact_dir=None, idle_timeout=None, extra_env=None, expected_artifact_paths=None, system_prompt=None))]
     fn run<'py>(
         &self,
         py: Python<'py>,
@@ -305,7 +305,6 @@ impl Client {
         idle_timeout: Option<f64>,
         extra_env: Option<HashMap<String, String>>,
         expected_artifact_paths: Option<Vec<PathBuf>>,
-        artifact_reminder_count: usize,
         system_prompt: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let backend = self.get_or_build_backend()?;
@@ -323,7 +322,6 @@ impl Client {
                 idle_timeout,
                 extra_env,
                 expected_artifact_paths: expected_artifact_paths.unwrap_or_default(),
-                artifact_reminder_count,
                 system_prompt,
             };
             let result = backend.run(params).await.map_err(map_error)?;

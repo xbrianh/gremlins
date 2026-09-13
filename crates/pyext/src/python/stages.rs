@@ -772,7 +772,6 @@ impl PyAgent {
                     "expected_artifact_paths",
                     expected_artifact_paths.as_slice(),
                 )?;
-                kwargs.set_item("artifact_reminder_count", 3)?;
                 kwargs.set_item("system_prompt", system_prompt.as_str())?;
 
                 // Pass through remaining options (except "model") as kwargs to client.run(),

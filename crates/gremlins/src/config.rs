@@ -25,8 +25,9 @@ You MUST delegate to Task to maintain a clean context. Multiple Task calls run c
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Bash (shell commands), Task\n\
-</tools>\n\n\
+by pattern), Bash (shell commands), Task, Done\n\
+</tools>\n\
+Call Done(summary) when your work is complete. The harness ignores empty turns.\n\
 <directories>\n\
 Project root:  {project}\n\
 Work root:     {work}\n\
@@ -52,8 +53,9 @@ pub(crate) fn task_system_prompt(
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Bash (shell commands), Task\n\
-</tools>\n\n\
+by pattern), Bash (shell commands), Task, Done\n\
+</tools>\n\
+Call Done(summary) when your work is complete. The harness ignores empty turns.\n\
 <directories>\n\
 Project root:  {project}\n\
 Work root:     {work}\n\
@@ -353,6 +355,24 @@ pub(crate) fn telemetry_enabled() -> bool {
     std::env::var("GREMLINS_TELEMETRY")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false)
+}
+
+/// GREMLINS_ARTIFACT_REMINDER_BUDGET — how many times to nudge when expected
+/// artifacts are missing. Default 3.
+pub(crate) fn artifact_reminder_budget() -> usize {
+    std::env::var("GREMLINS_ARTIFACT_REMINDER_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+}
+
+/// GREMLINS_COMPLETION_NUDGE_BUDGET — how many empty-turn nudges to inject
+/// before giving up. Default 3.
+pub(crate) fn completion_nudge_budget() -> usize {
+    std::env::var("GREMLINS_COMPLETION_NUDGE_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
 }
 
 /// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
@@ -1207,5 +1227,73 @@ mod tests {
             !prompt.contains("<important>") && !prompt.contains("<important>"),
             "child prompt must not inject delegation guidance; got: {prompt}"
         );
+    }
+
+    #[test]
+    fn test_agent_system_prompt_includes_done() {
+        let prompt = agent_system_prompt(
+            Path::new("/work"),
+            Path::new("/scratch"),
+            Path::new("/project"),
+        );
+        assert!(
+            prompt.contains("Task, Done"),
+            "agent prompt must include Done in tool roster; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Call Done(summary) when your work is complete"),
+            "agent prompt must include Done instruction; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_task_system_prompt_includes_done() {
+        let prompt = task_system_prompt(
+            Path::new("/work"),
+            Path::new("/scratch"),
+            Path::new("/project"),
+        );
+        assert!(
+            prompt.contains("Task, Done"),
+            "task prompt must include Done in tool roster; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Call Done(summary) when your work is complete"),
+            "task prompt must include Done instruction; got: {prompt}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Env-var accessor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_artifact_reminder_budget_default() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("GREMLINS_ARTIFACT_REMINDER_BUDGET");
+        assert_eq!(artifact_reminder_budget(), 3);
+    }
+
+    #[test]
+    fn test_artifact_reminder_budget_from_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("GREMLINS_ARTIFACT_REMINDER_BUDGET", "5");
+        assert_eq!(artifact_reminder_budget(), 5);
+        std::env::remove_var("GREMLINS_ARTIFACT_REMINDER_BUDGET");
+    }
+
+    #[test]
+    fn test_completion_nudge_budget_default() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("GREMLINS_COMPLETION_NUDGE_BUDGET");
+        assert_eq!(completion_nudge_budget(), 3);
+    }
+
+    #[test]
+    fn test_completion_nudge_budget_from_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "7");
+        assert_eq!(completion_nudge_budget(), 7);
+        std::env::remove_var("GREMLINS_COMPLETION_NUDGE_BUDGET");
     }
 }

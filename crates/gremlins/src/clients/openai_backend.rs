@@ -203,7 +203,7 @@ impl Backend for OpenAiBackend {
             prefix: prefix.clone(),
             idle_timeout,
             expected_artifact_paths: params.expected_artifact_paths.clone(),
-            reminder_budget: params.artifact_reminder_count,
+            reminder_budget: crate::config::artifact_reminder_budget(),
         };
         *self.last_ctx.lock().unwrap() = Some(ctx.clone());
 
