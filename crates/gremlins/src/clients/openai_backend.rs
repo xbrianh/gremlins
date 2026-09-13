@@ -401,6 +401,25 @@ mod tests {
             ClientError::Runtime { .. }
         ));
 
+        // Status-code based: 3xx, 2xx, 1xx → NOT retryable
+        let http_302 = CompletionError::from_http_response(StatusCode::FOUND, "redirect");
+        assert!(matches!(
+            map_stream_error(http_302),
+            ClientError::Runtime { .. }
+        ));
+        let http_200 =
+            CompletionError::from_http_response(StatusCode::OK, "unexpected success body");
+        assert!(matches!(
+            map_stream_error(http_200),
+            ClientError::Runtime { .. }
+        ));
+        let http_101 =
+            CompletionError::from_http_response(StatusCode::SWITCHING_PROTOCOLS, "protocol");
+        assert!(matches!(
+            map_stream_error(http_101),
+            ClientError::Runtime { .. }
+        ));
+
         // No HTTP status (mid-stream SSE, ProviderError, etc.) → retryable
         let provider_err = CompletionError::ProviderError("something broke".into());
         assert!(matches!(

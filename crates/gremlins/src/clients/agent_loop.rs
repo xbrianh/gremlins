@@ -22,17 +22,19 @@ use super::tools::{self, ToolContext};
 pub(crate) fn map_stream_error(err: CompletionError) -> ClientError {
     if let Some(status) = err.provider_response_status() {
         let code = status.as_u16();
-        // 4xx (except 429) = client error, don't retry
-        if (400..500).contains(&code) && code != 429 {
-            return ClientError::Runtime {
+        // Only retry 5xx and 429.
+        if (500..600).contains(&code) || code == 429 {
+            return ClientError::ApiServerError {
                 message: err.to_string(),
             };
         }
-    } else {
-        // No HTTP status — mid-stream SSE error (e.g. X.AI response.failed).
-        // Retry it; log at WARNING so we can spot provider patterns later.
-        log::warn!("retrying provider error (no HTTP status): {}", err);
+        return ClientError::Runtime {
+            message: err.to_string(),
+        };
     }
+    // No HTTP status — mid-stream SSE error (e.g. X.AI response.failed).
+    // Retry it; log at WARNING so we can spot provider patterns later.
+    log::warn!("retrying provider error (no HTTP status): {}", err);
     ClientError::ApiServerError {
         message: err.to_string(),
     }
