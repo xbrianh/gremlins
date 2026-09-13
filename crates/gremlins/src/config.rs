@@ -367,12 +367,12 @@ pub(crate) fn artifact_reminder_budget() -> usize {
 }
 
 /// GREMLINS_COMPLETION_NUDGE_BUDGET — how many empty-turn nudges to inject
-/// before giving up. Default 3.
+/// before giving up. Default 11.
 pub(crate) fn completion_nudge_budget() -> usize {
     std::env::var("GREMLINS_COMPLETION_NUDGE_BUDGET")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(3)
+        .unwrap_or(11)
 }
 
 /// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
@@ -1286,7 +1286,7 @@ mod tests {
     fn test_completion_nudge_budget_default() {
         let _guard = ENV_MUTEX.lock().unwrap();
         std::env::remove_var("GREMLINS_COMPLETION_NUDGE_BUDGET");
-        assert_eq!(completion_nudge_budget(), 3);
+        assert_eq!(completion_nudge_budget(), 11);
     }
 
     #[test]
