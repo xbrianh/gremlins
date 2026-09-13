@@ -446,10 +446,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     );
                     // Push the Done call + rejection into history so the model sees it.
                     history.push(next_prompt);
-                    history.push(assistant_tool_message(
-                        &text,
-                        &[done_tc.clone()],
-                    ));
+                    history.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
                     history.push(Message::tool_result_with_call_id(
                         done_tc.id.clone(),
                         done_tc.call_id.clone(),
@@ -558,23 +555,21 @@ async fn run_agent_loop_core<M: CompletionModel>(
             }
 
             // Empty turn — nudge if budget remains, otherwise fall through to final.
-            if !text.is_empty() {
-                if completion_nudge_budget > 0 {
-                    completion_nudge_budget -= 1;
-                    log::info!(
-                        target: "_gremlins_core.clients.agent_loop",
-                        "empty turn — nudging agent (remaining_budget={})",
-                        completion_nudge_budget,
-                    );
-                    history.push(next_prompt);
-                    history.push(assistant_tool_message(&text, &[]));
-                    next_prompt = Message::user(
-                        "You produced text but no tool calls. If your work is complete, \
-                         call the Done tool. If you still need to make changes, use the \
-                         appropriate tool now."
-                    );
-                    continue;
-                }
+            if !text.is_empty() && completion_nudge_budget > 0 {
+                completion_nudge_budget -= 1;
+                log::info!(
+                    target: "_gremlins_core.clients.agent_loop",
+                    "empty turn — nudging agent (remaining_budget={})",
+                    completion_nudge_budget,
+                );
+                history.push(next_prompt);
+                history.push(assistant_tool_message(&text, &[]));
+                next_prompt = Message::user(
+                    "You produced text but no tool calls. If your work is complete, \
+                     call the Done tool. If you still need to make changes, use the \
+                     appropriate tool now.",
+                );
+                continue;
             }
             // Budget exhausted or empty text — fall through to final.
             if !nested {
@@ -894,6 +889,10 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
 mod tests {
     use super::*;
     use rig_core::message::UserContent;
+    use std::sync::Mutex as StdMutex;
+
+    // Serialize env-var tests to prevent races.
+    static ENV_MUTEX: StdMutex<()> = StdMutex::new(());
 
     #[test]
     fn event_shapes() {
@@ -1746,7 +1745,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "0");
+        {
+            let _guard = ENV_MUTEX.lock().unwrap();
+            std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "0");
+        }
         let target = dir.join("never-written.md");
 
         // Turn 1: text-only → reminder injected.
@@ -1825,7 +1827,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "0");
+        {
+            let _guard = ENV_MUTEX.lock().unwrap();
+            std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "0");
+        }
 
         let over = tools::TASK_MAX_PER_TURN + 1;
         let mut turn = Vec::new();

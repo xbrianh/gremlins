@@ -1456,10 +1456,7 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
             }
         }
         "Done" => {
-            let summary = args
-                .get("summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
             format!("Done. {summary}")
         }
         other => format!("Error: unknown tool {other}"),
@@ -1623,7 +1620,8 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         name: "Done".into(),
         description: "Signal that your work is complete. The harness ignores empty \
 turns — you must call Done to finish. Provide a brief summary of what you \
-accomplished.".into(),
+accomplished."
+            .into(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
