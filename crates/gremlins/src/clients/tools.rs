@@ -1618,9 +1618,8 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
     // Task is always available, even when a tool filter is set.
     all.push(ToolDefinition {
         name: "Done".into(),
-        description: "Signal that your work is complete. The harness ignores empty \
-turns — you must call Done to finish. Provide a brief summary of what you \
-accomplished."
+        description: "Signal that your work is complete — call Done(summary) alongside your final \
+message to finish. The summary parameter briefly describes what you accomplished."
             .into(),
         parameters: serde_json::json!({
             "type": "object",

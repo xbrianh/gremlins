@@ -27,7 +27,7 @@ Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Task, Done\n\
 </tools>\n\
-Call Done(summary) when your work is complete. The harness ignores empty turns.\n\
+Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Project root:  {project}\n\
 Work root:     {work}\n\
@@ -55,7 +55,7 @@ Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Task, Done\n\
 </tools>\n\
-Call Done(summary) when your work is complete. The harness ignores empty turns.\n\
+Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Project root:  {project}\n\
 Work root:     {work}\n\
@@ -1241,7 +1241,7 @@ mod tests {
             "agent prompt must include Done in tool roster; got: {prompt}"
         );
         assert!(
-            prompt.contains("Call Done(summary) when your work is complete"),
+            prompt.contains("Call Done(summary) alongside your final message"),
             "agent prompt must include Done instruction; got: {prompt}"
         );
     }
@@ -1258,7 +1258,7 @@ mod tests {
             "task prompt must include Done in tool roster; got: {prompt}"
         );
         assert!(
-            prompt.contains("Call Done(summary) when your work is complete"),
+            prompt.contains("Call Done(summary) alongside your final message"),
             "task prompt must include Done instruction; got: {prompt}"
         );
     }
