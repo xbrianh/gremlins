@@ -428,72 +428,140 @@ async fn run_agent_loop_core<M: CompletionModel>(
         turn_num += 1;
 
         // Check for explicit Done — the only valid completion signal.
+        // Done must be the sole tool call in a turn; mixing it with other
+        // calls (e.g. Write + Done) is rejected so non-Done work isn't
+        // silently dropped when parallel tool calls are enabled.
+        let has_non_done = tool_calls.iter().any(|tc| tc.function.name != "Done");
         let done_call = tool_calls.iter().find(|tc| tc.function.name == "Done");
-        if let Some(done_tc) = done_call {
-            // Verify expected artifacts before accepting completion.
-            if !nested && !expected_artifact_paths.is_empty() {
-                let missing: Vec<&PathBuf> = expected_artifact_paths
-                    .iter()
-                    .filter(|p| !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0)
-                    .collect();
-                if !missing.is_empty() {
-                    // Inject a reminder instead of accepting Done.
-                    let paths: Vec<String> = missing
-                        .iter()
-                        .map(|p| format!("  - {}", p.display()))
-                        .collect();
-                    let reminder = format!(
-                        "Done rejected: the following expected files were not written:\n{}\n\
-                         Write each file using the Write tool, then call Done.",
-                        paths.join("\n")
-                    );
-                    // Push the Done call + rejection into history so the model sees it.
-                    history.push(next_prompt);
-                    history.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
-                    history.push(Message::tool_result_with_call_id(
-                        done_tc.id.clone(),
-                        done_tc.call_id.clone(),
-                        reminder.clone(),
-                    ));
-                    next_prompt = Message::user(reminder);
-                    // Continue the loop — do not return.
-                    continue;
-                }
-            }
 
-            // Expected artifacts satisfied (or none expected) — accept completion.
-            if !nested {
-                stream::flush();
-                emit_final(prefix, turns, "");
-                stream::emit_summary(
-                    prefix,
-                    turn_num,
-                    loop_start,
-                    total_prompt_tokens,
-                    total_completion_tokens,
-                    total_cached_tokens,
-                    total_cache_creation_tokens,
-                    total_reasoning_tokens,
-                );
+        // Capture Done for error injection when it's mixed with other tools.
+        let mixed_done: Option<ToolCall> = if done_call.is_some() && has_non_done {
+            done_call.cloned()
+        } else {
+            None
+        };
+
+        // Solo Done — accept or reject based on artifact validation.
+        if let Some(done_tc) = done_call {
+            if !has_non_done {
+                // Verify expected artifacts before accepting completion.
+                if !nested && !expected_artifact_paths.is_empty() {
+                    let missing: Vec<&PathBuf> = expected_artifact_paths
+                        .iter()
+                        .filter(|p| !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0)
+                        .collect();
+                    if !missing.is_empty() {
+                        // Done was rejected — count against reminder_budget.
+                        if reminder_budget > 0 {
+                            reminder_budget -= 1;
+                        } else {
+                            // Budget exhausted — exit the loop.
+                            history.push(next_prompt);
+                            history
+                                .push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                            if !nested {
+                                stream::flush();
+                                emit_final(prefix, turns, " (exhausted)");
+                                stream::emit_summary(
+                                    prefix,
+                                    turn_num,
+                                    loop_start,
+                                    total_prompt_tokens,
+                                    total_completion_tokens,
+                                    total_cached_tokens,
+                                    total_cache_creation_tokens,
+                                    total_reasoning_tokens,
+                                );
+                            }
+                            return Ok(CompletedRun {
+                                exit_code: 0,
+                                text_result: Some(final_text.clone()),
+                                events: captured.clone(),
+                                cost_usd: None,
+                                token_usage: Some(UsageStats {
+                                    prompt_tokens: total_prompt_tokens,
+                                    completion_tokens: total_completion_tokens,
+                                    cached_input_tokens: total_cached_tokens,
+                                    cache_creation_input_tokens: total_cache_creation_tokens,
+                                    reasoning_tokens: total_reasoning_tokens,
+                                    turns: turn_num,
+                                }),
+                            });
+                        }
+
+                        let paths: Vec<String> = missing
+                            .iter()
+                            .map(|p| format!("  - {}", p.display()))
+                            .collect();
+                        let reminder = format!(
+                            "Done rejected: the following expected files were not written:\n{}\n\
+                             Write each file using the Write tool, then call Done.",
+                            paths.join("\n")
+                        );
+                        // Push the Done call + rejection into history so the model sees it.
+                        history.push(next_prompt);
+                        history.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                        history.push(Message::tool_result_with_call_id(
+                            done_tc.id.clone(),
+                            done_tc.call_id.clone(),
+                            reminder.clone(),
+                        ));
+                        next_prompt = Message::user(reminder);
+                        continue;
+                    }
+                }
+
+                // Expected artifacts satisfied (or none expected) — accept completion.
+                // Use the Done summary as text_result so downstream consumers
+                // (bail/output handling) see the completion summary.
+                let summary = done_tc
+                    .function
+                    .arguments
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let result_text = if text.trim().is_empty() && !summary.is_empty() {
+                    summary
+                } else {
+                    text.clone()
+                };
+
+                if !nested {
+                    stream::flush();
+                    emit_final(prefix, turns, "");
+                    stream::emit_summary(
+                        prefix,
+                        turn_num,
+                        loop_start,
+                        total_prompt_tokens,
+                        total_completion_tokens,
+                        total_cached_tokens,
+                        total_cache_creation_tokens,
+                        total_reasoning_tokens,
+                    );
+                }
+                return Ok(CompletedRun {
+                    exit_code: 0,
+                    text_result: Some(result_text),
+                    events: captured.clone(),
+                    cost_usd: None,
+                    token_usage: Some(UsageStats {
+                        prompt_tokens: total_prompt_tokens,
+                        completion_tokens: total_completion_tokens,
+                        cached_input_tokens: total_cached_tokens,
+                        cache_creation_input_tokens: total_cache_creation_tokens,
+                        reasoning_tokens: total_reasoning_tokens,
+                        turns: turn_num,
+                    }),
+                });
             }
-            return Ok(CompletedRun {
-                exit_code: 0,
-                text_result: Some(text),
-                events: captured.clone(),
-                cost_usd: None,
-                token_usage: Some(UsageStats {
-                    prompt_tokens: total_prompt_tokens,
-                    completion_tokens: total_completion_tokens,
-                    cached_input_tokens: total_cached_tokens,
-                    cache_creation_input_tokens: total_cache_creation_tokens,
-                    reasoning_tokens: total_reasoning_tokens,
-                    turns: turn_num,
-                }),
-            });
         }
 
         // Tool calls from this point forward are for execution only — Done
-        // was handled above. Filter Done out so it never reaches invoke().
+        // was handled above (accepted or rejected). Filter Done out so it
+        // never reaches invoke(). When Done was mixed with other tools, the
+        // error is injected after tool results below.
         let tool_calls: Vec<ToolCall> = tool_calls
             .into_iter()
             .filter(|tc| tc.function.name != "Done")
@@ -565,13 +633,21 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     "empty turn — nudging agent (remaining_budget={})",
                     completion_nudge_budget,
                 );
+                // Record the nudge in raw and captured streams so the
+                // transcript accurately reflects the interaction.
+                let nudge_msg = "You produced text but no tool calls. If your work is complete, \
+                     call the Done tool. If you still need to make changes, use the \
+                     appropriate tool now.";
+                write_raw(
+                    raw,
+                    &serde_json::json!({"type": "reminder", "message": nudge_msg}),
+                );
+                if let Some(evts) = captured.as_mut() {
+                    evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
+                }
                 history.push(next_prompt);
                 history.push(assistant_tool_message(&text, &[]));
-                next_prompt = Message::user(
-                    "You produced text but no tool calls. If your work is complete, \
-                     call the Done tool. If you still need to make changes, use the \
-                     appropriate tool now.",
-                );
+                next_prompt = Message::user(nudge_msg.to_string());
                 continue;
             }
             // Budget exhausted or empty text — fall through to final.
@@ -683,6 +759,27 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // Every tool result lands in history so the results stay adjacent to the
         // assistant tool_calls message; the ledger becomes the next turn's prompt,
         // trailing the complete result block instead of splitting it.
+        // If Done was mixed with other tool calls, inject a Done error
+        // result so the model sees the rejection.
+        if let Some(done_tc) = &mixed_done {
+            let error_msg = "Error: Done must be called alone — do not combine Done with other \
+                 tool calls in the same message. Re-issue your tool calls without \
+                 Done, then call Done by itself when finished.";
+            stream::emit_result(prefix, error_msg, false);
+            if !nested {
+                let result_evt = tool_result_event(&done_tc.id, error_msg);
+                write_raw(raw, &result_evt);
+                if let Some(evts) = captured.as_mut() {
+                    evts.push(result_evt);
+                }
+            }
+            ledger.push(ledger_line("Done", "", error_msg));
+            result_msgs.push(Message::tool_result_with_call_id(
+                done_tc.id.clone(),
+                done_tc.call_id.clone(),
+                error_msg,
+            ));
+        }
         history.extend(result_msgs);
         next_prompt = Message::user(ledger_message(&ledger));
     }
@@ -1774,6 +1871,137 @@ mod tests {
         // Returns normally — file is still missing (Python verify_produced catches it).
         assert_eq!(result.text_result.as_deref(), Some("still no write"));
         assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn completion_nudge_then_done() {
+        // Positive completion-nudge budget: text-only turn gets a nudge,
+        // model responds with Done on the next turn.
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-nudge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Turn 1: text-only → triggers completion nudge.
+        // Turn 2: Done call → completes.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("thinking..."),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("all done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "completed task"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.completion_nudge_budget = 1;
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(&model, "do it", &ctx, cancel, loop_opts(None))
+            .await
+            .unwrap();
+        // Done succeeds; text is non-empty so it's the result.
+        assert_eq!(result.text_result.as_deref(), Some("all done"));
+        // Two requests: initial turn + post-nudge turn.
+        assert_eq!(model.requests().len(), 2);
+        // Verify the nudge was recorded in captured events.
+        let events = result.events.unwrap();
+        let nudge_evt = events.iter().find(|e| {
+            e["type"] == "reminder"
+                && e["message"]
+                    .as_str()
+                    .map_or(false, |m| m.contains("call the Done tool"))
+        });
+        assert!(
+            nudge_evt.is_some(),
+            "completion nudge must appear in captured events"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_done_with_other_tools_is_rejected() {
+        // Done mixed with other tool calls in the same turn must be
+        // rejected with an error while the other tools still execute.
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-mixed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("out.txt");
+
+        // Turn 1: Write + Done mixed in one turn.
+        // Turn 2: Done solo → completes.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Write",
+                    serde_json::json!({
+                        "file_path": target.to_str().unwrap(),
+                        "content": "hello"
+                    }),
+                ),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "mixed"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("fixed"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done2",
+                    "Done",
+                    serde_json::json!({"summary": "done after fix"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
+            .await
+            .unwrap();
+        // Write still executed; text_result is the model's text (not Done summary,
+        // since text was non-empty).
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+        assert_eq!(result.text_result.as_deref(), Some("fixed"));
+        // Verify the Done error appears in captured events.
+        let events = result.events.unwrap();
+        let done_error = events.iter().find(|e| {
+            e["message"]["content"][0]["type"] == "tool_result"
+                && e["message"]["content"][0]["tool_use_id"] == "done1"
+        });
+        assert!(
+            done_error.is_some(),
+            "Done error must appear in captured events"
+        );
+        let content = done_error.unwrap()["message"]["content"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            content.contains("Done must be called alone"),
+            "Done error must state the rule; got: {content}"
+        );
     }
 
     #[tokio::test]
