@@ -80,6 +80,7 @@ pub(crate) struct RunContext {
     pub(crate) idle_timeout: f64,
     pub(crate) expected_artifact_paths: Vec<PathBuf>,
     pub(crate) reminder_budget: usize,
+    pub(crate) completion_nudge_budget: usize,
 }
 
 pub(crate) struct LoopOpts<'a> {
@@ -173,6 +174,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         prefix.clone(),
         idle_timeout,
         max_turns,
+        ctx.completion_nudge_budget,
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -192,6 +194,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         false,
         &ctx.expected_artifact_paths,
         ctx.reminder_budget,
+        ctx.completion_nudge_budget,
     )
     .await
 }
@@ -211,6 +214,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     prefix: &str,
     idle_timeout: f64,
     max_turns: usize,
+    completion_nudge_budget: usize,
 ) -> Result<CompletedRun, ClientError> {
     eprintln!(
         "{} {}task: begin (max_turns={})",
@@ -241,6 +245,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         true,
         &[],
         0,
+        completion_nudge_budget,
     )
     .await;
     eprintln!("{} {}task: end", stream::ts_internal(), prefix);
@@ -264,6 +269,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
     nested: bool,
     expected_artifact_paths: &[PathBuf],
     mut reminder_budget: usize,
+    mut completion_nudge_budget: usize,
 ) -> Result<CompletedRun, ClientError> {
     let mut history: Vec<Message> = Vec::new();
     let mut next_prompt = Message::user(prompt.to_string());
@@ -421,6 +427,155 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         turn_num += 1;
 
+        // Check for explicit Done — the only valid completion signal.
+        // Done must be the sole tool call in a turn; mixing it with other
+        // calls (e.g. Write + Done) makes the turn incoherent.  Reject the
+        // whole turn so the model retries cleanly.
+        let has_non_done = tool_calls.iter().any(|tc| tc.function.name != "Done");
+        let done_call = tool_calls.iter().find(|tc| tc.function.name == "Done");
+
+        if let Some(done_tc) = done_call {
+            if has_non_done {
+                // Mixed Done — reject immediately, do not execute any tools.
+                history.push(next_prompt);
+                history.push(assistant_tool_message(&text, &tool_calls));
+                history.push(Message::tool_result_with_call_id(
+                    done_tc.id.clone(),
+                    done_tc.call_id.clone(),
+                    "Error: Done must be called alone — do not combine Done with other \
+                     tool calls in the same message. Re-issue your tool calls without \
+                     Done, then call Done by itself when finished.",
+                ));
+                next_prompt = Message::user(
+                    "Done was rejected because it was combined with other tool calls. \
+                     Try again — this time either use tools, or call Done. Never both.",
+                );
+                continue;
+            }
+            // Solo Done — accept or reject based on artifact validation.
+            {
+                // Verify expected artifacts before accepting completion.
+                if !nested && !expected_artifact_paths.is_empty() {
+                    let missing: Vec<&PathBuf> = expected_artifact_paths
+                        .iter()
+                        .filter(|p| !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0)
+                        .collect();
+                    if !missing.is_empty() {
+                        // Done was rejected — count against reminder_budget.
+                        if reminder_budget > 0 {
+                            reminder_budget -= 1;
+                        } else {
+                            // Budget exhausted — exit the loop.
+                            history.push(next_prompt);
+                            history
+                                .push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                            if !nested {
+                                stream::flush();
+                                emit_final(prefix, turns, " (exhausted)");
+                                stream::emit_summary(
+                                    prefix,
+                                    turn_num,
+                                    loop_start,
+                                    total_prompt_tokens,
+                                    total_completion_tokens,
+                                    total_cached_tokens,
+                                    total_cache_creation_tokens,
+                                    total_reasoning_tokens,
+                                );
+                            }
+                            return Ok(CompletedRun {
+                                exit_code: 0,
+                                text_result: Some(final_text.clone()),
+                                events: captured.clone(),
+                                cost_usd: None,
+                                token_usage: Some(UsageStats {
+                                    prompt_tokens: total_prompt_tokens,
+                                    completion_tokens: total_completion_tokens,
+                                    cached_input_tokens: total_cached_tokens,
+                                    cache_creation_input_tokens: total_cache_creation_tokens,
+                                    reasoning_tokens: total_reasoning_tokens,
+                                    turns: turn_num,
+                                }),
+                            });
+                        }
+
+                        let paths: Vec<String> = missing
+                            .iter()
+                            .map(|p| format!("  - {}", p.display()))
+                            .collect();
+                        let reminder = format!(
+                            "Done rejected: the following expected files were not written:\n{}\n\
+                             Write each file using the Write tool, then call Done.",
+                            paths.join("\n")
+                        );
+                        // Push the Done call + rejection into history so the model sees it.
+                        history.push(next_prompt);
+                        history.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                        history.push(Message::tool_result_with_call_id(
+                            done_tc.id.clone(),
+                            done_tc.call_id.clone(),
+                            reminder.clone(),
+                        ));
+                        next_prompt = Message::user(reminder);
+                        continue;
+                    }
+                }
+
+                // Expected artifacts satisfied (or none expected) — accept completion.
+                // Use the Done summary as text_result so downstream consumers
+                // (bail/output handling) see the completion summary.
+                let summary = done_tc
+                    .function
+                    .arguments
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let result_text = if text.trim().is_empty() && !summary.is_empty() {
+                    summary
+                } else {
+                    text.clone()
+                };
+
+                if !nested {
+                    stream::flush();
+                    emit_final(prefix, turns, "");
+                    stream::emit_summary(
+                        prefix,
+                        turn_num,
+                        loop_start,
+                        total_prompt_tokens,
+                        total_completion_tokens,
+                        total_cached_tokens,
+                        total_cache_creation_tokens,
+                        total_reasoning_tokens,
+                    );
+                }
+                return Ok(CompletedRun {
+                    exit_code: 0,
+                    text_result: Some(result_text),
+                    events: captured.clone(),
+                    cost_usd: None,
+                    token_usage: Some(UsageStats {
+                        prompt_tokens: total_prompt_tokens,
+                        completion_tokens: total_completion_tokens,
+                        cached_input_tokens: total_cached_tokens,
+                        cache_creation_input_tokens: total_cache_creation_tokens,
+                        reasoning_tokens: total_reasoning_tokens,
+                        turns: turn_num,
+                    }),
+                });
+            }
+        }
+
+        // Tool calls from this point forward are for execution only — Done
+        // was handled above (accepted or rejected). Filter Done out so it
+        // never reaches invoke().
+        let tool_calls: Vec<ToolCall> = tool_calls
+            .into_iter()
+            .filter(|tc| tc.function.name != "Done")
+            .collect();
+
         if tool_calls.is_empty() {
             // Check for missing expected artifacts — inject a reminder if budget remains.
             // Only inject when the model wrote text this turn (no point reminding if
@@ -479,9 +634,35 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 }
             }
 
+            // Empty turn — nudge if budget remains, otherwise fall through to final.
+            if !text.is_empty() && completion_nudge_budget > 0 {
+                completion_nudge_budget -= 1;
+                log::info!(
+                    target: "_gremlins_core.clients.agent_loop",
+                    "empty turn — nudging agent (remaining_budget={})",
+                    completion_nudge_budget,
+                );
+                // Record the nudge in raw and captured streams so the
+                // transcript accurately reflects the interaction.
+                let nudge_msg = "You produced text but no tool calls. If your work is complete, \
+                     call the Done tool. If you still need to make changes, use the \
+                     appropriate tool now.";
+                write_raw(
+                    raw,
+                    &serde_json::json!({"type": "reminder", "message": nudge_msg}),
+                );
+                if let Some(evts) = captured.as_mut() {
+                    evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
+                }
+                history.push(next_prompt);
+                history.push(assistant_tool_message(&text, &[]));
+                next_prompt = Message::user(nudge_msg.to_string());
+                continue;
+            }
+            // Budget exhausted or empty text — fall through to final.
             if !nested {
                 stream::flush();
-                emit_final(prefix, turns, "");
+                emit_final(prefix, turns, " (exhausted)");
                 stream::emit_summary(
                     prefix,
                     turn_num,
@@ -908,13 +1089,13 @@ mod tests {
                 idle_timeout: Some(0.05),
                 extra_env: None,
                 expected_artifact_paths: vec![],
-                artifact_reminder_count: 0,
                 system_prompt: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
             expected_artifact_paths: vec![],
             reminder_budget: 0,
+            completion_nudge_budget: 0,
         }
     }
 
@@ -991,6 +1172,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("wrote it"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1041,6 +1227,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("saw it"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1096,6 +1287,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("blocked"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1152,6 +1348,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("ok"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1202,6 +1403,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("both read"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1276,6 +1482,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1343,6 +1554,11 @@ mod tests {
 
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
             rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let mut ctx = test_ctx(Some(dir.clone()), None);
@@ -1380,6 +1596,11 @@ mod tests {
 
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
             rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let mut ctx = test_ctx(Some(dir.clone()), None);
@@ -1426,6 +1647,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1496,6 +1722,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1544,6 +1775,11 @@ mod tests {
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
             vec![
                 rig_core::test_utils::MockStreamEvent::text("here is the content"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
             vec![
@@ -1559,6 +1795,11 @@ mod tests {
             ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
@@ -1567,6 +1808,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.expected_artifact_paths = vec![target.clone()];
         ctx.reminder_budget = 1;
+        ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
             .await
@@ -1592,7 +1834,8 @@ mod tests {
         let target = dir.join("never-written.md");
 
         // Turn 1: text-only → reminder injected.
-        // Turn 2: text-only again → budget exhausted, returns normally.
+        // Turn 2: text-only again → budget exhausted (reminder + nudge both 0),
+        // falls through and returns.
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
             vec![
                 rig_core::test_utils::MockStreamEvent::text("first try"),
@@ -1608,6 +1851,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.expected_artifact_paths = vec![target.clone()];
         ctx.reminder_budget = 1;
+        ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
             .await
@@ -1615,6 +1859,150 @@ mod tests {
         // Returns normally — file is still missing (Python verify_produced catches it).
         assert_eq!(result.text_result.as_deref(), Some("still no write"));
         assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn completion_nudge_then_done() {
+        // Positive completion-nudge budget: text-only turn gets a nudge,
+        // model responds with Done on the next turn.
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-nudge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Turn 1: text-only → triggers completion nudge.
+        // Turn 2: Done call → completes.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("thinking..."),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("all done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "completed task"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.completion_nudge_budget = 1;
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(&model, "do it", &ctx, cancel, loop_opts(None))
+            .await
+            .unwrap();
+        // Done succeeds; text is non-empty so it's the result.
+        assert_eq!(result.text_result.as_deref(), Some("all done"));
+        // Two requests: initial turn + post-nudge turn.
+        assert_eq!(model.requests().len(), 2);
+        // Verify the nudge was recorded in captured events.
+        let events = result.events.unwrap();
+        let nudge_evt = events.iter().find(|e| {
+            e["type"] == "reminder"
+                && e["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("call the Done tool"))
+        });
+        assert!(
+            nudge_evt.is_some(),
+            "completion nudge must appear in captured events"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_done_with_other_tools_is_rejected() {
+        // Done mixed with other tool calls in the same turn must be
+        // rejected with an error; no tools from that turn may execute.
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-mixed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("out.txt");
+
+        // Turn 1: Write + Done mixed → rejected, nothing executes.
+        // Turn 2: Write solo → writes the file.
+        // Turn 3: Done solo → completes.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Write",
+                    serde_json::json!({
+                        "file_path": target.to_str().unwrap(),
+                        "content": "hello"
+                    }),
+                ),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "mixed"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c2",
+                    "Write",
+                    serde_json::json!({
+                        "file_path": target.to_str().unwrap(),
+                        "content": "hello"
+                    }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done2",
+                    "Done",
+                    serde_json::json!({"summary": "done after fix"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
+            .await
+            .unwrap();
+        // File was written on the retry, not in the mixed turn.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+        assert_eq!(result.text_result.as_deref(), Some("done"));
+        // The Done error was recorded in captured events.
+        let events = result.events.unwrap();
+        let done_error = events.iter().find(|e| {
+            e["message"]["content"][0]["type"] == "tool_result"
+                && e["message"]["content"][0]["tool_use_id"] == "done1"
+        });
+        assert!(
+            done_error.is_none(),
+            "mixed-turn Done does not produce a captured tool result — the rejection is in history only"
+        );
+        // The Write also did not produce a captured event from the mixed turn.
+        assert!(
+            !events.iter().any(|e| {
+                e["message"]["content"][0]
+                    .get("tool_use_id")
+                    .is_some_and(|id| id == "c1")
+            }),
+            "mixed-turn Write must not appear in captured events"
+        );
     }
 
     #[tokio::test]
@@ -1631,6 +2019,11 @@ mod tests {
 
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
             rig_core::test_utils::MockStreamEvent::text("just text"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let mut ctx = test_ctx(Some(dir.clone()), None);
@@ -1678,6 +2071,11 @@ mod tests {
         turns.extend((0..over + 1).map(|_| {
             vec![
                 rig_core::test_utils::MockStreamEvent::text("ok"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ]
         }));

@@ -50,6 +50,7 @@ fn task_prefix(base: &str, chain: &str) -> String {
 /// injects a child runner at `depth + 1` into the sub-context, so N sibling
 /// tasks launched from one parent all share the same depth and never
 /// exhaust the bound between them. Only genuine nesting increments depth.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: M,
     tool_filter: Option<Vec<String>>,
@@ -58,6 +59,7 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
     prefix: String,
     idle_timeout: f64,
     max_turns: usize,
+    completion_nudge_budget: usize,
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
@@ -69,6 +71,7 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
         max_turns,
         0,
         String::new(),
+        completion_nudge_budget,
     )
 }
 
@@ -83,6 +86,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
     max_turns: usize,
     depth: u32,
     id_chain: String,
+    completion_nudge_budget: usize,
 ) -> tools::TaskFn {
     Arc::new(move |_description: String, task: String| {
         let model = model.clone();
@@ -115,6 +119,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 max_turns,
                 depth + 1,
                 new_chain,
+                completion_nudge_budget,
             ));
 
             let scratch = crate::config::scratch_dir(None)
@@ -135,6 +140,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 &child_prefix,
                 idle_timeout,
                 max_turns,
+                completion_nudge_budget,
             )
             .await;
 
@@ -215,7 +221,7 @@ mod tests {
         ]]);
 
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_task_runner(model.clone(), None, cancel, ctx, String::new(), 5.0, 10);
+        let runner = make_task_runner(model.clone(), None, cancel, ctx, String::new(), 5.0, 10, 0);
 
         // First invocation: depth 0 < 3, should succeed.
         let output = runner("label".into(), "first call".into()).await;
@@ -283,7 +289,7 @@ mod tests {
         // Hangs forever so all siblings overlap in time.
         let model = PendingModel;
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_task_runner(model, None, cancel, ctx, String::new(), 0.2, 10);
+        let runner = make_task_runner(model, None, cancel, ctx, String::new(), 0.2, 10, 0);
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
         // "max depth" even though they overlap in time.
@@ -316,6 +322,7 @@ mod tests {
             10,
             MAX_DEPTH,
             String::new(),
+            0,
         );
 
         let blocked = runner("label".into(), "too deep".into()).await;
@@ -477,6 +484,7 @@ mod tests {
                 TEST_BASE.to_string(),
                 5.0,
                 10,
+                0,
             )
         }
 
