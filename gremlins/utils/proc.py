@@ -6,10 +6,14 @@ import logging
 import os
 import pathlib
 import re
-import subprocess
 import sys
 from typing import Any
 
+from _gremlins_core.utils.proc import (
+    CalledProcessError,
+    ProcResult,
+    TimeoutExpired,
+)
 from _gremlins_core.utils.proc import (
     run as _run,
 )
@@ -45,35 +49,33 @@ def run(
     check: bool = False,
     text: bool = True,
     timeout: float | None = None,
-) -> subprocess.CompletedProcess[str]:
+) -> ProcResult:
     try:
         r = _run(cmd, cwd=_to_str(cwd), check=check, timeout=timeout)
-    except subprocess.CalledProcessError as e:
+    except CalledProcessError as e:
         if text:
-            raise subprocess.CalledProcessError(
-                e.returncode,
-                e.cmd,
-                e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout,
-                e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr,
-            ) from None
+            e.cmd = _decode(e.cmd)
+            e.stdout = _decode(e.stdout)
+            e.stderr = _decode(e.stderr)
         raise
-    except subprocess.TimeoutExpired as e:
+    except TimeoutExpired as e:
         if text:
-            raise subprocess.TimeoutExpired(
-                e.cmd,
-                e.timeout,
-                e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout,
-                e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr,
-            ) from None
+            e.cmd = _decode(e.cmd)
+            e.stdout = _decode(e.stdout)
+            e.stderr = _decode(e.stderr)
         raise
     if text:
-        return subprocess.CompletedProcess(
+        return ProcResult(
             r.args if r.args is not None else cmd,
             r.returncode,
             r.stdout.decode(),
             r.stderr.decode(),
         )
-    return r  # type: ignore[return-value]
+    return r
+
+
+def _decode(v: Any) -> Any:
+    return v.decode() if isinstance(v, bytes) else v
 
 
 def _to_str(p: str | os.PathLike[str] | None) -> str | None:
@@ -92,7 +94,7 @@ def run_ok(cmd: list[str], *, cwd: str | os.PathLike[str] | None = None) -> bool
 
 def run_quiet(
     cmd: list[str], *, cwd: str | os.PathLike[str] | None = None
-) -> subprocess.CompletedProcess[str]:
+) -> ProcResult:
     return _run_quiet(cmd, cwd=_to_str(cwd))
 
 
@@ -104,7 +106,7 @@ async def run_async(
     text: bool = True,
     timeout: float | None = None,
     env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+) -> ProcResult:
     return await _run_async(
         cmd, cwd=_to_str(cwd), check=check, text=text, timeout=timeout, env=env
     )
@@ -116,10 +118,10 @@ async def run_shell_async(
     cwd: str | os.PathLike[str] | None = None,
     env: dict[str, str] | None = None,
     timeout: float | None = None,
-) -> subprocess.CompletedProcess[str]:
+) -> ProcResult:
     """Run a shell command string asynchronously.
 
-    Returns subprocess.CompletedProcess with decoded stdout and stderr.
+    Returns ProcResult with decoded stdout and stderr.
     On timeout, returns rc=124 with a timeout message appended to stderr.
     """
     return await _run_shell_async(cmd, cwd=_to_str(cwd), env=env, timeout=timeout)

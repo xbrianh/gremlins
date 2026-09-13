@@ -1,6 +1,5 @@
-import subprocess
-
 import pytest
+from _gremlins_core.utils.proc import CalledProcessError, TimeoutExpired
 
 from gremlins.utils import proc
 
@@ -16,7 +15,7 @@ def test_run_failure_no_raise():
 
 
 def test_run_check_raises():
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(CalledProcessError):
         proc.run(["false"], check=True)
 
 
@@ -60,18 +59,18 @@ def test_run_or_raise_returns_stripped_stdout():
 
 
 def test_run_or_raise_raises_on_failure():
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(CalledProcessError):
         proc.run_or_raise(["false"])
 
 
 def test_run_timeout_raises():
-    with pytest.raises(subprocess.TimeoutExpired) as exc:
+    with pytest.raises(TimeoutExpired) as exc:
         proc.run(["sleep", "10"], timeout=0.05)
-    assert exc.exconly().startswith("subprocess.TimeoutExpired")
+    assert "TimeoutExpired" in exc.exconly()
 
 
 def test_run_timeout_with_partial_output():
-    with pytest.raises(subprocess.TimeoutExpired) as exc:
+    with pytest.raises(TimeoutExpired) as exc:
         proc.run(
             ["sh", "-c", "echo start; sleep 10"],
             timeout=0.1,
@@ -81,7 +80,7 @@ def test_run_timeout_with_partial_output():
 
 def test_run_timeout_large_output():
     """Output larger than pipe buffer (~64KB) under timeout must not deadlock."""
-    with pytest.raises(subprocess.TimeoutExpired) as exc:
+    with pytest.raises(TimeoutExpired) as exc:
         proc.run(
             ["sh", "-c", "dd if=/dev/zero bs=131072 count=1 2>/dev/null; sleep 10"],
             timeout=0.2,

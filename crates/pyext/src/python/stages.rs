@@ -18,6 +18,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple, PyType};
 
 use crate::python::artifacts::ArtifactRegistry;
+use crate::python::executor::{PyState, PyStateData};
 use crate::python::json_conv::{py_to_value as py_to_json, value_to_py as json_value_to_py};
 use crate::schemas::loader;
 
@@ -356,11 +357,9 @@ impl PyExec {
             rust_exec::commit_exec(&prepared, &mut inner)
                 .map_err(|e| Bail::new_err(e.to_string()))?;
 
-            let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
-            let asyncio_mod = py.import("asyncio")?;
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("result", done_obj)?;
-            return asyncio_mod.call_method("sleep", (0.0,), Some(&kwargs));
+            return pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
+                Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()))
+            });
         }
 
         // Resolve shell hook: per-instance _shell_fn (test seam).
@@ -1331,55 +1330,90 @@ fn child_state_py(
     // A child's explicitly-set client wins; otherwise inherit the parent's.
     let child_client = child.getattr("client")?;
     let child_explicit: bool = child.getattr("client_explicit")?.extract()?;
-    let client = if !child_client.is_none() && child_explicit {
-        child_client
+    let client: Py<PyAny> = if !child_client.is_none() && child_explicit {
+        child_client.unbind()
     } else {
-        parent.getattr("client")?
+        parent.getattr("client")?.unbind()
     };
 
-    let replace = py.import("dataclasses")?.getattr("replace")?;
+    let data: Py<PyStateData> = parent.getattr("data")?.extract()?;
+    let artifact_dir: PathBuf = parent.getattr("artifact_dir")?.extract()?;
+    let artifacts: Py<PyAny> = parent.getattr("artifacts")?.extract()?;
+    let cwd: String = parent.getattr("cwd")?.extract()?;
+    let args: Py<PyAny> = parent.getattr("args")?.extract()?;
+    let pipeline_data: Option<Py<PyAny>> = parent.getattr("pipeline_data")?.extract()?;
+    let current_scope_py: Py<PyList> = parent.getattr("current_scope")?.extract()?;
+    let child_key: Option<String> = parent.getattr("child_key")?.extract()?;
+    let parent_stage: String = parent.getattr("parent_stage")?.extract()?;
+    let worktree: Option<PathBuf> = parent.getattr("worktree")?.extract()?;
+    let worktree_parent: Option<PathBuf> = parent.getattr("worktree_parent")?.extract()?;
+    let base_ref: String = parent.getattr("base_ref")?.extract()?;
+    let loop_stack_py: Py<PyList> = parent.getattr("loop_stack")?.extract()?;
+
+    let (artifact_dir, child_key) = if !fan_out {
+        (artifact_dir, child_key)
+    } else {
+        let child_name: String = child.getattr("name")?.extract()?;
+        let child_scratch: Option<PathBuf> = match child_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(cid) => Some(PathBuf::from(
+                py.import("_gremlins_core.config")?
+                    .getattr("scratch_root")?
+                    .call1((cid,))?
+                    .extract::<String>()?,
+            )),
+            None => None,
+        };
+        let params = compute_child_params(&artifact_dir, &child_name, child_scratch.as_deref());
+        std::fs::create_dir_all(&params.artifact_dir)?;
+        (params.artifact_dir, Some(params.child_key))
+    };
+
+    let current_scope: Vec<Py<PyAny>> = current_scope_py
+        .bind(py)
+        .iter()
+        .map(|item| Ok(item.unbind()))
+        .collect::<PyResult<_>>()?;
+    let loop_stack: Vec<(String, i32)> = loop_stack_py
+        .bind(py)
+        .iter()
+        .map(|item| item.extract())
+        .collect::<PyResult<_>>()?;
+
+    let new_state = Py::new(
+        py,
+        PyState::new(
+            py,
+            data,
+            client,
+            artifact_dir,
+            artifacts,
+            cwd,
+            Some(args),
+            pipeline_data,
+            Some(current_scope),
+            child_key,
+            parent_stage,
+            worktree,
+            worktree_parent,
+            base_ref,
+            Some(loop_stack),
+        )?,
+    )?;
 
     if !fan_out {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("client", &client)?;
-        let new_state = replace.call((parent,), Some(&kwargs))?;
-
-        let client_str: String = client.str()?.extract()?;
-        let data_client: String = new_state.getattr("data")?.getattr("client")?.extract()?;
+        let bound = new_state.bind(py);
+        let client_str: String = bound.getattr("client")?.str()?.extract()?;
+        let data_client: String = bound.getattr("data")?.getattr("client")?.extract()?;
         if client_str != data_client {
             let patch = PyDict::new(py);
             patch.set_item("client", client_str.as_str())?;
-            new_state
+            bound
                 .getattr("data")?
                 .call_method("patch", (), Some(&patch))?;
         }
-        return Ok(new_state.unbind());
     }
 
-    let parent_artifact_dir: PathBuf = parent.getattr("artifact_dir")?.extract()?;
-    let child_name: String = child.getattr("name")?.extract()?;
-    let child_scratch: Option<PathBuf> = match child_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(cid) => Some(PathBuf::from(
-            py.import("_gremlins_core.config")?
-                .getattr("scratch_root")?
-                .call1((cid,))?
-                .extract::<String>()?,
-        )),
-        None => None,
-    };
-    let params = compute_child_params(&parent_artifact_dir, &child_name, child_scratch.as_deref());
-    std::fs::create_dir_all(&params.artifact_dir)?;
-    let artifact_dir_py = py
-        .import("pathlib")?
-        .getattr("Path")?
-        .call1((params.artifact_dir.to_string_lossy().as_ref(),))?;
-
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("client", &client)?;
-    kwargs.set_item("artifact_dir", &artifact_dir_py)?;
-    kwargs.set_item("child_key", params.child_key.as_str())?;
-    let new_state = replace.call((parent,), Some(&kwargs))?;
-    Ok(new_state.unbind())
+    Ok(new_state.into_any())
 }
 
 #[pyfunction]

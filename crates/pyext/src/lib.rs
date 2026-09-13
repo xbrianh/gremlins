@@ -26,6 +26,16 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         python::utils::proc::terminate_with_grace,
         &proc
     )?)?;
+    proc.add_class::<python::utils::proc::ProcResult>()?;
+    proc.add(
+        "CalledProcessError",
+        proc.py()
+            .get_type::<python::utils::proc::CalledProcessError>(),
+    )?;
+    proc.add(
+        "TimeoutExpired",
+        proc.py().get_type::<python::utils::proc::TimeoutExpired>(),
+    )?;
     utils.add_submodule(&proc)?;
     m.add_submodule(&utils)?;
     // Register in sys.modules immediately so that Python imports triggered
