@@ -42,35 +42,3 @@ pub(crate) fn validate_max_retries(max_retries: usize) -> Result<(), String> {
         Ok(())
     }
 }
-
-const TRANSIENT_SUBSTRINGS: &[&str] = &[
-    "capacity",
-    "rate limit",
-    "too many requests",
-    "try again",
-    "please retry",
-    "server error",
-    "service unavailable",
-    "bad gateway",
-    "gateway timeout",
-    "overloaded",
-    "timed out in queue",
-    " 529",
-    // reqwest transport errors (transient)
-    "http client error",
-    "error sending request",
-    "error decoding response body",
-    "connection reset",
-    "connection refused",
-    "dns error",
-    "tls handshake",
-];
-
-pub(crate) fn is_transient_stream_error(message: &str) -> bool {
-    // Normalize snake_case JSON error types (e.g. `"type":"server_error"`) to
-    // their space-delimited form so they match the list above without needing
-    // per-provider spellings. This keeps the classifier keyed to the stable
-    // API error schema, not to any specific error `message` text.
-    let normalized = message.to_lowercase().replace('_', " ");
-    TRANSIENT_SUBSTRINGS.iter().any(|s| normalized.contains(s))
-}
