@@ -975,7 +975,8 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let timeout_secs = args
         .get("timeout")
         .and_then(|v| v.as_u64())
-        .unwrap_or(BASH_TIMEOUT_SECS);
+        .unwrap_or(BASH_TIMEOUT_SECS)
+        .clamp(1, 3600);
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command);
     cmd.stdout(Stdio::piped());
@@ -1084,11 +1085,11 @@ fn scan_file(
     };
     for (i, line) in content.lines().enumerate() {
         if pattern.is_match(line) {
-            matches.push(format!("{}:{}:{line}", path.display(), i + 1));
             if matches.len() >= max_matches {
                 *truncated = true;
                 return;
             }
+            matches.push(format!("{}:{}:{line}", path.display(), i + 1));
         }
     }
 }
@@ -1205,11 +1206,11 @@ fn grep_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
                 Ok(content) => {
                     for (i, line) in content.lines().enumerate() {
                         if pattern.is_match(line) {
-                            matches.push(format!("{}:{}:{line}", base.display(), i + 1));
                             if matches.len() >= max_matches {
                                 truncated = true;
                                 break;
                             }
+                            matches.push(format!("{}:{}:{line}", base.display(), i + 1));
                         }
                     }
                 }
@@ -1755,6 +1756,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bash_timeout_zero_is_clamped() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"command": "echo ok", "timeout": 0}).to_string();
+        let out = bash_invoke(&c, &args).await;
+        assert_eq!(out.trim(), "ok");
+        assert!(!out.contains("[timeout]"));
+    }
+
+    #[tokio::test]
     async fn bash_invoke_respects_cwd() {
         // Reproduction: pwd must report cwd, not the process working directory.
         let dir = tmp();
@@ -1895,6 +1906,37 @@ mod tests {
         let lines: Vec<_> = out.lines().collect();
         assert_eq!(lines.len(), 11, "got: {out}");
         assert!(out.ends_with("[truncated at 10 matches]"));
+    }
+
+    #[tokio::test]
+    async fn grep_exact_max_matches_is_not_truncated() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let body: String = (0..10).map(|i| format!("hit {i}\n")).collect();
+        std::fs::write(dir.join("hits.txt"), body).unwrap();
+        let args = serde_json::json!({"pattern": "hit", "max_matches": 10}).to_string();
+        let out = grep_invoke(&c, &args).await;
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 10, "got: {out}");
+        assert!(!out.contains("[truncated"));
+    }
+
+    #[tokio::test]
+    async fn grep_exact_max_matches_file_path_is_not_truncated() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let body: String = (0..10).map(|i| format!("hit {i}\n")).collect();
+        std::fs::write(dir.join("hits.txt"), body).unwrap();
+        let args = serde_json::json!({
+            "pattern": "hit",
+            "path": "hits.txt",
+            "max_matches": 10
+        })
+        .to_string();
+        let out = grep_invoke(&c, &args).await;
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 10, "got: {out}");
+        assert!(!out.contains("[truncated"));
     }
 
     #[tokio::test]
