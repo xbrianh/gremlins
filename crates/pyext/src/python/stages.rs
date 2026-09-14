@@ -330,10 +330,7 @@ impl PyExec {
                     source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
                     ..
                 }) => {
-                    return Err(MissingArtifact::new_err(format!(
-                        "artifact not bound: {:?}",
-                        key
-                    )));
+                    return Err(MissingArtifact::new_err(key));
                 }
                 Err(e) => {
                     return Err(pyo3::exceptions::PyValueError::new_err(e.to_string()));
@@ -697,10 +694,7 @@ impl PyAgent {
                     source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
                     ..
                 }) => {
-                    return Err(MissingArtifact::new_err(format!(
-                        "artifact not bound: {:?}",
-                        key
-                    )));
+                    return Err(MissingArtifact::new_err(key));
                 }
                 Err(e) => {
                     return Err(Bail::new_err(e.to_string()));
