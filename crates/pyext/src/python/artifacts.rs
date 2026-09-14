@@ -72,7 +72,7 @@ pub(crate) struct ArtifactRegistry {
 #[pymethods]
 impl ArtifactRegistry {
     #[new]
-    fn new(artifact_dir: PathBuf) -> Self {
+    pub(crate) fn new(artifact_dir: PathBuf) -> Self {
         ArtifactRegistry {
             inner: Mutex::new(rust_registry::ArtifactRegistry::new(artifact_dir)),
         }
