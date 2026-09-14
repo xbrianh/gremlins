@@ -1448,10 +1448,15 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
                 } else {
                     format!("# {description}\n\n{out}")
                 };
+                let desc_preview = if description.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    preview_str(description, 80)
+                };
                 log::info!(
                     target: "_gremlins_core.clients.task",
                     "task dispatch complete: desc={desc_q} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?}",
-                    desc_q = if description.is_empty() { "(empty)" } else { description },
+                    desc_q = desc_preview,
                     p_len = prompt.len(),
                     p_preview = preview_str(prompt, 120),
                     o_len = final_output.len(),

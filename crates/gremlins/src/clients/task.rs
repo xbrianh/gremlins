@@ -147,10 +147,15 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
             match result {
                 Ok(completed) => {
                     let out = completed.text_result.unwrap_or_default();
+                    let desc_preview = if description.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        tools::preview_str(&description, 80)
+                    };
                     log::info!(
                         target: "_gremlins_core.clients.task",
                         "task complete: desc={desc_q} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?} has_done_header={has_done} has_md_header={has_md}",
-                        desc_q = if description.is_empty() { "(empty)" } else { &description },
+                        desc_q = desc_preview,
                         p_len = task.len(),
                         p_preview = tools::preview_str(&task, 120),
                         o_len = out.len(),
