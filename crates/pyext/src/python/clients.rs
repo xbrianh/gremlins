@@ -281,7 +281,7 @@ impl Client {
     }
 
     #[staticmethod]
-    fn parse(s: &str) -> PyResult<Self> {
+    pub(crate) fn parse(s: &str) -> PyResult<Self> {
         let (provider, model, extra_params) = parse_spec(s)?;
         if !matches!(provider.as_str(), "openai" | "xai" | "openrouter" | "cmd") {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(

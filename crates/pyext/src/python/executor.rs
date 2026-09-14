@@ -8,6 +8,7 @@ use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList};
 
+use crate::python::artifacts::ArtifactRegistry;
 use crate::python::json_conv::{key_to_string, py_to_value, value_to_py};
 
 fn py_dict_to_map(d: &Bound<'_, PyDict>) -> PyResult<serde_json::Map<String, serde_json::Value>> {
@@ -633,14 +634,7 @@ fn build_state(
 ) -> PyResult<Py<PyState>> {
     let artifacts: Py<PyAny> = match artifacts {
         Some(a) => a,
-        None => {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("artifact_dir", artifact_dir.clone())?;
-            py.import("_gremlins_core.artifacts")?
-                .getattr("ArtifactRegistry")?
-                .call((), Some(&kwargs))?
-                .unbind()
-        }
+        None => Py::new(py, ArtifactRegistry::new(artifact_dir.clone()))?.into_any(),
     };
     let args = args.unwrap_or_else(|| py.None());
     let cwd = if !cwd.is_empty() {

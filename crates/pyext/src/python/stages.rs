@@ -17,7 +17,8 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple, PyType};
 
-use crate::python::artifacts::ArtifactRegistry;
+use crate::python::artifacts::{ArtifactRegistry, MissingArtifact};
+use crate::python::clients::Client;
 use crate::python::executor::{PyState, PyStateData};
 use crate::python::json_conv::{py_to_value as py_to_json, value_to_py as json_value_to_py};
 use crate::schemas::loader;
@@ -90,7 +91,7 @@ _m.Bail.__str__ = _str
 // --- Exec pyclass ---
 
 #[pyclass(name = "Exec", module = "_gremlins_core.stages", skip_from_py_object)]
-struct PyExec {
+pub(crate) struct PyExec {
     inner: rust_exec::Exec,
     raw_dict: Option<Py<PyAny>>,
     gremlin: Option<Py<PyAny>>,
@@ -184,12 +185,8 @@ impl PyExec {
             .get_item("client")?
             .and_then(|v| v.extract::<String>().ok());
         let (client, client_explicit) = if let Some(raw) = raw_client {
-            let py = _cls.py();
-            let parsed = py
-                .import("_gremlins_core.clients")?
-                .getattr("Client")?
-                .call_method1("parse", (raw,))?;
-            (Some(parsed.unbind()), true)
+            let parsed: Py<PyAny> = Py::new(_cls.py(), Client::parse(&raw)?)?.into_any();
+            (Some(parsed), true)
         } else {
             (None, false)
         };
@@ -333,12 +330,10 @@ impl PyExec {
                     source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
                     ..
                 }) => {
-                    let exc_type = py
-                        .import("_gremlins_core.artifacts")?
-                        .getattr("MissingArtifact")?;
-                    let args = (key.clone(),);
-                    let exc = exc_type.call1(args)?;
-                    return Err(PyErr::from_value(exc));
+                    return Err(MissingArtifact::new_err(format!(
+                        "artifact not bound: {:?}",
+                        key
+                    )));
                 }
                 Err(e) => {
                     return Err(pyo3::exceptions::PyValueError::new_err(e.to_string()));
@@ -545,12 +540,8 @@ impl PyAgent {
             .get_item("client")?
             .and_then(|v| v.extract::<String>().ok());
         let (client, client_explicit) = if let Some(raw) = raw_client {
-            let py = _cls.py();
-            let parsed = py
-                .import("_gremlins_core.clients")?
-                .getattr("Client")?
-                .call_method1("parse", (raw,))?;
-            (Some(parsed.unbind()), true)
+            let parsed: Py<PyAny> = Py::new(_cls.py(), Client::parse(&raw)?)?.into_any();
+            (Some(parsed), true)
         } else {
             (None, false)
         };
@@ -706,12 +697,10 @@ impl PyAgent {
                     source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
                     ..
                 }) => {
-                    let exc_type = py
-                        .import("_gremlins_core.artifacts")?
-                        .getattr("MissingArtifact")?;
-                    let args = (key.clone(),);
-                    let exc = exc_type.call1(args)?;
-                    return Err(PyErr::from_value(exc));
+                    return Err(MissingArtifact::new_err(format!(
+                        "artifact not bound: {:?}",
+                        key
+                    )));
                 }
                 Err(e) => {
                     return Err(Bail::new_err(e.to_string()));
@@ -1104,12 +1093,7 @@ impl PySequence {
         let obj = cls.call((seq.attrs.name.as_str(),), Some(&kwargs))?;
 
         let client = match &seq.client {
-            Some(spec) => Some(
-                py.import("_gremlins_core.clients")?
-                    .getattr("Client")?
-                    .call_method1("parse", (spec.0.as_str(),))?
-                    .unbind(),
-            ),
+            Some(spec) => Some(Py::new(py, Client::parse(&spec.0)?)?.into_any()),
             None => None,
         };
         obj.setattr("client", client)?;
@@ -1204,12 +1188,7 @@ impl PyLoop {
         let obj = cls.call((lp.attrs.name.as_str(),), Some(&kwargs))?;
 
         let client = match &lp.client {
-            Some(spec) => Some(
-                py.import("_gremlins_core.clients")?
-                    .getattr("Client")?
-                    .call_method1("parse", (spec.0.as_str(),))?
-                    .unbind(),
-            ),
+            Some(spec) => Some(Py::new(py, Client::parse(&spec.0)?)?.into_any()),
             None => None,
         };
         obj.setattr("client", client)?;
@@ -1298,11 +1277,8 @@ fn get_client_from_dict_py(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Op
     let name = stage_name_from_dict(d);
     match rust_get_client_from_dict(&map, &name) {
         Ok(Some(spec)) => {
-            let parsed = py
-                .import("_gremlins_core.clients")?
-                .getattr("Client")?
-                .call_method1("parse", (spec.0,))?;
-            Ok(Some(parsed.unbind()))
+            let parsed: Py<PyAny> = Py::new(py, Client::parse(&spec.0)?)?.into_any();
+            Ok(Some(parsed))
         }
         Ok(None) => Ok(None),
         // Render the offending Python type, as the pre-port helper did.
@@ -1354,15 +1330,10 @@ fn child_state_py(
         (artifact_dir, child_key)
     } else {
         let child_name: String = child.getattr("name")?.extract()?;
-        let child_scratch: Option<PathBuf> = match child_id.as_deref().filter(|s| !s.is_empty()) {
-            Some(cid) => Some(PathBuf::from(
-                py.import("_gremlins_core.config")?
-                    .getattr("scratch_root")?
-                    .call1((cid,))?
-                    .extract::<String>()?,
-            )),
-            None => None,
-        };
+        let child_scratch: Option<PathBuf> = child_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|cid| gremlins::config::scratch_root(Some(cid)));
         let params = compute_child_params(&artifact_dir, &child_name, child_scratch.as_deref());
         std::fs::create_dir_all(&params.artifact_dir)?;
         (params.artifact_dir, Some(params.child_key))
