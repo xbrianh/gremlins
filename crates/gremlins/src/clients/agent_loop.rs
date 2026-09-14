@@ -778,12 +778,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
         let mut result_msgs = Vec::new();
         let mut ledger = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
-            // Bound each Task result: every one lands in the next context.
-            let output = if job.name == "Task" {
-                tools::truncate_task_output(&output)
-            } else {
-                output
-            };
             stream::emit_result(prefix, &output, false);
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
