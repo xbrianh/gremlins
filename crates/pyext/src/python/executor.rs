@@ -564,6 +564,9 @@ impl PyState {
         scope: Option<&Bound<'_, PyAny>>,
         record_stage: bool,
     ) -> PyResult<Py<PyAny>> {
+        // The runner calls itself "runner(<stage name>)" so tracebacks and
+        // `repr` identify the stage it drives.
+        let entry_name: String = entry.getattr("name")?.extract()?;
         let runner = Py::new(
             py,
             StageRunner {
@@ -574,7 +577,11 @@ impl PyState {
                 record_stage,
             },
         )?;
-        crate::python::coroutine::mark_as_coroutine_function(py, runner.bind(py).as_any())?;
+        crate::python::coroutine::mark_as_coroutine_function(
+            py,
+            runner.bind(py).as_any(),
+            &format!("runner({entry_name})"),
+        )?;
         Ok(runner.into_any())
     }
 }

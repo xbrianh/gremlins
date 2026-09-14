@@ -1352,6 +1352,55 @@ fn build_child_runner(
         .unbind())
 }
 
+/// The key a composite stage is tracked under.
+///
+/// Root stages may carry no `path` at all, so fall back to `name` — mirroring
+/// the Python assertion-free `stage.path or stage.name` idiom.
+fn stage_key(path: Option<String>, name: String) -> String {
+    match path {
+        Some(path) if !path.is_empty() => path,
+        _ => name,
+    }
+}
+
+/// What a Loop iterates over.
+///
+/// `body_runners` is a test seam: when supplied it takes precedence over
+/// `body`, whose runners are instead built fresh on every iteration.
+enum LoopBody {
+    Provided(Vec<Py<PyAny>>),
+    Children(Vec<Py<PyAny>>),
+}
+
+/// Build a runner for `child`, await it, and publish it as the active child for
+/// the duration of the call.
+///
+/// The runner is built *before* `active_children` is published, so a failure to
+/// construct it cannot strand a stale marker; the marker is cleared on both the
+/// success and the failure path of the await.
+async fn run_child(
+    state: &Py<PyAny>,
+    gremlin: &Py<PyAny>,
+    stage: &Py<PyAny>,
+    child: &Py<PyAny>,
+    child_name: &str,
+) -> PyResult<()> {
+    let runner = Python::attach(|py| {
+        build_child_runner(
+            py,
+            state.bind(py),
+            child.bind(py),
+            gremlin.bind(py),
+            &stage.bind(py).getattr("body")?,
+        )
+    })?;
+    Python::attach(|py| patch_active_children(py, state.bind(py), Some(child_name)))?;
+    let awaited = await_callable(runner).await;
+    let cleared = Python::attach(|py| patch_active_children(py, state.bind(py), None));
+    awaited?;
+    cleared
+}
+
 /// Read the bail reason stored at `key`, if any.
 fn bail_reason(artifacts: &Bound<'_, PyAny>, key: &str) -> PyResult<Option<String>> {
     if !artifacts
@@ -1374,6 +1423,25 @@ fn bail_reason(artifacts: &Bound<'_, PyAny>, key: &str) -> PyResult<Option<Strin
     }
 }
 
+/// `_gremlins_core.stages._bail_reason`: the module-level view of
+/// [`bail_reason`], kept for parity with the module's historical surface.
+#[pyfunction]
+#[pyo3(name = "_bail_reason")]
+fn bail_reason_py(artifacts: &Bound<'_, PyAny>, key: &str) -> PyResult<Option<String>> {
+    bail_reason(artifacts, key)
+}
+
+/// `_gremlins_core.stages._is_bail_set`: whether a bail is recorded for
+/// `loop_iter` (scoped) or for the run as a whole.
+#[pyfunction]
+#[pyo3(name = "_is_bail_set")]
+fn is_bail_set_py(artifacts: &Bound<'_, PyAny>, loop_iter: &str) -> PyResult<bool> {
+    Ok(
+        bail_reason(artifacts, &format!("artifact://{loop_iter}/bail"))?.is_some()
+            || bail_reason(artifacts, BAIL_KEY)?.is_some(),
+    )
+}
+
 /// Run a Sequence's body in order, skipping children already marked done.
 #[pyfunction]
 #[pyo3(name = "_sequence_run_async")]
@@ -1387,9 +1455,9 @@ async fn sequence_run_async(stage: Py<PySequence>, gremlin: Py<PyAny>) -> PyResu
                 "sequence stage requires gremlin.state to be initialized",
             ));
         }
-        let path: String = stage_ref.getattr("path")?.extract()?;
+        let path: Option<String> = stage_ref.getattr("path")?.extract()?;
         let name: String = stage_ref.getattr("name")?.extract()?;
-        let key = if path.is_empty() { name } else { path };
+        let key = stage_key(path, name);
         let body: Vec<Py<PyAny>> = stage_ref.getattr("body")?.extract()?;
         Ok::<_, PyErr>((state.unbind(), key, body))
     })?;
@@ -1402,20 +1470,8 @@ async fn sequence_run_async(stage: Py<PySequence>, gremlin: Py<PyAny>) -> PyResu
         if done.contains(&child_name) {
             continue;
         }
-        Python::attach(|py| patch_active_children(py, state.bind(py), Some(&child_name)))?;
-        let runner = Python::attach(|py| {
-            let stage_ref = stage.bind(py);
-            build_child_runner(
-                py,
-                state.bind(py),
-                child.bind(py),
-                gremlin.bind(py),
-                &stage_ref.getattr("body")?,
-            )
-        })?;
-        let result = await_callable(runner).await;
-        Python::attach(|py| patch_active_children(py, state.bind(py), None))?;
-        result?;
+        let stage_obj = Python::attach(|py| stage.clone_ref(py).into_any());
+        run_child(&state, &gremlin, &stage_obj, child, &child_name).await?;
         Python::attach(|py| {
             state
                 .bind(py)
@@ -1431,7 +1487,7 @@ async fn sequence_run_async(stage: Py<PySequence>, gremlin: Py<PyAny>) -> PyResu
 #[pyfunction]
 #[pyo3(name = "_loop_run_async")]
 async fn loop_run_async(stage: Py<PyLoop>, gremlin: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let (state, stage_path, name, max_iterations, stop_when_exists, interval, body, provided) =
+    let (state, stage_path, name, max_iterations, stop_when_exists, interval, body) =
         Python::attach(|py| {
             let stage_ref = stage.bind(py);
             let gremlin_ref = gremlin.bind(py);
@@ -1441,21 +1497,21 @@ async fn loop_run_async(stage: Py<PyLoop>, gremlin: Py<PyAny>) -> PyResult<Py<Py
                     "loop stage requires gremlin.state to be initialized",
                 ));
             }
-            let path: String = stage_ref.getattr("path")?.extract()?;
+            let path: Option<String> = stage_ref.getattr("path")?.extract()?;
             let name: String = stage_ref.getattr("name")?.extract()?;
-            let stage_path = if path.is_empty() { name.clone() } else { path };
+            let stage_path = stage_key(path, name.clone());
             let max_iterations: u32 = stage_ref.getattr("max_iterations")?.extract()?;
             let stop_when_exists: Option<String> =
                 stage_ref.getattr("stop_when_exists")?.extract()?;
             let interval: Option<f64> = stage_ref.getattr("interval")?.extract()?;
-            let body: Vec<Py<PyAny>> = stage_ref.getattr("body")?.extract()?;
-            let provided: Option<Vec<Py<PyAny>>> = {
-                let br = stage_ref.getattr("body_runners")?;
-                if br.is_none() {
-                    None
-                } else {
-                    Some(br.extract()?)
-                }
+            // `body_runners` is a test seam: a Loop constructed with it may leave
+            // `body` unset entirely, so only read `body` when it is unusable.
+            let body = match stage_ref
+                .getattr("body_runners")?
+                .extract::<Option<Vec<Py<PyAny>>>>()?
+            {
+                Some(runners) => LoopBody::Provided(runners),
+                None => LoopBody::Children(stage_ref.getattr("body")?.extract()?),
             };
             Ok::<_, PyErr>((
                 state.unbind(),
@@ -1465,7 +1521,6 @@ async fn loop_run_async(stage: Py<PyLoop>, gremlin: Py<PyAny>) -> PyResult<Py<Py
                 stop_when_exists,
                 interval,
                 body,
-                provided,
             ))
         })?;
 
@@ -1485,7 +1540,6 @@ async fn loop_run_async(stage: Py<PyLoop>, gremlin: Py<PyAny>) -> PyResult<Py<Py
         stop_when_exists,
         interval,
         body,
-        provided,
     )
     .await;
     let _ = Python::attach(|py| state.bind(py).call_method0("pop_loop").map(|_| ()));
@@ -1501,8 +1555,7 @@ async fn loop_iterations(
     max_iterations: u32,
     stop_when_exists: Option<String>,
     interval: Option<f64>,
-    body: Vec<Py<PyAny>>,
-    provided: Option<Vec<Py<PyAny>>>,
+    body: LoopBody,
 ) -> PyResult<Py<PyAny>> {
     for iteration in 1..=max_iterations {
         Python::attach(|py| {
@@ -1535,33 +1588,19 @@ async fn loop_iterations(
             "loop {name}: iteration {iteration}/{max_iterations} starting"
         );
 
-        match &provided {
-            Some(runners) => {
+        match &body {
+            LoopBody::Provided(runners) => {
                 for runner in runners {
                     let runner = Python::attach(|py| runner.clone_ref(py));
                     await_callable(runner).await?;
                 }
             }
-            None => {
-                for child in &body {
+            LoopBody::Children(children) => {
+                let stage_obj = Python::attach(|py| stage.clone_ref(py).into_any());
+                for child in children {
                     let child_name: String =
                         Python::attach(|py| child.bind(py).getattr("name")?.extract())?;
-                    Python::attach(|py| {
-                        patch_active_children(py, state.bind(py), Some(&child_name))
-                    })?;
-                    let runner = Python::attach(|py| {
-                        let stage_ref = stage.bind(py);
-                        build_child_runner(
-                            py,
-                            state.bind(py),
-                            child.bind(py),
-                            gremlin.bind(py),
-                            &stage_ref.getattr("body")?,
-                        )
-                    })?;
-                    let result = await_callable(runner).await;
-                    Python::attach(|py| patch_active_children(py, state.bind(py), None))?;
-                    result?;
+                    run_child(&state, &gremlin, &stage_obj, child, &child_name).await?;
                 }
             }
         }
@@ -1814,6 +1853,8 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let keys: Vec<&str> = FRAMEWORK_KEYS.iter().copied().collect();
     m.add("FRAMEWORK_KEYS", PyFrozenSet::new(py, &keys)?)?;
     m.add_function(wrap_pyfunction!(substitute_vars_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(bail_reason_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(is_bail_set_py, &m)?)?;
 
     Ok(())
 }
