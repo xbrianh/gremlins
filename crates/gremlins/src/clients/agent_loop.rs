@@ -256,6 +256,62 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     result
 }
 
+// ── helpers for completion-decision bookkeeping ───────────────────────────
+
+fn usage_stats(
+    turns: usize,
+    prompt: u64,
+    completion: u64,
+    cached: u64,
+    cache_creation: u64,
+    reasoning: u64,
+) -> UsageStats {
+    UsageStats {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        cached_input_tokens: cached,
+        cache_creation_input_tokens: cache_creation,
+        reasoning_tokens: reasoning,
+        turns,
+    }
+}
+
+fn completed_run(
+    text: Option<String>,
+    events: &Option<Vec<serde_json::Value>>,
+    usage: UsageStats,
+) -> CompletedRun {
+    CompletedRun {
+        exit_code: 0,
+        text_result: text,
+        events: events.clone(),
+        cost_usd: None,
+        token_usage: Some(usage),
+    }
+}
+
+fn missing_artifacts(expected: &[PathBuf]) -> Vec<&PathBuf> {
+    expected
+        .iter()
+        .filter(|p| !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0)
+        .collect()
+}
+
+fn artifact_reminder(missing: &[&PathBuf]) -> String {
+    let paths: Vec<String> = missing
+        .iter()
+        .map(|p| format!("  - {}", p.display()))
+        .collect();
+    format!(
+        "The following expected output file(s) were not written:\n{}\n\
+         Please write each file using the Write tool now. Do not explain \
+         \u{2014} just write the files.",
+        paths.join("\n")
+    )
+}
+
+// ── agent loop ────────────────────────────────────────────────────────────
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_loop_core<M: CompletionModel>(
     model: &M,
@@ -447,103 +503,72 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         turn_num += 1;
 
-        // Check for explicit Done — the only valid completion signal.
-        // Done must be the sole tool call in a turn; mixing it with other
-        // calls (e.g. Write + Done) makes the turn incoherent.  Reject the
-        // whole turn so the model retries cleanly.
+        // ---- completion decision ----
+        // Solo Done is the only valid completion signal. Mixed Done + other
+        // tool calls is incoherent and rejected wholesale so the model retries
+        // cleanly.
         let has_non_done = tool_calls.iter().any(|tc| tc.function.name != "Done");
         let done_call = tool_calls.iter().find(|tc| tc.function.name == "Done");
 
-        if let Some(done_tc) = done_call {
-            if has_non_done {
-                // Mixed Done — reject immediately, do not execute any tools.
+        match (done_call, has_non_done) {
+            (Some(_done_tc), true) => {
+                // Mixed — produce a tool_result for every call so providers
+                // see a valid round of history.
                 history.push(next_prompt);
                 history.push(assistant_tool_message(&text, &tool_calls));
-                history.push(Message::tool_result_with_call_id(
-                    done_tc.id.clone(),
-                    done_tc.call_id.clone(),
-                    "Error: Done must be called alone — do not combine Done with other \
-                     tool calls in the same message. Re-issue your tool calls without \
-                     Done, then call Done by itself when finished.",
-                ));
+                for tc in &tool_calls {
+                    let body = if tc.function.name == "Done" {
+                        "Error: Done must be called alone — do not combine Done with \
+                         other tool calls in the same message. Re-issue your tool \
+                         calls without Done, then call Done by itself when finished."
+                    } else {
+                        "Skipped: this call was rejected because Done was combined \
+                         with other tool calls in the same message. Re-issue without \
+                         Done."
+                    };
+                    history.push(Message::tool_result_with_call_id(
+                        tc.id.clone(),
+                        tc.call_id.clone(),
+                        body,
+                    ));
+                }
                 next_prompt = Message::user(
                     "Done was rejected because it was combined with other tool calls. \
                      Try again — this time either use tools, or call Done. Never both.",
                 );
                 continue;
             }
-            // Solo Done — accept or reject based on artifact validation.
-            {
-                // Verify expected artifacts before accepting completion.
+            (Some(done_tc), false) => {
+                // Solo Done — validate expected artifacts before accepting.
                 if !nested && !expected_artifact_paths.is_empty() {
-                    let missing: Vec<&PathBuf> = expected_artifact_paths
-                        .iter()
-                        .filter(|p| !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0)
-                        .collect();
+                    let missing = missing_artifacts(expected_artifact_paths);
                     if !missing.is_empty() {
-                        // Done was rejected — count against reminder_budget.
                         if reminder_budget > 0 {
                             reminder_budget -= 1;
-                        } else {
-                            // Budget exhausted — exit the loop.
+                            let reminder = format!(
+                                "Done rejected: {}\nWrite each file using the Write \
+                                 tool, then call Done.",
+                                artifact_reminder(&missing),
+                            );
                             history.push(next_prompt);
                             history
                                 .push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
-                            if !nested {
-                                stream::flush();
-                                emit_final(prefix, turns, " (exhausted)");
-                                stream::emit_summary(
-                                    prefix,
-                                    turn_num,
-                                    loop_start,
-                                    total_prompt_tokens,
-                                    total_completion_tokens,
-                                    total_cached_tokens,
-                                    total_cache_creation_tokens,
-                                    total_reasoning_tokens,
-                                );
-                            }
-                            return Ok(CompletedRun {
-                                exit_code: 0,
-                                text_result: Some(final_text.clone()),
-                                events: captured.clone(),
-                                cost_usd: None,
-                                token_usage: Some(UsageStats {
-                                    prompt_tokens: total_prompt_tokens,
-                                    completion_tokens: total_completion_tokens,
-                                    cached_input_tokens: total_cached_tokens,
-                                    cache_creation_input_tokens: total_cache_creation_tokens,
-                                    reasoning_tokens: total_reasoning_tokens,
-                                    turns: turn_num,
-                                }),
-                            });
+                            history.push(Message::tool_result_with_call_id(
+                                done_tc.id.clone(),
+                                done_tc.call_id.clone(),
+                                reminder.clone(),
+                            ));
+                            next_prompt = Message::user(reminder);
+                            continue;
                         }
-
-                        let paths: Vec<String> = missing
-                            .iter()
-                            .map(|p| format!("  - {}", p.display()))
-                            .collect();
-                        let reminder = format!(
-                            "Done rejected: the following expected files were not written:\n{}\n\
-                             Write each file using the Write tool, then call Done.",
-                            paths.join("\n")
-                        );
-                        // Push the Done call + rejection into history so the model sees it.
+                        // Budget exhausted — accept anyway. Python
+                        // verify_produced catches missing files.
                         history.push(next_prompt);
                         history.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
-                        history.push(Message::tool_result_with_call_id(
-                            done_tc.id.clone(),
-                            done_tc.call_id.clone(),
-                            reminder.clone(),
-                        ));
-                        next_prompt = Message::user(reminder);
-                        continue;
                     }
                 }
 
-                // Expected artifacts satisfied (or none expected) — accept completion.
-                // Use the Done summary as text_result so downstream consumers
-                // (bail/output handling) see the completion summary.
+                // Accept completion.
                 let summary = done_tc
                     .function
                     .arguments
@@ -556,7 +581,14 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 } else {
                     text.clone()
                 };
-
+                let usage = usage_stats(
+                    turn_num,
+                    total_prompt_tokens,
+                    total_completion_tokens,
+                    total_cached_tokens,
+                    total_cache_creation_tokens,
+                    total_reasoning_tokens,
+                );
                 if !nested {
                     stream::flush();
                     emit_final(prefix, turns, "");
@@ -571,33 +603,29 @@ async fn run_agent_loop_core<M: CompletionModel>(
                         total_reasoning_tokens,
                     );
                 }
-                return Ok(CompletedRun {
-                    exit_code: 0,
-                    text_result: Some(result_text),
-                    events: captured.clone(),
-                    cost_usd: None,
-                    token_usage: Some(UsageStats {
-                        prompt_tokens: total_prompt_tokens,
-                        completion_tokens: total_completion_tokens,
-                        cached_input_tokens: total_cached_tokens,
-                        cache_creation_input_tokens: total_cache_creation_tokens,
-                        reasoning_tokens: total_reasoning_tokens,
-                        turns: turn_num,
-                    }),
-                });
+                return Ok(completed_run(Some(result_text), captured, usage));
             }
+            _ => {}
         }
 
-        // Tool calls from this point forward are for execution only — Done
-        // was handled above (accepted or rejected). Filter Done out so it
-        // never reaches invoke().
+        // Done handled — filter it out before execution.
         let tool_calls: Vec<ToolCall> = tool_calls
             .into_iter()
             .filter(|tc| tc.function.name != "Done")
             .collect();
 
         if tool_calls.is_empty() {
-            // Log every empty turn before any nudge / fall-through logic.
+            // Reasoning-only turn — the model is thinking. Just loop.
+            if text.is_empty() && !reasoning.is_empty() {
+                log::debug!(
+                    target: "_gremlins_core.clients.agent_loop",
+                    "reasoning-only turn: turn={turn_num} — continuing",
+                );
+                history.push(next_prompt);
+                next_prompt = Message::user("Continue.");
+                continue;
+            }
+
             log::warn!(
                 target: "_gremlins_core.clients.agent_loop",
                 "empty turn: turn={turn_num} text_empty={} reasoning_empty={} budget={completion_nudge_budget}",
@@ -605,42 +633,20 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 reasoning.is_empty(),
             );
 
-            // Check for missing expected artifacts — inject a reminder if budget remains.
-            // Only inject when the model wrote text this turn (no point reminding if
-            // the model produced nothing, and an empty assistant message may be rejected).
+            // Missing-artifact reminder (only when the model produced text).
             if !nested && reminder_budget > 0 && !text.is_empty() {
-                let missing: Vec<&PathBuf> = expected_artifact_paths
-                    .iter()
-                    .filter(|p| !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0)
-                    .collect();
+                let missing = missing_artifacts(expected_artifact_paths);
                 if !missing.is_empty() {
                     reminder_budget -= 1;
-
                     log::info!(
                         target: "_gremlins_core.clients.agent_loop",
                         "reminder: {} missing artifact(s) — nudging agent (remaining_budget={})",
                         missing.len(),
                         reminder_budget,
                     );
-
-                    // Push the assistant's current text into history so the model
-                    // sees what it produced before the reminder.
                     history.push(next_prompt);
                     history.push(assistant_tool_message(&text, &[]));
-
-                    let paths: Vec<String> = missing
-                        .iter()
-                        .map(|p| format!("  - {}", p.display()))
-                        .collect();
-                    let reminder = format!(
-                        "The following expected output file(s) were not written:\n{}\n\
-                         Please write each file using the Write tool now. Do not explain \
-                         — just write the files.",
-                        paths.join("\n")
-                    );
-
-                    // Record the reminder in the raw and captured streams so the
-                    // transcript accurately reflects the interaction.
+                    let reminder = artifact_reminder(&missing);
                     write_raw(
                         raw,
                         &serde_json::json!({"type": "reminder", "message": reminder}),
@@ -648,23 +654,12 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     if let Some(evts) = captured.as_mut() {
                         evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
                     }
-
                     next_prompt = Message::user(reminder);
                     continue;
-                } else if expected_artifact_paths.is_empty() {
-                    log::debug!(target: "_gremlins_core.clients.agent_loop", "reminder check: no expected artifact paths set — skipping");
-                } else {
-                    log::debug!(
-                        target: "_gremlins_core.clients.agent_loop",
-                        "reminder check: {} expected artifact(s) all present — no nudge needed",
-                        expected_artifact_paths.len(),
-                    );
                 }
             }
 
-            // Empty turn — nudge if budget remains, otherwise fall through to final.
-            // Only nudge when there is text — reasoning-only nudges produce empty
-            // assistant messages that providers may reject.
+            // Completion nudge — prompt the model to call Done.
             if !text.is_empty() && completion_nudge_budget > 0 {
                 completion_nudge_budget -= 1;
                 log::info!(
@@ -689,12 +684,20 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 next_prompt = Message::user(nudge_msg.to_string());
                 continue;
             }
-            // Budget exhausted or empty text — fall through to final.
+            // Exhausted — give up.
             log::warn!(
                 target: "_gremlins_core.clients.agent_loop",
                 "empty-turn exhausted: turn={turn_num} text_empty={} reasoning_empty={} budget={completion_nudge_budget}",
                 text.is_empty(),
                 reasoning.is_empty(),
+            );
+            let usage = usage_stats(
+                turn_num,
+                total_prompt_tokens,
+                total_completion_tokens,
+                total_cached_tokens,
+                total_cache_creation_tokens,
+                total_reasoning_tokens,
             );
             if !nested {
                 stream::flush();
@@ -710,20 +713,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     total_reasoning_tokens,
                 );
             }
-            return Ok(CompletedRun {
-                exit_code: 0,
-                text_result: Some(final_text),
-                events: captured.clone(),
-                cost_usd: None,
-                token_usage: Some(UsageStats {
-                    prompt_tokens: total_prompt_tokens,
-                    completion_tokens: total_completion_tokens,
-                    cached_input_tokens: total_cached_tokens,
-                    cache_creation_input_tokens: total_cache_creation_tokens,
-                    reasoning_tokens: total_reasoning_tokens,
-                    turns: turn_num,
-                }),
-            });
+            return Ok(completed_run(Some(final_text), captured, usage));
         }
 
         history.push(next_prompt);
@@ -810,6 +800,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         } else {
             ""
         };
+        stream::flush();
         emit_final(prefix, turns, suffix);
         stream::emit_summary(
             prefix,
