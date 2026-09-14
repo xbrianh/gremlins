@@ -19,9 +19,6 @@ pub(crate) fn agent_system_prompt(
 ) -> String {
     format!(
         "\
-<important>\n\
-You MUST delegate to Task to maintain a clean context. Multiple Task calls run concurrently.\n\
-</important>\n\
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
@@ -1196,7 +1193,7 @@ mod tests {
             Path::new("/project"),
         );
         assert!(
-            prompt.contains("<important>"),
+            prompt.contains("<tools>"),
             "agent prompt must inject delegation policy; got: {prompt}"
         );
     }
