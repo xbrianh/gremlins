@@ -88,7 +88,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
     id_chain: String,
     completion_nudge_budget: usize,
 ) -> tools::TaskFn {
-    Arc::new(move |_description: String, task: String| {
+    Arc::new(move |description: String, task: String| {
         let model = model.clone();
         let tool_filter = tool_filter.clone();
         let cancel = cancel.clone();
@@ -145,7 +145,26 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
             .await;
 
             match result {
-                Ok(completed) => completed.text_result.unwrap_or_default(),
+                Ok(completed) => {
+                    let out = completed.text_result.unwrap_or_default();
+                    let desc_preview = if description.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        tools::preview_str(&description, 80)
+                    };
+                    log::info!(
+                        target: "_gremlins_core.clients.task",
+                        "task complete: desc={desc_q} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?} has_done_header={has_done} has_md_header={has_md}",
+                        desc_q = desc_preview,
+                        p_len = task.len(),
+                        p_preview = tools::preview_str(&task, 120),
+                        o_len = out.len(),
+                        o_preview = tools::preview_str(&out, 300),
+                        has_done = out.starts_with("Done."),
+                        has_md = out.starts_with("# "),
+                    );
+                    out
+                }
                 Err(e) => format!("Task error: {e}"),
             }
         })

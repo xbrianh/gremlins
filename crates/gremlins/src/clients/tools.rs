@@ -25,6 +25,17 @@ fn always_available(name: &str) -> bool {
     ALWAYS_AVAILABLE.contains(&name)
 }
 
+/// First `max_chars` characters of a string, with \n escaped to `\\n`.
+pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
+    let truncated: String = s.chars().take(max_chars).collect();
+    let escaped = truncated.replace('\n', "\\n").replace('\r', "\\r");
+    if s.chars().count() > max_chars {
+        format!("{escaped}…")
+    } else {
+        escaped
+    }
+}
+
 type TaskFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
 
 /// Callback that `invoke` calls for Task tool invocations.
@@ -1432,11 +1443,26 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
                 }
                 let out = f(description.to_string(), prompt.to_string()).await;
                 // Label the result so concurrent Task outputs can be told apart.
-                if description.is_empty() {
+                let final_output = if description.is_empty() {
                     out
                 } else {
                     format!("# {description}\n\n{out}")
-                }
+                };
+                let desc_preview = if description.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    preview_str(description, 80)
+                };
+                log::info!(
+                    target: "_gremlins_core.clients.task",
+                    "task dispatch complete: desc={desc_q} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?}",
+                    desc_q = desc_preview,
+                    p_len = prompt.len(),
+                    p_preview = preview_str(prompt, 120),
+                    o_len = final_output.len(),
+                    o_preview = preview_str(&final_output, 300),
+                );
+                final_output
             } else {
                 "Error: Task not available for this backend".to_string()
             }
