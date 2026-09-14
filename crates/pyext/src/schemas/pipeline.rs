@@ -4,6 +4,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList, PyType};
 
 use crate::convert::pyval_to_serde;
+use crate::python::clients::Client;
+use crate::python::stages::PyExec;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::into_pyerr;
 use crate::schemas::loader;
@@ -106,8 +108,7 @@ impl Pipeline {
                         "default_client must be a non-empty string",
                     ));
                 }
-                let client_cls = py.import("_gremlins_core.clients")?.getattr("Client")?;
-                let client: Py<PyAny> = client_cls.call_method1("parse", (s,))?.extract()?;
+                let client: Py<PyAny> = Py::new(py, Client::parse(&s)?)?.into_any();
                 Ok(client)
             })
             .transpose()?;
@@ -183,7 +184,7 @@ impl Pipeline {
                 let land_dict: &Bound<'_, PyDict> = v.cast().map_err(|_| {
                     pyo3::exceptions::PyValueError::new_err("'land' must be a mapping")
                 })?;
-                let exec_cls = py.import("_gremlins_core.stages")?.getattr("Exec")?;
+                let exec_cls = py.get_type::<PyExec>();
                 let land_stage_dict = PyDict::new(py);
                 land_stage_dict.set_item("name", "land")?;
                 for (k, v) in land_dict.iter() {
@@ -220,12 +221,7 @@ impl Pipeline {
         let default_client = match (default_client, default_client_override) {
             (Some(dc), _) => Some(dc),
             (None, Some(override_str)) => {
-                let client_cls = py.import("_gremlins_core.clients")?.getattr("Client")?;
-                Some(
-                    client_cls
-                        .call_method1("parse", (override_str,))?
-                        .extract()?,
-                )
+                Some(Py::new(py, Client::parse(&override_str)?)?.into_any())
             }
             (None, None) => {
                 let cfg_default = gremlins::config::global_config()
@@ -233,9 +229,8 @@ impl Pipeline {
                     .and_then(|cfg| cfg.default_client().map(String::from));
                 match cfg_default {
                     Some(client_str) => {
-                        let client_cls = py.import("_gremlins_core.clients")?.getattr("Client")?;
                         let client: Py<PyAny> =
-                            client_cls.call_method1("parse", (client_str,))?.extract()?;
+                            Py::new(py, Client::parse(&client_str)?)?.into_any();
                         Some(client)
                     }
                     None => None,

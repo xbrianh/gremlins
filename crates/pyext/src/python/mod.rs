@@ -2,6 +2,7 @@ pub(crate) mod artifacts;
 pub(crate) mod assets;
 pub(crate) mod clients;
 pub(crate) mod config;
+pub(crate) mod coroutine;
 pub(crate) mod discovery;
 pub(crate) mod executor;
 pub(crate) mod json_conv;

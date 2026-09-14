@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -13,11 +13,12 @@ use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec as rust_exec;
 use gremlins::stages::outcome::Done as RustDone;
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyRuntimeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple, PyType};
+use pyo3::types::{PyCFunction, PyDict, PyFrozenSet, PyList, PyString, PyTuple, PyType};
 
-use crate::python::artifacts::ArtifactRegistry;
+use crate::python::artifacts::{ArtifactRegistry, MissingArtifact};
+use crate::python::clients::Client;
 use crate::python::executor::{PyState, PyStateData};
 use crate::python::json_conv::{py_to_value as py_to_json, value_to_py as json_value_to_py};
 use crate::schemas::loader;
@@ -48,7 +49,7 @@ fn extract_json_value_dict(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, s
 
 #[pyclass(name = "Done", module = "_gremlins_core.stages", skip_from_py_object)]
 #[derive(Clone)]
-struct Done(RustDone);
+pub(crate) struct Done(pub(crate) RustDone);
 
 #[pymethods]
 impl Done {
@@ -70,27 +71,34 @@ impl Done {
 
 create_exception!(_gremlins_core.stages, Bail, PyException);
 
+/// The textual payload of a `Bail`: `self.args[0]` or `""` when empty.
+fn bail_text(args: &Bound<'_, PyTuple>) -> PyResult<String> {
+    let slf = args.get_item(0)?;
+    let exc_args = slf.getattr("args")?;
+    if exc_args.len()? == 0 {
+        return Ok(String::new());
+    }
+    Ok(exc_args.get_item(0)?.str()?.to_string())
+}
+
+/// Give `Bail` a `reason` property surfacing its message.
+///
+/// `__str__` needs no override: `BaseException.__str__` already returns
+/// `args[0]` for a single-argument exception (and `""` for none), which is
+/// exactly the behaviour the old Python shim provided.
 fn patch_bail(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let globals = pyo3::types::PyDict::new(py);
-    globals.set_item("_m", m)?;
-    py.run(
-        c"\
-def _reason(self):
-    return self.args[0] if self.args else ''
-def _str(self):
-    return self.args[0] if self.args else ''
-_m.Bail.reason = property(_reason)
-_m.Bail.__str__ = _str
-",
-        Some(&globals),
-        None,
-    )
+    let bail = m.getattr("Bail")?;
+    let reason_getter =
+        PyCFunction::new_closure(py, Some(c"reason"), None, |args, _kwargs| bail_text(args))?;
+    let property = py.import("builtins")?.getattr("property")?;
+    bail.setattr("reason", property.call1((reason_getter,))?)?;
+    Ok(())
 }
 
 // --- Exec pyclass ---
 
 #[pyclass(name = "Exec", module = "_gremlins_core.stages", skip_from_py_object)]
-struct PyExec {
+pub(crate) struct PyExec {
     inner: rust_exec::Exec,
     raw_dict: Option<Py<PyAny>>,
     gremlin: Option<Py<PyAny>>,
@@ -184,12 +192,8 @@ impl PyExec {
             .get_item("client")?
             .and_then(|v| v.extract::<String>().ok());
         let (client, client_explicit) = if let Some(raw) = raw_client {
-            let py = _cls.py();
-            let parsed = py
-                .import("_gremlins_core.clients")?
-                .getattr("Client")?
-                .call_method1("parse", (raw,))?;
-            (Some(parsed.unbind()), true)
+            let parsed: Py<PyAny> = Py::new(_cls.py(), Client::parse(&raw)?)?.into_any();
+            (Some(parsed), true)
         } else {
             (None, false)
         };
@@ -295,6 +299,13 @@ impl PyExec {
         self.skip_if_exists = value;
     }
 
+    fn run(slf: PyRef<'_, Self>, gremlin: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = gremlin.py();
+        let stage: Py<PyExec> = slf.into();
+        let helper = wrap_pyfunction!(exec_run_async, py)?;
+        Ok(helper.call1((stage, gremlin))?.unbind())
+    }
+
     fn _run_impl<'py>(
         slf: PyRef<'_, Self>,
         py: Python<'py>,
@@ -333,12 +344,9 @@ impl PyExec {
                     source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
                     ..
                 }) => {
-                    let exc_type = py
-                        .import("_gremlins_core.artifacts")?
-                        .getattr("MissingArtifact")?;
-                    let args = (key.clone(),);
-                    let exc = exc_type.call1(args)?;
-                    return Err(PyErr::from_value(exc));
+                    return Err(MissingArtifact::new_err(format!(
+                        "artifact not bound: {key:?}"
+                    )));
                 }
                 Err(e) => {
                     return Err(pyo3::exceptions::PyValueError::new_err(e.to_string()));
@@ -545,12 +553,8 @@ impl PyAgent {
             .get_item("client")?
             .and_then(|v| v.extract::<String>().ok());
         let (client, client_explicit) = if let Some(raw) = raw_client {
-            let py = _cls.py();
-            let parsed = py
-                .import("_gremlins_core.clients")?
-                .getattr("Client")?
-                .call_method1("parse", (raw,))?;
-            (Some(parsed.unbind()), true)
+            let parsed: Py<PyAny> = Py::new(_cls.py(), Client::parse(&raw)?)?.into_any();
+            (Some(parsed), true)
         } else {
             (None, false)
         };
@@ -665,6 +669,13 @@ impl PyAgent {
         self.skip_if_exists = value;
     }
 
+    fn run(slf: PyRef<'_, Self>, gremlin: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = gremlin.py();
+        let stage: Py<PyAgent> = slf.into();
+        let helper = wrap_pyfunction!(agent_run_async, py)?;
+        Ok(helper.call1((stage, gremlin))?.unbind())
+    }
+
     fn _run_impl<'py>(
         slf: PyRef<'_, Self>,
         py: Python<'py>,
@@ -706,12 +717,9 @@ impl PyAgent {
                     source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
                     ..
                 }) => {
-                    let exc_type = py
-                        .import("_gremlins_core.artifacts")?
-                        .getattr("MissingArtifact")?;
-                    let args = (key.clone(),);
-                    let exc = exc_type.call1(args)?;
-                    return Err(PyErr::from_value(exc));
+                    return Err(MissingArtifact::new_err(format!(
+                        "artifact not bound: {key:?}"
+                    )));
                 }
                 Err(e) => {
                     return Err(Bail::new_err(e.to_string()));
@@ -1104,17 +1112,19 @@ impl PySequence {
         let obj = cls.call((seq.attrs.name.as_str(),), Some(&kwargs))?;
 
         let client = match &seq.client {
-            Some(spec) => Some(
-                py.import("_gremlins_core.clients")?
-                    .getattr("Client")?
-                    .call_method1("parse", (spec.0.as_str(),))?
-                    .unbind(),
-            ),
+            Some(spec) => Some(Py::new(py, Client::parse(&spec.0)?)?.into_any()),
             None => None,
         };
         obj.setattr("client", client)?;
         obj.setattr("client_explicit", seq.attrs.client_explicit)?;
         Ok(obj.unbind())
+    }
+
+    fn run(slf: PyRef<'_, Self>, gremlin: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = gremlin.py();
+        let stage: Py<PySequence> = slf.into();
+        let helper = wrap_pyfunction!(sequence_run_async, py)?;
+        Ok(helper.call1((stage, gremlin))?.unbind())
     }
 }
 
@@ -1204,17 +1214,19 @@ impl PyLoop {
         let obj = cls.call((lp.attrs.name.as_str(),), Some(&kwargs))?;
 
         let client = match &lp.client {
-            Some(spec) => Some(
-                py.import("_gremlins_core.clients")?
-                    .getattr("Client")?
-                    .call_method1("parse", (spec.0.as_str(),))?
-                    .unbind(),
-            ),
+            Some(spec) => Some(Py::new(py, Client::parse(&spec.0)?)?.into_any()),
             None => None,
         };
         obj.setattr("client", client)?;
         obj.setattr("client_explicit", lp.attrs.client_explicit)?;
         Ok(obj.unbind())
+    }
+
+    fn run(slf: PyRef<'_, Self>, gremlin: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = gremlin.py();
+        let stage: Py<PyLoop> = slf.into();
+        let helper = wrap_pyfunction!(loop_run_async, py)?;
+        Ok(helper.call1((stage, gremlin))?.unbind())
     }
 
     #[getter]
@@ -1265,6 +1277,358 @@ impl PyLoop {
 
 // --- Free functions ---
 
+/// Await `stage._run_impl(gremlin)` as a loop-independent coroutine.
+#[pyfunction]
+#[pyo3(name = "_exec_run_async")]
+async fn exec_run_async(stage: Py<PyExec>, gremlin: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let coro: Py<PyAny> = Python::attach(|py| {
+        stage
+            .bind(py)
+            .call_method1("_run_impl", (gremlin.bind(py),))
+            .map(|c| c.unbind())
+    })?;
+    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
+    fut.await
+}
+
+/// Await `stage._run_impl(gremlin)` as a loop-independent coroutine.
+#[pyfunction]
+#[pyo3(name = "_agent_run_async")]
+async fn agent_run_async(stage: Py<PyAgent>, gremlin: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let coro: Py<PyAny> = Python::attach(|py| {
+        stage
+            .bind(py)
+            .call_method1("_run_impl", (gremlin.bind(py),))
+            .map(|c| c.unbind())
+    })?;
+    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
+    fut.await
+}
+
+/// Call a zero-argument awaitable-returning callable and await its result.
+async fn await_callable(callable: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let coro: Py<PyAny> = Python::attach(|py| callable.bind(py).call0().map(|c| c.unbind()))?;
+    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
+    fut.await
+}
+
+/// Set or clear `state.data.active_children`.
+fn patch_active_children(
+    py: Python<'_>,
+    state: &Bound<'_, PyAny>,
+    name: Option<&str>,
+) -> PyResult<()> {
+    let data = state.getattr("data")?;
+    match name {
+        Some(n) => {
+            let patch = PyDict::new(py);
+            patch.set_item("active_children", vec![n.to_string()])?;
+            data.call_method("patch", (), Some(&patch))?;
+        }
+        None => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("_delete", ("active_children",))?;
+            data.call_method("patch", (), Some(&kwargs))?;
+        }
+    }
+    Ok(())
+}
+
+/// Build a runner for `child` via `child_state(state, child).make_runner(...)`.
+fn build_child_runner(
+    py: Python<'_>,
+    state: &Bound<'_, PyAny>,
+    child: &Bound<'_, PyAny>,
+    gremlin: &Bound<'_, PyAny>,
+    scope: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let child_state_fn = wrap_pyfunction!(child_state_py, py)?;
+    let cs = child_state_fn.call1((state, child))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("scope", scope)?;
+    kwargs.set_item("record_stage", false)?;
+    Ok(cs
+        .call_method("make_runner", (child, gremlin), Some(&kwargs))?
+        .unbind())
+}
+
+/// Read the bail reason stored at `key`, if any.
+fn bail_reason(artifacts: &Bound<'_, PyAny>, key: &str) -> PyResult<Option<String>> {
+    if !artifacts
+        .call_method1("is_registered", (key,))?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let raw: String = artifacts.call_method1("data_uri", (key,))?.extract()?;
+    if !raw.starts_with('/') {
+        return Ok(Some(raw.trim().to_string()));
+    }
+    let path = std::path::Path::new(&raw);
+    if !path.exists() {
+        return Ok(None);
+    }
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s.trim().to_string())),
+        Err(_) => Ok(Some(raw)),
+    }
+}
+
+/// Run a Sequence's body in order, skipping children already marked done.
+#[pyfunction]
+#[pyo3(name = "_sequence_run_async")]
+async fn sequence_run_async(stage: Py<PySequence>, gremlin: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let (state, key, body) = Python::attach(|py| {
+        let stage_ref = stage.bind(py);
+        let gremlin_ref = gremlin.bind(py);
+        let state = gremlin_ref.getattr("state")?;
+        if state.is_none() {
+            return Err(PyRuntimeError::new_err(
+                "sequence stage requires gremlin.state to be initialized",
+            ));
+        }
+        let path: String = stage_ref.getattr("path")?.extract()?;
+        let name: String = stage_ref.getattr("name")?.extract()?;
+        let key = if path.is_empty() { name } else { path };
+        let body: Vec<Py<PyAny>> = stage_ref.getattr("body")?.extract()?;
+        Ok::<_, PyErr>((state.unbind(), key, body))
+    })?;
+
+    let done: HashSet<String> =
+        Python::attach(|py| state.bind(py).call_method1("done_for", (&key,))?.extract())?;
+
+    for child in &body {
+        let child_name: String = Python::attach(|py| child.bind(py).getattr("name")?.extract())?;
+        if done.contains(&child_name) {
+            continue;
+        }
+        Python::attach(|py| patch_active_children(py, state.bind(py), Some(&child_name)))?;
+        let runner = Python::attach(|py| {
+            let stage_ref = stage.bind(py);
+            build_child_runner(
+                py,
+                state.bind(py),
+                child.bind(py),
+                gremlin.bind(py),
+                &stage_ref.getattr("body")?,
+            )
+        })?;
+        let result = await_callable(runner).await;
+        Python::attach(|py| patch_active_children(py, state.bind(py), None))?;
+        result?;
+        Python::attach(|py| {
+            state
+                .bind(py)
+                .call_method1("mark_done", (&key, &child_name))
+                .map(|_| ())
+        })?;
+    }
+
+    Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()))
+}
+
+/// Run a Loop's body until a stop condition, bail, or exhaustion.
+#[pyfunction]
+#[pyo3(name = "_loop_run_async")]
+async fn loop_run_async(stage: Py<PyLoop>, gremlin: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let (state, stage_path, name, max_iterations, stop_when_exists, interval, body, provided) =
+        Python::attach(|py| {
+            let stage_ref = stage.bind(py);
+            let gremlin_ref = gremlin.bind(py);
+            let state = gremlin_ref.getattr("state")?;
+            if state.is_none() {
+                return Err(PyRuntimeError::new_err(
+                    "loop stage requires gremlin.state to be initialized",
+                ));
+            }
+            let path: String = stage_ref.getattr("path")?.extract()?;
+            let name: String = stage_ref.getattr("name")?.extract()?;
+            let stage_path = if path.is_empty() { name.clone() } else { path };
+            let max_iterations: u32 = stage_ref.getattr("max_iterations")?.extract()?;
+            let stop_when_exists: Option<String> =
+                stage_ref.getattr("stop_when_exists")?.extract()?;
+            let interval: Option<f64> = stage_ref.getattr("interval")?.extract()?;
+            let body: Vec<Py<PyAny>> = stage_ref.getattr("body")?.extract()?;
+            let provided: Option<Vec<Py<PyAny>>> = {
+                let br = stage_ref.getattr("body_runners")?;
+                if br.is_none() {
+                    None
+                } else {
+                    Some(br.extract()?)
+                }
+            };
+            Ok::<_, PyErr>((
+                state.unbind(),
+                stage_path,
+                name,
+                max_iterations,
+                stop_when_exists,
+                interval,
+                body,
+                provided,
+            ))
+        })?;
+
+    Python::attach(|py| {
+        state
+            .bind(py)
+            .call_method1("push_loop", (&stage_path,))
+            .map(|_| ())
+    })?;
+    let state_for_loop = Python::attach(|py| state.clone_ref(py));
+    let result = loop_iterations(
+        state_for_loop,
+        gremlin,
+        stage,
+        name,
+        max_iterations,
+        stop_when_exists,
+        interval,
+        body,
+        provided,
+    )
+    .await;
+    let _ = Python::attach(|py| state.bind(py).call_method0("pop_loop").map(|_| ()));
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn loop_iterations(
+    state: Py<PyAny>,
+    gremlin: Py<PyAny>,
+    stage: Py<PyLoop>,
+    name: String,
+    max_iterations: u32,
+    stop_when_exists: Option<String>,
+    interval: Option<f64>,
+    body: Vec<Py<PyAny>>,
+    provided: Option<Vec<Py<PyAny>>>,
+) -> PyResult<Py<PyAny>> {
+    for iteration in 1..=max_iterations {
+        Python::attach(|py| {
+            state
+                .bind(py)
+                .call_method1("set_loop_iteration", (iteration as i32,))
+                .map(|_| ())
+        })?;
+        let loop_iter: String =
+            Python::attach(|py| state.bind(py).getattr("loop_iter")?.extract())?;
+
+        // Clear any stale per-iteration bail left by a prior attempt/resume.
+        let scoped_bail = format!("artifact://{loop_iter}/bail");
+        Python::attach(|py| {
+            let artifacts = state.bind(py).getattr("artifacts")?;
+            if artifacts
+                .call_method1("is_registered", (&scoped_bail,))?
+                .extract::<bool>()?
+            {
+                let bail_path: String = artifacts
+                    .call_method1("data_uri", (&scoped_bail,))?
+                    .extract()?;
+                let _ = std::fs::remove_file(&bail_path);
+            }
+            Ok::<_, PyErr>(())
+        })?;
+
+        log::info!(
+            target: "gremlins.executor.state",
+            "loop {name}: iteration {iteration}/{max_iterations} starting"
+        );
+
+        match &provided {
+            Some(runners) => {
+                for runner in runners {
+                    let runner = Python::attach(|py| runner.clone_ref(py));
+                    await_callable(runner).await?;
+                }
+            }
+            None => {
+                for child in &body {
+                    let child_name: String =
+                        Python::attach(|py| child.bind(py).getattr("name")?.extract())?;
+                    Python::attach(|py| {
+                        patch_active_children(py, state.bind(py), Some(&child_name))
+                    })?;
+                    let runner = Python::attach(|py| {
+                        let stage_ref = stage.bind(py);
+                        build_child_runner(
+                            py,
+                            state.bind(py),
+                            child.bind(py),
+                            gremlin.bind(py),
+                            &stage_ref.getattr("body")?,
+                        )
+                    })?;
+                    let result = await_callable(runner).await;
+                    Python::attach(|py| patch_active_children(py, state.bind(py), None))?;
+                    result?;
+                }
+            }
+        }
+
+        let (bail, reason) = Python::attach(|py| {
+            let artifacts = state.bind(py).getattr("artifacts")?;
+            let scoped = bail_reason(&artifacts, &format!("artifact://{loop_iter}/bail"))?;
+            let global = bail_reason(&artifacts, BAIL_KEY)?;
+            Ok::<_, PyErr>((scoped.is_some() || global.is_some(), scoped.or(global)))
+        })?;
+        if bail {
+            let reason = reason.unwrap_or_default();
+            Python::attach(|py| {
+                state
+                    .bind(py)
+                    .call_method1("record_bail", (&reason,))
+                    .map(|_| ())
+            })?;
+            return Err(Bail::new_err(reason));
+        }
+
+        if let Some(stop) = &stop_when_exists {
+            let resolved = stop.replace("{loop_iter}", &loop_iter);
+            let live: bool = Python::attach(|py| {
+                let artifacts = state.bind(py).getattr("artifacts")?;
+                let direct: bool = artifacts.call_method1("is_live", (&resolved,))?.extract()?;
+                let prefixed: bool = artifacts
+                    .call_method1("is_live", (&format!("artifact://{resolved}"),))?
+                    .extract()?;
+                Ok::<_, PyErr>(direct || prefixed)
+            })?;
+            if live {
+                return Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()));
+            }
+        }
+
+        if iteration == max_iterations {
+            let msg = format!("loop exhausted {max_iterations} iterations");
+            Python::attach(|py| {
+                state
+                    .bind(py)
+                    .call_method1("record_bail", (&msg,))
+                    .map(|_| ())
+            })?;
+            return Err(Bail::new_err(msg));
+        }
+
+        if let Some(secs) = interval {
+            // Sleep on the asyncio loop, not Tokio: this coroutine is driven by
+            // asyncio and there is no Tokio reactor in scope.
+            let coro: Py<PyAny> = Python::attach(|py| {
+                py.import("asyncio")
+                    .and_then(|m| m.call_method1("sleep", (secs,)))
+                    .map(|c| c.unbind())
+            })?;
+            let fut = Python::attach(|py| {
+                pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone())
+            })?;
+            fut.await?;
+        }
+    }
+
+    Err(PyRuntimeError::new_err(format!(
+        "Loop.run() fell through: max_iterations={max_iterations}"
+    )))
+}
+
 fn stage_name_from_dict(d: &Bound<'_, PyDict>) -> String {
     for key in ["name", "type"] {
         if let Ok(Some(v)) = d.get_item(key) {
@@ -1298,11 +1662,8 @@ fn get_client_from_dict_py(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Op
     let name = stage_name_from_dict(d);
     match rust_get_client_from_dict(&map, &name) {
         Ok(Some(spec)) => {
-            let parsed = py
-                .import("_gremlins_core.clients")?
-                .getattr("Client")?
-                .call_method1("parse", (spec.0,))?;
-            Ok(Some(parsed.unbind()))
+            let parsed: Py<PyAny> = Py::new(py, Client::parse(&spec.0)?)?.into_any();
+            Ok(Some(parsed))
         }
         Ok(None) => Ok(None),
         // Render the offending Python type, as the pre-port helper did.
@@ -1354,15 +1715,10 @@ fn child_state_py(
         (artifact_dir, child_key)
     } else {
         let child_name: String = child.getattr("name")?.extract()?;
-        let child_scratch: Option<PathBuf> = match child_id.as_deref().filter(|s| !s.is_empty()) {
-            Some(cid) => Some(PathBuf::from(
-                py.import("_gremlins_core.config")?
-                    .getattr("scratch_root")?
-                    .call1((cid,))?
-                    .extract::<String>()?,
-            )),
-            None => None,
-        };
+        let child_scratch: Option<PathBuf> = child_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|cid| gremlins::config::scratch_root(Some(cid)));
         let params = compute_child_params(&artifact_dir, &child_name, child_scratch.as_deref());
         std::fs::create_dir_all(&params.artifact_dir)?;
         (params.artifact_dir, Some(params.child_key))
@@ -1441,6 +1797,10 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Done>()?;
     m.add_function(wrap_pyfunction!(get_client_from_dict_py, &m)?)?;
     m.add_function(wrap_pyfunction!(child_state_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(exec_run_async, &m)?)?;
+    m.add_function(wrap_pyfunction!(agent_run_async, &m)?)?;
+    m.add_function(wrap_pyfunction!(sequence_run_async, &m)?)?;
+    m.add_function(wrap_pyfunction!(loop_run_async, &m)?)?;
     m.add("Bail", m.py().get_type::<Bail>())?;
 
     parent.add_submodule(&m)?;
@@ -1448,28 +1808,6 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     modules.set_item("_gremlins_core.stages", &m)?;
 
     patch_bail(py, &m)?;
-
-    // Python async wrapper so that stage.run(gremlin) returns a coroutine
-    // without needing a running event loop. The actual async work (_run_impl)
-    // is deferred until the coroutine is awaited.
-    let globals = PyDict::new(py);
-    globals.set_item("_m", &m)?;
-    globals.set_item("_BAIL_KEY", BAIL_KEY)?;
-    // Injected `run()` bodies call logging.getLogger(__name__); without this
-    // the lookup falls through to builtins and logs under "builtins".
-    globals.set_item("__name__", "_gremlins_core.stages")?;
-    py.run(
-        c"\
-async def _exec_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Exec.run = _exec_run_async\n\
-async def _agent_run_async(stage, gremlin):\n    return await stage._run_impl(gremlin)\n_m.Agent.run = _agent_run_async\n\
-async def _sequence_run_async(stage, gremlin):\n    from _gremlins_core.stages import Done, child_state as _child_state\n    state = gremlin.state\n    if state is None:\n        raise RuntimeError('sequence stage requires gremlin.state to be initialized')\n    key = stage.path or stage.name\n    done = state.done_for(key)\n    for child in stage.body:\n        if child.name in done:\n            continue\n        state.data.patch(active_children=[child.name])\n        runner = _child_state(state, child).make_runner(\n            child, gremlin, scope=stage.body, record_stage=False\n        )\n        try:\n            await runner()\n        finally:\n            state.data.patch(_delete=('active_children',))\n        state.mark_done(key, child.name)\n    return Done()\n_m.Sequence.run = _sequence_run_async\n\
-import pathlib as _pathlib\n\
-def _bail_reason(artifacts, key):\n    if not artifacts.is_registered(key):\n        return None\n    raw = artifacts.data_uri(key)\n    if not (isinstance(raw, str) and raw.startswith('/')):\n        return str(raw).strip()\n    path = _pathlib.Path(raw)\n    if not path.exists():\n        return None\n    try:\n        return path.read_text(encoding='utf-8').strip()\n    except (OSError, ValueError):\n        return raw\n\
-def _is_bail_set(artifacts, loop_iter):\n    return (\n        _bail_reason(artifacts, f'artifact://{loop_iter}/bail') is not None\n        or _bail_reason(artifacts, _BAIL_KEY) is not None\n    )\n_m._bail_reason = _bail_reason\n_m._is_bail_set = _is_bail_set\n\
-async def _loop_run_async(stage, gremlin):\n    from _gremlins_core.stages import Done, Bail, _BAIL_KEY, child_state as _child_state\n    import asyncio, pathlib, logging\n    logger = logging.getLogger(__name__)\n    state = gremlin.state\n    if state is None:\n        raise RuntimeError('loop stage requires gremlin.state to be initialized')\n    state.push_loop(stage.path or stage.name)\n    try:\n        max_iterations = stage.max_iterations\n        stop_when_exists = stage.stop_when_exists\n        interval = stage.interval\n        for iteration in range(1, max_iterations + 1):\n            state.set_loop_iteration(iteration)\n            scoped_bail = f'artifact://{state.loop_iter}/bail'\n            if state.artifacts.is_registered(scoped_bail):\n                bail_path = state.artifacts.data_uri(scoped_bail)\n                if isinstance(bail_path, str):\n                    try:\n                        pathlib.Path(bail_path).unlink(missing_ok=True)\n                    except OSError:\n                        pass\n            logger.info('loop %s: iteration %d/%d starting', stage.name, iteration, max_iterations)\n            runners = stage.body_runners\n            if runners is None:\n                runners = []\n                for child in stage.body:\n                    cs = _child_state(state, child)\n                    base = cs.make_runner(child, gremlin, scope=stage.body, record_stage=False)\n                    child_name = child.name\n\n                    async def _tracked(r=base, n=child_name):\n                        state.data.patch(active_children=[n])\n                        try:\n                            return await r()\n                        finally:\n                            state.data.patch(_delete=('active_children',))\n\n                    runners.append(_tracked)\n            for runner in runners:\n                await runner()\n            if _is_bail_set(state.artifacts, state.loop_iter):\n                reason = _bail_reason(state.artifacts, f'artifact://{state.loop_iter}/bail')\n                if reason is None:\n                    reason = _bail_reason(state.artifacts, _BAIL_KEY) or ''\n                state.record_bail(reason)\n                raise Bail(reason)\n            if stop_when_exists is not None:\n                resolved = stop_when_exists.replace('{loop_iter}', state.loop_iter)\n                if state.artifacts.is_live(resolved) or state.artifacts.is_live(f'artifact://{resolved}'):\n                    return Done()\n            if iteration == max_iterations:\n                state.record_bail(f'loop exhausted {max_iterations} iterations')\n                raise Bail(f'loop exhausted {max_iterations} iterations')\n            if interval is not None:\n                await asyncio.sleep(interval)\n        raise RuntimeError(f'Loop.run() fell through: max_iterations={max_iterations}')\n    finally:\n        state.pop_loop()\n_m.Loop.run = _loop_run_async\n",
-        Some(&globals),
-        None,
-    )?;
 
     m.add("Outcome", m.getattr("Done")?)?;
     m.add("_BAIL_KEY", BAIL_KEY)?;

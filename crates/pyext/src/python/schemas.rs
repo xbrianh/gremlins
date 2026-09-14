@@ -93,6 +93,7 @@ pub fn register_schemas_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     // Replace the placeholder with the real dict
     schemas_mod.setattr("STAGE_TYPES", &stage_types)?;
+    schemas::loader::set_stage_types_dict(m.py(), stage_types.unbind());
 
     Ok(())
 }

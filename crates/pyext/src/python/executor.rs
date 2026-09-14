@@ -4,11 +4,14 @@ use std::sync::Mutex;
 
 use gremlins::executor::state::{self as rust_state, StateData};
 use gremlins::stages::constants::FRAMEWORK_KEYS;
+use gremlins::stages::outcome::Done as RustDone;
 use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList};
 
+use crate::python::artifacts::ArtifactRegistry;
 use crate::python::json_conv::{key_to_string, py_to_value, value_to_py};
+use crate::python::stages::Done;
 
 fn py_dict_to_map(d: &Bound<'_, PyDict>) -> PyResult<serde_json::Map<String, serde_json::Value>> {
     let mut map = serde_json::Map::new();
@@ -561,19 +564,114 @@ impl PyState {
         scope: Option<&Bound<'_, PyAny>>,
         record_stage: bool,
     ) -> PyResult<Py<PyAny>> {
-        let this: Py<PyState> = slf.into();
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("record_stage", record_stage)?;
-        let scope = match scope {
-            Some(s) if !s.is_none() => s.clone(),
-            _ => py.None().into_bound(py),
-        };
-        Ok(py
-            .import("_gremlins_core.executor")?
-            .getattr("_make_runner_factory")?
-            .call((this, entry, gremlin, scope), Some(&kwargs))?
-            .unbind())
+        let runner = Py::new(
+            py,
+            StageRunner {
+                state: slf.into(),
+                entry: entry.clone().unbind(),
+                gremlin: gremlin.clone().unbind(),
+                scope: scope.filter(|s| !s.is_none()).map(|s| s.clone().unbind()),
+                record_stage,
+            },
+        )?;
+        crate::python::coroutine::mark_as_coroutine_function(py, runner.bind(py).as_any())?;
+        Ok(runner.into_any())
     }
+}
+
+// --- StageRunner ---
+
+/// A zero-argument coroutine function that runs a single stage.
+///
+/// Returned by [`PyState::make_runner`]. It is a `#[pyclass(dict)]` whose
+/// `__call__` is an `async fn`, so calling it produces a loop-independent
+/// coroutine (see [`crate::python::coroutine`]).
+#[pyclass(dict, name = "_StageRunner", module = "_gremlins_core.executor")]
+struct StageRunner {
+    state: Py<PyState>,
+    entry: Py<PyAny>,
+    gremlin: Py<PyAny>,
+    scope: Option<Py<PyAny>>,
+    record_stage: bool,
+}
+
+#[pymethods]
+impl StageRunner {
+    async fn __call__(&self) -> PyResult<Py<PyAny>> {
+        let (name, skip, loop_iter, artifacts) = Python::attach(|py| {
+            let entry = self.entry.bind(py);
+            let name: String = entry.getattr("name")?.extract()?;
+            let skip: String = entry
+                .getattr("skip_if_exists")
+                .ok()
+                .and_then(|v| v.extract().ok())
+                .unwrap_or_default();
+            let state = self.state.bind(py);
+            let loop_iter: String = state.getattr("loop_iter")?.extract()?;
+            let artifacts = state.getattr("artifacts")?.unbind();
+            Ok::<_, PyErr>((name, skip, loop_iter, artifacts))
+        })?;
+
+        if !skip.is_empty() {
+            let resolved = skip.replace("{loop_iter}", &loop_iter);
+            let is_live: bool = Python::attach(|py| {
+                artifacts
+                    .bind(py)
+                    .call_method1("is_live", (resolved,))?
+                    .extract()
+            })?;
+            if is_live {
+                log::info!(
+                    target: "gremlins.executor.state",
+                    "stage skipped (artifact exists): {name}"
+                );
+                return Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()));
+            }
+        }
+
+        let coro: Py<PyAny> = Python::attach(|py| {
+            let state = self.state.bind(py);
+            let entry = self.entry.bind(py);
+            let scope = match &self.scope {
+                Some(s) => s.bind(py).clone(),
+                None => py.None().into_bound(py),
+            };
+            let prepared =
+                state.call_method1("_make_runner_impl", (entry, scope, self.record_stage))?;
+            let child = py
+                .import("copy")?
+                .call_method1("copy", (self.gremlin.bind(py),))?;
+            child.setattr("state", &prepared)?;
+            child.setattr("registry", prepared.getattr("artifacts")?)?;
+            let entry_type: String = entry.getattr("type")?.extract()?;
+            log::info!(
+                target: "gremlins.executor.state",
+                "stage starting: {name} (type={entry_type})"
+            );
+            entry.call_method1("run", (child,)).map(|c| c.unbind())
+        })?;
+
+        let fut =
+            Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
+        let result = fut.await;
+
+        log::info!(target: "gremlins.executor.state", "stage finished: {name}");
+        Python::attach(flush_log_handlers).ok();
+        result
+    }
+}
+
+/// Flush every root-logger handler, mirroring the pre-port Python runner.
+fn flush_log_handlers(py: Python<'_>) -> PyResult<()> {
+    let handlers = py
+        .import("logging")?
+        .call_method0("getLogger")?
+        .getattr("handlers")?;
+    for handler in handlers.try_iter()? {
+        let handler = handler?;
+        let _ = handler.call_method0("flush");
+    }
+    Ok(())
 }
 
 // --- free functions ---
@@ -633,14 +731,7 @@ fn build_state(
 ) -> PyResult<Py<PyState>> {
     let artifacts: Py<PyAny> = match artifacts {
         Some(a) => a,
-        None => {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("artifact_dir", artifact_dir.clone())?;
-            py.import("_gremlins_core.artifacts")?
-                .getattr("ArtifactRegistry")?
-                .call((), Some(&kwargs))?
-                .unbind()
-        }
+        None => Py::new(py, ArtifactRegistry::new(artifact_dir.clone()))?.into_any(),
     };
     let args = args.unwrap_or_else(|| py.None());
     let cwd = if !cwd.is_empty() {
@@ -691,66 +782,18 @@ pub fn register_executor_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let modules = py.import("sys")?.getattr("modules")?;
     modules.set_item("_gremlins_core.executor", &m)?;
 
-    let globals = PyDict::new(py);
-    globals.set_item("_m", &m)?;
-
     let field_defaults = PyDict::new(py);
     for name in rust_state::field_names() {
         let default = rust_state::default_for(name)
             .ok_or_else(|| PyValueError::new_err(format!("no default for {name}")))?;
         field_defaults.set_item(name, value_to_py(py, &default)?)?;
     }
-    globals.set_item("_field_defaults", &field_defaults)?;
+    m.getattr("StateData")?
+        .setattr("FIELD_DEFAULTS", &field_defaults)?;
 
     let framework_keys: Vec<&str> = FRAMEWORK_KEYS.iter().copied().collect();
-    globals.set_item("_framework_keys", PyFrozenSet::new(py, &framework_keys)?)?;
+    m.getattr("State")?
+        .setattr("FRAMEWORK_KEYS", PyFrozenSet::new(py, &framework_keys)?)?;
 
-    py.run(
-        &std::ffi::CString::new(
-            r#"
-import copy as _copy
-import logging as _logging
-
-_m.StateData.FIELD_DEFAULTS = _field_defaults
-_m.State.FRAMEWORK_KEYS = _framework_keys
-
-_logger = _logging.getLogger("gremlins.executor.state")
-
-
-def _make_runner_factory(state, entry, gremlin, scope=None, *, record_stage=True):
-    async def _run_async():
-        skip = getattr(entry, "skip_if_exists", "") or ""
-        if skip:
-            skip = skip.replace("{loop_iter}", state.loop_iter)
-            if state.artifacts.is_live(skip):
-                from _gremlins_core.stages import Done
-                _logger.info("stage skipped (artifact exists): %s", entry.name)
-                return Done()
-        child_gremlin = _copy.copy(gremlin)
-        prepared = state._make_runner_impl(entry, scope, record_stage)
-        child_gremlin.state = prepared
-        child_gremlin.registry = prepared.artifacts
-        _logger.info("stage starting: %s (type=%s)", entry.name, entry.type)
-        try:
-            return await entry.run(child_gremlin)
-        finally:
-            _logger.info("stage finished: %s", entry.name)
-            for h in _logging.getLogger().handlers:
-                try:
-                    h.flush()
-                except Exception:
-                    pass
-    return _run_async
-
-
-_m._make_runner_factory = _make_runner_factory
-"#,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))?,
-        Some(&globals),
-        None,
-    )?;
-
-    let _ = py;
     Ok(())
 }

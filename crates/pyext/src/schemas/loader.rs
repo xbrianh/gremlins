@@ -1,10 +1,22 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList};
 
 use crate::schemas::error::SchemaError;
 use gremlins::schemas::loader as core_loader;
+
+/// The live `STAGE_TYPES` dict, populated by `register_schemas_module`.
+///
+/// `parse_stage` consults this for dynamically registered stage types (e.g.
+/// test fixtures) that are not part of the built-in [`STAGE_TYPES`] constant.
+static STAGE_TYPES_DICT: PyOnceLock<Py<PyDict>> = PyOnceLock::new();
+
+/// Record the live `STAGE_TYPES` dict for later lookups.
+pub fn set_stage_types_dict(py: Python<'_>, dict: Py<PyDict>) {
+    let _ = STAGE_TYPES_DICT.set(py, dict);
+}
 
 pub const STAGE_TYPES: &[(&str, &str, &str)] = &[
     ("agent", "_gremlins_core.stages", "Agent"),
@@ -77,12 +89,12 @@ pub fn parse_stage(py: Python<'_>, d: &Bound<'_, PyDict>, depth: usize) -> PyRes
         return Ok(stage);
     }
 
-    // Fall back to the Python STAGE_TYPES dict (which may have dynamically
+    // Fall back to the live STAGE_TYPES dict (which may have dynamically
     // registered types, e.g. test fixtures).
-    let stage_types: Bound<'_, PyDict> = py
-        .import("_gremlins_core.schemas")?
-        .getattr("STAGE_TYPES")?
-        .cast_into()?;
+    let stage_types = STAGE_TYPES_DICT
+        .get(py)
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("STAGE_TYPES not initialized"))?
+        .bind(py);
     match stage_types.get_item(&stage_type)? {
         Some(cls) => {
             let stage: Py<PyAny> = cls.call_method1("with_dict", (d, depth))?.extract()?;
