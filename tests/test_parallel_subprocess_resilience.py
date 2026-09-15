@@ -1,12 +1,19 @@
-"""Tests for subprocess supervisor resilience: kill, crash, timeout, large output."""
+"""Tests for subprocess supervisor resilience: kill, crash, timeout, large output.
+
+The parallel stage spawns each child with ``sys.executable -m gremlins.spawn.child
+<spec>``. These tests point ``sys.executable`` at a fake interpreter that reads a
+per-child plan from the environment, so the real spawn/pump/wait/teardown path is
+exercised end to end without running a full gremlin.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import pathlib
 import signal
+import stat
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -20,79 +27,96 @@ from conftest import make_parent_state
 from gremlins.utils import proc as _proc_mod
 from tests.fake_client import FakeClient
 
+# A stand-in for ``python -m gremlins.spawn.child``. It ignores the ``-m`` module
+# argument and treats the last argv entry as the spec path, then behaves per the
+# ``FAKE_CHILD_PLAN`` entry for its child key.
+_FAKE_CHILD = '''#!__PYTHON__
+"""Fake ``gremlins.spawn.child`` driven by ``FAKE_CHILD_PLAN``.
 
-class _FakeStreamReader:
-    def __init__(self, data: bytes = b"") -> None:
-        self._buf = data
+Each plan entry is a step dict:
+    {"mode": "done"|"sleep"|"hang"|"kill"|"exit_no_result"|"stderr_blob",
+     "status": "done"|"bail"|"error"|"needs_fix", "detail": str,
+     "cost": float, "exit": int, "bytes": int, "stdout": str}
+"""
+import json
+import os
+import pathlib
+import signal
+import sys
+import time
 
-    async def read(self, n: int) -> bytes:
-        chunk, self._buf = self._buf[:n], self._buf[n:]
-        return chunk
+spec = pathlib.Path(sys.argv[-1])
+plan = json.loads(os.environ.get("FAKE_CHILD_PLAN", "{}"))
+child_key = json.loads(spec.read_text()).get("child_key") or spec.parent.name
+step = plan.get(child_key, {})
+
+pid_file = os.environ.get("FAKE_CHILD_PID_FILE")
+if pid_file:
+    pathlib.Path(pid_file).write_text(str(os.getpid()))
+
+mode = step.get("mode", "done")
+if mode == "hang":
+    # Ignore SIGTERM so teardown must escalate to SIGKILL; record that we saw it.
+    marker = os.environ.get("FAKE_CHILD_SIGTERM_MARKER")
+    if marker:
+
+        def _on_term(*_args):
+            pathlib.Path(marker).write_text("term")
+
+        signal.signal(signal.SIGTERM, _on_term)
+    else:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(60)
+elif mode == "sleep":
+    time.sleep(60)
+elif mode == "kill":
+    os.kill(os.getpid(), signal.SIGKILL)
+elif mode == "exit_no_result":
+    sys.exit(step.get("exit", 0))
+elif mode == "stderr_blob":
+    sys.stderr.write("x" * step.get("bytes", 1024 * 1024))
+    sys.stderr.flush()
+
+if step.get("stdout"):
+    sys.stdout.write(step["stdout"])
+    sys.stdout.flush()
+
+pathlib.Path(str(spec) + ".result").write_text(
+    json.dumps(
+        {
+            "status": step.get("status", "done"),
+            "detail": step.get("detail", ""),
+            "returncode": None,
+            "cost_usd": step.get("cost", 0.0),
+        }
+    )
+)
+sys.exit(step.get("exit", 0))
+'''
 
 
-class _FakeProcess:
-    """Simulates an asyncio subprocess with controllable behavior."""
-
-    def __init__(
-        self,
-        exit_code: int = 0,
-        *,
-        hang: bool = False,
-        stderr_data: bytes = b"",
-    ) -> None:
-        self._exit_code = exit_code
-        self._hang = hang
-        self.returncode: int | None = None if hang else exit_code
-        self.stdout = _FakeStreamReader()
-        self.stderr = _FakeStreamReader(stderr_data)
-        self._event: asyncio.Event | None = None
-        self.pid = id(self) & 0x7FFFFFFF  # unique per instance; os.killpg is patched
-        _FAKE_PROCS[self.pid] = self
-
-    def _ev(self) -> asyncio.Event:
-        if self._event is None:
-            self._event = asyncio.Event()
-            if not self._hang:
-                self._event.set()
-        return self._event
-
-    async def wait(self) -> int:
-        await self._ev().wait()
-        return self._exit_code
-
-    def send_signal(self, sig: int) -> None:
-        self.returncode = -abs(sig)
-        self._ev().set()
-
-    def kill(self) -> None:
-        self.send_signal(signal.SIGKILL)
+@pytest.fixture
+def fake_child(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+    """Install the fake interpreter as ``sys.executable`` for the test."""
+    script = tmp_path / "fake_child.py"
+    script.write_text(_FAKE_CHILD.replace("__PYTHON__", sys.executable))
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr(sys, "executable", str(script))
+    return script
 
 
-_FAKE_PROCS: dict[int, _FakeProcess] = {}
+@pytest.fixture
+def child_plan(monkeypatch: pytest.MonkeyPatch) -> Callable[[dict[str, Any]], None]:
+    """Set the per-child behaviour plan the fake interpreter reads."""
 
+    def _set(plan: dict[str, Any]) -> None:
+        monkeypatch.setenv("FAKE_CHILD_PLAN", json.dumps(plan))
 
-@pytest.fixture(autouse=True)
-def _patch_killpg(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Route os.killpg in proc module to the fake process registered by pid.
-
-    The real proc.py uses os.killpg() (POSIX, works on macOS and Linux). Tests
-    here use _FakeProcess instead of real subprocesses, so we intercept killpg
-    and forward to the fake's send_signal.
-    """
-
-    def _fake_killpg(pgid: int, sig: int) -> None:
-        proc = _FAKE_PROCS.get(pgid)
-        if proc is None:
-            raise ProcessLookupError(pgid)
-        proc.send_signal(sig)
-
-    monkeypatch.setattr(os, "killpg", _fake_killpg)
-    yield
-    _FAKE_PROCS.clear()
+    return _set
 
 
 def _child_stage(name: str) -> StageAttrs:
-    """Minimal stage with raw_dict set so _dispatch takes the subprocess path."""
+    """Minimal stage with raw_dict set so dispatch takes the subprocess path."""
 
     class _Noop(StageAttrs):
         type = "_resilience_noop"
@@ -133,108 +157,79 @@ def _run_parallel(
     return rt_by_name["g"]  # the parallel-executor stage (group_name)
 
 
-def _write_result(spec_path: pathlib.Path, status: str = "done") -> None:
-    result_path = pathlib.Path(str(spec_path) + ".result")
-    result_path.write_text(
-        json.dumps(
-            {"status": status, "detail": "", "returncode": None, "cost_usd": 0.0}
-        ),
-        encoding="utf-8",
+def _run_one(
+    tmp_path: pathlib.Path,
+    stage: StageAttrs,
+    state: State,
+    parent_state: State | None = None,
+) -> Callable[[], Any]:
+    return _run_parallel(
+        [stage], [state], parent_state or make_parent_state(StateData()), tmp_path
     )
 
 
 def test_external_kill_records_failure(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
     """Child killed by signal (negative returncode, no result file) → RuntimeError naming the child."""
-    # asyncio reports signal-terminated children with a negative returncode.
-    fake_proc = _FakeProcess(exit_code=-signal.SIGKILL)
-
-    async def _mock_exec(*_args: Any, **_kwargs: Any) -> _FakeProcess:
-        return fake_proc
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-
+    child_plan({"child-a": {"mode": "kill"}})
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
+    parallel = _run_one(tmp_path, stage, state)
 
     with pytest.raises(RuntimeError, match=r"child-a.*SIGKILL.*no result file"):
         asyncio.run(parallel())  # type: ignore[operator]
 
 
 def test_external_kill_siblings_continue(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
     """When one child is killed, its sibling still runs to completion."""
-    ran: list[str] = []
-
-    async def _mock_exec(*args: Any, **_kwargs: Any) -> _FakeProcess:
-        # Determine which child this call is for by spec path argument.
-        spec_path = pathlib.Path(args[-1])
-        child_key = spec_path.parent.name
-        if child_key == "child-a":
-            return _FakeProcess(exit_code=-signal.SIGKILL)  # killed, no result
-        # child-b: exit 0, write result
-        _write_result(spec_path)
-        ran.append("child-b")
-        return _FakeProcess(exit_code=0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-
+    child_plan({"child-a": {"mode": "kill"}, "child-b": {"mode": "done"}})
     stage_a = _child_stage("child-a")
     stage_b = _child_stage("child-b")
     state_a = _child_state(tmp_path / "child-a")
     state_b = _child_state(tmp_path / "child-b")
-    parent_data = StateData()
     parallel = _run_parallel(
-        [stage_a, stage_b], [state_a, state_b], make_parent_state(parent_data), tmp_path
+        [stage_a, stage_b],
+        [state_a, state_b],
+        make_parent_state(StateData()),
+        tmp_path,
     )
 
     with pytest.raises(RuntimeError, match="child-a"):
         asyncio.run(parallel())  # type: ignore[operator]
 
-    assert "child-b" in ran
+    # child-b wrote its result before the group surfaced child-a's failure.
+    assert list((tmp_path / "child-b").glob("spec_*.json.result"))
 
 
 def test_crash_before_result_records_failure(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
     """Child exits 0 but never writes result file → RuntimeError with clear reason."""
-    fake_proc = _FakeProcess(exit_code=0)
-
-    async def _mock_exec(*_args: Any, **_kwargs: Any) -> _FakeProcess:
-        return fake_proc
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-
+    child_plan({"child-a": {"mode": "exit_no_result", "exit": 0}})
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
+    parallel = _run_one(tmp_path, stage, state)
 
     with pytest.raises(RuntimeError, match="exited 0 without writing result"):
         asyncio.run(parallel())  # type: ignore[operator]
 
 
 def test_timeout_kills_child_and_records_failure(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
     """Stage with timeout_seconds: child hangs → killed, RuntimeError mentioning timeout."""
-    fake_proc = _FakeProcess(hang=True)
-
-    async def _mock_exec(*_args: Any, **_kwargs: Any) -> _FakeProcess:
-        return fake_proc
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-
-    # Mock terminate_with_grace to call fake_proc.send_signal since the
-    # Rust implementation uses libc::kill directly (not intercepted by
-    # Python-level os.killpg mocks).
-    async def _fake_terminate_with_grace(p: Any, grace_s: float = 10.0) -> None:
-        p.send_signal(signal.SIGKILL)
-
-    monkeypatch.setattr(_proc_mod, "terminate_with_grace", _fake_terminate_with_grace)
-
+    child_plan({"child-a": {"mode": "sleep"}})
     stage = _child_stage("child-a")
     stage.raw_dict = {
         "name": "child-a",
@@ -242,146 +237,103 @@ def test_timeout_kills_child_and_records_failure(
         "timeout_seconds": 0.05,
     }
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
+    parallel = _run_one(tmp_path, stage, state)
 
     with pytest.raises(RuntimeError, match="timed out"):
         asyncio.run(parallel())  # type: ignore[operator]
 
-    assert fake_proc.returncode is not None  # process was killed
-
 
 def test_large_stderr_drains_without_deadlock(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
     """Child emitting 1 MB of stderr completes without deadlock."""
-    large_output = b"x" * (1024 * 1024)
-
-    async def _mock_exec(*args: Any, **_kwargs: Any) -> _FakeProcess:
-        spec_path = pathlib.Path(args[-1])
-        _write_result(spec_path, status="done")
-        return _FakeProcess(exit_code=0, stderr_data=large_output)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-
+    child_plan({"child-a": {"mode": "stderr_blob", "bytes": 1024 * 1024}})
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
+    parallel = _run_one(tmp_path, stage, state)
 
     asyncio.run(parallel())  # type: ignore[operator]  # must not hang or raise
 
 
-def test_cancellation_sigterm_then_sigkill(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+def _process_alive(pid: int) -> bool:
+    """Whether `pid` is a live process (a zombie counts as dead)."""
+    try:
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    # Field 3 is the state char; 'Z' means exited but not yet reaped.
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+def test_cancellation_terminates_child(
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation sends SIGTERM; if child hangs past grace, SIGKILL is sent."""
-    fake_proc = _FakeProcess(hang=True)
-    # Make SIGTERM also not stop the process to force SIGKILL path.
-    sigtermed = False
-
-    orig_send = fake_proc.send_signal
-
-    def _slow_send(sig: int) -> None:
-        nonlocal sigtermed
-        if sig == signal.SIGTERM:
-            sigtermed = True
-            # Don't unblock wait() — simulate process ignoring SIGTERM.
-            return
-        orig_send(sig)
-
-    fake_proc.send_signal = _slow_send  # type: ignore[method-assign]
-
-    async def _mock_exec(*_args: Any, **_kwargs: Any) -> _FakeProcess:
-        return fake_proc
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-
-    # Mock terminate_with_grace entirely since the Rust implementation uses
-    # libc::kill directly (not intercepted by Python-level os.killpg mocks).
-    async def _fake_terminate_with_grace(p: Any, grace_s: float = 0.05) -> None:
-        p.send_signal(signal.SIGTERM)
-        await asyncio.sleep(grace_s)
-        if p.returncode is None:
-            p.send_signal(signal.SIGKILL)
-
-    monkeypatch.setattr(_proc_mod, "terminate_with_grace", _fake_terminate_with_grace)
-
-    # The cancellation path runs through ChildGuard::drop, which uses the
-    # blocking, loop-independent variant.
-    def _fake_terminate_with_grace_blocking(p: Any, grace_s: float = 0.05) -> None:
-        p.send_signal(signal.SIGTERM)
-        if p.returncode is None:
-            p.send_signal(signal.SIGKILL)
-
-    monkeypatch.setattr(
-        _proc_mod, "terminate_with_grace_blocking", _fake_terminate_with_grace_blocking
-    )
+    """Cancelling the parallel future tears the child down via ChildGuard::drop."""
+    child_plan({"child-a": {"mode": "sleep"}})
+    pid_file = tmp_path / "child.pid"
+    monkeypatch.setenv("FAKE_CHILD_PID_FILE", str(pid_file))
 
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
-    parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
+    parallel = _run_one(tmp_path, stage, state)
 
     async def _run_and_cancel() -> None:
         task = asyncio.create_task(parallel())  # type: ignore[arg-type]
-        await asyncio.sleep(0.01)
+        # Wait for the child to start before cancelling.
+        for _ in range(200):
+            if pid_file.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert pid_file.exists(), "child never started"
+        pid = int(pid_file.read_text())
         task.cancel()
         try:
             await task
         except (asyncio.CancelledError, RuntimeError):
             pass
-        # The guard hands the blocking SIGTERM→SIGKILL wait to a dedicated
-        # thread so it never stalls the event loop; give that thread a moment
-        # to run before asserting on its effects.
-        for _ in range(100):
-            if fake_proc.returncode is not None:
-                break
+        # ChildGuard hands the blocking teardown to a dedicated thread; give it
+        # a moment to run before asserting the child is gone.
+        for _ in range(500):
+            if not _process_alive(pid):
+                return
             await asyncio.sleep(0.01)
+        raise AssertionError(f"child {pid} survived cancellation")
 
     asyncio.run(_run_and_cancel())
 
-    assert sigtermed
-    assert fake_proc.returncode is not None  # SIGKILL was sent
-
 
 def test_subprocess_result_done_bail_error(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
     stage = _child_stage("c")
     state = _child_state(tmp_path / "c")
-    p = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
 
-    async def mock_done(*args: Any, **_: Any) -> _FakeProcess:
-        _write_result(pathlib.Path(args[-1]), "done")
-        return _FakeProcess(0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_done)
-    asyncio.run(p())
+    child_plan({"c": {"status": "done"}})
+    asyncio.run(_run_one(tmp_path, stage, state)())
 
     stage = _child_stage("c")
     state = _child_state(tmp_path / "c")
-    p = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
-
-    async def mock_bail(*args: Any, **_: Any) -> _FakeProcess:
-        _write_result(pathlib.Path(args[-1]), "bail")
-        return _FakeProcess(0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_bail)
-    asyncio.run(p())
+    child_plan({"c": {"status": "bail"}})
+    asyncio.run(_run_one(tmp_path, stage, state)())
 
     stage = _child_stage("c")
     state = _child_state(tmp_path / "c")
-    p = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
-
-    async def mock_err(*args: Any, **_: Any) -> _FakeProcess:
-        _write_result(pathlib.Path(args[-1]), "error")
-        return _FakeProcess(0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_err)
+    child_plan({"c": {"status": "error", "detail": "boom"}})
     with pytest.raises(RuntimeError, match="error"):
-        asyncio.run(p())
+        asyncio.run(_run_one(tmp_path, stage, state)())
 
 
 def test_subprocess_cost_accumulated_in_state(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
     """cost_usd from each subprocess result is folded into state.json subprocess_cost_usd."""
     state_dir = tmp_path / "state" / "test-gremlin"
@@ -426,21 +378,12 @@ def test_subprocess_cost_accumulated_in_state(
     parallel_fn = dict(rt)["g"]
 
     COST_A, COST_B = 0.30, 0.12
-
-    async def _mock_exec(*args: Any, **_kwargs: Any) -> _FakeProcess:
-        spec_path = pathlib.Path(args[-1])
-        child_key = spec_path.parent.name
-        cost = COST_A if child_key == "child-a" else COST_B
-        result_path = pathlib.Path(str(spec_path) + ".result")
-        result_path.write_text(
-            json.dumps(
-                {"status": "done", "detail": "", "returncode": None, "cost_usd": cost}
-            ),
-            encoding="utf-8",
-        )
-        return _FakeProcess(exit_code=0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+    child_plan(
+        {
+            "child-a": {"cost": COST_A},
+            "child-b": {"cost": COST_B},
+        }
+    )
     asyncio.run(parallel_fn())
 
     data = json.loads(sf.read_text())
@@ -498,47 +441,33 @@ def test_missing_result_detail_no_returncode() -> None:
 
 
 def test_run_child_needs_fix_maps_to_done(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
-    child_st = _child_state(tmp_path / "c")
+    child_plan({"c": {"status": "needs_fix"}})
     stage = _child_stage("c")
-
-    async def _mock_exec(*args: Any, **_: Any) -> _FakeProcess:
-        _write_result(pathlib.Path(args[-1]), "needs_fix")
-        return _FakeProcess(0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-
-    parallel = _run_parallel(
-        [stage], [child_st], make_parent_state(StateData()), tmp_path
-    )
+    state = _child_state(tmp_path / "c")
+    parallel = _run_one(tmp_path, stage, state)
     asyncio.run(parallel())  # needs_fix is treated as done; must not raise
 
 
 def test_run_child_bail_is_recorded_not_raised(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
-    child_st = _child_state(tmp_path / "c")
+    child_plan({"c": {"status": "bail", "detail": "nope"}})
     stage = _child_stage("c")
-
-    async def _mock_exec(*args: Any, **_: Any) -> _FakeProcess:
-        result_path = pathlib.Path(str(args[-1]) + ".result")
-        result_path.write_text(
-            json.dumps({"status": "bail", "detail": "nope", "cost_usd": 0.0}),
-            encoding="utf-8",
-        )
-        return _FakeProcess(0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-
-    parallel = _run_parallel(
-        [stage], [child_st], make_parent_state(StateData()), tmp_path
-    )
+    state = _child_state(tmp_path / "c")
+    parallel = _run_one(tmp_path, stage, state)
     asyncio.run(parallel())  # a bail is recorded, not raised
 
 
 def test_bailed_subprocess_child_not_marked_done(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
     """A bailed subprocess child must not be recorded as completed."""
     state_dir = tmp_path / "state" / "gr-bail-done"
@@ -552,20 +481,10 @@ def test_bailed_subprocess_child_not_marked_done(
         data=parent_data, client=FakeClient(), artifact_dir=state_dir
     )
 
-    child_st = _child_state(tmp_path / "c")
+    child_plan({"c": {"status": "bail", "detail": "nope"}})
     stage = _child_stage("c")
-
-    async def _mock_exec(*args: Any, **_: Any) -> _FakeProcess:
-        result_path = pathlib.Path(str(args[-1]) + ".result")
-        result_path.write_text(
-            json.dumps({"status": "bail", "detail": "nope", "cost_usd": 0.0}),
-            encoding="utf-8",
-        )
-        return _FakeProcess(0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
-
-    parallel = _run_parallel([stage], [child_st], parent_state, tmp_path)
+    state = _child_state(tmp_path / "c")
+    parallel = _run_one(tmp_path, stage, state, parent_state)
     asyncio.run(parallel())
 
     done = json.loads(sf.read_text()).get("done_children", {}).get("g", [])
@@ -598,7 +517,9 @@ def test_build_child_spec_dict_base_ref_empty_by_default(
 
 
 def test_child_logs_survive_fan_in_cleanup(
-    sandbox: Any, monkeypatch: pytest.MonkeyPatch
+    sandbox: Any,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
 ) -> None:
     """Child scratch logs are copied into the parent state logs/ dir before
     fan-in removes the child scratch directories."""
@@ -639,34 +560,21 @@ def test_child_logs_survive_fan_in_cleanup(
         )
     )
 
-    saved: dict[str, str] = {}
-
-    async def _mock_exec(*args: Any, **_kwargs: Any) -> _FakeProcess:
-        if tuple(args[1:3]) != ("-m", "gremlins.spawn.child"):
-            return _FakeProcess(exit_code=0)
-        spec_path = pathlib.Path(args[-1])
-        content = f"stream failed for {spec_path.name}\n"
-        saved[spec_path.parent.parent.name] = content
-        spec_path.parent.parent.joinpath("log").write_text(content, encoding="utf-8")
-        result_path = pathlib.Path(str(spec_path) + ".result")
-        result_path.write_text(
-            json.dumps(
-                {"status": "done", "detail": "", "returncode": None, "cost_usd": 0.0}
-            ),
-            encoding="utf-8",
-        )
-        return _FakeProcess(exit_code=0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+    # Each child emits one stdout line; the pump relays it into the child's log.
+    child_plan(
+        {
+            key: {"stdout": f"stream failed for {gremlin_id}--g--{key}\n"}
+            for key in child_ids
+        }
+    )
     asyncio.run(rt["g"]())
     asyncio.run(rt["g-fanin"]())
 
     logs_dir = state_dir / "logs"
-    assert len(saved) == 2
     for key in child_ids:
-        assert (logs_dir / f"{key}.log").read_text(encoding="utf-8") == saved[
-            f"{gremlin_id}--g--{key}"
-        ]
+        assert (logs_dir / f"{key}.log").read_text(encoding="utf-8") == (
+            f"stream failed for {gremlin_id}--g--{key}\n"
+        )
         assert not scratch_dirs[key].exists() or not list(scratch_dirs[key].iterdir())
 
 

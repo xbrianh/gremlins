@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::stream::StreamExt;
+use gremlins::core::proc;
 use gremlins::executor::state as rust_state;
 use gremlins::stages::agent as rust_agent;
 use gremlins::stages::base;
@@ -3081,60 +3082,37 @@ async fn run_child_subprocess(
     })?;
 
     let timeout_s = Python::attach(|py| parse_child_timeout(stage_obj.bind(py), child_key))?;
-    let log_file = Python::attach(|py| -> PyResult<Option<Py<PyAny>>> {
+    let python_exe: String = Python::attach(|py| -> PyResult<String> {
+        Ok(py.import("sys")?.getattr("executable")?.extract()?)
+    })?;
+    let log_path = Python::attach(|py| -> PyResult<Option<PathBuf>> {
         let artifact_dir: PathBuf = child_state.bind(py).getattr("artifact_dir")?.extract()?;
         let log_path = artifact_dir.parent().map(|p| p.join("log"));
-        let Some(log_path) = log_path else {
-            return Ok(None);
-        };
-        if !log_path.parent().map(|p| p.exists()).unwrap_or(false) {
-            return Ok(None);
-        }
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            Ok(file) => Ok(Some(
-                Py::new(
-                    py,
-                    PyFileHandle {
-                        file: std::sync::Mutex::new(file),
-                    },
-                )?
-                .into_any(),
-            )),
-            Err(_) => Ok(None),
-        }
+        Ok(match log_path {
+            Some(path) if path.parent().map(|dir| dir.exists()).unwrap_or(false) => Some(path),
+            _ => None,
+        })
     })?;
 
-    let (child_proc, pumps) = spawn_with_pumps(&spec_path, &attempt, log_file.as_ref()).await?;
-    // If the surrounding future is dropped (asyncio cancellation), tear the
-    // child down and cancel its pumps. `terminate_with_grace` is a Python
-    // coroutine, so it is scheduled on the loop rather than awaited here.
-    let mut guard = ChildGuard::new(
-        Python::attach(|py| child_proc.clone_ref(py)),
-        pumps
-            .iter()
-            .map(|p| Python::attach(|py| p.clone_ref(py)))
-            .collect(),
-    );
+    // The parallel future is polled on the asyncio thread, which has no Tokio
+    // reactor, so the reactor-dependent lifecycle runs on the Tokio runtime and
+    // is awaited here as a plain join handle.
+    let lifecycle = pyo3_async_runtimes::tokio::get_runtime().spawn(run_child_lifecycle(
+        python_exe,
+        spec_path.clone(),
+        attempt,
+        timeout_s,
+        log_path,
+        child_key.to_string(),
+    ));
+    let mut task_guard = ChildTaskGuard::new(lifecycle);
+    let returncode = task_guard
+        .result()
+        .await
+        .map_err(PyRuntimeError::new_err)?;
+    task_guard.disarm();
 
-    let wait_result = wait_child_proc(&child_proc, timeout_s, child_key).await;
-    if let Err(err) = wait_result {
-        // Cancellation or timeout: tear the child down, then drain the pumps.
-        terminate_with_grace(&child_proc).await;
-        for pump in &pumps {
-            Python::attach(|py| pump.bind(py).call_method0("cancel").map(|_| ())).ok();
-        }
-        drain_pumps(&pumps).await;
-        guard.disarm();
-        return Err(err);
-    }
-    drain_pumps(&pumps).await;
-    guard.disarm();
-
-    let result = read_child_result(&spec_path, &child_proc, child_key)?;
+    let result = read_child_result(&spec_path, returncode, child_key)?;
     let cost = result
         .get("cost_usd")
         .and_then(|v| v.as_f64())
@@ -3171,23 +3149,111 @@ async fn run_child_subprocess(
     }
 }
 
+/// Drive one child's process lifecycle on the Tokio runtime.
+///
+/// Returns the child's Python-style returncode, or an error message when the
+/// wait failed (a timeout, or a reaping failure).
+async fn run_child_lifecycle(
+    python_exe: String,
+    spec_path: PathBuf,
+    attempt: String,
+    timeout_s: Option<f64>,
+    log_path: Option<PathBuf>,
+    child_key: String,
+) -> Result<Option<i32>, String> {
+    let (child, pumps) =
+        proc::spawn_with_pumps(&python_exe, &spec_path, &attempt, log_path.as_deref())
+            .await
+            .map_err(|err| err.to_string())?;
+    // If this task is dropped (asyncio cancellation), the explicit cleanup below
+    // never runs; `ChildGuard` closes that gap.
+    let mut guard = ChildGuard::new(child, pumps);
+
+    let wait_result = proc::wait_child_proc(guard.child_mut(), timeout_s, &child_key).await;
+    // The pumps reach EOF once the child's pipes close; drain them before
+    // reading the result so no output is lost.
+    guard.drain_pumps().await;
+    let returncode = match &wait_result {
+        Ok(status) => Some(proc::exit_code(status)),
+        Err(_) => None,
+    };
+    guard.disarm();
+    wait_result
+        .map(|_| returncode)
+        .map_err(|err| err.to_string())
+}
+
+/// Aborts the child's Tokio task if the owning future is dropped.
+///
+/// The lifecycle runs on the Tokio runtime, so dropping the asyncio future that
+/// awaits it would otherwise leave the task — and the child — running. Aborting
+/// drops the task's future, which drops its [`ChildGuard`] and tears the child
+/// down.
+struct ChildTaskGuard {
+    handle: Option<tokio::task::JoinHandle<Result<Option<i32>, String>>>,
+    armed: bool,
+}
+
+impl ChildTaskGuard {
+    fn new(handle: tokio::task::JoinHandle<Result<Option<i32>, String>>) -> Self {
+        ChildTaskGuard {
+            handle: Some(handle),
+            armed: true,
+        }
+    }
+
+    /// Await the lifecycle task's result.
+    async fn result(&mut self) -> Result<Option<i32>, String> {
+        self.handle
+            .as_mut()
+            .expect("handle is present while armed")
+            .await
+            .map_err(|err| format!("child task failed: {err}"))?
+    }
+
+    /// Stand down: the lifecycle completed and was awaited.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ChildTaskGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Some(handle) = self.handle.take() {
+                handle.abort();
+            }
+        }
+    }
+}
+
 /// Tears down a subprocess child when the owning future is dropped.
 ///
 /// `asyncio` cancellation drops the Rust future, so the explicit cleanup path
 /// in [`run_child_subprocess`] never runs; this guard closes that gap.
 struct ChildGuard {
-    proc: Py<PyAny>,
-    pumps: Vec<Py<PyAny>>,
+    child: Option<tokio::process::Child>,
+    pumps: Vec<tokio::task::JoinHandle<()>>,
     armed: bool,
 }
 
 impl ChildGuard {
-    fn new(proc: Py<PyAny>, pumps: Vec<Py<PyAny>>) -> Self {
+    fn new(child: tokio::process::Child, pumps: Vec<tokio::task::JoinHandle<()>>) -> Self {
         ChildGuard {
-            proc,
+            child: Some(child),
             pumps,
             armed: true,
         }
+    }
+
+    /// The live child handle, for waiting on it.
+    fn child_mut(&mut self) -> &mut tokio::process::Child {
+        self.child.as_mut().expect("child is present while armed")
+    }
+
+    /// Await the pumps so the child's output is fully relayed.
+    async fn drain_pumps(&mut self) {
+        proc::drain_pumps(std::mem::take(&mut self.pumps)).await;
     }
 
     /// Stand down: the explicit cleanup path already ran.
@@ -3201,69 +3267,33 @@ impl Drop for ChildGuard {
         if !self.armed {
             return;
         }
-        // Cancel the pumps first: they are asyncio tasks, so cancelling is
-        // cheap and stops them blocking on the child's pipes.
-        Python::attach(|py| {
-            for pump in &self.pumps {
-                let _ = pump.bind(py).call_method0("cancel");
-            }
-        });
+        // Abort the pumps first: they are tokio tasks reading the child's pipes.
+        for pump in &self.pumps {
+            pump.abort();
+        }
 
         // Hand the blocking SIGTERM→SIGKILL wait to a dedicated thread. `Drop`
         // runs on the Tokio worker polling the cancelled future; blocking there
         // would stall the runtime for the whole grace period and delay sibling
-        // cancellation, and `py.detach` only releases the GIL — it does not
-        // move the call off this thread. The thread owns the cleanup and runs
-        // to completion independently of the runtime.
-        let proc = Python::attach(|py| self.proc.clone_ref(py));
-        std::thread::spawn(move || {
-            Python::attach(|py| {
-                if let Ok(proc_mod) = py.import("gremlins.utils.proc") {
-                    let _ = proc_mod
-                        .getattr("terminate_with_grace_blocking")
-                        .and_then(|f| f.call1((proc.bind(py),)));
-                }
-            });
-        });
+        // cancellation. The thread owns the cleanup and runs to completion
+        // independently of the runtime.
+        if let Some(mut child) = self.child.take() {
+            if let Some(pid) = child.id() {
+                std::thread::spawn(move || proc::terminate_with_grace_blocking(pid, 10.0));
+            }
+            let _ = child.start_kill();
+        }
     }
 }
 
-/// A writable log file handed to the Python pump as a file-like object.
-#[pyclass(name = "_ParallelLogFile", module = "_gremlins_core.stages")]
-struct PyFileHandle {
-    file: std::sync::Mutex<std::fs::File>,
-}
-
-#[pymethods]
-impl PyFileHandle {
-    fn write(&self, data: &str) -> PyResult<()> {
-        use std::io::Write;
-        let mut file = self.file.lock().unwrap();
-        file.write_all(data.as_bytes())?;
-        file.flush()?;
-        Ok(())
-    }
-
-    fn close(&self) -> PyResult<()> {
-        Ok(())
-    }
-}
-
-/// `(status, cost)` for a finished child, or a descriptive error.
+/// The parsed result object for a finished child, or a descriptive error.
 fn read_child_result(
     spec_path: &Path,
-    child_proc: &Py<PyAny>,
+    returncode: Option<i32>,
     child_key: &str,
 ) -> PyResult<serde_json::Map<String, serde_json::Value>> {
     let result_path = PathBuf::from(format!("{}.result", spec_path.to_string_lossy()));
     if !result_path.exists() {
-        let returncode: Option<i32> = Python::attach(|py| {
-            child_proc
-                .bind(py)
-                .getattr("returncode")
-                .ok()
-                .and_then(|v| v.extract().ok())
-        });
         return Err(PyRuntimeError::new_err(missing_result_detail(
             child_key, returncode,
         )));
@@ -3420,96 +3450,6 @@ fn build_child_spec_dict(
         ),
     );
     Ok(map)
-}
-
-/// Spawn `gremlins.spawn.child` through the Python `proc.spawn_with_pumps`.
-async fn spawn_with_pumps(
-    spec_path: &Path,
-    attempt: &str,
-    log_file: Option<&Py<PyAny>>,
-) -> PyResult<(Py<PyAny>, Vec<Py<PyAny>>)> {
-    let coro = Python::attach(|py| {
-        let proc = py.import("gremlins.utils.proc")?;
-        let kwargs = PyDict::new(py);
-        if let Some(log) = log_file {
-            kwargs.set_item("log_file", log.bind(py))?;
-        }
-        proc.getattr("spawn_with_pumps")?
-            .call(
-                (spec_path.to_string_lossy().to_string(), attempt),
-                Some(&kwargs),
-            )
-            .map(|c| c.unbind())
-    })?;
-    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
-    let result = fut.await?;
-    Python::attach(|py| {
-        let proc: Py<PyAny> = result.bind(py).get_item(0)?.extract()?;
-        let pumps: Vec<Py<PyAny>> = result.bind(py).get_item(1)?.extract()?;
-        Ok((proc, pumps))
-    })
-}
-
-/// Await `proc.wait_child_proc`, mapping its timeout error to a `RuntimeError`.
-async fn wait_child_proc(
-    child_proc: &Py<PyAny>,
-    timeout_s: Option<f64>,
-    child_key: &str,
-) -> PyResult<()> {
-    let coro = Python::attach(|py| {
-        let proc = py.import("gremlins.utils.proc")?;
-        proc.getattr("wait_child_proc")?
-            .call1((child_proc.bind(py), timeout_s, child_key))
-            .map(|c| c.unbind())
-    })?;
-    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
-    fut.await.map(|_| ())
-}
-
-/// Terminate a child process with the Python `proc.terminate_with_grace`.
-async fn terminate_with_grace(child_proc: &Py<PyAny>) {
-    let Ok(coro) = Python::attach(|py| {
-        let proc = py.import("gremlins.utils.proc")?;
-        proc.getattr("terminate_with_grace")?
-            .call1((child_proc.bind(py),))
-            .map(|c| c.unbind())
-    }) else {
-        return;
-    };
-    let Ok(fut) =
-        Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))
-    else {
-        return;
-    };
-    let _ = fut.await;
-}
-
-/// Await every pump task, shielding them so a cancelled parent still drains.
-///
-/// `pumps` are passed as *positional* arguments — `asyncio.gather` takes
-/// awaitables, not a list of them — and `return_exceptions=true` keeps one
-/// pump's failure from masking the others, matching the pre-port
-/// `asyncio.shield(asyncio.gather(*pumps, return_exceptions=True))`.
-async fn drain_pumps(pumps: &[Py<PyAny>]) {
-    if pumps.is_empty() {
-        return;
-    }
-    let Ok(coro) = Python::attach(|py| -> PyResult<Py<PyAny>> {
-        let asyncio = py.import("asyncio")?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("return_exceptions", true)?;
-        let tasks = PyTuple::new(py, pumps.iter().map(|p| p.clone_ref(py)))?;
-        let gathered = asyncio.getattr("gather")?.call(tasks, Some(&kwargs))?;
-        Ok(asyncio.call_method1("shield", (gathered,))?.unbind())
-    }) else {
-        return;
-    };
-    let Ok(fut) =
-        Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))
-    else {
-        return;
-    };
-    let _ = fut.await;
 }
 
 /// Gather child artifacts, decide the group bail, and tear down worktrees.
@@ -4076,7 +4016,6 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLoop>()?;
     m.add_class::<PyParallelStage>()?;
     m.add_class::<ParallelRuntime>()?;
-    m.add_class::<PyFileHandle>()?;
     m.add_class::<Done>()?;
     m.add_function(wrap_pyfunction!(get_client_from_dict_py, &m)?)?;
     m.add_function(wrap_pyfunction!(child_state_py, &m)?)?;

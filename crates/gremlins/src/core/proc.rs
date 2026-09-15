@@ -48,7 +48,11 @@ impl std::fmt::Display for ProcError {
 
 impl std::error::Error for ProcError {}
 
-fn exit_code(status: &std::process::ExitStatus) -> i32 {
+/// The Python-style returncode for a finished process: its exit code, or the
+/// negated signal number when a signal killed it. Mirrors
+/// `asyncio.subprocess.Process.returncode`, which the parallel supervisor
+/// relies on to name a signal-terminated child.
+pub fn exit_code(status: &std::process::ExitStatus) -> i32 {
     #[cfg(unix)]
     {
         status
@@ -651,6 +655,344 @@ pub fn terminate_with_grace_blocking(pid: u32, grace_s: f64) {
 /// No-op stub for non-Unix platforms.
 #[cfg(not(unix))]
 pub fn terminate_with_grace_blocking(_pid: u32, _grace_s: f64) {}
+
+/// Size of each pipe read in [`pump_prefixed`].
+const PUMP_CHUNK: usize = 4096;
+
+/// How much unterminated text [`pump_prefixed`] buffers before flushing it
+/// anyway, so a child that reports progress without newlines stays live rather
+/// than growing our buffer (and, at the extreme, stalling on a full pipe).
+pub const MAX_PENDING_BYTES: usize = 64 * 1024;
+
+/// Spawn `python_exe -m gremlins.spawn.child <spec_path>` and drain the child's
+/// stdout and stderr through two prefixing pump tasks.
+///
+/// The child starts in its own process group so [`terminate_with_grace`] can
+/// target it precisely, and with `kill_on_drop` so a dropped handle can never
+/// leave it running. When `log_path` is given, each pump also appends the raw,
+/// unprefixed record it relays.
+///
+/// The returned join handles resolve once their pipe reaches EOF, so the caller
+/// can [`drain_pumps`] them to be sure no output is lost.
+pub async fn spawn_with_pumps(
+    python_exe: &str,
+    spec_path: &Path,
+    attempt: &str,
+    log_path: Option<&Path>,
+) -> io::Result<(tokio::process::Child, Vec<tokio::task::JoinHandle<()>>)> {
+    let (child, stdout, stderr) = spawn_child_pipes(python_exe, spec_path)?;
+
+    // Each pump owns its own append handle to the log: the two streams are
+    // independent writers and must not share a borrow.
+    let attempt_out = attempt.to_string();
+    let attempt_err = attempt.to_string();
+    let mut out_log = open_log(log_path);
+    let mut err_log = open_log(log_path);
+    let pumps = vec![
+        tokio::spawn(async move {
+            let log = out_log.as_mut().map(|f| f as &mut (dyn std::io::Write + Send));
+            let mut out = std::io::stdout();
+            pump_prefixed(stdout, &attempt_out, &mut out, log).await;
+        }),
+        tokio::spawn(async move {
+            let log = err_log.as_mut().map(|f| f as &mut (dyn std::io::Write + Send));
+            let mut out = std::io::stdout();
+            pump_prefixed(stderr, &attempt_err, &mut out, log).await;
+        }),
+    ];
+    Ok((child, pumps))
+}
+
+/// Spawn the child and take its piped streams, without starting any pumps.
+///
+/// Split out from [`spawn_with_pumps`] so the pipes can be driven directly.
+fn spawn_child_pipes(
+    python_exe: &str,
+    spec_path: &Path,
+) -> io::Result<(tokio::process::Child, tokio::process::ChildStdout, tokio::process::ChildStderr)> {
+    let mut command = tokio::process::Command::new(python_exe);
+    command
+        .arg("-m")
+        .arg("gremlins.spawn.child")
+        .arg(spec_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("child stdout was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("child stderr was not piped"))?;
+    Ok((child, stdout, stderr))
+}
+
+/// Await every pump to completion, so the child's output is fully relayed
+/// before the caller moves on. Handles that were aborted resolve immediately.
+pub async fn drain_pumps(pumps: Vec<tokio::task::JoinHandle<()>>) {
+    for pump in pumps {
+        let _ = pump.await;
+    }
+}
+
+/// Open an append-mode log sink, or `None` when there is no path or it cannot
+/// be opened: a missing log must never fail the child run.
+fn open_log(path: Option<&Path>) -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path?)
+        .ok()
+}
+
+/// Wait for `child`, terminating it with [`terminate_with_grace`] if `timeout_s`
+/// elapses first.
+///
+/// `child_key` is carried only so the error can name the child.
+pub async fn wait_child_proc(
+    child: &mut tokio::process::Child,
+    timeout_s: Option<f64>,
+    child_key: &str,
+) -> Result<std::process::ExitStatus, WaitChildError> {
+    let io_error = |err: io::Error| WaitChildError {
+        kind: WaitChildErrorKind::Io(err),
+        child_key: child_key.to_string(),
+        timeout_s,
+    };
+
+    let Some(seconds) = timeout_s else {
+        return child.wait().await.map_err(io_error);
+    };
+
+    let deadline = if seconds.is_finite() && seconds > 0.0 {
+        Duration::from_secs_f64(seconds)
+    } else {
+        Duration::MAX
+    };
+    match tokio::time::timeout(deadline, child.wait()).await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(err)) => Err(io_error(err)),
+        Err(_elapsed) => {
+            if let Some(pid) = child.id() {
+                terminate_with_grace(pid, 10.0).await;
+            }
+            Err(WaitChildError {
+                kind: WaitChildErrorKind::Timeout,
+                child_key: child_key.to_string(),
+                timeout_s,
+            })
+        }
+    }
+}
+
+/// How [`wait_child_proc`] failed.
+#[derive(Debug)]
+pub enum WaitChildErrorKind {
+    /// The wait itself failed — the child could not be reaped.
+    Io(io::Error),
+    /// The child outlived its timeout and was terminated.
+    Timeout,
+}
+
+/// A failed [`wait_child_proc`], carrying the context a useful message needs.
+#[derive(Debug)]
+pub struct WaitChildError {
+    pub kind: WaitChildErrorKind,
+    pub child_key: String,
+    pub timeout_s: Option<f64>,
+}
+
+impl std::fmt::Display for WaitChildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            WaitChildErrorKind::Io(err) => {
+                write!(f, "failed waiting for child {:?}: {err}", self.child_key)
+            }
+            WaitChildErrorKind::Timeout => write!(
+                f,
+                "parallel child {:?} timed out after {}s",
+                self.child_key,
+                self.timeout_s.unwrap_or_default()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WaitChildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            WaitChildErrorKind::Io(err) => Some(err),
+            WaitChildErrorKind::Timeout => None,
+        }
+    }
+}
+
+/// Relay one child pipe to stdout and `log_file`, prefixing each stdout record
+/// with `[prefix]`.
+///
+/// Reads in [`PUMP_CHUNK`] chunks and carries only the trailing partial record
+/// across reads, so the prefix is never inserted mid-line. The remainder is
+/// relayed at EOF, or once it outgrows [`MAX_PENDING_BYTES`]. A trailing bare
+/// `\r` is held back too: it may be the first half of a `\r\n` split across a
+/// read boundary.
+pub(crate) async fn pump_prefixed(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+    prefix: &str,
+    mut stdout: impl std::io::Write,
+    mut log_file: Option<&mut (dyn std::io::Write + Send)>,
+) {
+    let mut decoder = Utf8Decoder::default();
+    let mut pending = String::new();
+    let mut buf = [0u8; PUMP_CHUNK];
+
+    loop {
+        let read = match stream.read(&mut buf).await {
+            Ok(0) => {
+                pending.push_str(&decoder.decode(&[], true));
+                emit_tail(prefix, pending, &mut stdout, &mut log_file);
+                return;
+            }
+            Ok(n) => n,
+            // A read error is terminal for this pipe; the child's exit status —
+            // not its log — decides the outcome.
+            Err(_) => return,
+        };
+        pending.push_str(&decoder.decode(&buf[..read], false));
+
+        for record in drain_records(&mut pending) {
+            emit_prefixed(prefix, &record, &mut stdout, &mut log_file);
+        }
+        if pending.len() > MAX_PENDING_BYTES {
+            let record = format!("{}\n", std::mem::take(&mut pending));
+            emit_prefixed(prefix, &record, &mut stdout, &mut log_file);
+        }
+    }
+}
+
+/// Emit the unterminated remainder: verbatim when it already ends in a carriage
+/// return, otherwise with a newline appended.
+fn emit_tail(
+    prefix: &str,
+    pending: String,
+    stdout: &mut impl std::io::Write,
+    log_file: &mut Option<&mut (dyn std::io::Write + Send)>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    if pending.ends_with('\r') {
+        emit_prefixed(prefix, &pending, stdout, log_file);
+    } else {
+        emit_prefixed(prefix, &format!("{pending}\n"), stdout, log_file);
+    }
+}
+
+/// Write one prefixed record to stdout and, when configured, the log.
+///
+/// Failures on either sink are swallowed: a broken pipe must not kill the pump
+/// and strand the child.
+fn emit_prefixed(
+    prefix: &str,
+    record: &str,
+    stdout: &mut impl std::io::Write,
+    log_file: &mut Option<&mut (dyn std::io::Write + Send)>,
+) {
+    let _ = write!(stdout, "[{prefix}] {record}");
+    let _ = stdout.flush();
+    if let Some(sink) = log_file.as_deref_mut() {
+        let _ = sink.write_all(record.as_bytes());
+        let _ = sink.flush();
+    }
+}
+
+/// Move every complete record out of `pending`, leaving only the unterminated
+/// remainder. Each record includes its `\r\n`, `\r`, or `\n` terminator.
+fn drain_records(pending: &mut String) -> Vec<String> {
+    let mut records = Vec::new();
+    let mut start = 0;
+    while let Some(end) = next_terminated_record(&pending[start..]) {
+        records.push(pending[start..start + end].to_string());
+        start += end;
+    }
+    if start > 0 {
+        pending.drain(..start);
+    }
+    records
+}
+
+/// Length of the first terminated record in `s`, terminator included.
+///
+/// `None` means `s` holds only an unterminated remainder — or ends in a lone
+/// `\r`, which may yet prove to be the first half of a `\r\n` split across a
+/// read boundary, so it too must be held back.
+fn next_terminated_record(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => return Some(i + 1),
+            b'\r' if i + 1 < bytes.len() => {
+                return Some(if bytes[i + 1] == b'\n' { i + 2 } else { i + 1 });
+            }
+            b'\r' => return None,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// A minimal incremental UTF-8 decoder: multibyte sequences split across reads
+/// are carried forward, and malformed bytes become U+FFFD — matching Python's
+/// `codecs.getincrementaldecoder("utf-8")("replace")`.
+#[derive(Default)]
+struct Utf8Decoder {
+    /// Bytes seen but not yet decodable on their own.
+    carry: Vec<u8>,
+}
+
+impl Utf8Decoder {
+    fn decode(&mut self, chunk: &[u8], eof: bool) -> String {
+        self.carry.extend_from_slice(chunk);
+        match std::str::from_utf8(&self.carry) {
+            Ok(text) => {
+                let text = text.to_string();
+                self.carry.clear();
+                text
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                let mut text = String::from_utf8(self.carry[..valid].to_vec())
+                    .expect("valid_up_to marks a valid UTF-8 prefix");
+                match err.error_len() {
+                    // A malformed sequence: replace it and carry on past it.
+                    Some(len) => {
+                        text.push('\u{FFFD}');
+                        self.carry.drain(..valid + len);
+                    }
+                    // A truncated tail: hold it, unless the stream is done.
+                    None if eof => {
+                        text.push('\u{FFFD}');
+                        self.carry.clear();
+                    }
+                    None => {
+                        self.carry.drain(..valid);
+                    }
+                }
+                text
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1519,5 +1861,144 @@ mod tests {
             ProcError::EmptyCommand => {}
             _ => panic!("expected EmptyCommand, got {err}"),
         }
+    }
+
+    // -- pump_prefixed tests --
+
+    /// Feed `chunks` through a duplex pipe, then run the pump and return the
+    /// prefixed stdout it produced and the raw records it wrote to its log.
+    async fn pump(chunks: &[&[u8]], prefix: &str) -> (String, Vec<u8>) {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(MAX_PENDING_BYTES * 2);
+        for chunk in chunks {
+            writer.write_all(chunk).await.unwrap();
+        }
+        drop(writer);
+        let mut stdout = Vec::new();
+        let mut log = Vec::new();
+        pump_prefixed(reader, prefix, &mut stdout, Some(&mut log)).await;
+        (String::from_utf8(stdout).unwrap(), log)
+    }
+
+    #[tokio::test]
+    async fn test_pump_prefixed_basic() {
+        let (stdout, log) = pump(&[b"one\ntwo\n"], "p").await;
+        assert_eq!(stdout, "[p] one\n[p] two\n");
+        assert_eq!(log, b"one\ntwo\n");
+    }
+
+    #[tokio::test]
+    async fn test_pump_prefixed_partial_line_flushed_at_eof() {
+        let (stdout, log) = pump(&[b"no newline"], "p").await;
+        assert_eq!(stdout, "[p] no newline\n");
+        assert_eq!(log, b"no newline\n");
+    }
+
+    #[tokio::test]
+    async fn test_pump_prefixed_crlf_is_one_record() {
+        let (stdout, log) = pump(&[b"one\rtwo\r\n"], "p").await;
+        assert_eq!(stdout, "[p] one\r[p] two\r\n");
+        assert_eq!(log, b"one\rtwo\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_pump_prefixed_holds_terminal_cr_across_reads() {
+        // The `\r` must not be emitted on its own: it is the first half of a
+        // CRLF split across the read boundary.
+        let (stdout, log) = pump(&[b"one\r", b"\ntwo\n"], "p").await;
+        assert_eq!(stdout, "[p] one\r\n[p] two\n");
+        assert_eq!(log, b"one\r\ntwo\n");
+    }
+
+    #[tokio::test]
+    async fn test_pump_prefixed_flushes_bare_cr_at_eof() {
+        let (stdout, log) = pump(&[b"one\r"], "p").await;
+        assert_eq!(stdout, "[p] one\r");
+        assert_eq!(log, b"one\r");
+    }
+
+    #[tokio::test]
+    async fn test_pump_prefixed_joins_multibyte_across_reads() {
+        let (stdout, log) = pump(&[b"caf\xc3", b"\xa9\n"], "p").await;
+        assert_eq!(stdout, "[p] caf\u{e9}\n");
+        assert_eq!(log, "caf\u{e9}\n".as_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_pump_prefixed_flushes_oversized_pending() {
+        let blob = vec![b'x'; MAX_PENDING_BYTES + 10];
+        let (stdout, log) = pump(&[&blob], "p").await;
+        assert_eq!(log.len(), blob.len() + 1);
+        assert_eq!(&log[..blob.len()], blob.as_slice());
+        assert_eq!(log[blob.len()], b'\n');
+        assert_eq!(stdout.len(), blob.len() + 1 + "[p] ".len());
+    }
+
+    #[test]
+    fn test_next_terminated_record() {
+        assert_eq!(next_terminated_record("ab\ncd"), Some(3));
+        assert_eq!(next_terminated_record("ab\r\ncd"), Some(4));
+        assert_eq!(next_terminated_record("ab\rcd"), Some(3));
+        assert_eq!(next_terminated_record("ab\r"), None);
+        assert_eq!(next_terminated_record("abc"), None);
+    }
+
+    #[test]
+    fn test_drain_records_holds_partial() {
+        let mut pending = String::from("one\ntwo\r\nthree");
+        assert_eq!(drain_records(&mut pending), vec!["one\n", "two\r\n"]);
+        assert_eq!(pending, "three");
+    }
+
+    #[test]
+    fn test_utf8_decoder_replaces_invalid() {
+        let mut decoder = Utf8Decoder::default();
+        assert_eq!(decoder.decode(b"ok\xff", false), "ok\u{FFFD}");
+    }
+
+    // -- spawn_with_pumps / wait_child_proc tests --
+
+    #[tokio::test]
+    async fn test_spawn_with_pumps_relays_output() {
+        // `echo` stands in for the interpreter: it prints its argv and exits.
+        let (mut child, pumps) =
+            spawn_with_pumps("echo", Path::new("/tmp/spec.json"), "attempt", None)
+                .await
+                .unwrap();
+        drain_pumps(pumps).await;
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn test_wait_child_proc_no_timeout() {
+        let mut child = tokio::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let status = wait_child_proc(&mut child, None, "k").await.unwrap();
+        assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn test_wait_child_proc_timeout_terminates() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("10")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let err = wait_child_proc(&mut child, Some(0.1), "k").await.unwrap_err();
+        assert!(matches!(err.kind, WaitChildErrorKind::Timeout));
+        assert!(err.to_string().contains("timed out"));
+        // The child was terminated, so reaping it completes promptly.
+        let status = tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .expect("child should have been terminated")
+            .unwrap();
+        assert!(!status.success());
     }
 }
