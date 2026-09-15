@@ -40,13 +40,13 @@ import sys
 import traceback
 from typing import Any, cast
 
+from _gremlins_core.config import scratch_root
 from _gremlins_core.schemas import parse_stage
 from _gremlins_core.stages import Bail
 
 from gremlins.env_file import source_env_string
 from gremlins.executor.gremlin import Gremlin
 from gremlins.logging_setup import configure_logging
-from _gremlins_core.config import scratch_root
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,19 @@ async def _run(spec_path: pathlib.Path) -> int:
     # create_subprocess_exec (which inherits os.environ by default).
     # Re-building here ensures VIRTUAL_ENV, PATH, and GREMLINS_* vars
     # point at the child's worktree, not the parent's.
+
+    # Copy the project .gremlins overlay into the child's state directory
+    # (the parent does this in run_pipeline; the child's state dir is
+    # created without it, so code that resolves config/prompt files through
+    # GREMLINS_OVERLAY_DIR would fail otherwise).
+    if gremlin.project_root:
+        from gremlins.utils.git import stage_gremlins_overlay
+
+        try:
+            stage_gremlins_overlay(gremlin.project_root, gremlin.state_dir)
+        except Exception:
+            logger.warning("Failed to stage .gremlins overlay for child", exc_info=True)
+
     _system = {
         k: v
         for k, v in {
