@@ -7,7 +7,7 @@ use gremlins::stages::constants::FRAMEWORK_KEYS;
 use gremlins::stages::outcome::Done as RustDone;
 use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFrozenSet, PyList};
+use pyo3::types::{PyDict, PyFrozenSet, PyList, PyTuple};
 
 use crate::python::artifacts::ArtifactRegistry;
 use crate::python::json_conv::{key_to_string, py_to_value, value_to_py};
@@ -207,6 +207,41 @@ impl PyStateData {
 
     fn patch_parallel_attempt(&self, child_key: &str, attempt: &str) {
         self.with(|d| d.patch_parallel_attempt(child_key, attempt));
+    }
+
+    fn parallel_worktrees(&self, py: Python<'_>, group_name: &str) -> PyResult<Py<PyAny>> {
+        let (base_head, paths) = self.with(|d| d.parallel_worktrees(group_name));
+        Ok(PyTuple::new(
+            py,
+            [
+                base_head.into_pyobject(py)?.into_any(),
+                paths.into_pyobject(py)?.into_any(),
+            ],
+        )?
+        .into())
+    }
+
+    fn clear_parallel_attempts(&self) {
+        self.with(StateData::clear_parallel_attempts);
+    }
+
+    fn write_parallel_bail(&self, child_key: &str, reason: &str) {
+        self.with(|d| d.write_parallel_bail(child_key, reason));
+    }
+
+    fn read_bail_scan_inputs(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let (state_dir, attempts) = self.with(StateData::read_bail_scan_inputs);
+        let out = PyTuple::new(
+            py,
+            [
+                state_dir
+                    .map(|p| p.to_string_lossy().to_string())
+                    .into_pyobject(py)?
+                    .into_any(),
+                attempts.into_pyobject(py)?.into_any(),
+            ],
+        )?;
+        Ok(out.into())
     }
 
     fn write_terminal_state(&self, exit_code: i32) {

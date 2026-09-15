@@ -18,15 +18,16 @@ import pathlib
 import subprocess
 import threading
 
+import _gremlins_core.artifacts as _artifacts_mod
 import _gremlins_core.executor as state_mod
 import pytest
+from _gremlins_core.config import scratch_root
 from _gremlins_core.executor import State, StateData, build_state
 from _gremlins_core.executor import locked_update as _state_locked_update
-from _gremlins_core.stages import Bail
+from _gremlins_core.stages import Bail, ParallelStage
 from conftest import make_parent_state
 
 from gremlins.executor.gremlin import run_stages
-from gremlins.stages.parallel import ParallelStage
 from tests.fake_client import FakeClient
 
 # ---------------------------------------------------------------------------
@@ -306,6 +307,44 @@ def test_cancel_on_bail_skips_unstarted_children():
     assert "c" not in ran
 
 
+def test_cancel_on_bail_aborts_in_flight_siblings():
+    """A bail cancels siblings that are already running, not just queued ones."""
+    ran: list[str] = []
+
+    async def child_a() -> None:
+        raise Bail("child-a bailed")
+
+    async def child_b() -> None:
+        # Long enough that the bail in child-a fires while this is in flight.
+        await asyncio.sleep(5)
+        ran.append("b")
+
+    def _ctx(key: str):
+        return build_state(
+            data=StateData(),
+            client=FakeClient(),
+            artifact_dir=pathlib.Path("/tmp"),
+            child_key=key,
+        )
+
+    children = [("a", _ctx("a"), child_a), ("b", _ctx("b"), child_b)]
+
+    stages = _make_parallel_stages(
+        "workers",
+        children,
+        set_stage_fn=lambda _n: None,
+        cancel_on_bail=True,
+        bail_policy="any",
+        project_root_path=pathlib.Path.cwd(),
+    )
+
+    # The parallel stage must return promptly rather than waiting out child-b's
+    # 5s sleep: the in-flight sibling is aborted on bail.
+    asyncio.run(asyncio.wait_for(stages[1][1](), timeout=2))
+
+    assert "b" not in ran
+
+
 # ---------------------------------------------------------------------------
 # Fan-in resume: --resume-from <group>-fanin aggregates existing shards
 # ---------------------------------------------------------------------------
@@ -365,6 +404,52 @@ def test_run_stages_resume_from_fanin_name(tmp_path, sandbox):
     assert (state_dir / "bail_fanin-resume-parent.json").exists()
     data = _read_state(sf)
     assert "parallel_attempts" not in data
+
+
+# ---------------------------------------------------------------------------
+# Fan-in always tears down, even when artifact gathering fails
+# ---------------------------------------------------------------------------
+
+
+def test_fanin_tears_down_when_gather_fails(tmp_path, sandbox, monkeypatch):
+    """A gather error must not leave child dirs behind: teardown still runs."""
+    gremlin_id = "gr-fanin-gather-fail"
+    _make_state(sandbox.state, gremlin_id)
+    child_key = "c"
+    child_id = f"{gremlin_id}--reviews--{child_key}"
+
+    # A child scratch dir that fan-in would normally remove.
+    child_scratch = pathlib.Path(scratch_root(child_id))
+    (child_scratch / "artifacts").mkdir(parents=True, exist_ok=True)
+    (child_scratch / "registry.json").write_text("{}", encoding="utf-8")
+
+    project_root = tmp_path / "nongit3"
+    project_root.mkdir()
+
+    ctx = _make_simple_ctx(tmp_path, child_key)
+    stages = _make_parallel_stages(
+        "reviews",
+        [(child_key, ctx, lambda: None)],
+        max_concurrent=None,
+        set_stage_fn=lambda _n: None,
+        cancel_on_bail=False,
+        bail_policy="any",
+        parent_state=make_parent_state(StateData(gremlin_id)),
+        project_root_path=project_root,
+    )
+    fanin = dict(stages)["reviews-fanin"]
+
+    # Force artifact gathering to fail at the registry-loading seam.
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("gather exploded")
+
+    monkeypatch.setattr(_artifacts_mod.ArtifactRegistry, "from_registry_file", _boom)
+
+    with pytest.raises(RuntimeError, match="gather exploded"):
+        asyncio.run(fanin())
+
+    # Cleanup ran despite the gather failure.
+    assert not child_scratch.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -866,3 +951,45 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
     for p in paths.values():
         assert not p.is_dir()
     assert "reviews" not in (_read_state(sf).get("parallel_worktrees") or {})
+
+
+# ---------------------------------------------------------------------------
+# In-process child bail is visible to fan-in
+# ---------------------------------------------------------------------------
+
+
+def test_in_process_child_bail_reaches_fan_in(tmp_path, sandbox):
+    """An in-process child that raises Bail must be recorded as an attempt, or
+    fan-in's bail scan (which resolves bail files through parallel_attempts)
+    silently ignores it and returns Done."""
+    gremlin_id = "gr-inproc-bail"
+    sf = _make_state(sandbox.state, gremlin_id)
+    StateData(gremlin_id).patch(attempt="parent-attempt")
+
+    async def child_a() -> None:
+        raise Bail("in-process child bailed")
+
+    async def child_b() -> None:
+        return None
+
+    project_root = tmp_path / "nongit-inproc"
+    project_root.mkdir()
+    stages = _make_parallel_stages(
+        "reviews",
+        [
+            ("a", _make_simple_ctx(tmp_path, "a"), child_a),
+            ("b", _make_simple_ctx(tmp_path, "b"), child_b),
+        ],
+        set_stage_fn=lambda _n: None,
+        bail_policy="any",
+        parent_state=make_parent_state(StateData(gremlin_id)),
+        project_root_path=project_root,
+    )
+    by_name = dict(stages)
+
+    asyncio.run(by_name["reviews"]())
+    data = _read_state(sf)
+    assert data.get("parallel_attempts", {}).get("a")
+
+    with pytest.raises(Bail, match="bailed"):
+        asyncio.run(by_name["reviews-fanin"]())

@@ -9,9 +9,8 @@ import pathlib
 import pytest
 from _gremlins_core.artifacts import Uri
 from _gremlins_core.executor import State, StateData, build_state
-from _gremlins_core.stages import StageAttrs
+from _gremlins_core.stages import _gather_child_artifacts
 
-from gremlins.stages.parallel import ParallelStage, _ParallelExecutor
 from tests.fake_client import FakeClient
 
 
@@ -36,24 +35,10 @@ def _make_child_dir(
         (artifacts_dir / name).write_bytes(content)
 
 
-def _executor(
-    parent_state: State,
-    child_keys: list[str],
-    group_name: str = "grp",
-) -> _ParallelExecutor:
-    child_runners = [(k, parent_state, lambda: None) for k in child_keys]
-    parallel_stage = ParallelStage(group_name, [])
-    return _ParallelExecutor(
-        parallel_stage,
-        child_runners,  # type: ignore[arg-type]
-        max_concurrent=None,
-        set_stage_fn=lambda _: None,
-        cancel_on_bail=False,
-        bail_policy="any",
-        parent_state=parent_state,
-        project_root=pathlib.Path("/nonexistent"),
-        child_stages=[StageAttrs(k) for k in child_keys],
-    )
+def _gather(
+    parent_state: State, child_keys: list[str], group_name: str = "grp"
+) -> None:
+    _gather_child_artifacts(parent_state, child_keys, group_name)
 
 
 @pytest.fixture(autouse=True)
@@ -76,8 +61,7 @@ def test_single_child_file_artifact_copied(tmp_path: pathlib.Path) -> None:
         files={"review.md": b"# review"},
     )
 
-    ex = _executor(parent, ["sonnet"])
-    ex._gather_child_artifacts()
+    _gather(parent, ["sonnet"])
 
     assert parent.artifacts.is_registered("review-code")
     content = parent.artifacts.content("review-code")
@@ -107,8 +91,7 @@ def test_multi_child_same_key_disambiguated(tmp_path: pathlib.Path) -> None:
         files={"review.md": b"sonnet review"},
     )
 
-    ex = _executor(parent, ["opus", "sonnet"])
-    ex._gather_child_artifacts()
+    _gather(parent, ["opus", "sonnet"])
 
     assert parent.artifacts.is_registered("review-code/opus")
     assert parent.artifacts.is_registered("review-code/sonnet")
@@ -140,8 +123,7 @@ def test_snapshotted_parent_keys_skipped(tmp_path: pathlib.Path) -> None:
         files={"new.txt": b"new content"},
     )
 
-    ex = _executor(parent, ["child"])
-    ex._gather_child_artifacts()
+    _gather(parent, ["child"])
 
     # existing-key must not be rebound
     assert parent.artifacts.is_registered("artifact://existing.txt")
@@ -164,8 +146,7 @@ def test_non_file_artifact_bound_directly(tmp_path: pathlib.Path) -> None:
         files={},
     )
 
-    ex = _executor(parent, ["child"])
-    ex._gather_child_artifacts()
+    _gather(parent, ["child"])
 
     assert parent.artifacts.is_registered("pr")
     assert parent.artifacts.data_uri("pr") == "opaque://pr/42"
@@ -187,9 +168,8 @@ def test_missing_child_artifact_file_skipped(
         files={},  # file not created
     )
 
-    ex = _executor(parent, ["child"])
     with caplog.at_level(logging.WARNING):
-        ex._gather_child_artifacts()
+        _gather(parent, ["child"])
 
     assert not parent.artifacts.is_registered("review-code")
     assert any("missing" in r.message for r in caplog.records)

@@ -10,14 +10,13 @@ import signal
 from collections.abc import Callable
 from typing import Any
 
+import _gremlins_core.stages as _parallel_mod
 import pytest
 from _gremlins_core.config import scratch_root
 from _gremlins_core.executor import State, StateData, build_state, write_state
-from _gremlins_core.stages import Done, Outcome, StageAttrs
+from _gremlins_core.stages import Done, Outcome, ParallelStage, StageAttrs
 from conftest import make_parent_state
 
-from gremlins.stages import parallel as _parallel_mod
-from gremlins.stages.parallel import ParallelStage
 from gremlins.utils import proc as _proc_mod
 from tests.fake_client import FakeClient
 
@@ -306,6 +305,17 @@ def test_cancellation_sigterm_then_sigkill(
 
     monkeypatch.setattr(_proc_mod, "terminate_with_grace", _fake_terminate_with_grace)
 
+    # The cancellation path runs through ChildGuard::drop, which uses the
+    # blocking, loop-independent variant.
+    def _fake_terminate_with_grace_blocking(p: Any, grace_s: float = 0.05) -> None:
+        p.send_signal(signal.SIGTERM)
+        if p.returncode is None:
+            p.send_signal(signal.SIGKILL)
+
+    monkeypatch.setattr(
+        _proc_mod, "terminate_with_grace_blocking", _fake_terminate_with_grace_blocking
+    )
+
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
     parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
@@ -318,6 +328,13 @@ def test_cancellation_sigterm_then_sigkill(
             await task
         except (asyncio.CancelledError, RuntimeError):
             pass
+        # The guard hands the blocking SIGTERM→SIGKILL wait to a dedicated
+        # thread so it never stalls the event loop; give that thread a moment
+        # to run before asserting on its effects.
+        for _ in range(100):
+            if fake_proc.returncode is not None:
+                break
+            await asyncio.sleep(0.01)
 
     asyncio.run(_run_and_cancel())
 
@@ -492,20 +509,17 @@ def test_run_child_needs_fix_maps_to_done(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
-    status, _ = asyncio.run(
-        _parallel_mod.run_child_subprocess(
-            stage, child_st, "c", "attempt-1", on_bail=lambda _: None
-        )
+    parallel = _run_parallel(
+        [stage], [child_st], make_parent_state(StateData()), tmp_path
     )
-    assert status == "done"
+    asyncio.run(parallel())  # needs_fix is treated as done; must not raise
 
 
-def test_run_child_bail_calls_on_bail(
+def test_run_child_bail_is_recorded_not_raised(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     child_st = _child_state(tmp_path / "c")
     stage = _child_stage("c")
-    bailed: list[str] = []
 
     async def _mock_exec(*args: Any, **_: Any) -> _FakeProcess:
         result_path = pathlib.Path(str(args[-1]) + ".result")
@@ -517,13 +531,45 @@ def test_run_child_bail_calls_on_bail(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
-    status, _ = asyncio.run(
-        _parallel_mod.run_child_subprocess(
-            stage, child_st, "c", "attempt-1", on_bail=bailed.append
-        )
+    parallel = _run_parallel(
+        [stage], [child_st], make_parent_state(StateData()), tmp_path
     )
-    assert status == "bail"
-    assert bailed == ["nope"]
+    asyncio.run(parallel())  # a bail is recorded, not raised
+
+
+def test_bailed_subprocess_child_not_marked_done(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bailed subprocess child must not be recorded as completed."""
+    state_dir = tmp_path / "state" / "gr-bail-done"
+    state_dir.mkdir(parents=True)
+    write_state(state_dir, {"id": "gr-bail-done"})
+    sf = state_dir / "state.json"
+
+    parent_data = StateData(gremlin_id="gr-bail-done")
+    parent_data.state_file = sf
+    parent_state = build_state(
+        data=parent_data, client=FakeClient(), artifact_dir=state_dir
+    )
+
+    child_st = _child_state(tmp_path / "c")
+    stage = _child_stage("c")
+
+    async def _mock_exec(*args: Any, **_: Any) -> _FakeProcess:
+        result_path = pathlib.Path(str(args[-1]) + ".result")
+        result_path.write_text(
+            json.dumps({"status": "bail", "detail": "nope", "cost_usd": 0.0}),
+            encoding="utf-8",
+        )
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+
+    parallel = _run_parallel([stage], [child_st], parent_state, tmp_path)
+    asyncio.run(parallel())
+
+    done = json.loads(sf.read_text()).get("done_children", {}).get("g", [])
+    assert "c" not in done
 
 
 def test_build_child_spec_dict_base_ref_propagated(
@@ -632,21 +678,10 @@ def test_child_scratch_cleaned_when_parent_state_dir_missing(sandbox: Any) -> No
 
     parent_data = StateData(gremlin_id=gremlin_id)
     parent_data.state_file = sandbox.state / gremlin_id / "state.json"
-    stage = _child_stage("child-a")
-    executor = _parallel_mod._ParallelExecutor(
-        ParallelStage("g", [stage]),
-        [],
-        max_concurrent=None,
-        set_stage_fn=lambda _: None,
-        cancel_on_bail=False,
-        bail_policy="any",
-        parent_state=build_state(
-            parent_data, FakeClient(), artifact_dir=sandbox.state / "artifacts"
-        ),
-        project_root=sandbox.project,
-        child_stages=[stage],
+    parent_state = build_state(
+        parent_data, FakeClient(), artifact_dir=sandbox.state / "artifacts"
     )
-    executor._rm_child_dirs()
+    _parallel_mod._remove_child_dirs(parent_state, ["child-a"], "g")
     assert not child_scratch.exists()
 
 

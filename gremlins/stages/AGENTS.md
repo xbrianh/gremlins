@@ -36,12 +36,18 @@ sequencing logic of their own.
   YAML via `stop_when_exists: <artifact-key>`. No magic `status=needs_fix`
   marker or `head_stable` predicate.
 
+- `parallel` (type `"parallel"`) — Fans out a `parallel: list[Stage]` body
+  and joins at fan-in. Rust `PyParallelStage` in `_gremlins_core.stages.ParallelStage`
+  (parsing/validation in `crates/gremlins/src/stages/parallel.rs`; execution in
+  `crates/pyext/src/python/stages.rs`). Constructed by the orchestrator with
+  pre-built child runners; `build_runtime_stages()` returns the three
+  `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`) that
+  implement fan-out/fan-in execution. Children with a `raw_dict` run as
+  subprocesses (`gremlins.spawn.child`); bare stages run in-process.
+  Nested parallel groups are rejected.
+
 ## Python stages
 
-- `parallel.py` — `ParallelStage(Stage)`. Constructed by the orchestrator
-  with pre-built child runners; call `build_runtime_stages()` to get the
-  three `(name, fn)` pairs (`<group>-fanout`, `<group>`, `<group>-fanin`)
-  that implement fan-out/fan-in execution.
 - `sequence` — `Sequence` (Rust, `_gremlins_core.stages`). Runs
   `body: list[Stage]` sequentially in order, inheriting parent state (no
   fan-out). Child stages share artifacts and execution scope with the

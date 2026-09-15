@@ -13,10 +13,10 @@ from typing import Any
 import pytest
 from _gremlins_core.executor import State, StateData, build_state
 from _gremlins_core.schemas import Pipeline
+from _gremlins_core.stages import ParallelStage
 from conftest import MockGremlin, make_parent_state
 
 from gremlins.executor.gremlin import run_stages
-from gremlins.stages.parallel import ParallelStage
 from tests.fake_client import FakeClient
 
 # ---------------------------------------------------------------------------
@@ -339,6 +339,81 @@ def test_build_parallel_stages_names() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fan-out propagates a per-child branch pipeline into fork()
+# ---------------------------------------------------------------------------
+
+
+def test_fanout_passes_branch_pipeline_to_fork(sandbox) -> None:
+    """Each forked child receives a single-stage branch pipeline, not the parent's."""
+    from _gremlins_core.schemas import Bootstrap, Pipeline
+    from _gremlins_core.stages import Done, Outcome, StageAttrs
+
+    captured: list[Pipeline | None] = []
+
+    class _FakeForkedState:
+        def __init__(self, worktree: pathlib.Path) -> None:
+            self.worktree = worktree
+
+    class _FakeGremlin:
+        def __init__(self, worktree: pathlib.Path) -> None:
+            self._worktree = worktree
+
+        async def fork(self, state, target_id, *, pipeline=None, **_kwargs):
+            captured.append(pipeline)
+            return _FakeForkedState(self._worktree)
+
+    class _ChildStage(StageAttrs):
+        type = "_branch_pipeline_child"
+
+        async def run(self, gremlin) -> Outcome:
+            return Done()
+
+    child = _ChildStage("shard-1")
+    child.raw_dict = {"name": "shard-1", "type": "_branch_pipeline_child"}
+
+    parent_pipeline = Pipeline(
+        name="parent",
+        path=pathlib.Path("/parent"),
+        stages=[],
+        default_client=FakeClient(),
+        base_ref="main",
+        bootstrap=Bootstrap(),
+    )
+    child_ctx = build_state(
+        data=StateData(gremlin_id="parent-1"),
+        client=FakeClient(),
+        artifact_dir=pathlib.Path("/tmp"),
+        pipeline_data=parent_pipeline,
+        child_key="shard-1",
+    )
+
+    worktree = sandbox.work / "wt-shard-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    gremlin = _FakeGremlin(worktree)
+
+    parent_state = make_parent_state(StateData(gremlin_id="parent-1"))
+    stage = ParallelStage("reviews", [child])
+    stage.gremlin = gremlin
+    stages = stage.build_runtime_stages(
+        [("shard-1", child_ctx, lambda: None)],
+        parent_state=parent_state,
+        project_root_path=sandbox.project,
+        child_stages=[child],
+    )
+    fanout = dict(stages)["reviews-fanout"]
+    asyncio.run(fanout())
+
+    assert len(captured) == 1
+    branch = captured[0]
+    assert branch is not None
+    assert branch.name == "shard-1"
+    assert [s.name for s in branch.stages] == ["shard-1"]
+    # Inherited from the parent pipeline.
+    assert branch.path == pathlib.Path("/parent")
+    assert branch.base_ref == "main"
+
+
+# ---------------------------------------------------------------------------
 # Sequence as a parallel child — worktree propagation
 # ---------------------------------------------------------------------------
 
@@ -451,3 +526,58 @@ def test_stages_run_in_order_via_make_runner() -> None:
     ]
     asyncio.run(run_stages(stages))
     assert executed == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# Resumed run: artifacts from a previously-done child are still gathered
+# ---------------------------------------------------------------------------
+
+
+def test_resume_gathers_artifacts_from_done_child(
+    tmp_path: pathlib.Path, sandbox: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child recorded `done` in an earlier attempt is skipped for execution,
+    but fan-in must still gather its artifacts and clean up its scratch dir."""
+    import json
+
+    from _gremlins_core.config import scratch_root
+    from _gremlins_core.stages import Done, Outcome, StageAttrs
+
+    class _Noop(StageAttrs):
+        type = "_resume_noop"
+
+        async def run(self, gremlin: Any) -> Outcome:  # type: ignore[override]
+            return Done()
+
+    gremlin_id = "gr-resume-gather"
+    state_dir = sandbox.state / gremlin_id
+    state_dir.mkdir(parents=True)
+    sf = state_dir / "state.json"
+    sf.write_text(json.dumps({"id": gremlin_id, "done_children": {"grp": ["a"]}}))
+
+    parent_data = StateData(gremlin_id=gremlin_id)
+    parent_data.state_file = sf
+    parent_state = build_state(
+        data=parent_data, client=FakeClient(), artifact_dir=state_dir
+    )
+
+    # Child 'a' completed in an earlier attempt; its scratch dir survives.
+    child_a_scratch = pathlib.Path(scratch_root(f"{gremlin_id}--grp--a"))
+    (child_a_scratch / "artifacts").mkdir(parents=True, exist_ok=True)
+    (child_a_scratch / "registry.json").write_text(
+        json.dumps({"review-code": "file://session/review.md"}), encoding="utf-8"
+    )
+    (child_a_scratch / "artifacts" / "review.md").write_text(
+        "from child a", encoding="utf-8"
+    )
+
+    project_root = tmp_path / "nongit"
+    project_root.mkdir()
+    monkeypatch.setenv("GREMLINS_PROJECT_ROOT", str(project_root))
+
+    stage = ParallelStage("grp", [_Noop("a"), _Noop("b")])
+    asyncio.run(stage.run(MockGremlin(state=parent_state)))
+
+    assert parent_state.artifacts.is_registered("review-code")
+    assert parent_state.artifacts.content("review-code") == "from child a"
+    assert not child_a_scratch.exists()

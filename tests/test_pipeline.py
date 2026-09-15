@@ -5,11 +5,10 @@ import pytest
 from _gremlins_core.discovery import resolve_pipeline_name, resolve_pipeline_path
 from _gremlins_core.schemas import STAGE_TYPES
 from _gremlins_core.schemas import Pipeline as _PipelineData
-from _gremlins_core.stages import Agent
+from _gremlins_core.stages import Agent, ParallelStage
 
 from gremlins.executor.gremlin import Gremlin
 from gremlins.protocols import StageProtocol
-from gremlins.stages.parallel import ParallelStage
 
 
 def _pipeline_data(stages: list[StageProtocol] | None = None) -> _PipelineData:

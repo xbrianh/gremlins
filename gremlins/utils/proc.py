@@ -38,6 +38,9 @@ from _gremlins_core.utils.proc import (
 from _gremlins_core.utils.proc import (
     terminate_with_grace as _terminate_with_grace,
 )
+from _gremlins_core.utils.proc import (
+    terminate_with_grace_blocking as _terminate_with_grace_blocking,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +156,18 @@ async def terminate_with_grace(
 ) -> None:
     """SIGTERM → wait grace_s → SIGKILL (targets only the specific PID, not the process group)."""
     await _terminate_with_grace(p.pid, grace_s=grace_s)
+
+
+def terminate_with_grace_blocking(
+    p: asyncio.subprocess.Process, grace_s: float = 10.0
+) -> None:
+    """Blocking SIGTERM → wait grace_s → SIGKILL for synchronous callers.
+
+    Used by the parallel child guard's ``Drop`` path, which runs while the
+    owning asyncio loop is mid-teardown and cannot be re-entered. Unlike
+    :func:`terminate_with_grace`, this never touches an event loop.
+    """
+    _terminate_with_grace_blocking(p.pid, grace_s=grace_s)
 
 
 _MAX_PENDING_BYTES = 64 * 1024
