@@ -3167,14 +3167,18 @@ async fn run_child_lifecycle(
     let mut guard = ChildGuard::new(child, pumps);
 
     let wait_result = proc::wait_child_proc(guard.child_mut(), timeout_s, &child_key).await;
-    // The pumps reach EOF once the child's pipes close; drain them before
-    // reading the result so no output is lost.
-    guard.drain_pumps().await;
+    // The wait is settled, so the child's fate is decided: disarm before
+    // retiring the pumps, or a cancellation during the drain would tear down a
+    // child this lifecycle is about to report on.
+    guard.disarm();
+    // A completed child has closed its pipes, so draining relays every byte it
+    // wrote; after a failed wait the pipes may still be held open by an
+    // unterminated descendant, so the pumps are aborted instead of awaited.
+    guard.retire_pumps(wait_result.is_err()).await;
     let returncode = match &wait_result {
         Ok(status) => Some(proc::exit_code(status)),
         Err(_) => None,
     };
-    guard.disarm();
     wait_result
         .map(|_| returncode)
         .map_err(|err| err.to_string())
@@ -3248,9 +3252,24 @@ impl ChildGuard {
         self.child.as_mut().expect("child is present while armed")
     }
 
-    /// Await the pumps so the child's output is fully relayed.
-    async fn drain_pumps(&mut self) {
+    /// Retire the pumps now that the child's wait has settled.
+    ///
+    /// A clean exit closes the pipes, so the pumps reach EOF and draining loses
+    /// no output. A failed wait leaves the possibility that a descendant still
+    /// holds the pipes open; aborting there keeps the run from hanging on output
+    /// that will never end.
+    async fn retire_pumps(&mut self, wait_failed: bool) {
+        if wait_failed {
+            self.abort_pumps();
+        }
         proc::drain_pumps(std::mem::take(&mut self.pumps)).await;
+    }
+
+    /// Cancel the pumps, dropping their reads on the child's pipes.
+    fn abort_pumps(&mut self) {
+        for pump in &self.pumps {
+            pump.abort();
+        }
     }
 
     /// Stand down: the explicit cleanup path already ran.
@@ -3265,20 +3284,17 @@ impl Drop for ChildGuard {
             return;
         }
         // Abort the pumps first: they are tokio tasks reading the child's pipes.
-        for pump in &self.pumps {
-            pump.abort();
-        }
+        self.abort_pumps();
 
-        // Hand the blocking SIGTERM→SIGKILL wait to a dedicated thread. `Drop`
-        // runs on the Tokio worker polling the cancelled future; blocking there
-        // would stall the runtime for the whole grace period and delay sibling
-        // cancellation. The thread owns the cleanup and runs to completion
-        // independently of the runtime.
-        if let Some(mut child) = self.child.take() {
-            if let Some(pid) = child.id() {
-                std::thread::spawn(move || proc::terminate_with_grace_blocking(pid, 10.0));
-            }
-            let _ = child.start_kill();
+        // Hand the child's teardown to a dedicated thread. `Drop` runs on the
+        // Tokio worker polling the cancelled future; blocking there would stall
+        // the runtime for the whole grace period and delay sibling cancellation.
+        // The thread owns the child outright — including the reap — so nothing
+        // here fires an immediate SIGKILL that would preempt its SIGTERM grace.
+        if let Some(child) = self.child.take() {
+            std::thread::spawn(move || {
+                proc::terminate_child_blocking(child, proc::TERMINATE_GRACE)
+            });
         }
     }
 }

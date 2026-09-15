@@ -552,6 +552,10 @@ pub async fn run_shell_async(
     })
 }
 
+/// How often the teardown helpers poll a process for its exit.
+#[cfg(unix)]
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Poll whether a process with the given PID is still alive, without reaping it.
 /// Uses `kill(pid, 0)` which returns 0 if the process exists.
 /// Returns `true` if the process is still alive after `timeout`, `false` if it has exited.
@@ -567,9 +571,15 @@ async fn poll_process_alive(pid: i32, timeout: Duration) -> bool {
         if Instant::now() >= deadline {
             return true; // still alive after timeout
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
+
+/// Grace a terminated child gets to exit on SIGTERM before the SIGKILL.
+pub const TERMINATE_GRACE: Duration = Duration::from_secs(10);
+
+/// Grace a SIGKILLed child gets to be reaped before the caller gives up.
+pub const TERMINATE_KILL_GRACE: Duration = Duration::from_millis(500);
 
 /// Send SIGTERM → wait grace_s → SIGKILL. Cancellation-safe: the kill sequence
 /// runs in a detached tokio task so it completes even if the caller drops the future.
@@ -636,7 +646,7 @@ pub fn terminate_with_grace_blocking(pid: u32, grace_s: f64) {
         if Instant::now() >= deadline {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(POLL_INTERVAL);
     }
     // Grace period expired; escalate to SIGKILL.
     unsafe {
@@ -648,13 +658,88 @@ pub fn terminate_with_grace_blocking(pid: u32, grace_s: f64) {
         if unsafe { libc::kill(pid_i32, 0) } != 0 {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 
 /// No-op stub for non-Unix platforms.
 #[cfg(not(unix))]
 pub fn terminate_with_grace_blocking(_pid: u32, _grace_s: f64) {}
+
+/// Tear down a child whose handle can no longer be awaited, and reap it.
+///
+/// This is the escape hatch for a `Drop` impl on a runtime worker: it blocks
+/// while the child exits, so it must be called from a thread of its own. The
+/// handle is owned, so the final reap — not tokio's kill-on-drop — ends the
+/// child, and no stray SIGKILL preempts the SIGTERM grace period.
+#[cfg(unix)]
+pub fn terminate_child_blocking(mut child: tokio::process::Child, grace: Duration) {
+    if signal_child(&child, libc::SIGTERM).is_err() {
+        // ESRCH (already gone) or EPERM — collect what we can and stop.
+        let _ = child.try_wait();
+        return;
+    }
+    if !wait_until_exited(&mut child, grace) {
+        let _ = signal_child(&child, libc::SIGKILL);
+    }
+    wait_until_exited(&mut child, TERMINATE_KILL_GRACE);
+}
+
+/// No-op stub for non-Unix platforms.
+#[cfg(not(unix))]
+pub fn terminate_child_blocking(mut child: tokio::process::Child, _grace: Duration) {
+    let _ = child.start_kill();
+    let _ = child.try_wait();
+}
+
+/// Send `signal` to `child`, unless the handle has already collected it.
+///
+/// `Ok(())` covers a reaped child too: there is nothing left to signal, and
+/// that is not a failure. `Err` is the raw `kill(2)` error — `ESRCH` for a
+/// child that has vanished, `EPERM` for one this process may not signal.
+///
+/// Gating on [`tokio::process::Child::id`] is what makes signalling safe: Unix
+/// cannot recycle a pid until it has been reaped, so a child that still answers
+/// to `id` is still the child those signals reach.
+#[cfg(unix)]
+fn signal_child(child: &tokio::process::Child, signal: libc::c_int) -> io::Result<()> {
+    let Some(pid) = child.id().filter(|pid| *pid <= i32::MAX as u32) else {
+        return Ok(());
+    };
+    // SAFETY: `kill` sends a signal to a single pid and touches no memory.
+    if unsafe { libc::kill(pid as i32, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Poll `child` until it is reaped or `budget` runs out.
+///
+/// `true` means the child is gone — exited, or beyond reaping. A successful
+/// `try_wait` also reaps, leaving the handle safe to drop.
+#[cfg(unix)]
+fn wait_until_exited(child: &mut tokio::process::Child, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Reap `child` once it exits, giving up after `budget`; `true` if collected.
+///
+/// [`tokio::process::Child::wait`] is cancel safe, so an abandoned attempt
+/// leaves the handle exactly as it was.
+async fn reap_within(child: &mut tokio::process::Child, budget: Duration) -> bool {
+    matches!(tokio::time::timeout(budget, child.wait()).await, Ok(Ok(_)))
+}
 
 /// Size of each pipe read in [`pump_prefixed`].
 const PUMP_CHUNK: usize = 4096;
@@ -763,8 +848,13 @@ fn open_log(path: Option<&Path>) -> Option<std::fs::File> {
         .ok()
 }
 
-/// Wait for `child`, terminating it with [`terminate_with_grace`] if `timeout_s`
+/// Wait for `child`, tearing it down with [`terminate_and_reap`] if `timeout_s`
 /// elapses first.
+///
+/// `None` and non-finite timeouts wait without a deadline. Zero and negative
+/// timeouts expire at once, so the child is torn down rather than waited on.
+/// Either way the child is reaped before the error is returned, so a timeout
+/// never leaves a zombie behind.
 ///
 /// `child_key` is carried only so the error can name the child.
 pub async fn wait_child_proc(
@@ -778,29 +868,57 @@ pub async fn wait_child_proc(
         timeout_s,
     };
 
-    let Some(seconds) = timeout_s else {
-        return child.wait().await.map_err(io_error);
+    let timeout_error = || WaitChildError {
+        kind: WaitChildErrorKind::Timeout,
+        child_key: child_key.to_string(),
+        timeout_s,
     };
 
-    let deadline = if seconds.is_finite() && seconds > 0.0 {
-        Duration::from_secs_f64(seconds)
-    } else {
-        Duration::MAX
+    let budget = match timeout_s {
+        // No deadline: the child may take as long as it needs. Timers cannot
+        // represent `Duration::MAX`, so the unbounded cases skip them entirely.
+        None => return child.wait().await.map_err(io_error),
+        Some(seconds) if !seconds.is_finite() => return child.wait().await.map_err(io_error),
+        // A non-positive timeout expires at once: terminate, never wait.
+        Some(seconds) if seconds <= 0.0 => Duration::ZERO,
+        Some(seconds) => Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX),
     };
-    match tokio::time::timeout(deadline, child.wait()).await {
+
+    match tokio::time::timeout(budget, child.wait()).await {
         Ok(Ok(status)) => Ok(status),
         Ok(Err(err)) => Err(io_error(err)),
         Err(_elapsed) => {
-            if let Some(pid) = child.id() {
-                terminate_with_grace(pid, 10.0).await;
-            }
-            Err(WaitChildError {
-                kind: WaitChildErrorKind::Timeout,
-                child_key: child_key.to_string(),
-                timeout_s,
-            })
+            terminate_and_reap(child).await;
+            Err(timeout_error())
         }
     }
+}
+
+/// Give up on a child that outran its timeout: SIGTERM, then SIGKILL if it
+/// still will not leave, reaping it either way.
+///
+/// The timed-out wait left the child unreaped, so without this it would linger
+/// as a zombie for the rest of the parent's life. Reaping doubles as the
+/// liveness probe — a child too stubborn even for SIGKILL must not hang the
+/// caller — and it is the only probe used, so every signal goes to a child this
+/// process still owns rather than to whatever might inherit its pid next.
+async fn terminate_and_reap(child: &mut tokio::process::Child) {
+    if child.id().is_none() {
+        return; // reaped already: there is nothing left to signal
+    }
+    #[cfg(unix)]
+    {
+        let _ = signal_child(child, libc::SIGTERM);
+        if !reap_within(child, TERMINATE_GRACE).await {
+            let _ = signal_child(child, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.start_kill();
+    }
+    // A no-op when the grace period already reaped the child.
+    let _ = reap_within(child, TERMINATE_KILL_GRACE).await;
 }
 
 /// How [`wait_child_proc`] failed.
@@ -808,7 +926,7 @@ pub async fn wait_child_proc(
 pub enum WaitChildErrorKind {
     /// The wait itself failed — the child could not be reaped.
     Io(io::Error),
-    /// The child outlived its timeout and was terminated.
+    /// The child outlived its timeout and was torn down.
     Timeout,
 }
 
@@ -969,34 +1087,44 @@ struct Utf8Decoder {
 }
 
 impl Utf8Decoder {
+    /// Decode `chunk` on top of [`Self::carry`], replacing malformed bytes with
+    /// U+FFFD. Decoding continues past every malformed sequence in the buffer; a
+    /// truncated trailing sequence is held back for the next chunk — or, at
+    /// `eof`, replaced too.
     fn decode(&mut self, chunk: &[u8], eof: bool) -> String {
         self.carry.extend_from_slice(chunk);
-        match std::str::from_utf8(&self.carry) {
-            Ok(text) => {
-                let text = text.to_string();
-                self.carry.clear();
-                text
-            }
-            Err(err) => {
-                let valid = err.valid_up_to();
-                let mut text = String::from_utf8(self.carry[..valid].to_vec())
-                    .expect("valid_up_to marks a valid UTF-8 prefix");
-                match err.error_len() {
-                    // A malformed sequence: replace it and carry on past it.
-                    Some(len) => {
-                        text.push('\u{FFFD}');
-                        self.carry.drain(..valid + len);
-                    }
-                    // A truncated tail: hold it, unless the stream is done.
-                    None if eof => {
-                        text.push('\u{FFFD}');
-                        self.carry.clear();
-                    }
-                    None => {
-                        self.carry.drain(..valid);
+        let mut text = String::new();
+        loop {
+            match std::str::from_utf8(&self.carry) {
+                Ok(valid) => {
+                    text.push_str(valid);
+                    self.carry.clear();
+                    return text;
+                }
+                Err(err) => {
+                    let valid = err.valid_up_to();
+                    text.push_str(
+                        std::str::from_utf8(&self.carry[..valid])
+                            .expect("valid_up_to marks a valid UTF-8 prefix"),
+                    );
+                    match err.error_len() {
+                        // Malformed: replace it and keep decoding what follows.
+                        Some(len) => {
+                            text.push('\u{FFFD}');
+                            self.carry.drain(..valid + len);
+                        }
+                        // Truncated: the tail may be completed by the next chunk.
+                        None => {
+                            if eof {
+                                text.push('\u{FFFD}');
+                                self.carry.clear();
+                            } else {
+                                self.carry.drain(..valid);
+                            }
+                            return text;
+                        }
                     }
                 }
-                text
             }
         }
     }
@@ -1964,6 +2092,42 @@ mod tests {
         assert_eq!(decoder.decode(b"ok\xff", false), "ok\u{FFFD}");
     }
 
+    #[test]
+    fn test_utf8_decoder_replaces_every_invalid_byte() {
+        let mut decoder = Utf8Decoder::default();
+        assert_eq!(decoder.decode(b"\xff\xfe", false), "\u{FFFD}\u{FFFD}");
+        assert!(decoder.carry.is_empty());
+    }
+
+    #[test]
+    fn test_utf8_decoder_keeps_text_after_invalid_byte() {
+        let mut decoder = Utf8Decoder::default();
+        assert_eq!(decoder.decode(b"\xffok", false), "\u{FFFD}ok");
+    }
+
+    #[test]
+    fn test_utf8_decoder_carries_split_multibyte() {
+        let mut decoder = Utf8Decoder::default();
+        assert_eq!(decoder.decode(&[0xE2, 0x82], false), "");
+        assert_eq!(decoder.decode(&[0xAC], false), "\u{20AC}");
+        assert!(decoder.carry.is_empty());
+    }
+
+    #[test]
+    fn test_utf8_decoder_carries_truncated_tail() {
+        let mut decoder = Utf8Decoder::default();
+        assert_eq!(decoder.decode(b"ok\xE2\x82", false), "ok");
+        assert_eq!(decoder.decode(b"\xAC", false), "\u{20AC}");
+    }
+
+    #[test]
+    fn test_utf8_decoder_replaces_unfinished_tail_at_eof() {
+        let mut decoder = Utf8Decoder::default();
+        assert_eq!(decoder.decode(b"ok\xE2", false), "ok");
+        assert_eq!(decoder.decode(&[], true), "\u{FFFD}");
+        assert!(decoder.carry.is_empty());
+    }
+
     // -- spawn_with_pumps / wait_child_proc tests --
 
     #[tokio::test]
@@ -1976,6 +2140,17 @@ mod tests {
         drain_pumps(pumps).await;
         let status = child.wait().await.unwrap();
         assert!(status.success());
+    }
+
+    /// A child that will not exit on its own, for exercising the timeout paths.
+    fn sleep_child() -> tokio::process::Child {
+        tokio::process::Command::new("sleep")
+            .arg("10")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -1992,23 +2167,50 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_child_proc_timeout_terminates() {
-        let mut child = tokio::process::Command::new("sleep")
-            .arg("10")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let mut child = sleep_child();
         let err = wait_child_proc(&mut child, Some(0.1), "k")
             .await
             .unwrap_err();
         assert!(matches!(err.kind, WaitChildErrorKind::Timeout));
         assert!(err.to_string().contains("timed out"));
-        // The child was terminated, so reaping it completes promptly.
-        let status = tokio::time::timeout(Duration::from_secs(3), child.wait())
+        // The child was terminated and reaped, so it is already collectable.
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    /// A zero timeout must expire at once — never wait, never leak a zombie.
+    #[tokio::test]
+    async fn test_wait_child_proc_zero_timeout_terminates_and_reaps() {
+        let mut child = sleep_child();
+        let started = Instant::now();
+        let err = wait_child_proc(&mut child, Some(0.0), "k")
             .await
-            .expect("child should have been terminated")
+            .unwrap_err();
+        assert!(matches!(err.kind, WaitChildErrorKind::Timeout));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(child.try_wait().unwrap().is_some(), "child was not reaped");
+    }
+
+    #[tokio::test]
+    async fn test_wait_child_proc_negative_timeout_terminates() {
+        let mut child = sleep_child();
+        let err = wait_child_proc(&mut child, Some(-1.0), "k")
+            .await
+            .unwrap_err();
+        assert!(matches!(err.kind, WaitChildErrorKind::Timeout));
+        assert!(child.try_wait().unwrap().is_some(), "child was not reaped");
+    }
+
+    #[tokio::test]
+    async fn test_wait_child_proc_nan_timeout_waits_without_deadline() {
+        let mut child = tokio::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
             .unwrap();
-        assert!(!status.success());
+        let status = wait_child_proc(&mut child, Some(f64::NAN), "k")
+            .await
+            .unwrap();
+        assert!(status.success());
     }
 }

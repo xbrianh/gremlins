@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pathlib
 import signal
 import stat
@@ -24,7 +25,7 @@ from _gremlins_core.executor import State, StateData, build_state, write_state
 from _gremlins_core.stages import Done, Outcome, ParallelStage, StageAttrs
 from conftest import make_parent_state
 
-from gremlins.utils import proc as _proc_mod
+from gremlins.utils.proc import terminate_with_grace
 from tests.fake_client import FakeClient
 
 # A stand-in for ``python -m gremlins.spawn.child``. It ignores the ``-m`` module
@@ -258,13 +259,19 @@ def test_large_stderr_drains_without_deadlock(
 
 
 def _process_alive(pid: int) -> bool:
-    """Whether `pid` is a live process (a zombie counts as dead)."""
+    """Whether `pid` still names a process (a zombie has not been reaped yet).
+
+    ``os.kill(pid, 0)`` delivers no signal; it only probes existence, so it
+    works on every POSIX platform rather than relying on Linux's ``/proc``.
+    """
     try:
-        stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
-    except (FileNotFoundError, ProcessLookupError):
+        os.kill(pid, 0)
+    except ProcessLookupError:
         return False
-    # Field 3 is the state char; 'Z' means exited but not yet reaped.
-    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+    except PermissionError:
+        # The process exists but belongs to another user.
+        return True
+    return True
 
 
 def test_cancellation_terminates_child(
@@ -624,7 +631,7 @@ def test_terminate_with_grace_does_not_kill_descendants(
 
         try:
             # Call the real Rust binding (targets only the specific PID, not the PG).
-            await _proc_mod.terminate_with_grace(proc, grace_s=0.1)
+            await terminate_with_grace(proc, grace_s=0.1)
 
             # Parent should be dead.
             ret = await proc.wait()
