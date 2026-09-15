@@ -3083,7 +3083,7 @@ async fn run_child_subprocess(
 
     let timeout_s = Python::attach(|py| parse_child_timeout(stage_obj.bind(py), child_key))?;
     let python_exe: String = Python::attach(|py| -> PyResult<String> {
-        Ok(py.import("sys")?.getattr("executable")?.extract()?)
+        py.import("sys")?.getattr("executable")?.extract()
     })?;
     let log_path = Python::attach(|py| -> PyResult<Option<PathBuf>> {
         let artifact_dir: PathBuf = child_state.bind(py).getattr("artifact_dir")?.extract()?;
@@ -3106,10 +3106,7 @@ async fn run_child_subprocess(
         child_key.to_string(),
     ));
     let mut task_guard = ChildTaskGuard::new(lifecycle);
-    let returncode = task_guard
-        .result()
-        .await
-        .map_err(PyRuntimeError::new_err)?;
+    let returncode = task_guard.result().await.map_err(PyRuntimeError::new_err)?;
     task_guard.disarm();
 
     let result = read_child_result(&spec_path, returncode, child_key)?;

@@ -690,12 +690,16 @@ pub async fn spawn_with_pumps(
     let mut err_log = open_log(log_path);
     let pumps = vec![
         tokio::spawn(async move {
-            let log = out_log.as_mut().map(|f| f as &mut (dyn std::io::Write + Send));
+            let log = out_log
+                .as_mut()
+                .map(|f| f as &mut (dyn std::io::Write + Send));
             let mut out = std::io::stdout();
             pump_prefixed(stdout, &attempt_out, &mut out, log).await;
         }),
         tokio::spawn(async move {
-            let log = err_log.as_mut().map(|f| f as &mut (dyn std::io::Write + Send));
+            let log = err_log
+                .as_mut()
+                .map(|f| f as &mut (dyn std::io::Write + Send));
             let mut out = std::io::stdout();
             pump_prefixed(stderr, &attempt_err, &mut out, log).await;
         }),
@@ -709,7 +713,11 @@ pub async fn spawn_with_pumps(
 fn spawn_child_pipes(
     python_exe: &str,
     spec_path: &Path,
-) -> io::Result<(tokio::process::Child, tokio::process::ChildStdout, tokio::process::ChildStderr)> {
+) -> io::Result<(
+    tokio::process::Child,
+    tokio::process::ChildStdout,
+    tokio::process::ChildStderr,
+)> {
     let mut command = tokio::process::Command::new(python_exe);
     command
         .arg("-m")
@@ -1991,7 +1999,9 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let err = wait_child_proc(&mut child, Some(0.1), "k").await.unwrap_err();
+        let err = wait_child_proc(&mut child, Some(0.1), "k")
+            .await
+            .unwrap_err();
         assert!(matches!(err.kind, WaitChildErrorKind::Timeout));
         assert!(err.to_string().contains("timed out"));
         // The child was terminated, so reaping it completes promptly.
