@@ -17,8 +17,16 @@ logger = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> int:
+    from _gremlins_core.config import init as _init_config
+
     from gremlins.executor.gremlin import validate_gremlin_id, write_terminal_state
     from gremlins.logging_setup import configure_logging
+
+    try:
+        _init_config()
+    except ValueError as exc:
+        sys.stderr.write(f"run_pipeline: failed to load config: {exc}\n")
+        return 1
 
     configure_logging()
 

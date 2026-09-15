@@ -15,7 +15,8 @@ bootstrap:
     - gremlins:bind_artifact("artifact://instructions.txt", instructions)
   cmds:
     - uv venv .venv
-    - uv pip install -e ".[dev]"
+    - uv pip install -r requirements.txt -r requirements.dev.txt
+    - make install
   env: |
     export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
     unset VIRTUAL_ENV UV_PYTHON UV_PROJECT_ENVIRONMENT UV_SYSTEM_PYTHON PYTHONPATH

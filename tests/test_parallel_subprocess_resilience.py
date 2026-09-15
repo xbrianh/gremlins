@@ -14,6 +14,7 @@ import _gremlins_core.stages as _parallel_mod
 import pytest
 from _gremlins_core.config import scratch_root
 from _gremlins_core.executor import State, StateData, build_state, write_state
+from _gremlins_core.schemas import Bootstrap, Pipeline
 from _gremlins_core.stages import Done, Outcome, ParallelStage, StageAttrs
 from conftest import make_parent_state
 
@@ -595,6 +596,81 @@ def test_build_child_spec_dict_base_ref_empty_by_default(
     stage = _child_stage("c")
     spec = _parallel_mod._build_child_spec_dict(stage, child_st, "c", "attempt-1")
     assert spec["base_ref"] == ""
+
+
+@pytest.mark.skip(
+    reason="requires Rust extension rebuild — bootstrap_env not yet in compiled .so"
+)
+def test_build_child_spec_dict_includes_bootstrap_env(
+    tmp_path: pathlib.Path,
+) -> None:
+    """When pipeline_data carries a bootstrap env script, the child spec serializes it.
+
+    This test requires the Rust extension to be rebuilt with the bootstrap_env
+    changes in crates/pyext/src/python/stages.rs.  It will fail against the
+    pre-PR compiled .so.
+    """
+    artifact_dir = tmp_path / "c"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    env_script = 'export VIRTUAL_ENV="$GREMLINS_WORKTREE_PATH/.venv"'
+    child_st = build_state(
+        data=StateData(),
+        client=FakeClient(),
+        artifact_dir=artifact_dir,
+        pipeline_data=Pipeline(
+            name="test",
+            path=tmp_path,
+            stages=[],
+            bootstrap=Bootstrap(env=env_script),
+        ),
+    )
+    stage = _child_stage("c")
+    spec = _parallel_mod._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    assert spec["bootstrap_env"] == env_script
+
+
+@pytest.mark.skip(
+    reason="requires Rust extension rebuild — bootstrap_env not yet in compiled .so"
+)
+def test_build_child_spec_dict_no_bootstrap_env_when_empty(
+    tmp_path: pathlib.Path,
+) -> None:
+    """When pipeline_data has a bootstrap without env, bootstrap_env is absent from the spec.
+
+    Requires Rust extension rebuild (see test above).
+    """
+    artifact_dir = tmp_path / "c"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    child_st = build_state(
+        data=StateData(),
+        client=FakeClient(),
+        artifact_dir=artifact_dir,
+        pipeline_data=Pipeline(
+            name="test",
+            path=tmp_path,
+            stages=[],
+            bootstrap=Bootstrap(env=""),
+        ),
+    )
+    stage = _child_stage("c")
+    spec = _parallel_mod._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    assert "bootstrap_env" not in spec
+
+
+@pytest.mark.skip(
+    reason="requires Rust extension rebuild — bootstrap_env not yet in compiled .so"
+)
+def test_build_child_spec_dict_no_bootstrap_env_when_no_pipeline(
+    tmp_path: pathlib.Path,
+) -> None:
+    """When there is no pipeline_data at all, bootstrap_env is absent from the spec.
+
+    Requires Rust extension rebuild (see test above).
+    """
+    child_st = _child_state(tmp_path / "c")
+    stage = _child_stage("c")
+    spec = _parallel_mod._build_child_spec_dict(stage, child_st, "c", "attempt-1")
+    assert "bootstrap_env" not in spec
 
 
 def test_child_logs_survive_fan_in_cleanup(

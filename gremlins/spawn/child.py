@@ -40,9 +40,11 @@ import sys
 import traceback
 from typing import Any, cast
 
+from _gremlins_core.config import scratch_root
 from _gremlins_core.schemas import parse_stage
 from _gremlins_core.stages import Bail
 
+from gremlins.env_file import source_env_string
 from gremlins.executor.gremlin import Gremlin
 from gremlins.logging_setup import configure_logging
 
@@ -109,6 +111,92 @@ async def _run(spec_path: pathlib.Path) -> int:
             gremlin.patch_state_for(gremlin.gremlin_id, pid=os.getpid())
         except Exception:
             logger.warning("Failed to record PID in child state", exc_info=True)
+
+    # --- env isolation ---
+    # Re-run the same env isolation as the parent gremlin, but with the
+    # child's own worktree/artifact/state paths.  The parent's os.environ
+    # was mutated by its bootstrap.env sourcing and leaks through
+    # create_subprocess_exec (which inherits os.environ by default).
+    # Re-building here ensures VIRTUAL_ENV, PATH, and GREMLINS_* vars
+    # point at the child's worktree, not the parent's.
+
+    # Copy the project .gremlins overlay into the child's state directory
+    # (the parent does this in run_pipeline; the child's state dir is
+    # created without it, so code that resolves config/prompt files through
+    # GREMLINS_OVERLAY_DIR would fail otherwise).
+    if gremlin.project_root:
+        from gremlins.utils.git import stage_gremlins_overlay
+
+        try:
+            stage_gremlins_overlay(gremlin.project_root, gremlin.state_dir)
+        except Exception:
+            logger.warning("Failed to stage .gremlins overlay for child", exc_info=True)
+
+    _system = {
+        k: v
+        for k, v in {
+            "GREMLINS_GREMLIN_ID": gremlin.gremlin_id or "",
+            "GREMLINS_PROJECT_ROOT": gremlin.project_root or "",
+            "GREMLINS_OVERLAY_DIR": str(gremlin.state_dir / ".gremlins"),
+            "GREMLINS_WORKTREE_PATH": str(gremlin.worktree_dir)
+            if gremlin.worktree_dir
+            else None,
+            "GREMLINS_ARTIFACT_DIR": str(gremlin.artifact_dir),
+            "GREMLIN_WORKSPACE_DIR": str(gremlin.worktree_dir)
+            if gremlin.worktree_dir
+            else None,
+            "GREMLIN_STATE_DIR": str(gremlin.state_dir),
+        }.items()
+        if v is not None
+    }
+
+    env_script = (spec.get("bootstrap_env") or "").strip()
+    if env_script:
+        _base = dict(os.environ)
+        _base.update(_system)
+        try:
+            _env = source_env_string(
+                env_script,
+                base_env=_base,
+                cwd=pathlib.Path(gremlin.project_root)
+                if gremlin.project_root
+                else pathlib.Path.cwd(),
+            )
+        except RuntimeError as exc:
+            _write_result(
+                result_path,
+                {
+                    "status": "error",
+                    "detail": f"bootstrap env sourcing failed: {exc}",
+                    "returncode": None,
+                    "cost_usd": 0.0,
+                },
+            )
+            return 2
+    else:
+        _env = dict(os.environ)
+        _env.update(_system)
+
+    os.environ.clear()
+    os.environ.update(_env)
+    os.environ.update(_system)
+
+    _overlay_dir = _system.get("GREMLINS_OVERLAY_DIR", "")
+    if _overlay_dir:
+        overlay_bin = pathlib.Path(_overlay_dir) / "bin"
+        if overlay_bin.is_dir():
+            existing_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = (
+                f"{overlay_bin}{os.pathsep}{existing_path}"
+                if existing_path
+                else str(overlay_bin)
+            )
+
+    if gremlin.gremlin_id:
+        os.environ["GREMLINS_SCRATCH_DIR"] = str(
+            pathlib.Path(scratch_root(gremlin.gremlin_id))
+        )
+    # --- end env isolation ---
 
     if gremlin.bootstrap_cmds and gremlin.worktree_dir:
         from gremlins.executor.bootstrap import run_bootstrap as _run_bootstrap
@@ -189,6 +277,14 @@ async def _run(spec_path: pathlib.Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from _gremlins_core.config import init as _init_config
+
+    try:
+        _init_config()
+    except ValueError as exc:
+        sys.stderr.write(f"run_child: failed to load config: {exc}\n")
+        return 1
+
     configure_logging()
     if argv is None:
         argv = sys.argv[1:]

@@ -277,3 +277,55 @@ def test_main_happy_path(tmp_path: pathlib.Path) -> None:
     assert rc == 0
     result = _read_result(spec_path)
     assert result["status"] == "done"
+
+
+def test_run_bootstrap_env_isolation(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """bootstrap_env is sourced with the child's own worktree paths, not the parent's."""
+    monkeypatch.setenv("GREMLINS_SANDBOX_ROOT", str(tmp_path))
+
+    child_worktree = tmp_path / "child-worktree"
+    child_worktree.mkdir(parents=True, exist_ok=True)
+    child_state_dir = tmp_path / "state" / "child-boot"
+    child_state_dir.mkdir(parents=True, exist_ok=True)
+    (child_state_dir / "state.json").write_text(
+        json.dumps({"id": "child-boot", "attempt": "a1", "status": "running"}),
+        encoding="utf-8",
+    )
+
+    captured_base_env: dict[str, str] = {}
+
+    def _fake_source(
+        script: str, base_env: dict[str, str], cwd: pathlib.Path
+    ) -> dict[str, str]:
+        nonlocal captured_base_env
+        captured_base_env = dict(base_env)
+        result = dict(base_env)
+        result["VIRTUAL_ENV"] = f"{base_env.get('GREMLINS_WORKTREE_PATH', '')}/.venv"
+        return result
+
+    monkeypatch.setattr(_rc, "source_env_string", _fake_source)
+
+    spec_path = _write_spec(
+        tmp_path,
+        "_test_done",
+        extra={
+            "gremlin_id": "child-boot",
+            "child_id": "child-boot",
+            "worktree": str(child_worktree),
+            "bootstrap_env": 'export VIRTUAL_ENV="$GREMLINS_WORKTREE_PATH/.venv"',
+        },
+    )
+    rc = asyncio.run(_rc._run(spec_path))
+    assert rc == 0
+    result = _read_result(spec_path)
+    assert result["status"] == "done"
+
+    # The bootstrap env sourcing should see the child's worktree path, not the parent's.
+    assert captured_base_env.get("GREMLINS_WORKTREE_PATH") == str(child_worktree), (
+        f"expected child worktree {child_worktree}, got {captured_base_env.get('GREMLINS_WORKTREE_PATH')!r}"
+    )
+
+    # After env isolation, the child's os.environ should point to child paths.
+    assert os.environ.get("GREMLINS_WORKTREE_PATH") == str(child_worktree)

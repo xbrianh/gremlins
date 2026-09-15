@@ -3353,16 +3353,19 @@ fn build_child_spec_dict(
         .extract::<Option<String>>()?;
     let parent_stage: String = child_st.getattr("parent_stage")?.extract()?;
     let base_ref: String = child_st.getattr("base_ref")?.extract()?;
-    let bootstrap: Vec<String> = {
+    let (bootstrap_cmds, bootstrap_env): (Vec<String>, String) = {
         let pipeline_data = child_st.getattr("pipeline_data")?;
         if pipeline_data.is_none() {
-            Vec::new()
+            (Vec::new(), String::new())
         } else {
             let bootstrap = pipeline_data.getattr("bootstrap")?;
             if bootstrap.is_none() {
-                Vec::new()
+                (Vec::new(), String::new())
             } else {
-                bootstrap.getattr("cmds")?.extract::<Vec<String>>()?
+                (
+                    bootstrap.getattr("cmds")?.extract::<Vec<String>>()?,
+                    bootstrap.getattr("env")?.extract::<String>()?,
+                )
             }
         }
     };
@@ -3413,12 +3416,18 @@ fn build_child_spec_dict(
     map.insert(
         "bootstrap".into(),
         serde_json::Value::Array(
-            bootstrap
+            bootstrap_cmds
                 .into_iter()
                 .map(serde_json::Value::String)
                 .collect(),
         ),
     );
+    if !bootstrap_env.is_empty() {
+        map.insert(
+            "bootstrap_env".into(),
+            serde_json::Value::String(bootstrap_env),
+        );
+    }
     Ok(map)
 }
 
