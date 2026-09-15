@@ -328,6 +328,13 @@ def test_cancellation_sigterm_then_sigkill(
             await task
         except (asyncio.CancelledError, RuntimeError):
             pass
+        # The guard hands the blocking SIGTERM→SIGKILL wait to a dedicated
+        # thread so it never stalls the event loop; give that thread a moment
+        # to run before asserting on its effects.
+        for _ in range(100):
+            if fake_proc.returncode is not None:
+                break
+            await asyncio.sleep(0.01)
 
     asyncio.run(_run_and_cancel())
 

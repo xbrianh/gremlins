@@ -42,67 +42,76 @@ fn lookup_stage_class(
 }
 
 pub fn parse_stage(py: Python<'_>, d: &Bound<'_, PyDict>, depth: usize) -> PyResult<Py<PyAny>> {
-    if d.contains("parallel")? {
-        let cls = py
-            .import("_gremlins_core.stages")?
-            .getattr("ParallelStage")?;
-        let stage: Py<PyAny> = cls.call_method1("with_dict", (d, depth))?.extract()?;
-        let name: String = d
-            .get_item("name")?
-            .and_then(|v| v.extract().ok())
-            .unwrap_or_else(|| "<parallel>".to_string());
-        let skip_if_exists = parse_skip_if_exists(d, &name)?;
-        stage.setattr(py, "raw_dict", d)?;
-        stage.setattr(py, "skip_if_exists", skip_if_exists)?;
-        return Ok(stage);
-    }
-
+    // A bare `parallel:` block is sugar for `type: parallel`. Both spellings are
+    // resolved through [`resolve_stage_class`], so the loader has one path.
+    let is_parallel = d.contains("parallel")?;
     let name: String = d
         .get_item("name")?
         .and_then(|v| v.extract().ok())
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            if is_parallel {
+                "<parallel>".into()
+            } else {
+                String::new()
+            }
+        });
 
-    if d.contains("max_concurrent")? {
+    if !is_parallel && d.contains("max_concurrent")? {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "stage {name:?}: 'max_concurrent' is only valid on parallel groups"
         )));
     }
 
-    let stage_type: Option<String> = d.get_item("type")?.and_then(|v| v.extract().ok());
-
-    let stage_type = match stage_type {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "stage {name:?}: must have a 'type' field"
-            )));
+    let stage_type = if is_parallel {
+        "parallel".to_string()
+    } else {
+        let raw: Option<String> = d.get_item("type")?.and_then(|v| v.extract().ok());
+        match raw {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "stage {name:?}: must have a 'type' field"
+                )));
+            }
         }
     };
 
-    // First try the built-in Rust constant
-    if let Ok((module, class)) = lookup_stage_class(&stage_type, &name) {
-        let cls = py.import(module)?.getattr(class)?;
-        let stage: Py<PyAny> = cls.call_method1("with_dict", (d, depth))?.extract()?;
-        let skip_if_exists = parse_skip_if_exists(d, &name)?;
-        stage.setattr(py, "raw_dict", d)?;
-        stage.setattr(py, "skip_if_exists", skip_if_exists)?;
-        return Ok(stage);
-    }
+    instantiate_stage(py, d, depth, &stage_type, &name)
+}
 
-    // Fall back to the live STAGE_TYPES dict (which may have dynamically
-    // registered types, e.g. test fixtures).
+/// Construct one stage from its raw dict and attach the attributes the
+/// orchestrator reads back (`raw_dict` and `skip_if_exists`).
+fn instantiate_stage(
+    py: Python<'_>,
+    d: &Bound<'_, PyDict>,
+    depth: usize,
+    stage_type: &str,
+    name: &str,
+) -> PyResult<Py<PyAny>> {
+    let cls = resolve_stage_class(py, stage_type, name)?;
+    let stage: Py<PyAny> = cls.call_method1("with_dict", (d, depth))?.extract()?;
+    stage.setattr(py, "raw_dict", d)?;
+    stage.setattr(py, "skip_if_exists", parse_skip_if_exists(d, name)?)?;
+    Ok(stage)
+}
+
+/// Resolve a stage type to its implementing class: the built-in [`STAGE_TYPES`]
+/// table first, then the live dict (which may hold dynamically registered types,
+/// e.g. test fixtures).
+fn resolve_stage_class<'py>(
+    py: Python<'py>,
+    stage_type: &str,
+    name: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    if let Ok((module, class)) = lookup_stage_class(stage_type, name) {
+        return py.import(module)?.getattr(class);
+    }
     let stage_types = STAGE_TYPES_DICT
         .get(py)
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("STAGE_TYPES not initialized"))?
         .bind(py);
-    match stage_types.get_item(&stage_type)? {
-        Some(cls) => {
-            let stage: Py<PyAny> = cls.call_method1("with_dict", (d, depth))?.extract()?;
-            let skip_if_exists = parse_skip_if_exists(d, &name)?;
-            stage.setattr(py, "raw_dict", d)?;
-            stage.setattr(py, "skip_if_exists", skip_if_exists)?;
-            Ok(stage)
-        }
+    match stage_types.get_item(stage_type)? {
+        Some(cls) => Ok(cls),
         None => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "stage {name:?}: unknown type {stage_type:?}"
         ))),

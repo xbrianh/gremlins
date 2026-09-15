@@ -526,3 +526,58 @@ def test_stages_run_in_order_via_make_runner() -> None:
     ]
     asyncio.run(run_stages(stages))
     assert executed == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# Resumed run: artifacts from a previously-done child are still gathered
+# ---------------------------------------------------------------------------
+
+
+def test_resume_gathers_artifacts_from_done_child(
+    tmp_path: pathlib.Path, sandbox: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child recorded `done` in an earlier attempt is skipped for execution,
+    but fan-in must still gather its artifacts and clean up its scratch dir."""
+    import json
+
+    from _gremlins_core.config import scratch_root
+    from _gremlins_core.stages import Done, Outcome, StageAttrs
+
+    class _Noop(StageAttrs):
+        type = "_resume_noop"
+
+        async def run(self, gremlin: Any) -> Outcome:  # type: ignore[override]
+            return Done()
+
+    gremlin_id = "gr-resume-gather"
+    state_dir = sandbox.state / gremlin_id
+    state_dir.mkdir(parents=True)
+    sf = state_dir / "state.json"
+    sf.write_text(json.dumps({"id": gremlin_id, "done_children": {"grp": ["a"]}}))
+
+    parent_data = StateData(gremlin_id=gremlin_id)
+    parent_data.state_file = sf
+    parent_state = build_state(
+        data=parent_data, client=FakeClient(), artifact_dir=state_dir
+    )
+
+    # Child 'a' completed in an earlier attempt; its scratch dir survives.
+    child_a_scratch = pathlib.Path(scratch_root(f"{gremlin_id}--grp--a"))
+    (child_a_scratch / "artifacts").mkdir(parents=True, exist_ok=True)
+    (child_a_scratch / "registry.json").write_text(
+        json.dumps({"review-code": "file://session/review.md"}), encoding="utf-8"
+    )
+    (child_a_scratch / "artifacts" / "review.md").write_text(
+        "from child a", encoding="utf-8"
+    )
+
+    project_root = tmp_path / "nongit"
+    project_root.mkdir()
+    monkeypatch.setenv("GREMLINS_PROJECT_ROOT", str(project_root))
+
+    stage = ParallelStage("grp", [_Noop("a"), _Noop("b")])
+    asyncio.run(stage.run(MockGremlin(state=parent_state)))
+
+    assert parent_state.artifacts.is_registered("review-code")
+    assert parent_state.artifacts.content("review-code") == "from child a"
+    assert not child_a_scratch.exists()

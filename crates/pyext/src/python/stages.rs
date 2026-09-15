@@ -1406,9 +1406,18 @@ impl PyParallelStage {
         self.max_concurrent
     }
 
+    /// Reject `0` here for the same reason the constructor does: `0` would
+    /// build a `Semaphore` no child can ever acquire, hanging the group.
     #[setter]
-    fn set_max_concurrent(&mut self, value: Option<u32>) {
-        self.max_concurrent = value;
+    fn set_max_concurrent(mut slf: PyRefMut<'_, Self>, value: Option<u32>) -> PyResult<()> {
+        if let Some(0) = value {
+            let name = slf.as_super().inner.name.clone();
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "parallel group {name:?}: 'max_concurrent' must be a positive integer"
+            )));
+        }
+        slf.max_concurrent = value;
+        Ok(())
     }
 
     #[getter]
@@ -1426,9 +1435,19 @@ impl PyParallelStage {
         self.bail_policy.clone()
     }
 
+    /// Mirror the constructor's invariant. `config()` maps anything other than
+    /// `"all"` onto `BailPolicy::Any`, so a typo here would silently widen the
+    /// policy instead of failing.
     #[setter]
-    fn set_bail_policy(&mut self, value: String) {
-        self.bail_policy = value;
+    fn set_bail_policy(mut slf: PyRefMut<'_, Self>, value: String) -> PyResult<()> {
+        if value != "any" && value != "all" {
+            let name = slf.as_super().inner.name.clone();
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "parallel group {name:?}: 'bail_policy' must be 'any' or 'all'"
+            )));
+        }
+        slf.bail_policy = value;
+        Ok(())
     }
 
     /// Build the three runtime stages for this group: fan-out, parallel, fan-in.
@@ -1479,6 +1498,7 @@ impl PyParallelStage {
                 runner,
             })
             .collect();
+        let all_child_keys: Vec<String> = children.iter().map(|c| c.key.clone()).collect();
 
         let group = Arc::new(ParallelGroupState::new(
             group_name.clone(),
@@ -1496,6 +1516,7 @@ impl PyParallelStage {
                 stage,
                 group,
                 children,
+                all_child_keys,
                 parent_state,
                 parent_gremlin,
                 project_root,
@@ -1523,6 +1544,9 @@ struct ParallelRuntime {
     stage: Py<PyParallelStage>,
     group: Arc<ParallelGroupState>,
     children: Vec<ChildSpec>,
+    /// Every child declared by the group, including those skipped as already
+    /// done. Fan-in needs the complete set for artifact gathering and cleanup.
+    all_child_keys: Vec<String>,
     parent_state: Py<PyAny>,
     parent_gremlin: Option<Py<PyAny>>,
     project_root: PathBuf,
@@ -1622,11 +1646,16 @@ impl ParallelRuntime {
     }
 
     async fn fanin(&self) -> PyResult<Py<PyAny>> {
-        let (bail_policy, children, state) = Python::attach(|py| {
+        let (bail_policy, children, all_child_keys, state) = Python::attach(|py| {
             self.set_stage(py, &format!("{}-fanin", self.group_name));
             let (_, _, bail_policy) = self.config(py)?;
             let children: Vec<ChildSpec> = self.children.iter().map(|c| c.clone_ref(py)).collect();
-            Ok::<_, PyErr>((bail_policy, children, self.parent_state.clone_ref(py)))
+            Ok::<_, PyErr>((
+                bail_policy,
+                children,
+                self.all_child_keys.clone(),
+                self.parent_state.clone_ref(py),
+            ))
         })?;
         let group = self.group.clone();
         let stage_path = self.stage_path.clone();
@@ -1635,6 +1664,7 @@ impl ParallelRuntime {
         let project_root = self.project_root.clone();
         fan_in(
             &group,
+            &all_child_keys,
             &children,
             &state,
             &stage_path,
@@ -2225,6 +2255,10 @@ struct ParallelRun {
     stage_path: String,
     parent_id: String,
     children: Vec<ChildSpec>,
+    /// Every child declared in the group, whether or not it was skipped as
+    /// already done. Fan-in gathers artifacts from and cleans up after all of
+    /// them, so a resumed run must not lose a previously-completed child.
+    all_child_keys: Vec<String>,
     /// The gremlin attached to the stage; present only when the group was
     /// wired into a running pipeline. Without it, children get detached
     /// worktrees instead of forks.
@@ -2272,9 +2306,11 @@ fn prepare_parallel_run(
     )?;
 
     let child_state_fn = wrap_pyfunction!(child_state_py, py)?;
+    let mut all_child_keys: Vec<String> = Vec::with_capacity(body.len());
     let mut children = Vec::new();
     for child in &body {
         let child_name: String = child.bind(py).getattr("name")?.extract()?;
+        all_child_keys.push(child_name.clone());
         if done.contains(&child_name) {
             continue;
         }
@@ -2327,6 +2363,7 @@ fn prepare_parallel_run(
         stage_path,
         parent_id,
         children,
+        all_child_keys,
         parent_gremlin,
     })
 }
@@ -2346,6 +2383,7 @@ async fn parallel_run_async(stage: Py<PyParallelStage>, gremlin: Py<PyAny>) -> P
         stage_path,
         parent_id,
         children,
+        all_child_keys,
         parent_gremlin,
     } = run;
 
@@ -2393,6 +2431,7 @@ async fn parallel_run_async(stage: Py<PyParallelStage>, gremlin: Py<PyAny>) -> P
                 stage: stage.clone_ref(py),
                 group,
                 children,
+                all_child_keys,
                 parent_state: state.clone_ref(py),
                 parent_gremlin,
                 project_root,
@@ -2766,6 +2805,9 @@ async fn dispatch_children(
             .call_method("patch", (), Some(&patch))?;
         Ok::<_, PyErr>(())
     })?;
+    // Cancelling this future drops it mid-await, so the completion path below is
+    // not guaranteed to run. The guard clears the marker on that path too.
+    let mut active_guard = Python::attach(|py| ActiveChildrenGuard::new(state.clone_ref(py)));
 
     let semaphore = max_concurrent.map(|n| Arc::new(Semaphore::new(n as usize)));
     // Each child runs as an abortable future so a bail can cancel in-flight
@@ -2826,6 +2868,11 @@ async fn dispatch_children(
             Ok(Err(err)) => {
                 if first_error.is_none() {
                     first_error = Some(err);
+                } else {
+                    log::error!(
+                        target: "gremlins.stages.parallel",
+                        "parallel child also failed: {err}"
+                    );
                 }
             }
             // A sibling aborted by the bail path; nothing to record.
@@ -2838,19 +2885,57 @@ async fn dispatch_children(
         }
     }
 
-    Python::attach(|py| {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("_delete", ("active_children",))?;
-        state
-            .bind(py)
-            .getattr("data")?
-            .call_method("patch", (), Some(&kwargs))?;
-        Ok::<_, PyErr>(())
-    })?;
+    active_guard.clear();
 
     match first_error {
         Some(err) => Err(err),
         None => Ok(()),
+    }
+}
+
+/// Clears `state.data.active_children` when dropped.
+///
+/// The group publishes the snapshot of dispatched children before draining the
+/// child futures. Cancellation unwinds this future mid-await, so the normal
+/// completion path may never run; a guard keeps the marker from outliving the
+/// stage in that case, which would otherwise leave fleet/resume state stale.
+struct ActiveChildrenGuard {
+    state: Option<Py<PyAny>>,
+}
+
+impl ActiveChildrenGuard {
+    fn new(state: Py<PyAny>) -> Self {
+        ActiveChildrenGuard { state: Some(state) }
+    }
+
+    /// Clear the marker now. Idempotent: a later drop becomes a no-op.
+    fn clear(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            let cleared = kwargs
+                .set_item("_delete", ("active_children",))
+                .and_then(|()| {
+                    state
+                        .bind(py)
+                        .getattr("data")?
+                        .call_method("patch", (), Some(&kwargs))
+                });
+            if let Err(err) = cleared {
+                log::warn!(
+                    target: "gremlins.stages.parallel",
+                    "could not clear active_children: {err}"
+                );
+            }
+        });
+    }
+}
+
+impl Drop for ActiveChildrenGuard {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 
@@ -2920,14 +3005,15 @@ async fn run_parallel_child(
                 if cancel_on_bail {
                     cancel.store(true, Ordering::SeqCst);
                 }
-                let reason = Python::attach(|py| -> PyResult<String> {
-                    let args = err.value(py).getattr("args")?;
-                    if args.len()? == 0 {
-                        return Ok(String::new());
-                    }
-                    Ok(args.get_item(0)?.str()?.to_string())
-                })?;
-                Python::attach(|py| group.write_bail(py, child_key, &reason));
+                let reason = Python::attach(|py| bail_message(py, &err))?;
+                // `collect_bails` resolves each child's bail file through
+                // `parallel_attempts[child_key]`. Only the subprocess path
+                // records an attempt itself, so an in-process bail must mint
+                // one here — without it the bail is invisible at fan-in.
+                Python::attach(|py| {
+                    group.record_attempt(py, child_key, &in_process_attempt(child_key));
+                    group.write_bail(py, child_key, &reason);
+                });
                 Ok(())
             } else {
                 if cancel_on_bail {
@@ -2937,6 +3023,24 @@ async fn run_parallel_child(
             }
         }
     }
+}
+
+/// The attempt id recorded for an in-process child that bails.
+///
+/// Deterministic per child, mirroring `write_parallel_bail`'s top-level
+/// `attempt` fallback. A parallel group does not nest, so child keys are unique
+/// within a group and this cannot collide across children.
+fn in_process_attempt(child_key: &str) -> String {
+    format!("{child_key}-inprocess")
+}
+
+/// The bail detail carried by a `Bail` exception, or an empty string.
+fn bail_message(py: Python<'_>, err: &PyErr) -> PyResult<String> {
+    let args = err.value(py).getattr("args")?;
+    if args.len()? == 0 {
+        return Ok(String::new());
+    }
+    Ok(args.get_item(0)?.str()?.to_string())
 }
 
 /// Spawn one child through `gremlins.spawn.child` and fold in its cost.
@@ -3097,23 +3201,29 @@ impl Drop for ChildGuard {
         if !self.armed {
             return;
         }
-        // The owning future is dropped by asyncio cancellation, so the normal
-        // cleanup path never runs. Terminate the child with a blocking,
-        // loop-independent SIGTERM→SIGKILL sequence: the child was spawned on
-        // the main event loop, so driving `asyncio.run()` on a worker thread
-        // would wait on process-exit events registered to a loop we do not own
-        // (and cannot re-enter). The blocking primitive touches only OS signals.
-        Python::attach(|py| {
-            if let Ok(proc_mod) = py.import("gremlins.utils.proc") {
-                let _ = proc_mod
-                    .getattr("terminate_with_grace_blocking")
-                    .and_then(|f| f.call1((self.proc.bind(py),)));
-            }
-        });
+        // Cancel the pumps first: they are asyncio tasks, so cancelling is
+        // cheap and stops them blocking on the child's pipes.
         Python::attach(|py| {
             for pump in &self.pumps {
                 let _ = pump.bind(py).call_method0("cancel");
             }
+        });
+
+        // Hand the blocking SIGTERM→SIGKILL wait to a dedicated thread. `Drop`
+        // runs on the Tokio worker polling the cancelled future; blocking there
+        // would stall the runtime for the whole grace period and delay sibling
+        // cancellation, and `py.detach` only releases the GIL — it does not
+        // move the call off this thread. The thread owns the cleanup and runs
+        // to completion independently of the runtime.
+        let proc = Python::attach(|py| self.proc.clone_ref(py));
+        std::thread::spawn(move || {
+            Python::attach(|py| {
+                if let Ok(proc_mod) = py.import("gremlins.utils.proc") {
+                    let _ = proc_mod
+                        .getattr("terminate_with_grace_blocking")
+                        .and_then(|f| f.call1((proc.bind(py),)));
+                }
+            });
         });
     }
 }
@@ -3375,16 +3485,22 @@ async fn terminate_with_grace(child_proc: &Py<PyAny>) {
 }
 
 /// Await every pump task, shielding them so a cancelled parent still drains.
+///
+/// `pumps` are passed as *positional* arguments — `asyncio.gather` takes
+/// awaitables, not a list of them — and `return_exceptions=true` keeps one
+/// pump's failure from masking the others, matching the pre-port
+/// `asyncio.shield(asyncio.gather(*pumps, return_exceptions=True))`.
 async fn drain_pumps(pumps: &[Py<PyAny>]) {
     if pumps.is_empty() {
         return;
     }
-    let Ok(coro) = Python::attach(|py| {
+    let Ok(coro) = Python::attach(|py| -> PyResult<Py<PyAny>> {
         let asyncio = py.import("asyncio")?;
-        let gather = asyncio.call_method1("gather", (PyList::new(py, pumps)?,))?;
-        asyncio
-            .call_method1("shield", (gather,))
-            .map(|c| c.unbind())
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("return_exceptions", true)?;
+        let tasks = PyTuple::new(py, pumps.iter().map(|p| p.clone_ref(py)))?;
+        let gathered = asyncio.getattr("gather")?.call(tasks, Some(&kwargs))?;
+        Ok(asyncio.call_method1("shield", (gathered,))?.unbind())
     }) else {
         return;
     };
@@ -3397,9 +3513,17 @@ async fn drain_pumps(pumps: &[Py<PyAny>]) {
 }
 
 /// Gather child artifacts, decide the group bail, and tear down worktrees.
+///
+/// `children` is the *filtered* set the parallel stage actually executed (a
+/// resumed run omits children already recorded `done`); `all_child_keys` is the
+/// group's full membership. Artifact gathering and directory cleanup must use
+/// the full set, or a resumed run would drop the artifacts of — and leave the
+/// scratch directory of — any child completed by an earlier attempt. Bail
+/// scanning keeps using the executed set, which is what wrote the attempts.
 #[allow(clippy::too_many_arguments)]
 async fn fan_in(
     group: &Arc<ParallelGroupState>,
+    all_child_keys: &[String],
     children: &[ChildSpec],
     state: &Py<PyAny>,
     stage_path: &str,
@@ -3410,15 +3534,16 @@ async fn fan_in(
 ) -> PyResult<()> {
     Python::attach(|py| group.hydrate(py));
     let child_keys: Vec<String> = children.iter().map(|c| c.key.clone()).collect();
+    let state_for_teardown = Python::attach(|py| state.clone_ref(py));
 
     // Capture the artifact-gathering result rather than propagating with `?`:
     // teardown must run even when gathering fails, or detached worktrees and
     // child state directories are left behind on disk.
-    let gather_result = gather_child_artifacts(&child_keys, state, group_name, parent_id);
+    let gather_result = gather_child_artifacts(all_child_keys, state, group_name, parent_id);
 
     let fan_in_result = do_fan_in(
         group,
-        children,
+        &child_keys,
         state,
         stage_path,
         group_name,
@@ -3427,13 +3552,82 @@ async fn fan_in(
     )
     .await;
 
-    remove_child_dirs(&child_keys, state, group_name, parent_id);
-    teardown_worktrees(group, project_root).await;
+    // Teardown is guarded: if this future is dropped mid-await (asyncio
+    // cancellation, or `--resume-from <group>-fanin`), the guard still removes
+    // child dirs and detached worktrees. The pre-port `_fan_in` used a
+    // `finally`; this is the structured-concurrency equivalent.
+    let mut teardown = TeardownGuard::new(
+        group.clone(),
+        all_child_keys.to_vec(),
+        state_for_teardown,
+        group_name.to_string(),
+        parent_id.to_string(),
+        project_root.to_path_buf(),
+    );
+    teardown.run();
 
     // Surface the first failure: a gathering error takes precedence over the
     // fan-in outcome, since it means artifacts were never merged.
     gather_result?;
     fan_in_result
+}
+
+/// Owns fan-in teardown and runs it exactly once, even on cancellation.
+///
+/// `run` performs the cleanup eagerly on the normal path; `Drop` covers the
+/// path where the enclosing future is dropped before reaching it. The cleanup
+/// itself is blocking Rust (no Python coroutines), so it cannot be interrupted
+/// halfway by a cancellation that arrives while it is in flight.
+struct TeardownGuard {
+    group: Arc<ParallelGroupState>,
+    child_keys: Vec<String>,
+    state: Py<PyAny>,
+    group_name: String,
+    parent_id: String,
+    project_root: PathBuf,
+    done: bool,
+}
+
+impl TeardownGuard {
+    fn new(
+        group: Arc<ParallelGroupState>,
+        child_keys: Vec<String>,
+        state: Py<PyAny>,
+        group_name: String,
+        parent_id: String,
+        project_root: PathBuf,
+    ) -> Self {
+        TeardownGuard {
+            group,
+            child_keys,
+            state,
+            group_name,
+            parent_id,
+            project_root,
+            done: false,
+        }
+    }
+
+    /// Run the cleanup now. Idempotent: a later drop becomes a no-op.
+    fn run(&mut self) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        remove_child_dirs(
+            &self.child_keys,
+            &self.state,
+            &self.group_name,
+            &self.parent_id,
+        );
+        teardown_worktrees_blocking(&self.group, &self.project_root);
+    }
+}
+
+impl Drop for TeardownGuard {
+    fn drop(&mut self) {
+        self.run();
+    }
 }
 
 /// Copy child artifact bindings into the parent registry before dirs vanish.
@@ -3513,7 +3707,7 @@ fn gather_child_artifacts(
 #[allow(clippy::too_many_arguments)]
 async fn do_fan_in(
     group: &Arc<ParallelGroupState>,
-    children: &[ChildSpec],
+    child_keys: &[String],
     state: &Py<PyAny>,
     stage_path: &str,
     group_name: &str,
@@ -3523,9 +3717,8 @@ async fn do_fan_in(
     prune_worktrees(project_root).await;
 
     let (state_dir, attempts) = Python::attach(|py| group.read_bail_scan_inputs(py));
-    let child_keys: Vec<String> = children.iter().map(|c| c.key.clone()).collect();
     let bailed = match state_dir {
-        Some(dir) => gremlins::stages::parallel_bail::collect_bails(&dir, &child_keys, &attempts),
+        Some(dir) => gremlins::stages::parallel_bail::collect_bails(&dir, child_keys, &attempts),
         None => Vec::new(),
     };
     let decision = gremlins::stages::parallel_bail::decide(&bailed, child_keys.len(), bail_policy);
@@ -3617,14 +3810,17 @@ fn save_child_log(src: &Path, dest: &Path, group_name: &str) {
 }
 
 /// Log child worktree mutations, then remove every worktree.
-async fn teardown_worktrees(group: &Arc<ParallelGroupState>, project_root: &Path) {
+///
+/// Blocking on purpose: fan-in teardown must complete atomically with respect
+/// to cancellation, and a blocking body cannot be interrupted halfway through.
+fn teardown_worktrees_blocking(group: &Arc<ParallelGroupState>, project_root: &Path) {
     let paths = group.paths();
     for (child_key, wt) in &paths {
         if !wt.is_dir() {
             continue;
         }
-        let child_head = head_sha(&wt.to_string_lossy()).await;
-        let dirty = status_porcelain(&wt.to_string_lossy()).await;
+        let child_head = head_sha_blocking(wt);
+        let dirty = status_porcelain_blocking(wt);
         if !child_head.is_empty() && child_head != group.base_head() {
             log::warn!(
                 target: "gremlins.stages.parallel",
@@ -3645,8 +3841,46 @@ async fn teardown_worktrees(group: &Arc<ParallelGroupState>, project_root: &Path
         .values()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    remove_worktrees(project_root, &all).await;
+    remove_worktrees_blocking(project_root, &all);
     Python::attach(|py| group.clear(py));
+}
+
+// --- blocking git helpers (for the cancellation-safe teardown path) ---
+
+/// Run `git <args>` in `cwd`, returning trimmed stdout, or `None` on failure.
+fn git_stdout_blocking(args: &[&str], cwd: &Path) -> Option<String> {
+    let cmd: Vec<String> = std::iter::once("git".to_string())
+        .chain(args.iter().map(|a| a.to_string()))
+        .collect();
+    gremlins::core::proc::run_or_raise(&cmd, Some(cwd)).ok()
+}
+
+fn in_git_repo_blocking(cwd: &Path) -> bool {
+    let cmd = ["git", "rev-parse", "--git-dir"].map(String::from).to_vec();
+    gremlins::core::proc::run_ok(&cmd, Some(cwd)).unwrap_or(false)
+}
+
+fn head_sha_blocking(cwd: &Path) -> String {
+    git_stdout_blocking(&["rev-parse", "HEAD"], cwd).unwrap_or_default()
+}
+
+fn status_porcelain_blocking(cwd: &Path) -> String {
+    git_stdout_blocking(&["status", "--porcelain"], cwd).unwrap_or_default()
+}
+
+/// Remove worktrees in bulk and prune stale entries. No-op outside a repo.
+fn remove_worktrees_blocking(project_root: &Path, paths: &[String]) {
+    if !in_git_repo_blocking(project_root) {
+        return;
+    }
+    for wt in paths {
+        let cmd = ["git", "worktree", "remove", "--force", wt.as_str()]
+            .map(String::from)
+            .to_vec();
+        let _ = gremlins::core::proc::run_quiet(&cmd, Some(project_root));
+    }
+    let prune = ["git", "worktree", "prune"].map(String::from).to_vec();
+    let _ = gremlins::core::proc::run_quiet(&prune, Some(project_root));
 }
 
 // --- git helpers (thin wrappers over the Rust proc layer) ---
@@ -3694,20 +3928,6 @@ async fn in_git_repo(cwd: &Path) -> bool {
 async fn head_sha(cwd: &str) -> String {
     let result = Python::attach(|py| {
         call_git_async("head_sha_async", vec![], vec![("cwd", py_str(py, cwd))])
-    });
-    match result.await {
-        Ok(v) => Python::attach(|py| v.bind(py).extract::<String>().unwrap_or_default()),
-        Err(_) => String::new(),
-    }
-}
-
-async fn status_porcelain(cwd: &str) -> String {
-    let result = Python::attach(|py| {
-        call_git_async(
-            "status_porcelain_async",
-            vec![],
-            vec![("cwd", py_str(py, cwd))],
-        )
     });
     match result.await {
         Ok(v) => Python::attach(|py| v.bind(py).extract::<String>().unwrap_or_default()),

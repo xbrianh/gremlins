@@ -951,3 +951,45 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
     for p in paths.values():
         assert not p.is_dir()
     assert "reviews" not in (_read_state(sf).get("parallel_worktrees") or {})
+
+
+# ---------------------------------------------------------------------------
+# In-process child bail is visible to fan-in
+# ---------------------------------------------------------------------------
+
+
+def test_in_process_child_bail_reaches_fan_in(tmp_path, sandbox):
+    """An in-process child that raises Bail must be recorded as an attempt, or
+    fan-in's bail scan (which resolves bail files through parallel_attempts)
+    silently ignores it and returns Done."""
+    gremlin_id = "gr-inproc-bail"
+    sf = _make_state(sandbox.state, gremlin_id)
+    StateData(gremlin_id).patch(attempt="parent-attempt")
+
+    async def child_a() -> None:
+        raise Bail("in-process child bailed")
+
+    async def child_b() -> None:
+        return None
+
+    project_root = tmp_path / "nongit-inproc"
+    project_root.mkdir()
+    stages = _make_parallel_stages(
+        "reviews",
+        [
+            ("a", _make_simple_ctx(tmp_path, "a"), child_a),
+            ("b", _make_simple_ctx(tmp_path, "b"), child_b),
+        ],
+        set_stage_fn=lambda _n: None,
+        bail_policy="any",
+        parent_state=make_parent_state(StateData(gremlin_id)),
+        project_root_path=project_root,
+    )
+    by_name = dict(stages)
+
+    asyncio.run(by_name["reviews"]())
+    data = _read_state(sf)
+    assert data.get("parallel_attempts", {}).get("a")
+
+    with pytest.raises(Bail, match="bailed"):
+        asyncio.run(by_name["reviews-fanin"]())
