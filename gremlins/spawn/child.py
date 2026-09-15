@@ -46,7 +46,7 @@ from _gremlins_core.stages import Bail
 from gremlins.env_file import source_env_string
 from gremlins.executor.gremlin import Gremlin
 from gremlins.logging_setup import configure_logging
-from gremlins.paths import scratch_root
+from _gremlins_core.config import scratch_root
 
 logger = logging.getLogger(__name__)
 
