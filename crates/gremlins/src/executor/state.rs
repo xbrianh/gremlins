@@ -354,18 +354,12 @@ impl StateData {
         }
         let Some(state_dir) = sf.parent() else { return };
         let bail_path = state_dir.join(format!("bail_{attempt}.json"));
-        if bail_path.exists() {
-            return;
-        }
         let payload = serde_json::json!({
             "class": bail_class,
             "detail": bail_detail,
             "ts": now_iso(),
         });
-        let tmp = state_dir.join(format!(".bail_{attempt}_{}.tmp", rand_hex(4)));
-        if std::fs::write(&tmp, payload.to_string()).is_ok() {
-            let _ = std::fs::rename(&tmp, &bail_path);
-        }
+        write_bail_atomically(state_dir, &bail_path, &attempt, &payload);
     }
 
     pub fn accumulate_token_usage(&self, usage: &HashMap<String, i64>) {
@@ -626,18 +620,12 @@ impl StateData {
         let Some(attempt) = attempt else { return };
         let Some(state_dir) = sf.parent() else { return };
         let bail_path = state_dir.join(format!("bail_{attempt}.json"));
-        if bail_path.exists() {
-            return;
-        }
         let payload = serde_json::json!({
             "class": "other",
             "detail": reason,
             "ts": now_iso(),
         });
-        let tmp = state_dir.join(format!(".bail_{attempt}_{}.tmp", rand_hex(4)));
-        if std::fs::write(&tmp, payload.to_string()).is_ok() {
-            let _ = std::fs::rename(&tmp, &bail_path);
-        }
+        write_bail_atomically(state_dir, &bail_path, &attempt, &payload);
     }
 
     /// `(state_dir, parallel_attempts)` used to scan for per-child bail files.
@@ -663,6 +651,25 @@ impl StateData {
         self.patch(&[], &fields);
         self.invalidate();
     }
+}
+
+/// Write `payload` to `bail_path` with first-writer-wins semantics.
+///
+/// The destination is created with no-replace semantics via a hard link from a
+/// uniquely named temporary file, so two concurrent writers can never clobber
+/// each other's payload: the loser's link fails with `AlreadyExists` and its
+/// temporary file is removed. This replaces the racy `exists()`-then-`rename`
+/// check-then-act sequence.
+fn write_bail_atomically(state_dir: &Path, bail_path: &Path, attempt: &str, payload: &Value) {
+    let tmp = state_dir.join(format!(".bail_{attempt}_{}.tmp", rand_hex(4)));
+    if std::fs::write(&tmp, payload.to_string()).is_err() {
+        return;
+    }
+    // `hard_link` fails if the destination already exists, giving us an atomic
+    // create-if-absent without a separate existence check. Either way the
+    // temporary file is no longer needed.
+    let _ = std::fs::hard_link(&tmp, bail_path);
+    let _ = std::fs::remove_file(&tmp);
 }
 
 fn as_i64_f64(v: &Value) -> f64 {
@@ -836,6 +843,53 @@ mod tests {
             d.read_bail_info().unwrap().get("class"),
             Some(&Value::String("other".into()))
         );
+    }
+
+    #[test]
+    fn write_bail_file_is_first_writer_wins_under_concurrency() {
+        // Many threads race to write the same bail file; exactly one payload
+        // must win and no temporary files may be left behind.
+        let dir = tempfile::tempdir().unwrap();
+        let sf = seed(dir.path(), "gr-test");
+        let d = data_with(&sf);
+        let mut fields = Map::new();
+        fields.insert("attempt".into(), Value::String("a1".into()));
+        d.patch(&[], &fields);
+
+        let sf_path = sf.clone();
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let sf_path = sf_path.clone();
+                std::thread::spawn(move || {
+                    let mut data = StateData::new(Some("gr-test".into()));
+                    data.state_file = Some(sf_path);
+                    data.write_bail_file("other", &format!("writer-{i}"));
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let bail = dir.path().join("bail_a1.json");
+        assert!(bail.exists());
+        // The file is valid JSON with a single winner's detail.
+        let info = d.read_bail_info().unwrap();
+        assert_eq!(info.get("class").unwrap().as_str(), Some("other"));
+        let detail = info.get("detail").unwrap().as_str().unwrap();
+        assert!(
+            detail.starts_with("writer-"),
+            "unexpected detail {detail:?}"
+        );
+
+        // No leftover temp files.
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(".bail_"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
     }
 
     #[test]

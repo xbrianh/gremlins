@@ -339,6 +339,81 @@ def test_build_parallel_stages_names() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fan-out propagates a per-child branch pipeline into fork()
+# ---------------------------------------------------------------------------
+
+
+def test_fanout_passes_branch_pipeline_to_fork(sandbox) -> None:
+    """Each forked child receives a single-stage branch pipeline, not the parent's."""
+    from _gremlins_core.schemas import Bootstrap, Pipeline
+    from _gremlins_core.stages import Done, Outcome, StageAttrs
+
+    captured: list[Pipeline | None] = []
+
+    class _FakeForkedState:
+        def __init__(self, worktree: pathlib.Path) -> None:
+            self.worktree = worktree
+
+    class _FakeGremlin:
+        def __init__(self, worktree: pathlib.Path) -> None:
+            self._worktree = worktree
+
+        async def fork(self, state, target_id, *, pipeline=None, **_kwargs):
+            captured.append(pipeline)
+            return _FakeForkedState(self._worktree)
+
+    class _ChildStage(StageAttrs):
+        type = "_branch_pipeline_child"
+
+        async def run(self, gremlin) -> Outcome:
+            return Done()
+
+    child = _ChildStage("shard-1")
+    child.raw_dict = {"name": "shard-1", "type": "_branch_pipeline_child"}
+
+    parent_pipeline = Pipeline(
+        name="parent",
+        path=pathlib.Path("/parent"),
+        stages=[],
+        default_client=FakeClient(),
+        base_ref="main",
+        bootstrap=Bootstrap(),
+    )
+    child_ctx = build_state(
+        data=StateData(gremlin_id="parent-1"),
+        client=FakeClient(),
+        artifact_dir=pathlib.Path("/tmp"),
+        pipeline_data=parent_pipeline,
+        child_key="shard-1",
+    )
+
+    worktree = sandbox.work / "wt-shard-1"
+    worktree.mkdir(parents=True, exist_ok=True)
+    gremlin = _FakeGremlin(worktree)
+
+    parent_state = make_parent_state(StateData(gremlin_id="parent-1"))
+    stage = ParallelStage("reviews", [child])
+    stage.gremlin = gremlin
+    stages = stage.build_runtime_stages(
+        [("shard-1", child_ctx, lambda: None)],
+        parent_state=parent_state,
+        project_root_path=sandbox.project,
+        child_stages=[child],
+    )
+    fanout = dict(stages)["reviews-fanout"]
+    asyncio.run(fanout())
+
+    assert len(captured) == 1
+    branch = captured[0]
+    assert branch is not None
+    assert branch.name == "shard-1"
+    assert [s.name for s in branch.stages] == ["shard-1"]
+    # Inherited from the parent pipeline.
+    assert branch.path == pathlib.Path("/parent")
+    assert branch.base_ref == "main"
+
+
+# ---------------------------------------------------------------------------
 # Sequence as a parallel child — worktree propagation
 # ---------------------------------------------------------------------------
 

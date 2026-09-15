@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use futures::stream::StreamExt;
 use gremlins::executor::state as rust_state;
 use gremlins::stages::agent as rust_agent;
 use gremlins::stages::base;
@@ -2620,6 +2621,54 @@ async fn fan_out(
     Ok(())
 }
 
+/// Build the single-stage branch pipeline a forked child runs with.
+///
+/// Mirrors the pre-port `_branch_pipeline`: the child inherits the parent
+/// pipeline's path, default client, base ref, and bootstrap, but its `stages`
+/// list contains only the child's own stage. Returns `None` when the child has
+/// no parsed stage (a bare test-seam stage), matching Python's
+/// `branch_stage is None or branch_stage.raw_dict is None` guard.
+fn build_branch_pipeline(
+    py: Python<'_>,
+    stage: &Py<PyAny>,
+    child_state: &Py<PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let stage = stage.bind(py);
+    if stage.getattr("raw_dict")?.is_none() {
+        return Ok(None);
+    }
+
+    let schemas = py.import("_gremlins_core.schemas")?;
+    let pipeline_cls = schemas.getattr("Pipeline")?;
+    let bootstrap_cls = schemas.getattr("Bootstrap")?;
+
+    let parent_pipeline = child_state.bind(py).getattr("pipeline_data")?;
+    let (path, default_client, base_ref, bootstrap) = if parent_pipeline.is_none() {
+        (
+            PathBuf::from("."),
+            py.None(),
+            "current".to_string(),
+            bootstrap_cls.call0()?.unbind(),
+        )
+    } else {
+        (
+            parent_pipeline.getattr("path")?.extract::<PathBuf>()?,
+            parent_pipeline.getattr("default_client")?.unbind(),
+            parent_pipeline.getattr("base_ref")?.extract::<String>()?,
+            parent_pipeline.getattr("bootstrap")?.unbind(),
+        )
+    };
+
+    let name: String = stage.getattr("name")?.extract()?;
+    let stages = PyList::new(py, [stage])?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("default_client", default_client)?;
+    kwargs.set_item("base_ref", base_ref)?;
+    kwargs.set_item("bootstrap", bootstrap)?;
+    let pipeline = pipeline_cls.call((name, path, stages), Some(&kwargs))?;
+    Ok(Some(pipeline.unbind()))
+}
+
 async fn fan_out_children(
     group: &Arc<ParallelGroupState>,
     children: &[ChildSpec],
@@ -2636,6 +2685,13 @@ async fn fan_out_children(
                 kwargs.set_item("parent_id", parent_id)?;
                 kwargs.set_item("group_name", &group.group_name)?;
                 kwargs.set_item("child_key", &child.key)?;
+                // The child must run with its own single-stage branch pipeline,
+                // not inherit the parent's pipeline metadata.
+                let branch_pipeline = match child.stage.as_ref() {
+                    Some(stage) => build_branch_pipeline(py, stage, &child.state)?,
+                    None => None,
+                };
+                kwargs.set_item("pipeline", branch_pipeline)?;
                 let coro = gremlin.bind(py).call_method(
                     "fork",
                     (child.state.bind(py), child_id.as_str()),
@@ -2712,7 +2768,11 @@ async fn dispatch_children(
     })?;
 
     let semaphore = max_concurrent.map(|n| Arc::new(Semaphore::new(n as usize)));
-    let mut futures = Vec::with_capacity(children.len());
+    // Each child runs as an abortable future so a bail can cancel in-flight
+    // siblings. `abortable` is runtime-agnostic (unlike `JoinSet`), which
+    // matters because these futures are polled by the asyncio loop.
+    let mut pending = futures::stream::FuturesUnordered::new();
+    let mut handles: Vec<futures::future::AbortHandle> = Vec::with_capacity(children.len());
     for child in children {
         let child_key = child.key.clone();
         let child_state = Python::attach(|py| child.state.clone_ref(py));
@@ -2728,7 +2788,7 @@ async fn dispatch_children(
         let parent_id = parent_id.to_string();
         let cancel = cancel.clone();
         let semaphore = semaphore.clone();
-        futures.push(async move {
+        let (fut, handle) = futures::future::abortable(async move {
             let _permit = match semaphore {
                 Some(sem) => Some(sem.acquire_owned().await.expect("semaphore open")),
                 None => None,
@@ -2751,13 +2811,29 @@ async fn dispatch_children(
             )
             .await
         });
+        handles.push(handle);
+        pending.push(fut);
     }
 
+    // Drain the set. Once a child bails (the cancel flag is set), abort every
+    // still-running sibling so in-flight children are cancelled rather than
+    // merely skipped at dispatch time. Aborting an already-finished future is
+    // a no-op.
     let mut first_error: Option<PyErr> = None;
-    for result in futures::future::join_all(futures).await {
-        if let Err(err) = result {
-            if first_error.is_none() {
-                first_error = Some(err);
+    while let Some(joined) = pending.next().await {
+        match joined {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+            // A sibling aborted by the bail path; nothing to record.
+            Err(_aborted) => {}
+        }
+        if cancel_on_bail && cancel.load(Ordering::SeqCst) {
+            for handle in &handles {
+                handle.abort();
             }
         }
     }
@@ -2776,6 +2852,19 @@ async fn dispatch_children(
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+/// How a subprocess child finished: cleanly, or by bailing.
+///
+/// A bail is not an error (the group decides via its bail policy), but it must
+/// not be recorded as `done` — hence the explicit distinction rather than
+/// collapsing both into `Ok(())`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildOutcome {
+    /// The child completed successfully (`done` or `needs_fix`).
+    Done,
+    /// The child bailed; its bail file has already been written.
+    Bailed,
 }
 
 /// Run a single child, translating bail/error into the group's bookkeeping.
@@ -2809,11 +2898,11 @@ async fn run_parallel_child(
         }
         None => await_callable(Python::attach(|py| runner.clone_ref(py)))
             .await
-            .map(|_| ()),
+            .map(|_| ChildOutcome::Done),
     };
 
     match outcome {
-        Ok(()) => {
+        Ok(ChildOutcome::Done) => {
             Python::attach(|py| {
                 state
                     .bind(py)
@@ -2822,6 +2911,9 @@ async fn run_parallel_child(
             })?;
             Ok(())
         }
+        // A bailed child is never recorded as done; the bail file drives the
+        // group's fan-in decision.
+        Ok(ChildOutcome::Bailed) => Ok(()),
         Err(err) => {
             let is_bail = Python::attach(|py| err.is_instance_of::<Bail>(py));
             if is_bail {
@@ -2858,7 +2950,7 @@ async fn run_child_subprocess(
     parent_id: &str,
     cancel_on_bail: bool,
     cancel: &Arc<AtomicBool>,
-) -> PyResult<()> {
+) -> PyResult<ChildOutcome> {
     let child_id = if parent_id.is_empty() {
         String::new()
     } else {
@@ -2953,7 +3045,7 @@ async fn run_child_subprocess(
     }
 
     match result.get("status").and_then(|v| v.as_str()) {
-        Some("done") | Some("needs_fix") => Ok(()),
+        Some("done") | Some("needs_fix") => Ok(ChildOutcome::Done),
         Some("bail") => {
             if cancel_on_bail {
                 cancel.store(true, Ordering::SeqCst);
@@ -2964,7 +3056,7 @@ async fn run_child_subprocess(
                 .unwrap_or("")
                 .to_string();
             Python::attach(|py| group.write_bail(py, child_key, &detail));
-            Ok(())
+            Ok(ChildOutcome::Bailed)
         }
         _ => {
             let detail = result.get("detail").and_then(|v| v.as_str()).unwrap_or("");
@@ -3006,40 +3098,20 @@ impl Drop for ChildGuard {
             return;
         }
         // The owning future is dropped by asyncio cancellation, so the normal
-        // cleanup path never runs. Drive `terminate_with_grace` to completion
-        // on a private event loop in a worker thread: the main loop is mid
-        // teardown and cannot be re-entered, and the grace period must elapse
-        // before SIGKILL is sent.
-        let coro = Python::attach(|py| {
-            let proc_mod = py.import("gremlins.utils.proc")?;
-            proc_mod
-                .getattr("terminate_with_grace")?
-                .call1((self.proc.bind(py),))
-                .map(|c| c.unbind())
-        });
-        let pumps: Vec<Py<PyAny>> = self
-            .pumps
-            .iter()
-            .map(|p| Python::attach(|py| p.clone_ref(py)))
-            .collect();
-        if let Ok(coro) = coro {
-            // Release the GIL for the whole spawn-and-join: the worker thread
-            // must attach, and joining while holding the GIL would deadlock.
-            Python::attach(|py| {
-                py.detach(|| {
-                    let handle = std::thread::spawn(move || {
-                        let _ = Python::attach(|py| {
-                            let asyncio = py.import("asyncio")?;
-                            let _ = asyncio.call_method1("run", (coro.bind(py),));
-                            Ok::<_, PyErr>(())
-                        });
-                    });
-                    let _ = handle.join();
-                })
-            });
-        }
+        // cleanup path never runs. Terminate the child with a blocking,
+        // loop-independent SIGTERM→SIGKILL sequence: the child was spawned on
+        // the main event loop, so driving `asyncio.run()` on a worker thread
+        // would wait on process-exit events registered to a loop we do not own
+        // (and cannot re-enter). The blocking primitive touches only OS signals.
         Python::attach(|py| {
-            for pump in &pumps {
+            if let Ok(proc_mod) = py.import("gremlins.utils.proc") {
+                let _ = proc_mod
+                    .getattr("terminate_with_grace_blocking")
+                    .and_then(|f| f.call1((self.proc.bind(py),)));
+            }
+        });
+        Python::attach(|py| {
+            for pump in &self.pumps {
                 let _ = pump.bind(py).call_method0("cancel");
             }
         });
@@ -3338,9 +3410,13 @@ async fn fan_in(
 ) -> PyResult<()> {
     Python::attach(|py| group.hydrate(py));
     let child_keys: Vec<String> = children.iter().map(|c| c.key.clone()).collect();
-    gather_child_artifacts(&child_keys, state, group_name, parent_id)?;
 
-    let result = do_fan_in(
+    // Capture the artifact-gathering result rather than propagating with `?`:
+    // teardown must run even when gathering fails, or detached worktrees and
+    // child state directories are left behind on disk.
+    let gather_result = gather_child_artifacts(&child_keys, state, group_name, parent_id);
+
+    let fan_in_result = do_fan_in(
         group,
         children,
         state,
@@ -3350,10 +3426,14 @@ async fn fan_in(
         project_root,
     )
     .await;
-    let child_keys: Vec<String> = children.iter().map(|c| c.key.clone()).collect();
+
     remove_child_dirs(&child_keys, state, group_name, parent_id);
     teardown_worktrees(group, project_root).await;
-    result
+
+    // Surface the first failure: a gathering error takes precedence over the
+    // fan-in outcome, since it means artifacts were never merged.
+    gather_result?;
+    fan_in_result
 }
 
 /// Copy child artifact bindings into the parent registry before dirs vanish.
@@ -3451,16 +3531,8 @@ async fn do_fan_in(
     let decision = gremlins::stages::parallel_bail::decide(&bailed, child_keys.len(), bail_policy);
 
     if decision.should_bail {
-        let bail_class = decision
-            .first_bail
-            .get("class")
-            .map(String::as_str)
-            .unwrap_or("other");
-        let detail = decision
-            .first_bail
-            .get("detail")
-            .map(String::as_str)
-            .unwrap_or("");
+        let bail_class = decision.bail_class();
+        let detail = decision.bail_detail();
         Python::attach(|py| {
             let _ = state
                 .bind(py)

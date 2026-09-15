@@ -6,20 +6,54 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 use crate::stages::parallel::BailPolicy;
 
 /// One child that wrote a bail file, with the parsed payload.
+///
+/// Values are kept as raw JSON so a bail file whose attributes are not strings
+/// (e.g. `{"class": 1}`) still parses instead of silently degrading to the
+/// `{"class": "other"}` fallback.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BailedChild {
     pub key: String,
-    pub bail: HashMap<String, String>,
+    pub bail: HashMap<String, Value>,
 }
 
 /// The outcome of applying a bail policy to the collected bails.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BailDecision {
     pub should_bail: bool,
-    pub first_bail: HashMap<String, String>,
+    pub first_bail: HashMap<String, Value>,
+}
+
+impl BailDecision {
+    /// The bail class to record, mirroring Python's `first_bail.get("class") or "other"`.
+    pub fn bail_class(&self) -> String {
+        field_or(&self.first_bail, "class", "other")
+    }
+
+    /// The bail detail to record, mirroring Python's `first_bail.get("detail") or ""`.
+    pub fn bail_detail(&self) -> String {
+        field_or(&self.first_bail, "detail", "")
+    }
+}
+
+/// Read a bail field as a string, applying Python's `value or default` semantics:
+/// a missing, null, or otherwise falsy value falls back to `default`, while a
+/// truthy non-string value is stringified.
+fn field_or(bail: &HashMap<String, Value>, key: &str, default: &str) -> String {
+    match bail.get(key) {
+        None | Some(Value::Null) => default.to_string(),
+        Some(Value::String(s)) if s.is_empty() => default.to_string(),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Bool(false)) => default.to_string(),
+        Some(Value::Number(n)) if n.as_f64() == Some(0.0) => default.to_string(),
+        Some(Value::Array(a)) if a.is_empty() => default.to_string(),
+        Some(Value::Object(o)) if o.is_empty() => default.to_string(),
+        Some(other) => other.to_string(),
+    }
 }
 
 /// Collect the bail files for `child_keys`, resolving each child's attempt id
@@ -45,10 +79,10 @@ pub fn collect_bails(
         }
         let bail = std::fs::read_to_string(&bail_file)
             .ok()
-            .and_then(|text| serde_json::from_str::<HashMap<String, String>>(&text).ok())
+            .and_then(|text| serde_json::from_str::<HashMap<String, Value>>(&text).ok())
             .unwrap_or_else(|| {
                 let mut fallback = HashMap::new();
-                fallback.insert("class".to_string(), "other".to_string());
+                fallback.insert("class".to_string(), Value::String("other".to_string()));
                 fallback
             });
         result.push(BailedChild {
@@ -124,7 +158,25 @@ mod tests {
         let bailed = collect_bails(tmp.path(), &keys, &attempts);
         assert_eq!(bailed.len(), 1);
         assert_eq!(bailed[0].key, "a");
-        assert_eq!(bailed[0].bail.get("detail").map(String::as_str), Some("x"));
+        assert_eq!(
+            bailed[0].bail.get("detail"),
+            Some(&Value::String("x".to_string()))
+        );
+    }
+
+    #[test]
+    fn collect_keeps_non_string_attributes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keys = vec!["a".to_string()];
+        let mut attempts = HashMap::new();
+        attempts.insert("a".to_string(), "attempt-a".to_string());
+        // A non-string `class` must not collapse the whole payload to the fallback.
+        write_bail(tmp.path(), "attempt-a", r#"{"class":1,"detail":"boom"}"#);
+
+        let bailed = collect_bails(tmp.path(), &keys, &attempts);
+        assert_eq!(bailed.len(), 1);
+        assert_eq!(bailed[0].bail.get("class"), Some(&Value::from(1)));
+        assert_eq!(bailed[0].bail.get("detail"), Some(&Value::from("boom")));
     }
 
     #[test]
@@ -138,8 +190,8 @@ mod tests {
         let bailed = collect_bails(tmp.path(), &keys, &attempts);
         assert_eq!(bailed.len(), 1);
         assert_eq!(
-            bailed[0].bail.get("class").map(String::as_str),
-            Some("other")
+            bailed[0].bail.get("class"),
+            Some(&Value::String("other".to_string()))
         );
     }
 
@@ -172,13 +224,27 @@ mod tests {
     #[test]
     fn decide_reports_first_bail() {
         let mut bail = HashMap::new();
-        bail.insert("class".to_string(), "other".to_string());
+        bail.insert("class".to_string(), Value::String("other".to_string()));
         let bailed = vec![BailedChild {
             key: "a".into(),
             bail: bail.clone(),
         }];
         assert_eq!(decide(&bailed, 1, BailPolicy::Any).first_bail, bail);
         assert!(decide(&[], 1, BailPolicy::Any).first_bail.is_empty());
+    }
+
+    #[test]
+    fn bail_class_and_detail_apply_python_falsy_defaults() {
+        let mut bail = HashMap::new();
+        bail.insert("class".to_string(), Value::from(7));
+        bail.insert("detail".to_string(), Value::Null);
+        let decision = BailDecision {
+            should_bail: true,
+            first_bail: bail,
+        };
+        assert_eq!(decision.bail_class(), "7");
+        assert_eq!(decision.bail_detail(), "");
+        assert_eq!(BailDecision::default().bail_class(), "other");
     }
 
     #[test]

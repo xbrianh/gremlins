@@ -305,6 +305,17 @@ def test_cancellation_sigterm_then_sigkill(
 
     monkeypatch.setattr(_proc_mod, "terminate_with_grace", _fake_terminate_with_grace)
 
+    # The cancellation path runs through ChildGuard::drop, which uses the
+    # blocking, loop-independent variant.
+    def _fake_terminate_with_grace_blocking(p: Any, grace_s: float = 0.05) -> None:
+        p.send_signal(signal.SIGTERM)
+        if p.returncode is None:
+            p.send_signal(signal.SIGKILL)
+
+    monkeypatch.setattr(
+        _proc_mod, "terminate_with_grace_blocking", _fake_terminate_with_grace_blocking
+    )
+
     stage = _child_stage("child-a")
     state = _child_state(tmp_path / "child-a")
     parallel = _run_parallel([stage], [state], make_parent_state(StateData()), tmp_path)
@@ -517,6 +528,41 @@ def test_run_child_bail_is_recorded_not_raised(
         [stage], [child_st], make_parent_state(StateData()), tmp_path
     )
     asyncio.run(parallel())  # a bail is recorded, not raised
+
+
+def test_bailed_subprocess_child_not_marked_done(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bailed subprocess child must not be recorded as completed."""
+    state_dir = tmp_path / "state" / "gr-bail-done"
+    state_dir.mkdir(parents=True)
+    write_state(state_dir, {"id": "gr-bail-done"})
+    sf = state_dir / "state.json"
+
+    parent_data = StateData(gremlin_id="gr-bail-done")
+    parent_data.state_file = sf
+    parent_state = build_state(
+        data=parent_data, client=FakeClient(), artifact_dir=state_dir
+    )
+
+    child_st = _child_state(tmp_path / "c")
+    stage = _child_stage("c")
+
+    async def _mock_exec(*args: Any, **_: Any) -> _FakeProcess:
+        result_path = pathlib.Path(str(args[-1]) + ".result")
+        result_path.write_text(
+            json.dumps({"status": "bail", "detail": "nope", "cost_usd": 0.0}),
+            encoding="utf-8",
+        )
+        return _FakeProcess(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
+
+    parallel = _run_parallel([stage], [child_st], parent_state, tmp_path)
+    asyncio.run(parallel())
+
+    done = json.loads(sf.read_text()).get("done_children", {}).get("g", [])
+    assert "c" not in done
 
 
 def test_build_child_spec_dict_base_ref_propagated(

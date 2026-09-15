@@ -120,9 +120,14 @@ impl ParallelGroup {
         };
 
         // `str(d.get("bail_policy") or "any")` — any falsy value falls back to "any".
+        // Python's falsy set is: None, False, 0, 0.0, "", [], {}.
         let raw_policy = match d.get("bail_policy") {
             None | Some(Value::Null) => "any".to_string(),
+            Some(Value::Bool(false)) => "any".to_string(),
+            Some(Value::Number(n)) if n.as_f64() == Some(0.0) => "any".to_string(),
             Some(Value::String(s)) if s.is_empty() => "any".to_string(),
+            Some(Value::Array(a)) if a.is_empty() => "any".to_string(),
+            Some(Value::Object(o)) if o.is_empty() => "any".to_string(),
             Some(Value::String(s)) => s.clone(),
             Some(v) => v.to_string(),
         };
@@ -291,6 +296,28 @@ mod tests {
         ]);
         let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
         assert!(err.contains("'bail_policy' must be 'any' or 'all'"));
+    }
+
+    #[test]
+    fn with_dict_treats_falsy_bail_policy_as_any() {
+        // Python's `d.get("bail_policy") or "any"` maps every falsy value to "any".
+        for raw in [
+            json!(false),
+            json!(0),
+            json!(0.0),
+            json!(""),
+            json!([]),
+            json!({}),
+        ] {
+            let d = dict(&[
+                ("name", json!("g")),
+                ("parallel", children()),
+                ("bail_policy", raw.clone()),
+            ]);
+            let group = ParallelGroup::with_dict(&d, 0)
+                .unwrap_or_else(|e| panic!("bail_policy={raw} should default to any: {e}"));
+            assert_eq!(group.bail_policy, BailPolicy::Any, "bail_policy={raw}");
+        }
     }
 
     #[test]

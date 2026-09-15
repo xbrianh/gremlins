@@ -606,6 +606,52 @@ pub async fn terminate_with_grace(pid: u32, grace_s: f64) {
 #[cfg(not(unix))]
 pub async fn terminate_with_grace(_pid: u32, _grace_s: f64) {}
 
+/// Blocking variant of [`terminate_with_grace`] for synchronous contexts (such
+/// as a `Drop` impl) where no async runtime is available.
+///
+/// It sends SIGTERM to the specific PID, waits `grace_s` for the process to
+/// exit, then escalates to SIGKILL. It never touches an event loop, so it is
+/// safe to call from a thread that does not own the process's asyncio loop.
+#[cfg(unix)]
+pub fn terminate_with_grace_blocking(pid: u32, grace_s: f64) {
+    if pid > i32::MAX as u32 || !grace_s.is_finite() || grace_s < 0.0 {
+        return;
+    }
+    let pid_i32 = pid as i32;
+    // SAFETY: kill(pid, SIGTERM) is safe; it targets a single PID.
+    if unsafe { libc::kill(pid_i32, libc::SIGTERM) } != 0 {
+        // ESRCH (already dead) or EPERM — nothing to do.
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs_f64(grace_s);
+    loop {
+        // SAFETY: kill(pid, 0) only probes for existence.
+        if unsafe { libc::kill(pid_i32, 0) } != 0 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Grace period expired; escalate to SIGKILL.
+    unsafe {
+        libc::kill(pid_i32, libc::SIGKILL);
+    }
+    // Give the kernel a moment to deliver the signal.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        if unsafe { libc::kill(pid_i32, 0) } != 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// No-op stub for non-Unix platforms.
+#[cfg(not(unix))]
+pub fn terminate_with_grace_blocking(_pid: u32, _grace_s: f64) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1312,6 +1358,52 @@ mod tests {
         let status = child.wait().await.unwrap();
         // SIGKILL produces a signal exit, not a normal exit.
         assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_terminate_with_grace_blocking_sigterm_kills() {
+        // The blocking variant must work without any async runtime context.
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        terminate_with_grace_blocking(pid, 0.5);
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_terminate_with_grace_blocking_escalates_to_sigkill() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; sleep 10")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        terminate_with_grace_blocking(pid, 0.05);
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_terminate_with_grace_blocking_already_dead() {
+        let mut child = std::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let _ = child.wait();
+        // Must not panic or hang.
+        terminate_with_grace_blocking(pid, 0.1);
     }
 
     #[cfg(unix)]

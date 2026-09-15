@@ -26,6 +26,10 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         python::utils::proc::terminate_with_grace,
         &proc
     )?)?;
+    proc.add_function(wrap_pyfunction!(
+        python::utils::proc::terminate_with_grace_blocking,
+        &proc
+    )?)?;
     proc.add_class::<python::utils::proc::ProcResult>()?;
     proc.add(
         "CalledProcessError",
