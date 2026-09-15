@@ -21,7 +21,7 @@ pub fn set_stage_types_dict(py: Python<'_>, dict: Py<PyDict>) {
 pub const STAGE_TYPES: &[(&str, &str, &str)] = &[
     ("agent", "_gremlins_core.stages", "Agent"),
     ("loop", "_gremlins_core.stages", "Loop"),
-    ("parallel", "gremlins.stages.parallel", "ParallelStage"),
+    ("parallel", "_gremlins_core.stages", "ParallelStage"),
     ("sequence", "_gremlins_core.stages", "Sequence"),
     ("exec", "_gremlins_core.stages", "Exec"),
 ];
@@ -44,7 +44,7 @@ fn lookup_stage_class(
 pub fn parse_stage(py: Python<'_>, d: &Bound<'_, PyDict>, depth: usize) -> PyResult<Py<PyAny>> {
     if d.contains("parallel")? {
         let cls = py
-            .import("gremlins.stages.parallel")?
+            .import("_gremlins_core.stages")?
             .getattr("ParallelStage")?;
         let stage: Py<PyAny> = cls.call_method1("with_dict", (d, depth))?.extract()?;
         let name: String = d

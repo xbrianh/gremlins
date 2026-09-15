@@ -13,10 +13,10 @@ from typing import Any
 import pytest
 from _gremlins_core.executor import State, StateData, build_state
 from _gremlins_core.schemas import Pipeline
+from _gremlins_core.stages import ParallelStage
 from conftest import MockGremlin, make_parent_state
 
 from gremlins.executor.gremlin import run_stages
-from gremlins.stages.parallel import ParallelStage
 from tests.fake_client import FakeClient
 
 # ---------------------------------------------------------------------------

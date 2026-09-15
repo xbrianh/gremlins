@@ -558,6 +558,93 @@ impl StateData {
         self.invalidate();
     }
 
+    /// Read `parallel_worktrees[group_name]` as `(base_head, {child_key: path})`.
+    ///
+    /// Missing group, missing file, or a malformed entry all read as empty.
+    pub fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>) {
+        let Some(sf) = self.sf() else {
+            return (String::new(), HashMap::new());
+        };
+        if !sf.exists() {
+            return (String::new(), HashMap::new());
+        }
+        let data = read_state_json(Some(&sf));
+        let Some(entry) = data
+            .get("parallel_worktrees")
+            .and_then(|v| v.as_object())
+            .and_then(|o| o.get(group_name))
+            .and_then(|v| v.as_object())
+        else {
+            return (String::new(), HashMap::new());
+        };
+        let base_head = entry
+            .get("base_head")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let paths = entry
+            .get("paths")
+            .and_then(|v| v.as_object())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (base_head, paths)
+    }
+
+    /// Delete the whole `parallel_attempts` map.
+    pub fn clear_parallel_attempts(&self) {
+        self.patch(&["parallel_attempts".to_string()], &Map::new());
+    }
+
+    /// Write `bail_<attempt>.json` for a parallel child.
+    ///
+    /// The attempt is resolved through `parallel_attempts[child_key]`, falling
+    /// back to the top-level `attempt`. An existing bail file is never
+    /// clobbered, so the first child to bail wins.
+    pub fn write_parallel_bail(&self, child_key: &str, reason: &str) {
+        let Some(sf) = self.sf() else { return };
+        if !sf.exists() {
+            return;
+        }
+        let data = read_state_json(Some(&sf));
+        let attempt = data
+            .get("parallel_attempts")
+            .and_then(|v| v.as_object())
+            .and_then(|o| o.get(child_key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                data.get("attempt")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            });
+        let Some(attempt) = attempt else { return };
+        let Some(state_dir) = sf.parent() else { return };
+        let bail_path = state_dir.join(format!("bail_{attempt}.json"));
+        if bail_path.exists() {
+            return;
+        }
+        let payload = serde_json::json!({
+            "class": "other",
+            "detail": reason,
+            "ts": now_iso(),
+        });
+        let tmp = state_dir.join(format!(".bail_{attempt}_{}.tmp", rand_hex(4)));
+        if std::fs::write(&tmp, payload.to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &bail_path);
+        }
+    }
+
+    /// `(state_dir, parallel_attempts)` used to scan for per-child bail files.
+    pub fn read_bail_scan_inputs(&self) -> (Option<PathBuf>, HashMap<String, String>) {
+        crate::stages::parallel_bail::read_bail_scan_inputs(self.sf().as_deref())
+    }
+
     pub fn write_terminal_state(&self, exit_code: i32) {
         if self.gremlin_id.as_deref().unwrap_or("").is_empty() {
             return;
@@ -895,5 +982,71 @@ mod tests {
         d.patch_parallel_attempt("bail-child", "attempt-bail");
         let raw = read_state_json(Some(&sf));
         assert_eq!(raw["parallel_attempts"]["bail-child"], "attempt-bail");
+    }
+
+    #[test]
+    fn parallel_worktrees_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let sf = seed(dir.path(), "gr-test");
+        let d = data_with(&sf);
+        let mut paths = HashMap::new();
+        paths.insert("a".to_string(), "/wt/a".to_string());
+        d.patch_parallel_worktrees("reviews", Some("abc123"), Some(&paths));
+        let (base, read_paths) = d.parallel_worktrees("reviews");
+        assert_eq!(base, "abc123");
+        assert_eq!(read_paths.get("a").map(String::as_str), Some("/wt/a"));
+        assert!(d.parallel_worktrees("missing").1.is_empty());
+    }
+
+    #[test]
+    fn clear_parallel_attempts_removes_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let sf = seed(dir.path(), "gr-test");
+        let d = data_with(&sf);
+        d.patch_parallel_attempt("a", "attempt-a");
+        d.clear_parallel_attempts();
+        assert!(read_state_json(Some(&sf))
+            .get("parallel_attempts")
+            .is_none());
+    }
+
+    #[test]
+    fn write_parallel_bail_uses_child_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let sf = seed(dir.path(), "gr-test");
+        let d = data_with(&sf);
+        d.patch_parallel_attempt("a", "attempt-a");
+        d.write_parallel_bail("a", "boom");
+        let bail = dir.path().join("bail_attempt-a.json");
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&bail).unwrap()).unwrap();
+        assert_eq!(raw["class"], "other");
+        assert_eq!(raw["detail"], "boom");
+    }
+
+    #[test]
+    fn write_parallel_bail_falls_back_to_top_level_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let sf = seed(dir.path(), "gr-test");
+        let d = data_with(&sf);
+        d.patch(&[], &{
+            let mut m = Map::new();
+            m.insert("attempt".into(), Value::String("top-attempt".into()));
+            m
+        });
+        d.write_parallel_bail("a", "boom");
+        assert!(dir.path().join("bail_top-attempt.json").exists());
+    }
+
+    #[test]
+    fn write_parallel_bail_does_not_clobber() {
+        let dir = tempfile::tempdir().unwrap();
+        let sf = seed(dir.path(), "gr-test");
+        let d = data_with(&sf);
+        d.patch_parallel_attempt("a", "attempt-a");
+        d.write_parallel_bail("a", "first");
+        d.write_parallel_bail("a", "second");
+        let bail = dir.path().join("bail_attempt-a.json");
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&bail).unwrap()).unwrap();
+        assert_eq!(raw["detail"], "first");
     }
 }

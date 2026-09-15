@@ -249,7 +249,7 @@ class Gremlin:
         # Copy artifact directory and registry in thread to avoid blocking event loop
         # Use self.artifact_dir (parent gremlin) as the source, not state.artifact_dir.
         # state.artifact_dir may point to a child's empty directory (e.g. when called
-        # from _ParallelExecutor._fan_out via child_state(fan_out=True)).
+        # from the parallel fan-out via child_state(fan_out=True)).
         child_artifact_dir.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(
             shutil.copytree, self.artifact_dir, child_artifact_dir, dirs_exist_ok=True

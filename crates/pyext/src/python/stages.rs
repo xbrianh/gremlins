@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
+use gremlins::executor::state as rust_state;
 use gremlins::stages::agent as rust_agent;
 use gremlins::stages::base;
 use gremlins::stages::composite::{
@@ -12,10 +15,12 @@ use gremlins::stages::composite::{
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec as rust_exec;
 use gremlins::stages::outcome::Done as RustDone;
+use gremlins::stages::parallel::BailPolicy;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict, PyFrozenSet, PyList, PyString, PyTuple, PyType};
+use tokio::sync::Semaphore;
 
 use crate::python::artifacts::{ArtifactRegistry, MissingArtifact};
 use crate::python::clients::Client;
@@ -1275,6 +1280,373 @@ impl PyLoop {
     }
 }
 
+// --- ParallelStage pyclass ---
+
+/// Fan-out/fan-in execution of a `parallel:` block.
+///
+/// The heavy lifting lives in [`parallel_run_async`]; this class owns the
+/// parsed configuration and the Python-visible surface (`with_dict`, `run`,
+/// and the `max_concurrent` / `cancel_on_bail` / `bail_policy` properties).
+#[pyclass(name = "ParallelStage", module = "_gremlins_core.stages", extends = PyStageAttrs, subclass, skip_from_py_object)]
+struct PyParallelStage {
+    max_concurrent: Option<u32>,
+    cancel_on_bail: bool,
+    bail_policy: String,
+}
+
+impl PyParallelStage {
+    /// Build the `StageAttrs` base, propagating the group path onto each child.
+    fn base_attrs(py: Python<'_>, name: &str, body: &Bound<'_, PyList>) -> PyResult<PyStageAttrs> {
+        let mut attrs = RustStageAttrs::new(name.to_string());
+        attrs.stage_type = "parallel".to_string();
+        for child in body.iter() {
+            let Ok(child_name) = child.getattr("name").and_then(|n| n.extract::<String>()) else {
+                continue;
+            };
+            child.setattr("path", format!("{name}/{child_name}"))?;
+        }
+        Ok(PyStageAttrs {
+            inner: attrs,
+            body: body.clone().unbind(),
+            options: PyDict::new(py).unbind(),
+            bind_map: PyDict::new(py).unbind(),
+            client: None,
+            raw_dict: None,
+            gremlin: None,
+        })
+    }
+}
+
+#[pymethods]
+impl PyParallelStage {
+    #[new]
+    #[pyo3(signature = (name, body = None, *, max_concurrent = None, cancel_on_bail = false, bail_policy = "any".to_string()))]
+    fn new(
+        py: Python<'_>,
+        name: String,
+        body: Option<&Bound<'_, PyList>>,
+        max_concurrent: Option<u32>,
+        cancel_on_bail: bool,
+        bail_policy: String,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        if max_concurrent == Some(0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "parallel group {name:?}: 'max_concurrent' must be a positive integer"
+            )));
+        }
+        if bail_policy != "any" && bail_policy != "all" {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "parallel group {name:?}: 'bail_policy' must be 'any' or 'all'"
+            )));
+        }
+        let body = body.cloned().unwrap_or_else(|| PyList::empty(py));
+        let base = Self::base_attrs(py, &name, &body)?;
+        Ok(
+            PyClassInitializer::from(base).add_subclass(PyParallelStage {
+                max_concurrent,
+                cancel_on_bail,
+                bail_policy,
+            }),
+        )
+    }
+
+    #[classmethod]
+    #[pyo3(signature = (d, depth = 0))]
+    fn with_dict(
+        cls: &Bound<'_, PyType>,
+        d: &Bound<'_, PyDict>,
+        depth: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let map = extract_json_value_dict(d)?;
+        let group = gremlins::stages::parallel::ParallelGroup::with_dict(&map, depth)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        let py = d.py();
+        let raw_body = PyList::empty(py);
+        for child in &group.body {
+            raw_body.append(json_value_to_py(py, child)?)?;
+        }
+        let parsed = loader::parse_stages(py, &raw_body, depth + 1)?;
+
+        // Child names are only known once parse_stages has named them.
+        let names: Vec<String> = parsed
+            .iter()
+            .map(|c| c.bind(py).getattr("name")?.extract::<String>())
+            .collect::<PyResult<_>>()?;
+        gremlins::stages::parallel::validate_child_names(&group.attrs.name, &names)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        // Construct through `cls` so subclasses get their own type.
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("body", PyList::new(py, parsed)?)?;
+        kwargs.set_item("max_concurrent", group.max_concurrent)?;
+        kwargs.set_item("cancel_on_bail", group.cancel_on_bail)?;
+        kwargs.set_item("bail_policy", group.bail_policy.as_str())?;
+        let obj = cls.call((group.attrs.name.as_str(),), Some(&kwargs))?;
+
+        let client = match &group.client {
+            Some(spec) => Some(Py::new(py, Client::parse(&spec.0)?)?.into_any()),
+            None => None,
+        };
+        obj.setattr("client", client)?;
+        obj.setattr("client_explicit", group.attrs.client_explicit)?;
+        Ok(obj.unbind())
+    }
+
+    fn run(slf: PyRef<'_, Self>, gremlin: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = gremlin.py();
+        let stage: Py<PyParallelStage> = slf.into();
+        let helper = wrap_pyfunction!(parallel_run_async, py)?;
+        Ok(helper.call1((stage, gremlin))?.unbind())
+    }
+
+    #[getter]
+    fn max_concurrent(&self) -> Option<u32> {
+        self.max_concurrent
+    }
+
+    #[setter]
+    fn set_max_concurrent(&mut self, value: Option<u32>) {
+        self.max_concurrent = value;
+    }
+
+    #[getter]
+    fn cancel_on_bail(&self) -> bool {
+        self.cancel_on_bail
+    }
+
+    #[setter]
+    fn set_cancel_on_bail(&mut self, value: bool) {
+        self.cancel_on_bail = value;
+    }
+
+    #[getter]
+    fn bail_policy(&self) -> String {
+        self.bail_policy.clone()
+    }
+
+    #[setter]
+    fn set_bail_policy(&mut self, value: String) {
+        self.bail_policy = value;
+    }
+
+    /// Build the three runtime stages for this group: fan-out, parallel, fan-in.
+    ///
+    /// This is the test seam that mirrors the pre-port `build_runtime_stages`.
+    /// Production code drives the group through [`PyParallelStage::run`].
+    #[pyo3(signature = (child_runners, *, parent_state, project_root_path = None, worktree_parent = None, set_stage_fn = None, child_stages = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn build_runtime_stages(
+        slf: PyRef<'_, Self>,
+        py: Python<'_>,
+        child_runners: Vec<(String, Py<PyAny>, Py<PyAny>)>,
+        parent_state: Py<PyAny>,
+        project_root_path: Option<PathBuf>,
+        worktree_parent: Option<PathBuf>,
+        set_stage_fn: Option<Py<PyAny>>,
+        child_stages: Option<Vec<Py<PyAny>>>,
+    ) -> PyResult<Vec<(String, Py<PyAny>)>> {
+        let stage: Py<PyParallelStage> = slf.into();
+        let group_name: String = stage.bind(py).getattr("name")?.extract()?;
+        let stage_path: String = {
+            let path: Option<String> = stage.bind(py).getattr("path")?.extract()?;
+            stage_key(path, group_name.clone())
+        };
+        let project_root = project_root_path.unwrap_or_else(gremlins::config::project_root);
+        let parent_id: String = parent_state
+            .bind(py)
+            .getattr("data")?
+            .getattr("gremlin_id")?
+            .extract::<Option<String>>()?
+            .unwrap_or_default();
+
+        let stages_by_key: HashMap<String, Py<PyAny>> = child_stages
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| {
+                let name: String = s.bind(py).getattr("name")?.extract()?;
+                Ok::<_, PyErr>((name, s))
+            })
+            .collect::<PyResult<_>>()?;
+
+        let children: Vec<ChildSpec> = child_runners
+            .into_iter()
+            .map(|(key, state, runner)| ChildSpec {
+                stage: stages_by_key.get(&key).map(|s| s.clone_ref(py)),
+                key,
+                state,
+                runner,
+            })
+            .collect();
+
+        let group = Arc::new(ParallelGroupState::new(
+            group_name.clone(),
+            parent_state.bind(py).getattr("data")?.unbind(),
+        ));
+        let parent_gremlin: Option<Py<PyAny>> = stage
+            .bind(py)
+            .getattr("gremlin")
+            .ok()
+            .filter(|g| !g.is_none())
+            .map(|g| g.unbind());
+        let runtime = Py::new(
+            py,
+            ParallelRuntime {
+                stage,
+                group,
+                children,
+                parent_state,
+                parent_gremlin,
+                project_root,
+                worktree_parent,
+                set_stage_fn,
+                stage_path,
+                group_name: group_name.clone(),
+                parent_id,
+            },
+        )?;
+        let fanout = runtime.bind(py).getattr("fanout")?.unbind();
+        let parallel = runtime.bind(py).getattr("parallel")?.unbind();
+        let fanin = runtime.bind(py).getattr("fanin")?.unbind();
+        Ok(vec![
+            (format!("{group_name}-fanout"), fanout),
+            (group_name.clone(), parallel),
+            (format!("{group_name}-fanin"), fanin),
+        ])
+    }
+}
+
+/// The three runtime stages of one parallel group, as callable coroutines.
+#[pyclass(name = "_ParallelRuntime", module = "_gremlins_core.stages")]
+struct ParallelRuntime {
+    stage: Py<PyParallelStage>,
+    group: Arc<ParallelGroupState>,
+    children: Vec<ChildSpec>,
+    parent_state: Py<PyAny>,
+    parent_gremlin: Option<Py<PyAny>>,
+    project_root: PathBuf,
+    worktree_parent: Option<PathBuf>,
+    set_stage_fn: Option<Py<PyAny>>,
+    stage_path: String,
+    group_name: String,
+    parent_id: String,
+}
+
+impl ParallelRuntime {
+    fn set_stage(&self, py: Python<'_>, name: &str) {
+        if let Some(f) = &self.set_stage_fn {
+            let _ = f.bind(py).call1((name,));
+        }
+    }
+
+    fn config(&self, py: Python<'_>) -> PyResult<(Option<u32>, bool, BailPolicy)> {
+        let stage = self.stage.bind(py);
+        let max_concurrent: Option<u32> = stage.getattr("max_concurrent")?.extract()?;
+        let cancel_on_bail: bool = stage.getattr("cancel_on_bail")?.extract()?;
+        let raw: String = stage.getattr("bail_policy")?.extract()?;
+        let policy = if raw == "all" {
+            BailPolicy::All
+        } else {
+            BailPolicy::Any
+        };
+        Ok((max_concurrent, cancel_on_bail, policy))
+    }
+}
+
+#[pymethods]
+impl ParallelRuntime {
+    async fn fanout(&self) -> PyResult<Py<PyAny>> {
+        let children: Vec<ChildSpec> = Python::attach(|py| {
+            self.set_stage(py, &format!("{}-fanout", self.group_name));
+            self.children.iter().map(|c| c.clone_ref(py)).collect()
+        });
+        let group = self.group.clone();
+        let project_root = self.project_root.clone();
+        let worktree_parent = self.worktree_parent.clone();
+        let parent_id = self.parent_id.clone();
+        fan_out(
+            &group,
+            &children,
+            &project_root,
+            worktree_parent.as_deref(),
+            &parent_id,
+            &self.parent_state,
+            self.parent_gremlin.as_ref(),
+        )
+        .await?;
+        Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()))
+    }
+
+    async fn parallel(&self) -> PyResult<Py<PyAny>> {
+        let (max_concurrent, cancel_on_bail, children, state) = Python::attach(|py| {
+            self.set_stage(py, &self.group_name);
+            let (max_concurrent, cancel_on_bail, _) = self.config(py)?;
+            // Skip children already recorded as done on a prior run.
+            let done: HashSet<String> = self
+                .parent_state
+                .bind(py)
+                .call_method1("done_for", (&self.stage_path,))?
+                .extract()?;
+            let children: Vec<ChildSpec> = self
+                .children
+                .iter()
+                .filter(|c| !done.contains(&c.key))
+                .map(|c| c.clone_ref(py))
+                .collect();
+            Ok::<_, PyErr>((
+                max_concurrent,
+                cancel_on_bail,
+                children,
+                self.parent_state.clone_ref(py),
+            ))
+        })?;
+        let group = self.group.clone();
+        let stage_path = self.stage_path.clone();
+        let group_name = self.group_name.clone();
+        let parent_id = self.parent_id.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        dispatch_children(
+            &children,
+            &state,
+            &group,
+            &stage_path,
+            &group_name,
+            &parent_id,
+            max_concurrent,
+            cancel_on_bail,
+            cancel,
+        )
+        .await?;
+        Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()))
+    }
+
+    async fn fanin(&self) -> PyResult<Py<PyAny>> {
+        let (bail_policy, children, state) = Python::attach(|py| {
+            self.set_stage(py, &format!("{}-fanin", self.group_name));
+            let (_, _, bail_policy) = self.config(py)?;
+            let children: Vec<ChildSpec> = self.children.iter().map(|c| c.clone_ref(py)).collect();
+            Ok::<_, PyErr>((bail_policy, children, self.parent_state.clone_ref(py)))
+        })?;
+        let group = self.group.clone();
+        let stage_path = self.stage_path.clone();
+        let group_name = self.group_name.clone();
+        let parent_id = self.parent_id.clone();
+        let project_root = self.project_root.clone();
+        fan_in(
+            &group,
+            &children,
+            &state,
+            &stage_path,
+            &group_name,
+            &parent_id,
+            bail_policy,
+            &project_root,
+        )
+        .await?;
+        Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()))
+    }
+}
+
 // --- Free functions ---
 
 /// Await `stage._run_impl(gremlin)` as a loop-independent coroutine.
@@ -1822,6 +2194,1583 @@ fn substitute_vars_py(
     base::substitute_vars(text, &string_options, &extra, &framework_subs)
 }
 
+// --- Parallel execution ---
+
+/// A child of a parallel group, resolved to the pieces the driver needs.
+struct ChildSpec {
+    key: String,
+    state: Py<PyAny>,
+    runner: Py<PyAny>,
+    /// Present when the child came from a parsed `parallel:` block, which
+    /// routes it through the subprocess path.
+    stage: Option<Py<PyAny>>,
+}
+
+impl ChildSpec {
+    fn clone_ref(&self, py: Python<'_>) -> Self {
+        ChildSpec {
+            key: self.key.clone(),
+            state: self.state.clone_ref(py),
+            runner: self.runner.clone_ref(py),
+            stage: self.stage.as_ref().map(|s| s.clone_ref(py)),
+        }
+    }
+}
+
+/// Everything `parallel_run_async` reads off the gremlin before awaiting.
+struct ParallelRun {
+    state: Py<PyAny>,
+    group_name: String,
+    stage_path: String,
+    parent_id: String,
+    children: Vec<ChildSpec>,
+    /// The gremlin attached to the stage; present only when the group was
+    /// wired into a running pipeline. Without it, children get detached
+    /// worktrees instead of forks.
+    parent_gremlin: Option<Py<PyAny>>,
+}
+
+/// Read the group's configuration and build one [`ChildSpec`] per child.
+///
+/// Children already recorded in `done_children` are skipped, mirroring the
+/// Python `run()` which filtered them before building runners.
+fn prepare_parallel_run(
+    py: Python<'_>,
+    stage: &Bound<'_, PyAny>,
+    gremlin: &Bound<'_, PyAny>,
+) -> PyResult<ParallelRun> {
+    let state = gremlin.getattr("state")?;
+    if state.is_none() {
+        return Err(PyRuntimeError::new_err(
+            "parallel stage requires gremlin.state to be initialized",
+        ));
+    }
+
+    let name: String = stage.getattr("name")?.extract()?;
+    let path: Option<String> = stage.getattr("path")?.extract()?;
+    let stage_path = stage_key(path, name.clone());
+    let body: Vec<Py<PyAny>> = stage.getattr("body")?.extract()?;
+
+    let parent_id: String = state
+        .getattr("data")?
+        .getattr("gremlin_id")?
+        .extract::<Option<String>>()?
+        .unwrap_or_default();
+    let done: HashSet<String> = state.call_method1("done_for", (&stage_path,))?.extract()?;
+
+    // `copy.copy(state)` then `parent_stage = parent_stage or name`.
+    let group_state = py.import("copy")?.call_method1("copy", (&state,))?;
+    let parent_stage: String = state.getattr("parent_stage")?.extract()?;
+    group_state.setattr(
+        "parent_stage",
+        if parent_stage.is_empty() {
+            name.clone()
+        } else {
+            parent_stage
+        },
+    )?;
+
+    let child_state_fn = wrap_pyfunction!(child_state_py, py)?;
+    let mut children = Vec::new();
+    for child in &body {
+        let child_name: String = child.bind(py).getattr("name")?.extract()?;
+        if done.contains(&child_name) {
+            continue;
+        }
+        let child_id = if parent_id.is_empty() {
+            None
+        } else {
+            Some(format!("{parent_id}--{name}--{child_name}"))
+        };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("fan_out", true)?;
+        kwargs.set_item("child_id", child_id)?;
+        let cs = child_state_fn.call((&group_state, child.bind(py)), Some(&kwargs))?;
+        let runner_kwargs = PyDict::new(py);
+        runner_kwargs.set_item("scope", PyList::new(py, &body)?)?;
+        let runner = cs
+            .call_method(
+                "make_runner",
+                (child.bind(py), gremlin),
+                Some(&runner_kwargs),
+            )?
+            .unbind();
+        // Only stages parsed from YAML carry a raw_dict; a bare stage object
+        // (test seam) runs in-process through its runner.
+        let stage = if child
+            .bind(py)
+            .getattr("raw_dict")
+            .map(|r| !r.is_none())
+            .unwrap_or(false)
+        {
+            Some(child.clone_ref(py))
+        } else {
+            None
+        };
+        children.push(ChildSpec {
+            key: child_name,
+            state: cs.unbind(),
+            runner,
+            stage,
+        });
+    }
+
+    let parent_gremlin: Option<Py<PyAny>> = stage
+        .getattr("gremlin")
+        .ok()
+        .filter(|g| !g.is_none())
+        .map(|g| g.unbind());
+    Ok(ParallelRun {
+        state: state.unbind(),
+        group_name: name,
+        stage_path,
+        parent_id,
+        children,
+        parent_gremlin,
+    })
+}
+
+/// Run one parallel group end to end: fan-out, parallel, fan-in.
+///
+/// This drives the same [`ParallelRuntime`] stages that
+/// [`PyParallelStage::build_runtime_stages`] hands to the orchestrator, so the
+/// production and test paths share one implementation.
+#[pyfunction]
+#[pyo3(name = "_parallel_run_async")]
+async fn parallel_run_async(stage: Py<PyParallelStage>, gremlin: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let run = Python::attach(|py| prepare_parallel_run(py, stage.bind(py), gremlin.bind(py)))?;
+    let ParallelRun {
+        state,
+        group_name,
+        stage_path,
+        parent_id,
+        children,
+        parent_gremlin,
+    } = run;
+
+    let project_root = gremlins::config::project_root();
+    let worktree_parent: Option<PathBuf> =
+        Python::attach(|py| state.bind(py).getattr("worktree_parent")?.extract())?;
+
+    let group = Arc::new(ParallelGroupState::new(
+        group_name.clone(),
+        Python::attach(|py| state.bind(py).getattr("data").map(|d| d.unbind()))?,
+    ));
+
+    // Production reports progress through `record_stage_progress`, scoping the
+    // sub-stage to this group.
+    let set_stage_fn = Python::attach(|py| -> PyResult<Py<PyAny>> {
+        let state = state.clone_ref(py);
+        let group_name = group_name.clone();
+        let f = PyCFunction::new_closure(
+            py,
+            None,
+            None,
+            move |args: &Bound<'_, PyTuple>,
+                  _kwargs: Option<&Bound<'_, PyDict>>|
+                  -> PyResult<Py<PyAny>> {
+                let name: String = args.get_item(0)?.extract()?;
+                Python::attach(|py| {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("sub_stage", name)?;
+                    state.bind(py).call_method(
+                        "record_stage_progress",
+                        (group_name.as_str(),),
+                        Some(&kwargs),
+                    )?;
+                    Ok(py.None())
+                })
+            },
+        )?;
+        Ok(f.into_any().unbind())
+    })?;
+
+    let runtime = Python::attach(|py| {
+        Py::new(
+            py,
+            ParallelRuntime {
+                stage: stage.clone_ref(py),
+                group,
+                children,
+                parent_state: state.clone_ref(py),
+                parent_gremlin,
+                project_root,
+                worktree_parent,
+                set_stage_fn: Some(set_stage_fn),
+                stage_path,
+                group_name,
+                parent_id,
+            },
+        )
+    })?;
+
+    let fanout = await_runtime_stage(&runtime, "fanout").await;
+    fanout?;
+    let parallel = await_runtime_stage(&runtime, "parallel").await;
+    // Fan-in still runs when the parallel stage failed, so worktrees and child
+    // directories are always torn down.
+    let fanin = await_runtime_stage(&runtime, "fanin").await;
+    parallel?;
+    fanin?;
+
+    Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()))
+}
+
+/// Await one of a [`ParallelRuntime`]'s coroutine methods.
+async fn await_runtime_stage(runtime: &Py<ParallelRuntime>, method: &str) -> PyResult<Py<PyAny>> {
+    let coro = Python::attach(|py| runtime.bind(py).call_method0(method).map(|c| c.unbind()))?;
+    await_py(coro).await
+}
+
+/// Per-group worktree mirror and attempt tracking, backed by `StateData`.
+struct ParallelGroupState {
+    group_name: String,
+    parent_data: Py<PyAny>,
+    worktree_paths: std::sync::Mutex<HashMap<String, PathBuf>>,
+    base_head: std::sync::Mutex<String>,
+}
+
+impl ParallelGroupState {
+    fn new(group_name: String, state: Py<PyAny>) -> Self {
+        ParallelGroupState {
+            group_name,
+            parent_data: state,
+            worktree_paths: std::sync::Mutex::new(HashMap::new()),
+            base_head: std::sync::Mutex::new(String::new()),
+        }
+    }
+
+    /// Load persisted worktree paths, unless they are already in memory.
+    fn hydrate(&self, py: Python<'_>) {
+        if !self.worktree_paths.lock().unwrap().is_empty() {
+            return;
+        }
+        let Ok(data) = self
+            .parent_data
+            .bind(py)
+            .call_method1("parallel_worktrees", (&self.group_name,))
+        else {
+            return;
+        };
+        let Ok(base_head) = data.get_item(0).and_then(|v| v.extract::<String>()) else {
+            return;
+        };
+        let Ok(paths) = data
+            .get_item(1)
+            .and_then(|v| v.extract::<HashMap<String, String>>())
+        else {
+            return;
+        };
+        let mut guard = self.worktree_paths.lock().unwrap();
+        for (k, v) in paths {
+            guard.insert(k, PathBuf::from(v));
+        }
+        let mut head = self.base_head.lock().unwrap();
+        if !base_head.is_empty() {
+            *head = base_head;
+        }
+    }
+
+    fn paths(&self) -> HashMap<String, PathBuf> {
+        self.worktree_paths.lock().unwrap().clone()
+    }
+
+    fn set_path(&self, key: &str, path: PathBuf) {
+        self.worktree_paths
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), path);
+    }
+
+    fn base_head(&self) -> String {
+        self.base_head.lock().unwrap().clone()
+    }
+
+    fn set_base_head(&self, head: String) {
+        *self.base_head.lock().unwrap() = head;
+    }
+
+    fn persist(&self, py: Python<'_>) {
+        let paths: HashMap<String, String> = self
+            .worktree_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_string_lossy().to_string()))
+            .collect();
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("base_head", self.base_head()).ok();
+        kwargs.set_item("paths", paths).ok();
+        let _ = self.parent_data.bind(py).call_method(
+            "patch_parallel_worktrees",
+            (&self.group_name,),
+            Some(&kwargs),
+        );
+    }
+
+    fn clear(&self, py: Python<'_>) {
+        self.worktree_paths.lock().unwrap().clear();
+        self.set_base_head(String::new());
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("base_head", py.None()).ok();
+        kwargs.set_item("paths", py.None()).ok();
+        let _ = self.parent_data.bind(py).call_method(
+            "patch_parallel_worktrees",
+            (&self.group_name,),
+            Some(&kwargs),
+        );
+    }
+
+    fn record_attempt(&self, py: Python<'_>, child_key: &str, attempt: &str) {
+        let _ = self
+            .parent_data
+            .bind(py)
+            .call_method1("patch_parallel_attempt", (child_key, attempt));
+    }
+
+    fn clear_attempts(&self, py: Python<'_>) {
+        let _ = self
+            .parent_data
+            .bind(py)
+            .call_method0("clear_parallel_attempts");
+    }
+
+    fn write_bail(&self, py: Python<'_>, child_key: &str, reason: &str) {
+        let _ = self
+            .parent_data
+            .bind(py)
+            .call_method1("write_parallel_bail", (child_key, reason));
+    }
+
+    fn read_bail_scan_inputs(&self, py: Python<'_>) -> (Option<PathBuf>, HashMap<String, String>) {
+        let Ok(tuple) = self
+            .parent_data
+            .bind(py)
+            .call_method0("read_bail_scan_inputs")
+        else {
+            return (None, HashMap::new());
+        };
+        let dir: Option<String> = tuple.get_item(0).ok().and_then(|v| v.extract().ok());
+        let attempts: HashMap<String, String> = tuple
+            .get_item(1)
+            .ok()
+            .and_then(|v| v.extract().ok())
+            .unwrap_or_default();
+        (dir.map(PathBuf::from), attempts)
+    }
+}
+
+/// Create (or reuse) a worktree for every child, persisting the result.
+async fn fan_out(
+    group: &Arc<ParallelGroupState>,
+    children: &[ChildSpec],
+    project_root: &Path,
+    worktree_parent: Option<&Path>,
+    parent_id: &str,
+    parent_state: &Py<PyAny>,
+    parent_gremlin: Option<&Py<PyAny>>,
+) -> PyResult<()> {
+    Python::attach(|py| group.hydrate(py));
+    let prior: Vec<String> = group
+        .paths()
+        .values()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    if !prior.is_empty() {
+        remove_worktrees(project_root, &prior).await;
+    }
+    Python::attach(|py| group.clear(py));
+
+    if !in_git_repo(project_root).await {
+        return Ok(());
+    }
+    prune_worktrees(project_root).await;
+
+    // base_head must come from the parent worktree, not project_root: the
+    // latter diverges from the fork once implement commits.
+    let parent_worktree: Option<PathBuf> =
+        Python::attach(|py| parent_state.bind(py).getattr("worktree")?.extract())?;
+    let base_ref = parent_worktree
+        .as_deref()
+        .unwrap_or(project_root)
+        .to_string_lossy()
+        .to_string();
+    group.set_base_head(head_sha(&base_ref).await);
+
+    let result = fan_out_children(
+        group,
+        children,
+        project_root,
+        worktree_parent,
+        parent_id,
+        parent_gremlin,
+    )
+    .await;
+    if let Err(err) = result {
+        let paths: Vec<String> = group
+            .paths()
+            .values()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        remove_worktrees(project_root, &paths).await;
+        Python::attach(|py| group.clear(py));
+        return Err(err);
+    }
+    Python::attach(|py| group.persist(py));
+    Ok(())
+}
+
+async fn fan_out_children(
+    group: &Arc<ParallelGroupState>,
+    children: &[ChildSpec],
+    project_root: &Path,
+    worktree_parent: Option<&Path>,
+    parent_id: &str,
+    parent_gremlin: Option<&Py<PyAny>>,
+) -> PyResult<()> {
+    for child in children {
+        if let (false, Some(gremlin)) = (parent_id.is_empty(), parent_gremlin) {
+            let child_id = format!("{parent_id}--{}--{}", group.group_name, child.key);
+            let forked: Py<PyAny> = Python::attach(|py| {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("parent_id", parent_id)?;
+                kwargs.set_item("group_name", &group.group_name)?;
+                kwargs.set_item("child_key", &child.key)?;
+                let coro = gremlin.bind(py).call_method(
+                    "fork",
+                    (child.state.bind(py), child_id.as_str()),
+                    Some(&kwargs),
+                )?;
+                let fut = pyo3_async_runtimes::tokio::into_future(coro)?;
+                Ok::<_, PyErr>(fut)
+            })?
+            .await?;
+
+            let worktree: Option<PathBuf> = Python::attach(|py| {
+                let wt = forked.bind(py).getattr("worktree")?;
+                let wt: Option<PathBuf> = wt.extract()?;
+                if let Some(ref path) = wt {
+                    child.state.bind(py).setattr("worktree", path)?;
+                }
+                Ok::<_, PyErr>(wt)
+            })?;
+            if let Some(path) = worktree {
+                group.set_path(&child.key, path);
+            }
+        } else {
+            let wt_dir =
+                setup_detached_worktree(project_root, &group.base_head(), worktree_parent).await?;
+            let wt_path = PathBuf::from(wt_dir);
+            group.set_path(&child.key, wt_path.clone());
+            Python::attach(|py| child.state.bind(py).setattr("worktree", &wt_path))?;
+        }
+    }
+    Ok(())
+}
+
+/// Dispatch every child concurrently, honouring `max_concurrent`.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_children(
+    children: &[ChildSpec],
+    state: &Py<PyAny>,
+    group: &Arc<ParallelGroupState>,
+    stage_path: &str,
+    group_name: &str,
+    parent_id: &str,
+    max_concurrent: Option<u32>,
+    cancel_on_bail: bool,
+    cancel: Arc<AtomicBool>,
+) -> PyResult<()> {
+    if children.is_empty() {
+        return Ok(());
+    }
+
+    Python::attach(|py| group.hydrate(py));
+    let paths = group.paths();
+    for child in children {
+        if let Some(wt) = paths.get(&child.key) {
+            Python::attach(|py| {
+                let current = child.state.bind(py).getattr("worktree")?;
+                if current.is_none() {
+                    child.state.bind(py).setattr("worktree", wt)?;
+                }
+                Ok::<_, PyErr>(())
+            })?;
+        }
+    }
+
+    // Snapshot of all dispatched keys; not updated as children finish.
+    let active: Vec<String> = children.iter().map(|c| c.key.clone()).collect();
+    Python::attach(|py| {
+        let patch = PyDict::new(py);
+        patch.set_item("active_children", &active)?;
+        state
+            .bind(py)
+            .getattr("data")?
+            .call_method("patch", (), Some(&patch))?;
+        Ok::<_, PyErr>(())
+    })?;
+
+    let semaphore = max_concurrent.map(|n| Arc::new(Semaphore::new(n as usize)));
+    let mut futures = Vec::with_capacity(children.len());
+    for child in children {
+        let child_key = child.key.clone();
+        let child_state = Python::attach(|py| child.state.clone_ref(py));
+        let runner = Python::attach(|py| child.runner.clone_ref(py));
+        let stage_obj = child
+            .stage
+            .as_ref()
+            .map(|s| Python::attach(|py| s.clone_ref(py)));
+        let state = Python::attach(|py| state.clone_ref(py));
+        let group = group.clone();
+        let stage_path = stage_path.to_string();
+        let group_name = group_name.to_string();
+        let parent_id = parent_id.to_string();
+        let cancel = cancel.clone();
+        let semaphore = semaphore.clone();
+        futures.push(async move {
+            let _permit = match semaphore {
+                Some(sem) => Some(sem.acquire_owned().await.expect("semaphore open")),
+                None => None,
+            };
+            if cancel_on_bail && cancel.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            run_parallel_child(
+                &child_key,
+                &child_state,
+                &runner,
+                stage_obj.as_ref(),
+                &state,
+                &group,
+                &stage_path,
+                &group_name,
+                &parent_id,
+                cancel_on_bail,
+                &cancel,
+            )
+            .await
+        });
+    }
+
+    let mut first_error: Option<PyErr> = None;
+    for result in futures::future::join_all(futures).await {
+        if let Err(err) = result {
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+    }
+
+    Python::attach(|py| {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("_delete", ("active_children",))?;
+        state
+            .bind(py)
+            .getattr("data")?
+            .call_method("patch", (), Some(&kwargs))?;
+        Ok::<_, PyErr>(())
+    })?;
+
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// Run a single child, translating bail/error into the group's bookkeeping.
+#[allow(clippy::too_many_arguments)]
+async fn run_parallel_child(
+    child_key: &str,
+    child_state: &Py<PyAny>,
+    runner: &Py<PyAny>,
+    stage_obj: Option<&Py<PyAny>>,
+    state: &Py<PyAny>,
+    group: &Arc<ParallelGroupState>,
+    stage_path: &str,
+    group_name: &str,
+    parent_id: &str,
+    cancel_on_bail: bool,
+    cancel: &Arc<AtomicBool>,
+) -> PyResult<()> {
+    let outcome = match stage_obj {
+        Some(stage) => {
+            run_child_subprocess(
+                stage,
+                child_state,
+                child_key,
+                group,
+                group_name,
+                parent_id,
+                cancel_on_bail,
+                cancel,
+            )
+            .await
+        }
+        None => await_callable(Python::attach(|py| runner.clone_ref(py)))
+            .await
+            .map(|_| ()),
+    };
+
+    match outcome {
+        Ok(()) => {
+            Python::attach(|py| {
+                state
+                    .bind(py)
+                    .call_method1("mark_done", (stage_path, child_key))
+                    .map(|_| ())
+            })?;
+            Ok(())
+        }
+        Err(err) => {
+            let is_bail = Python::attach(|py| err.is_instance_of::<Bail>(py));
+            if is_bail {
+                if cancel_on_bail {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+                let reason = Python::attach(|py| -> PyResult<String> {
+                    let args = err.value(py).getattr("args")?;
+                    if args.len()? == 0 {
+                        return Ok(String::new());
+                    }
+                    Ok(args.get_item(0)?.str()?.to_string())
+                })?;
+                Python::attach(|py| group.write_bail(py, child_key, &reason));
+                Ok(())
+            } else {
+                if cancel_on_bail {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+                Err(err)
+            }
+        }
+    }
+}
+
+/// Spawn one child through `gremlins.spawn.child` and fold in its cost.
+#[allow(clippy::too_many_arguments)]
+async fn run_child_subprocess(
+    stage_obj: &Py<PyAny>,
+    child_state: &Py<PyAny>,
+    child_key: &str,
+    group: &Arc<ParallelGroupState>,
+    group_name: &str,
+    parent_id: &str,
+    cancel_on_bail: bool,
+    cancel: &Arc<AtomicBool>,
+) -> PyResult<()> {
+    let child_id = if parent_id.is_empty() {
+        String::new()
+    } else {
+        format!("{parent_id}--{group_name}--{child_key}")
+    };
+    let attempt = format!("{child_key}-{}", rust_state::token_hex(4));
+    Python::attach(|py| group.record_attempt(py, child_key, &attempt));
+
+    let spec_path = Python::attach(|py| -> PyResult<PathBuf> {
+        let artifact_dir: PathBuf = child_state.bind(py).getattr("artifact_dir")?.extract()?;
+        let spec = build_child_spec_dict(
+            stage_obj.bind(py),
+            child_state.bind(py),
+            child_key,
+            &attempt,
+            group_name,
+            &child_id,
+        )?;
+        let spec_path = artifact_dir.join(format!("spec_{attempt}.json"));
+        let spec_json =
+            serde_json::to_string(&spec).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        std::fs::write(&spec_path, spec_json)?;
+        Ok(spec_path)
+    })?;
+
+    let timeout_s = Python::attach(|py| parse_child_timeout(stage_obj.bind(py), child_key))?;
+    let log_file = Python::attach(|py| -> PyResult<Option<Py<PyAny>>> {
+        let artifact_dir: PathBuf = child_state.bind(py).getattr("artifact_dir")?.extract()?;
+        let log_path = artifact_dir.parent().map(|p| p.join("log"));
+        let Some(log_path) = log_path else {
+            return Ok(None);
+        };
+        if !log_path.parent().map(|p| p.exists()).unwrap_or(false) {
+            return Ok(None);
+        }
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(file) => Ok(Some(
+                Py::new(
+                    py,
+                    PyFileHandle {
+                        file: std::sync::Mutex::new(file),
+                    },
+                )?
+                .into_any(),
+            )),
+            Err(_) => Ok(None),
+        }
+    })?;
+
+    let (child_proc, pumps) = spawn_with_pumps(&spec_path, &attempt, log_file.as_ref()).await?;
+    // If the surrounding future is dropped (asyncio cancellation), tear the
+    // child down and cancel its pumps. `terminate_with_grace` is a Python
+    // coroutine, so it is scheduled on the loop rather than awaited here.
+    let mut guard = ChildGuard::new(
+        Python::attach(|py| child_proc.clone_ref(py)),
+        pumps
+            .iter()
+            .map(|p| Python::attach(|py| p.clone_ref(py)))
+            .collect(),
+    );
+
+    let wait_result = wait_child_proc(&child_proc, timeout_s, child_key).await;
+    if let Err(err) = wait_result {
+        // Cancellation or timeout: tear the child down, then drain the pumps.
+        terminate_with_grace(&child_proc).await;
+        for pump in &pumps {
+            Python::attach(|py| pump.bind(py).call_method0("cancel").map(|_| ())).ok();
+        }
+        drain_pumps(&pumps).await;
+        guard.disarm();
+        return Err(err);
+    }
+    drain_pumps(&pumps).await;
+    guard.disarm();
+
+    let result = read_child_result(&spec_path, &child_proc, child_key)?;
+    let cost = result
+        .get("cost_usd")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    if cost > 0.0 && cost.is_finite() {
+        Python::attach(|py| {
+            let _ = child_state
+                .bind(py)
+                .getattr("data")
+                .and_then(|d| d.call_method1("add_subprocess_cost", (cost,)));
+        });
+    }
+
+    match result.get("status").and_then(|v| v.as_str()) {
+        Some("done") | Some("needs_fix") => Ok(()),
+        Some("bail") => {
+            if cancel_on_bail {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            let detail = result
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Python::attach(|py| group.write_bail(py, child_key, &detail));
+            Ok(())
+        }
+        _ => {
+            let detail = result.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+            Err(PyRuntimeError::new_err(format!(
+                "parallel child {child_key:?} error: {detail}"
+            )))
+        }
+    }
+}
+
+/// Tears down a subprocess child when the owning future is dropped.
+///
+/// `asyncio` cancellation drops the Rust future, so the explicit cleanup path
+/// in [`run_child_subprocess`] never runs; this guard closes that gap.
+struct ChildGuard {
+    proc: Py<PyAny>,
+    pumps: Vec<Py<PyAny>>,
+    armed: bool,
+}
+
+impl ChildGuard {
+    fn new(proc: Py<PyAny>, pumps: Vec<Py<PyAny>>) -> Self {
+        ChildGuard {
+            proc,
+            pumps,
+            armed: true,
+        }
+    }
+
+    /// Stand down: the explicit cleanup path already ran.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // The owning future is dropped by asyncio cancellation, so the normal
+        // cleanup path never runs. Drive `terminate_with_grace` to completion
+        // on a private event loop in a worker thread: the main loop is mid
+        // teardown and cannot be re-entered, and the grace period must elapse
+        // before SIGKILL is sent.
+        let coro = Python::attach(|py| {
+            let proc_mod = py.import("gremlins.utils.proc")?;
+            proc_mod
+                .getattr("terminate_with_grace")?
+                .call1((self.proc.bind(py),))
+                .map(|c| c.unbind())
+        });
+        let pumps: Vec<Py<PyAny>> = self
+            .pumps
+            .iter()
+            .map(|p| Python::attach(|py| p.clone_ref(py)))
+            .collect();
+        if let Ok(coro) = coro {
+            // Release the GIL for the whole spawn-and-join: the worker thread
+            // must attach, and joining while holding the GIL would deadlock.
+            Python::attach(|py| {
+                py.detach(|| {
+                    let handle = std::thread::spawn(move || {
+                        let _ = Python::attach(|py| {
+                            let asyncio = py.import("asyncio")?;
+                            let _ = asyncio.call_method1("run", (coro.bind(py),));
+                            Ok::<_, PyErr>(())
+                        });
+                    });
+                    let _ = handle.join();
+                })
+            });
+        }
+        Python::attach(|py| {
+            for pump in &pumps {
+                let _ = pump.bind(py).call_method0("cancel");
+            }
+        });
+    }
+}
+
+/// A writable log file handed to the Python pump as a file-like object.
+#[pyclass(name = "_ParallelLogFile", module = "_gremlins_core.stages")]
+struct PyFileHandle {
+    file: std::sync::Mutex<std::fs::File>,
+}
+
+#[pymethods]
+impl PyFileHandle {
+    fn write(&self, data: &str) -> PyResult<()> {
+        use std::io::Write;
+        let mut file = self.file.lock().unwrap();
+        file.write_all(data.as_bytes())?;
+        file.flush()?;
+        Ok(())
+    }
+
+    fn close(&self) -> PyResult<()> {
+        Ok(())
+    }
+}
+
+/// `(status, cost)` for a finished child, or a descriptive error.
+fn read_child_result(
+    spec_path: &Path,
+    child_proc: &Py<PyAny>,
+    child_key: &str,
+) -> PyResult<serde_json::Map<String, serde_json::Value>> {
+    let result_path = PathBuf::from(format!("{}.result", spec_path.to_string_lossy()));
+    if !result_path.exists() {
+        let returncode: Option<i32> = Python::attach(|py| {
+            child_proc
+                .bind(py)
+                .getattr("returncode")
+                .ok()
+                .and_then(|v| v.extract().ok())
+        });
+        return Err(PyRuntimeError::new_err(missing_result_detail(
+            child_key, returncode,
+        )));
+    }
+    let text = std::fs::read_to_string(&result_path)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    match value {
+        serde_json::Value::Object(map) => Ok(map),
+        _ => Err(PyRuntimeError::new_err(format!(
+            "parallel child {child_key:?}: result file is not a JSON object"
+        ))),
+    }
+}
+
+/// The `timeout_seconds` for a child stage, or `None` when unset/non-positive.
+fn parse_child_timeout(stage_obj: &Bound<'_, PyAny>, child_key: &str) -> PyResult<Option<f64>> {
+    let raw_dict = stage_obj.getattr("raw_dict")?;
+    if raw_dict.is_none() {
+        return Ok(None);
+    }
+    let raw = match raw_dict.cast::<PyDict>()?.get_item("timeout_seconds")? {
+        Some(v) if !v.is_none() => v,
+        _ => return Ok(None),
+    };
+    let parsed = raw.extract::<f64>().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "parallel child {child_key:?}: 'timeout_seconds' must be a number, got {raw:?}"
+        ))
+    })?;
+    Ok(if parsed > 0.0 { Some(parsed) } else { None })
+}
+
+/// A human-readable reason for a child that exited without a result file.
+fn missing_result_detail(child_key: &str, returncode: Option<i32>) -> String {
+    match returncode {
+        None => format!(
+            "parallel child {child_key:?}: subprocess exited with no result file (returncode unavailable)"
+        ),
+        Some(0) => format!("parallel child {child_key:?} exited 0 without writing result"),
+        Some(rc) if rc < 0 => format!(
+            "parallel child {child_key:?} terminated by {} with no result file",
+            signal_name(-rc)
+        ),
+        Some(rc) => format!(
+            "parallel child {child_key:?} exited with returncode {rc} and no result file"
+        ),
+    }
+}
+
+fn signal_name(signum: i32) -> String {
+    match signum {
+        1 => "SIGHUP".to_string(),
+        2 => "SIGINT".to_string(),
+        3 => "SIGQUIT".to_string(),
+        6 => "SIGABRT".to_string(),
+        9 => "SIGKILL".to_string(),
+        13 => "SIGPIPE".to_string(),
+        14 => "SIGALRM".to_string(),
+        15 => "SIGTERM".to_string(),
+        other => format!("signal {other}"),
+    }
+}
+
+/// The JSON spec handed to `gremlins.spawn.child`.
+fn build_child_spec_dict(
+    stage_obj: &Bound<'_, PyAny>,
+    child_st: &Bound<'_, PyAny>,
+    child_key: &str,
+    attempt: &str,
+    group_name: &str,
+    child_id: &str,
+) -> PyResult<serde_json::Map<String, serde_json::Value>> {
+    let raw_dict = stage_obj.getattr("raw_dict")?;
+    let stage_dict = crate::python::json_conv::py_to_value(&raw_dict)?;
+    let client: String = child_st.getattr("client")?.str()?.extract()?;
+    let parent_id: String = child_st
+        .getattr("data")?
+        .getattr("gremlin_id")?
+        .extract::<Option<String>>()?
+        .unwrap_or_default();
+    let worktree: Option<PathBuf> = child_st.getattr("worktree")?.extract()?;
+    let worktree_parent: Option<PathBuf> = child_st.getattr("worktree_parent")?.extract()?;
+    let pipeline_path: Option<String> = child_st
+        .getattr("data")?
+        .getattr("pipeline_path")?
+        .extract::<Option<String>>()?;
+    let parent_stage: String = child_st.getattr("parent_stage")?.extract()?;
+    let base_ref: String = child_st.getattr("base_ref")?.extract()?;
+    let bootstrap: Vec<String> = {
+        let pipeline_data = child_st.getattr("pipeline_data")?;
+        if pipeline_data.is_none() {
+            Vec::new()
+        } else {
+            let bootstrap = pipeline_data.getattr("bootstrap")?;
+            if bootstrap.is_none() {
+                Vec::new()
+            } else {
+                bootstrap.getattr("cmds")?.extract::<Vec<String>>()?
+            }
+        }
+    };
+
+    let mut map = serde_json::Map::new();
+    map.insert("stage_dict".into(), stage_dict);
+    map.insert("client".into(), serde_json::Value::String(client));
+    map.insert(
+        "child_id".into(),
+        serde_json::Value::String(child_id.to_string()),
+    );
+    map.insert("parent_id".into(), serde_json::Value::String(parent_id));
+    map.insert(
+        "group_name".into(),
+        serde_json::Value::String(group_name.to_string()),
+    );
+    map.insert(
+        "worktree".into(),
+        worktree
+            .map(|p| serde_json::Value::String(p.to_string_lossy().to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    map.insert(
+        "worktree_parent".into(),
+        worktree_parent
+            .map(|p| serde_json::Value::String(p.to_string_lossy().to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    map.insert(
+        "pipeline_path".into(),
+        pipeline_path
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    map.insert(
+        "child_key".into(),
+        serde_json::Value::String(child_key.to_string()),
+    );
+    map.insert(
+        "attempt".into(),
+        serde_json::Value::String(attempt.to_string()),
+    );
+    map.insert(
+        "parent_stage".into(),
+        serde_json::Value::String(parent_stage),
+    );
+    map.insert("base_ref".into(), serde_json::Value::String(base_ref));
+    map.insert(
+        "bootstrap".into(),
+        serde_json::Value::Array(
+            bootstrap
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    Ok(map)
+}
+
+/// Spawn `gremlins.spawn.child` through the Python `proc.spawn_with_pumps`.
+async fn spawn_with_pumps(
+    spec_path: &Path,
+    attempt: &str,
+    log_file: Option<&Py<PyAny>>,
+) -> PyResult<(Py<PyAny>, Vec<Py<PyAny>>)> {
+    let coro = Python::attach(|py| {
+        let proc = py.import("gremlins.utils.proc")?;
+        let kwargs = PyDict::new(py);
+        if let Some(log) = log_file {
+            kwargs.set_item("log_file", log.bind(py))?;
+        }
+        proc.getattr("spawn_with_pumps")?
+            .call(
+                (spec_path.to_string_lossy().to_string(), attempt),
+                Some(&kwargs),
+            )
+            .map(|c| c.unbind())
+    })?;
+    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
+    let result = fut.await?;
+    Python::attach(|py| {
+        let proc: Py<PyAny> = result.bind(py).get_item(0)?.extract()?;
+        let pumps: Vec<Py<PyAny>> = result.bind(py).get_item(1)?.extract()?;
+        Ok((proc, pumps))
+    })
+}
+
+/// Await `proc.wait_child_proc`, mapping its timeout error to a `RuntimeError`.
+async fn wait_child_proc(
+    child_proc: &Py<PyAny>,
+    timeout_s: Option<f64>,
+    child_key: &str,
+) -> PyResult<()> {
+    let coro = Python::attach(|py| {
+        let proc = py.import("gremlins.utils.proc")?;
+        proc.getattr("wait_child_proc")?
+            .call1((child_proc.bind(py), timeout_s, child_key))
+            .map(|c| c.unbind())
+    })?;
+    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
+    fut.await.map(|_| ())
+}
+
+/// Terminate a child process with the Python `proc.terminate_with_grace`.
+async fn terminate_with_grace(child_proc: &Py<PyAny>) {
+    let Ok(coro) = Python::attach(|py| {
+        let proc = py.import("gremlins.utils.proc")?;
+        proc.getattr("terminate_with_grace")?
+            .call1((child_proc.bind(py),))
+            .map(|c| c.unbind())
+    }) else {
+        return;
+    };
+    let Ok(fut) =
+        Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))
+    else {
+        return;
+    };
+    let _ = fut.await;
+}
+
+/// Await every pump task, shielding them so a cancelled parent still drains.
+async fn drain_pumps(pumps: &[Py<PyAny>]) {
+    if pumps.is_empty() {
+        return;
+    }
+    let Ok(coro) = Python::attach(|py| {
+        let asyncio = py.import("asyncio")?;
+        let gather = asyncio.call_method1("gather", (PyList::new(py, pumps)?,))?;
+        asyncio
+            .call_method1("shield", (gather,))
+            .map(|c| c.unbind())
+    }) else {
+        return;
+    };
+    let Ok(fut) =
+        Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))
+    else {
+        return;
+    };
+    let _ = fut.await;
+}
+
+/// Gather child artifacts, decide the group bail, and tear down worktrees.
+#[allow(clippy::too_many_arguments)]
+async fn fan_in(
+    group: &Arc<ParallelGroupState>,
+    children: &[ChildSpec],
+    state: &Py<PyAny>,
+    stage_path: &str,
+    group_name: &str,
+    parent_id: &str,
+    bail_policy: BailPolicy,
+    project_root: &Path,
+) -> PyResult<()> {
+    Python::attach(|py| group.hydrate(py));
+    let child_keys: Vec<String> = children.iter().map(|c| c.key.clone()).collect();
+    gather_child_artifacts(&child_keys, state, group_name, parent_id)?;
+
+    let result = do_fan_in(
+        group,
+        children,
+        state,
+        stage_path,
+        group_name,
+        bail_policy,
+        project_root,
+    )
+    .await;
+    let child_keys: Vec<String> = children.iter().map(|c| c.key.clone()).collect();
+    remove_child_dirs(&child_keys, state, group_name, parent_id);
+    teardown_worktrees(group, project_root).await;
+    result
+}
+
+/// Copy child artifact bindings into the parent registry before dirs vanish.
+fn gather_child_artifacts(
+    child_keys: &[String],
+    state: &Py<PyAny>,
+    group_name: &str,
+    parent_id: &str,
+) -> PyResult<()> {
+    if parent_id.is_empty() {
+        return Ok(());
+    }
+    Python::attach(|py| {
+        let parent_artifacts = state.bind(py).getattr("artifacts")?;
+        let parent_keys: HashSet<String> = parent_artifacts
+            .call_method0("keys")?
+            .extract::<Vec<String>>()?
+            .into_iter()
+            .collect();
+
+        // key -> [(child_key, child_registry)]
+        let mut per_key: HashMap<String, Vec<(String, Py<PyAny>)>> = HashMap::new();
+        for child_key in child_keys {
+            let child_id = format!("{parent_id}--{group_name}--{child_key}");
+            let scratch = gremlins::config::scratch_root(Some(&child_id));
+            let child_reg_path = scratch.join("registry.json");
+            if !child_reg_path.exists() {
+                continue;
+            }
+            let registry_cls = py
+                .import("_gremlins_core.artifacts")?
+                .getattr("ArtifactRegistry")?;
+            let child_registry = registry_cls.call_method1(
+                "from_registry_file",
+                (
+                    child_reg_path.to_string_lossy().to_string(),
+                    scratch.join("artifacts").to_string_lossy().to_string(),
+                ),
+            )?;
+            let keys: Vec<String> = child_registry.call_method0("keys")?.extract()?;
+            for key in keys {
+                if parent_keys.contains(&key) {
+                    continue;
+                }
+                per_key
+                    .entry(key)
+                    .or_default()
+                    .push((child_key.clone(), child_registry.clone().unbind()));
+            }
+        }
+
+        for (key, producers) in per_key {
+            let multi = producers.len() > 1;
+            for (child_key, child_registry) in producers {
+                let kwargs = PyDict::new(py);
+                if multi {
+                    let key_map = PyDict::new(py);
+                    key_map.set_item(&key, format!("{key}/{child_key}"))?;
+                    kwargs.set_item("key_map", key_map)?;
+                }
+                kwargs.set_item("copy_files", true)?;
+                let keys = pyo3::types::PySet::empty(py)?;
+                keys.add(&key)?;
+                kwargs.set_item("keys", keys)?;
+                parent_artifacts.call_method(
+                    "merge_from",
+                    (child_registry.bind(py),),
+                    Some(&kwargs),
+                )?;
+            }
+        }
+        Ok::<_, PyErr>(())
+    })
+}
+
+/// Prune worktrees, apply the bail policy, and clear per-run bookkeeping.
+#[allow(clippy::too_many_arguments)]
+async fn do_fan_in(
+    group: &Arc<ParallelGroupState>,
+    children: &[ChildSpec],
+    state: &Py<PyAny>,
+    stage_path: &str,
+    group_name: &str,
+    bail_policy: BailPolicy,
+    project_root: &Path,
+) -> PyResult<()> {
+    prune_worktrees(project_root).await;
+
+    let (state_dir, attempts) = Python::attach(|py| group.read_bail_scan_inputs(py));
+    let child_keys: Vec<String> = children.iter().map(|c| c.key.clone()).collect();
+    let bailed = match state_dir {
+        Some(dir) => gremlins::stages::parallel_bail::collect_bails(&dir, &child_keys, &attempts),
+        None => Vec::new(),
+    };
+    let decision = gremlins::stages::parallel_bail::decide(&bailed, child_keys.len(), bail_policy);
+
+    if decision.should_bail {
+        let bail_class = decision
+            .first_bail
+            .get("class")
+            .map(String::as_str)
+            .unwrap_or("other");
+        let detail = decision
+            .first_bail
+            .get("detail")
+            .map(String::as_str)
+            .unwrap_or("");
+        Python::attach(|py| {
+            let _ = state
+                .bind(py)
+                .getattr("data")
+                .and_then(|d| d.call_method1("write_bail_file", (bail_class, detail)));
+        });
+    }
+    Python::attach(|py| group.clear_attempts(py));
+    if !decision.should_bail {
+        Python::attach(|py| {
+            let _ = state.bind(py).call_method1("clear_done", (stage_path,));
+        });
+    }
+    if decision.should_bail {
+        return Err(Bail::new_err(format!(
+            "parallel group {group_name:?} bailed ({} child(ren), policy={:?})",
+            bailed.len(),
+            bail_policy.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Remove child state dirs, preserving their logs first.
+fn remove_child_dirs(child_keys: &[String], state: &Py<PyAny>, group_name: &str, parent_id: &str) {
+    if parent_id.is_empty() {
+        return;
+    }
+    let state_root = gremlins::config::state_root();
+    let prefix = format!("{parent_id}--{group_name}--");
+    if let Ok(entries) = std::fs::read_dir(&state_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) && entry.path().is_dir() {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    let state_dir = state_root.join(parent_id);
+    let preserve = state_dir.is_dir();
+    if !preserve {
+        log::warn!(
+            target: "gremlins.stages.parallel",
+            "parallel {group_name}: parent state dir {} is missing, child logs not preserved",
+            state_dir.display()
+        );
+    }
+    let _ = state;
+    for child_key in child_keys {
+        let child_id = format!("{parent_id}--{group_name}--{child_key}");
+        let child_scratch = gremlins::config::scratch_root(Some(&child_id));
+        let child_log = child_scratch.join("log");
+        if preserve && child_log.is_file() {
+            save_child_log(
+                &child_log,
+                &state_dir.join("logs").join(format!("{child_key}.log")),
+                group_name,
+            );
+        }
+        let _ = std::fs::remove_dir_all(&child_scratch);
+    }
+}
+
+fn save_child_log(src: &Path, dest: &Path, group_name: &str) {
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::copy(src, dest) {
+        Ok(_) => log::debug!(
+            target: "gremlins.stages.parallel",
+            "parallel {group_name}: saved child log {}",
+            dest.display()
+        ),
+        Err(exc) => log::warn!(
+            target: "gremlins.stages.parallel",
+            "parallel {group_name}: could not preserve child log {} -> {}: {exc}",
+            src.display(),
+            dest.display()
+        ),
+    }
+}
+
+/// Log child worktree mutations, then remove every worktree.
+async fn teardown_worktrees(group: &Arc<ParallelGroupState>, project_root: &Path) {
+    let paths = group.paths();
+    for (child_key, wt) in &paths {
+        if !wt.is_dir() {
+            continue;
+        }
+        let child_head = head_sha(&wt.to_string_lossy()).await;
+        let dirty = status_porcelain(&wt.to_string_lossy()).await;
+        if !child_head.is_empty() && child_head != group.base_head() {
+            log::warn!(
+                target: "gremlins.stages.parallel",
+                "parallel child {child_key} mutated its worktree (HEAD={child_head}, base={}) \
+                 — mutations will be discarded on teardown (fan-in merge not yet implemented)",
+                group.base_head()
+            );
+        }
+        if !dirty.trim().is_empty() {
+            log::warn!(
+                target: "gremlins.stages.parallel",
+                "parallel child {child_key} has uncommitted changes — \
+                 changes will be discarded on teardown (fan-in merge not yet implemented)"
+            );
+        }
+    }
+    let all: Vec<String> = paths
+        .values()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    remove_worktrees(project_root, &all).await;
+    Python::attach(|py| group.clear(py));
+}
+
+// --- git helpers (thin wrappers over the Rust proc layer) ---
+
+/// Await a Python coroutine, bridging it onto the Tokio runtime.
+async fn await_py(coro: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
+    fut.await
+}
+
+/// Call an async function in `gremlins.utils.git` and await it.
+async fn call_git_async(
+    func: &str,
+    args: Vec<Py<PyAny>>,
+    kwargs: Vec<(&str, Py<PyAny>)>,
+) -> PyResult<Py<PyAny>> {
+    let coro = Python::attach(|py| {
+        let git = py.import("gremlins.utils.git")?;
+        let py_kwargs = PyDict::new(py);
+        for (k, v) in kwargs {
+            py_kwargs.set_item(k, v)?;
+        }
+        git.getattr(func)?
+            .call(PyTuple::new(py, args)?, Some(&py_kwargs))
+            .map(|c| c.unbind())
+    })?;
+    await_py(coro).await
+}
+
+fn py_str(py: Python<'_>, s: &str) -> Py<PyAny> {
+    PyString::new(py, s).into_any().unbind()
+}
+
+async fn in_git_repo(cwd: &Path) -> bool {
+    let cwd = cwd.to_string_lossy().to_string();
+    let result = Python::attach(|py| {
+        call_git_async("in_git_repo_async", vec![], vec![("cwd", py_str(py, &cwd))])
+    });
+    match result.await {
+        Ok(v) => Python::attach(|py| v.bind(py).extract::<bool>().unwrap_or(false)),
+        Err(_) => false,
+    }
+}
+
+async fn head_sha(cwd: &str) -> String {
+    let result = Python::attach(|py| {
+        call_git_async("head_sha_async", vec![], vec![("cwd", py_str(py, cwd))])
+    });
+    match result.await {
+        Ok(v) => Python::attach(|py| v.bind(py).extract::<String>().unwrap_or_default()),
+        Err(_) => String::new(),
+    }
+}
+
+async fn status_porcelain(cwd: &str) -> String {
+    let result = Python::attach(|py| {
+        call_git_async(
+            "status_porcelain_async",
+            vec![],
+            vec![("cwd", py_str(py, cwd))],
+        )
+    });
+    match result.await {
+        Ok(v) => Python::attach(|py| v.bind(py).extract::<String>().unwrap_or_default()),
+        Err(_) => String::new(),
+    }
+}
+
+async fn prune_worktrees(project_root: &Path) {
+    if !in_git_repo(project_root).await {
+        return;
+    }
+    let root = project_root.to_string_lossy().to_string();
+    let result = Python::attach(|py| {
+        call_git_async("prune_worktrees_async", vec![py_str(py, &root)], vec![])
+    });
+    let _ = result.await;
+}
+
+async fn remove_worktrees(project_root: &Path, paths: &[String]) {
+    if !in_git_repo(project_root).await {
+        return;
+    }
+    let root = project_root.to_string_lossy().to_string();
+    let result = Python::attach(|py| -> PyResult<_> {
+        let paths = PyList::new(py, paths)?;
+        Ok(call_git_async(
+            "remove_worktrees_async",
+            vec![py_str(py, &root), paths.into_any().unbind()],
+            vec![],
+        ))
+    });
+    if let Ok(fut) = result {
+        let _ = fut.await;
+    }
+}
+
+async fn setup_detached_worktree(
+    project_root: &Path,
+    base_ref: &str,
+    worktree_parent: Option<&Path>,
+) -> PyResult<String> {
+    let root = project_root.to_string_lossy().to_string();
+    let base = if base_ref.is_empty() {
+        "HEAD"
+    } else {
+        base_ref
+    };
+    let parent = worktree_parent.map(|p| p.to_string_lossy().to_string());
+    let result = Python::attach(|py| {
+        let mut kwargs: Vec<(&str, Py<PyAny>)> = Vec::new();
+        if let Some(parent) = &parent {
+            kwargs.push(("worktree_parent", py_str(py, parent)));
+        }
+        call_git_async(
+            "setup_detached_worktree_async",
+            vec![py_str(py, &root), py_str(py, base)],
+            kwargs,
+        )
+    });
+    let value = result.await?;
+    Python::attach(|py| value.bind(py).extract::<String>())
+}
+
+// --- Test seams for the parallel helpers ---
+
+#[pyfunction]
+#[pyo3(name = "_gather_child_artifacts")]
+fn gather_child_artifacts_py(
+    parent_state: &Bound<'_, PyAny>,
+    child_keys: Vec<String>,
+    group_name: &str,
+) -> PyResult<()> {
+    let parent_id: String = parent_state
+        .getattr("data")?
+        .getattr("gremlin_id")?
+        .extract::<Option<String>>()?
+        .unwrap_or_default();
+    gather_child_artifacts(
+        &child_keys,
+        &parent_state.clone().unbind(),
+        group_name,
+        &parent_id,
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "_remove_child_dirs")]
+fn remove_child_dirs_py(
+    parent_state: &Bound<'_, PyAny>,
+    child_keys: Vec<String>,
+    group_name: &str,
+) {
+    let parent_id: String = parent_state
+        .getattr("data")
+        .and_then(|d| d.getattr("gremlin_id"))
+        .and_then(|v| v.extract::<Option<String>>())
+        .unwrap_or_default()
+        .unwrap_or_default();
+    remove_child_dirs(
+        &child_keys,
+        &parent_state.clone().unbind(),
+        group_name,
+        &parent_id,
+    );
+}
+
+#[pyfunction]
+#[pyo3(name = "_parse_child_timeout")]
+fn parse_child_timeout_py(stage_obj: &Bound<'_, PyAny>, child_key: &str) -> PyResult<Option<f64>> {
+    parse_child_timeout(stage_obj, child_key)
+}
+
+#[pyfunction]
+#[pyo3(name = "_missing_result_detail")]
+fn missing_result_detail_py(child_key: &str, returncode: Option<i32>) -> String {
+    missing_result_detail(child_key, returncode)
+}
+
+#[pyfunction]
+#[pyo3(name = "_build_child_spec_dict", signature = (stage_obj, child_st, child_key, attempt, group_name = "", child_id = ""))]
+fn build_child_spec_dict_py(
+    py: Python<'_>,
+    stage_obj: &Bound<'_, PyAny>,
+    child_st: &Bound<'_, PyAny>,
+    child_key: &str,
+    attempt: &str,
+    group_name: &str,
+    child_id: &str,
+) -> PyResult<Py<PyAny>> {
+    let spec = build_child_spec_dict(
+        stage_obj, child_st, child_key, attempt, group_name, child_id,
+    )?;
+    json_value_to_py(py, &serde_json::Value::Object(spec))
+}
+
 // --- Module registration ---
 
 pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1833,6 +3782,9 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStageAttrs>()?;
     m.add_class::<PySequence>()?;
     m.add_class::<PyLoop>()?;
+    m.add_class::<PyParallelStage>()?;
+    m.add_class::<ParallelRuntime>()?;
+    m.add_class::<PyFileHandle>()?;
     m.add_class::<Done>()?;
     m.add_function(wrap_pyfunction!(get_client_from_dict_py, &m)?)?;
     m.add_function(wrap_pyfunction!(child_state_py, &m)?)?;
@@ -1840,6 +3792,12 @@ pub fn register_stages_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(agent_run_async, &m)?)?;
     m.add_function(wrap_pyfunction!(sequence_run_async, &m)?)?;
     m.add_function(wrap_pyfunction!(loop_run_async, &m)?)?;
+    m.add_function(wrap_pyfunction!(parallel_run_async, &m)?)?;
+    m.add_function(wrap_pyfunction!(gather_child_artifacts_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(remove_child_dirs_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(parse_child_timeout_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(missing_result_detail_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(build_child_spec_dict_py, &m)?)?;
     m.add("Bail", m.py().get_type::<Bail>())?;
 
     parent.add_submodule(&m)?;

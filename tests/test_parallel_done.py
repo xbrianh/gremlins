@@ -8,10 +8,9 @@ import pathlib
 
 import pytest
 from _gremlins_core.executor import State, StateData, build_state
-from _gremlins_core.stages import Bail
+from _gremlins_core.stages import Bail, ParallelStage
 from conftest import make_parent_state
 
-from gremlins.stages.parallel import ParallelStage
 from tests.fake_client import FakeClient
 
 

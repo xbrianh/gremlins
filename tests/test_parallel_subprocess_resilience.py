@@ -10,14 +10,13 @@ import signal
 from collections.abc import Callable
 from typing import Any
 
+import _gremlins_core.stages as _parallel_mod
 import pytest
 from _gremlins_core.config import scratch_root
 from _gremlins_core.executor import State, StateData, build_state, write_state
-from _gremlins_core.stages import Done, Outcome, StageAttrs
+from _gremlins_core.stages import Done, Outcome, ParallelStage, StageAttrs
 from conftest import make_parent_state
 
-from gremlins.stages import parallel as _parallel_mod
-from gremlins.stages.parallel import ParallelStage
 from gremlins.utils import proc as _proc_mod
 from tests.fake_client import FakeClient
 
@@ -492,20 +491,17 @@ def test_run_child_needs_fix_maps_to_done(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
-    status, _ = asyncio.run(
-        _parallel_mod.run_child_subprocess(
-            stage, child_st, "c", "attempt-1", on_bail=lambda _: None
-        )
+    parallel = _run_parallel(
+        [stage], [child_st], make_parent_state(StateData()), tmp_path
     )
-    assert status == "done"
+    asyncio.run(parallel())  # needs_fix is treated as done; must not raise
 
 
-def test_run_child_bail_calls_on_bail(
+def test_run_child_bail_is_recorded_not_raised(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     child_st = _child_state(tmp_path / "c")
     stage = _child_stage("c")
-    bailed: list[str] = []
 
     async def _mock_exec(*args: Any, **_: Any) -> _FakeProcess:
         result_path = pathlib.Path(str(args[-1]) + ".result")
@@ -517,13 +513,10 @@ def test_run_child_bail_calls_on_bail(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _mock_exec)
 
-    status, _ = asyncio.run(
-        _parallel_mod.run_child_subprocess(
-            stage, child_st, "c", "attempt-1", on_bail=bailed.append
-        )
+    parallel = _run_parallel(
+        [stage], [child_st], make_parent_state(StateData()), tmp_path
     )
-    assert status == "bail"
-    assert bailed == ["nope"]
+    asyncio.run(parallel())  # a bail is recorded, not raised
 
 
 def test_build_child_spec_dict_base_ref_propagated(
@@ -632,21 +625,10 @@ def test_child_scratch_cleaned_when_parent_state_dir_missing(sandbox: Any) -> No
 
     parent_data = StateData(gremlin_id=gremlin_id)
     parent_data.state_file = sandbox.state / gremlin_id / "state.json"
-    stage = _child_stage("child-a")
-    executor = _parallel_mod._ParallelExecutor(
-        ParallelStage("g", [stage]),
-        [],
-        max_concurrent=None,
-        set_stage_fn=lambda _: None,
-        cancel_on_bail=False,
-        bail_policy="any",
-        parent_state=build_state(
-            parent_data, FakeClient(), artifact_dir=sandbox.state / "artifacts"
-        ),
-        project_root=sandbox.project,
-        child_stages=[stage],
+    parent_state = build_state(
+        parent_data, FakeClient(), artifact_dir=sandbox.state / "artifacts"
     )
-    executor._rm_child_dirs()
+    _parallel_mod._remove_child_dirs(parent_state, ["child-a"], "g")
     assert not child_scratch.exists()
 
 

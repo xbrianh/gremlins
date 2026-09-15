@@ -19,6 +19,7 @@ regex = "1"
 indexmap = "2"
 rig-core = { version = "0.41", features = ["derive"] }
 log = "0.4"
+futures = "0.3"
 
 [dev-dependencies]
 pyo3 = { version = "0.29", features = ["auto-initialize"] }
