@@ -1,8 +1,17 @@
+// Process execution: synchronous and async runners, and the child-process
+// plumbing the parallel stage is built on.
+//
+// Nothing here decides *where* a child's relayed output goes. The pumps write
+// through `Sink`, and the caller supplies the sink — the extension binds it to
+// Python's `sys.stdout`, so redirection and capture still work.
+
 use std::collections::HashMap;
 use std::io;
 use std::io::Read;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
@@ -741,6 +750,39 @@ async fn reap_within(child: &mut tokio::process::Child, budget: Duration) -> boo
     matches!(tokio::time::timeout(budget, child.wait()).await, Ok(Ok(_)))
 }
 
+/// Where a [`pump_prefixed`] sends each record it relays.
+///
+/// The stdout and stderr pumps share one sink and may write at any moment, so
+/// the seam here is a single `&self` call and exclusion is left to the
+/// implementor — the only party that knows what state it keeps.
+///
+/// This crate is pure Rust and has no Python to fall back on, so the sink is
+/// injected rather than chosen: the extension binds it to Python's `sys.stdout`,
+/// which keeps `contextlib.redirect_stdout` and test capture working exactly as
+/// they did when the Python `proc` module owned the pump.
+pub trait Sink: Send + Sync {
+    /// Write one whole record — `[prefix] ` and the child's line — and flush it,
+    /// so a reader sees each line as it arrives.
+    ///
+    /// A record is never split across calls, so an implementor needs no framing
+    /// logic of its own.
+    fn write(&self, record: &str) -> io::Result<()>;
+}
+
+/// The default [`Sink`]: this process's stdout.
+///
+/// The handle is taken fresh on every write, since [`io::Stdout`] is a handle to
+/// the process-wide buffer rather than a value worth holding.
+pub struct StdoutSink;
+
+impl Sink for StdoutSink {
+    fn write(&self, record: &str) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        stdout.write_all(record.as_bytes())?;
+        stdout.flush()
+    }
+}
+
 /// Size of each pipe read in [`pump_prefixed`].
 const PUMP_CHUNK: usize = 4096;
 
@@ -749,47 +791,92 @@ const PUMP_CHUNK: usize = 4096;
 /// than growing our buffer (and, at the extreme, stalling on a full pipe).
 pub const MAX_PENDING_BYTES: usize = 64 * 1024;
 
-/// Spawn `python_exe -m gremlins.spawn.child <spec_path>` and drain the child's
-/// stdout and stderr through two prefixing pump tasks.
+/// Spawn `{python_exe} -m gremlins.spawn.child {spec_path}` and relay its output
+/// through two prefixing pump tasks.
 ///
-/// The child starts in its own process group so [`terminate_with_grace`] can
-/// target it precisely, and with `kill_on_drop` so a dropped handle can never
-/// leave it running. When `log_path` is given, each pump also appends the raw,
-/// unprefixed record it relays.
+/// A child is identified by the `attempt` label each relayed record carries, and
+/// the call chain is:
 ///
-/// The returned join handles resolve once their pipe reaches EOF, so the caller
-/// can [`drain_pumps`] them to be sure no output is lost.
-pub async fn spawn_with_pumps(
-    python_exe: &str,
-    spec_path: &Path,
-    attempt: &str,
-    log_path: Option<&Path>,
-) -> io::Result<(tokio::process::Child, Vec<tokio::task::JoinHandle<()>>)> {
-    let (child, stdout, stderr) = spawn_child_pipes(python_exe, spec_path)?;
+/// ```text
+/// Pumps::new(..).log(..).sink(..).spawn().await
+/// ```
+///
+/// — see [`Pumps`].
+pub struct Pumps<'a> {
+    python_exe: &'a str,
+    spec_path: &'a Path,
+    attempt: &'a str,
+    log_path: Option<&'a Path>,
+    sink: Option<Arc<dyn Sink>>,
+}
 
-    // Each pump owns its own append handle to the log: the two streams are
-    // independent writers and must not share a borrow.
-    let attempt_out = attempt.to_string();
-    let attempt_err = attempt.to_string();
-    let mut out_log = open_log(log_path);
-    let mut err_log = open_log(log_path);
-    let pumps = vec![
-        tokio::spawn(async move {
-            let log = out_log
-                .as_mut()
-                .map(|f| f as &mut (dyn std::io::Write + Send));
-            let mut out = std::io::stdout();
-            pump_prefixed(stdout, &attempt_out, &mut out, log).await;
-        }),
-        tokio::spawn(async move {
-            let log = err_log
-                .as_mut()
-                .map(|f| f as &mut (dyn std::io::Write + Send));
-            let mut out = std::io::stdout();
-            pump_prefixed(stderr, &attempt_err, &mut out, log).await;
-        }),
-    ];
-    Ok((child, pumps))
+impl<'a> Pumps<'a> {
+    /// Spawn `python_exe -m gremlins.spawn.child spec_path`, prefixing each
+    /// relayed record with `attempt`.
+    pub fn new(python_exe: &'a str, spec_path: &'a Path, attempt: &'a str) -> Self {
+        Pumps {
+            python_exe,
+            spec_path,
+            attempt,
+            log_path: None,
+            sink: None,
+        }
+    }
+
+    /// Also append the raw, unprefixed records to the log at `path`.
+    pub fn log(mut self, path: Option<&'a Path>) -> Self {
+        self.log_path = path;
+        self
+    }
+
+    /// Relay records through `sink` instead of straight to this process's
+    /// stdout.
+    pub fn sink(mut self, sink: Arc<dyn Sink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Start the child and return it with its two pump handles.
+    ///
+    /// The child starts in its own process group so [`terminate_with_grace`] can
+    /// target it precisely, and with `kill_on_drop` so a dropped handle can
+    /// never leave it running. Each log is opened freshly per pump, so the two
+    /// streams never share a writer. The returned handles resolve once their
+    /// pipe reaches EOF, so the caller can [`drain_pumps`] them to be sure no
+    /// output is lost.
+    pub async fn spawn(
+        self,
+    ) -> io::Result<(tokio::process::Child, Vec<tokio::task::JoinHandle<()>>)> {
+        let Pumps {
+            python_exe,
+            spec_path,
+            attempt,
+            log_path,
+            sink,
+        } = self;
+        let (child, stdout, stderr) = spawn_child_pipes(python_exe, spec_path)?;
+        let attempt = attempt.to_string();
+        let sink = sink.unwrap_or_else(|| Arc::new(StdoutSink));
+        let pumps = vec![
+            pump_pipe(stdout, attempt.clone(), sink.clone(), log_path),
+            pump_pipe(stderr, attempt, sink, log_path),
+        ];
+        Ok((child, pumps))
+    }
+}
+
+/// Relay one child pipe on a task of its own.
+fn pump_pipe(
+    stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    attempt: String,
+    sink: Arc<dyn Sink>,
+    log_path: Option<&Path>,
+) -> tokio::task::JoinHandle<()> {
+    let log = open_log(log_path);
+    tokio::spawn(async move {
+        let mut log = log;
+        pump_prefixed(stream, &attempt, sink.as_ref(), log.as_mut()).await;
+    })
 }
 
 /// Spawn the child and take its piped streams, without starting any pumps.
@@ -832,8 +919,12 @@ fn spawn_child_pipes(
 
 /// Await every pump to completion, so the child's output is fully relayed
 /// before the caller moves on. Handles that were aborted resolve immediately.
-pub async fn drain_pumps(pumps: Vec<tokio::task::JoinHandle<()>>) {
-    for pump in pumps {
+///
+/// The handles are borrowed rather than consumed: a caller dropped mid-drain
+/// still holds them, so it can abort the pumps on the way out instead of
+/// detaching tasks that keep the child's pipes open.
+pub async fn drain_pumps(pumps: &mut [tokio::task::JoinHandle<()>]) {
+    for pump in pumps.iter_mut() {
         let _ = pump.await;
     }
 }
@@ -886,7 +977,14 @@ pub async fn wait_child_proc(
 
     match tokio::time::timeout(budget, child.wait()).await {
         Ok(Ok(status)) => Ok(status),
-        Ok(Err(err)) => Err(io_error(err)),
+        Ok(Err(err)) => {
+            // The wait failed, so nothing has collected the child. Leaving it
+            // unreaped would strand a running process — `kill_on_drop` only
+            // *requests* the kill and does not wait — so tear it down the same
+            // way a timeout does before reporting the failure.
+            terminate_and_reap(child).await;
+            Err(io_error(err))
+        }
         Err(_elapsed) => {
             terminate_and_reap(child).await;
             Err(timeout_error())
@@ -963,8 +1061,8 @@ impl std::error::Error for WaitChildError {
     }
 }
 
-/// Relay one child pipe to stdout and `log_file`, prefixing each stdout record
-/// with `[prefix]`.
+/// Relay one child pipe to `stdout` and `log_file`, prefixing each record with
+/// `[prefix] `.
 ///
 /// Reads in [`PUMP_CHUNK`] chunks and carries only the trailing partial record
 /// across reads, so the prefix is never inserted mid-line. The remainder is
@@ -974,8 +1072,8 @@ impl std::error::Error for WaitChildError {
 pub(crate) async fn pump_prefixed(
     mut stream: impl tokio::io::AsyncRead + Unpin,
     prefix: &str,
-    mut stdout: impl std::io::Write,
-    mut log_file: Option<&mut (dyn std::io::Write + Send)>,
+    stdout: &dyn Sink,
+    mut log_file: Option<&mut std::fs::File>,
 ) {
     let mut decoder = Utf8Decoder::default();
     let mut pending = String::new();
@@ -985,7 +1083,7 @@ pub(crate) async fn pump_prefixed(
         let read = match stream.read(&mut buf).await {
             Ok(0) => {
                 pending.push_str(&decoder.decode(&[], true));
-                emit_tail(prefix, pending, &mut stdout, &mut log_file);
+                emit_tail(prefix, pending, stdout, log_file.as_deref_mut());
                 return;
             }
             Ok(n) => n,
@@ -996,11 +1094,11 @@ pub(crate) async fn pump_prefixed(
         pending.push_str(&decoder.decode(&buf[..read], false));
 
         for record in drain_records(&mut pending) {
-            emit_prefixed(prefix, &record, &mut stdout, &mut log_file);
+            emit_prefixed(prefix, &record, stdout, log_file.as_deref_mut());
         }
         if pending.len() > MAX_PENDING_BYTES {
             let record = format!("{}\n", std::mem::take(&mut pending));
-            emit_prefixed(prefix, &record, &mut stdout, &mut log_file);
+            emit_prefixed(prefix, &record, stdout, log_file.as_deref_mut());
         }
     }
 }
@@ -1010,8 +1108,8 @@ pub(crate) async fn pump_prefixed(
 fn emit_tail(
     prefix: &str,
     pending: String,
-    stdout: &mut impl std::io::Write,
-    log_file: &mut Option<&mut (dyn std::io::Write + Send)>,
+    stdout: &dyn Sink,
+    log_file: Option<&mut std::fs::File>,
 ) {
     if pending.is_empty() {
         return;
@@ -1023,22 +1121,33 @@ fn emit_tail(
     }
 }
 
-/// Write one prefixed record to stdout and, when configured, the log.
+/// Re-emit one whole record: prefixed to the sink, raw to the log.
 ///
-/// Failures on either sink are swallowed: a broken pipe must not kill the pump
-/// and strand the child.
+/// Failures on either receiver are swallowed: a broken pipe or log must not kill
+/// the pump and strand the child.
+///
+/// The record is handed over whole rather than assembled in place, in one call
+/// per receiver. [`Sink`] is the funnel for the prefixed copy — several pumps
+/// share one sink — and the log is one `write_all` so a record that straddles the
+/// `[prefix] ` label cannot be split by a short write, nor stranded if a later
+/// write fails.
 fn emit_prefixed(
     prefix: &str,
     record: &str,
-    stdout: &mut impl std::io::Write,
-    log_file: &mut Option<&mut (dyn std::io::Write + Send)>,
+    stdout: &dyn Sink,
+    log_file: Option<&mut std::fs::File>,
 ) {
-    let _ = write!(stdout, "[{prefix}] {record}");
-    let _ = stdout.flush();
-    if let Some(sink) = log_file.as_deref_mut() {
-        let _ = sink.write_all(record.as_bytes());
-        let _ = sink.flush();
+    let _ = stdout.write(&format!("[{prefix}] {record}"));
+    if let Some(file) = log_file {
+        let _ = append(file, record.as_bytes());
     }
+}
+
+/// Append `bytes` to `file` and flush, so a reader tailing the log sees the
+/// record as soon as it is relayed.
+fn append(file: &mut std::fs::File, bytes: &[u8]) -> io::Result<()> {
+    file.write_all(bytes)?;
+    file.flush()
 }
 
 /// Move every complete record out of `pending`, leaving only the unterminated
@@ -1133,6 +1242,7 @@ impl Utf8Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn test_run_ok_success() {
@@ -2002,38 +2112,42 @@ mod tests {
     // -- pump_prefixed tests --
 
     /// Feed `chunks` through a duplex pipe, then run the pump and return the
-    /// prefixed stdout it produced and the raw records it wrote to its log.
-    async fn pump(chunks: &[&[u8]], prefix: &str) -> (String, Vec<u8>) {
+    /// prefixed records it produced and the raw records it wrote to its log.
+    async fn pump(chunks: &[&[u8]], prefix: &str) -> (Vec<String>, Vec<u8>) {
+        use std::io::{Seek, SeekFrom};
         use tokio::io::AsyncWriteExt;
         let (mut writer, reader) = tokio::io::duplex(MAX_PENDING_BYTES * 2);
         for chunk in chunks {
             writer.write_all(chunk).await.unwrap();
         }
         drop(writer);
-        let mut stdout = Vec::new();
-        let mut log = Vec::new();
-        pump_prefixed(reader, prefix, &mut stdout, Some(&mut log)).await;
-        (String::from_utf8(stdout).unwrap(), log)
+        let inner = RecordingSink::new();
+        let mut log = tempfile::tempfile().unwrap();
+        pump_prefixed(reader, prefix, inner.as_ref(), Some(&mut log)).await;
+        let mut raw = Vec::new();
+        log.seek(SeekFrom::Start(0)).unwrap();
+        log.read_to_end(&mut raw).unwrap();
+        (inner.writes(), raw)
     }
 
     #[tokio::test]
     async fn test_pump_prefixed_basic() {
         let (stdout, log) = pump(&[b"one\ntwo\n"], "p").await;
-        assert_eq!(stdout, "[p] one\n[p] two\n");
+        assert_eq!(stdout, ["[p] one\n", "[p] two\n"]);
         assert_eq!(log, b"one\ntwo\n");
     }
 
     #[tokio::test]
     async fn test_pump_prefixed_partial_line_flushed_at_eof() {
         let (stdout, log) = pump(&[b"no newline"], "p").await;
-        assert_eq!(stdout, "[p] no newline\n");
+        assert_eq!(stdout, ["[p] no newline\n"]);
         assert_eq!(log, b"no newline\n");
     }
 
     #[tokio::test]
     async fn test_pump_prefixed_crlf_is_one_record() {
         let (stdout, log) = pump(&[b"one\rtwo\r\n"], "p").await;
-        assert_eq!(stdout, "[p] one\r[p] two\r\n");
+        assert_eq!(stdout, ["[p] one\r", "[p] two\r\n"]);
         assert_eq!(log, b"one\rtwo\r\n");
     }
 
@@ -2042,21 +2156,21 @@ mod tests {
         // The `\r` must not be emitted on its own: it is the first half of a
         // CRLF split across the read boundary.
         let (stdout, log) = pump(&[b"one\r", b"\ntwo\n"], "p").await;
-        assert_eq!(stdout, "[p] one\r\n[p] two\n");
+        assert_eq!(stdout, ["[p] one\r\n", "[p] two\n"]);
         assert_eq!(log, b"one\r\ntwo\n");
     }
 
     #[tokio::test]
     async fn test_pump_prefixed_flushes_bare_cr_at_eof() {
         let (stdout, log) = pump(&[b"one\r"], "p").await;
-        assert_eq!(stdout, "[p] one\r");
+        assert_eq!(stdout, ["[p] one\r"]);
         assert_eq!(log, b"one\r");
     }
 
     #[tokio::test]
     async fn test_pump_prefixed_joins_multibyte_across_reads() {
         let (stdout, log) = pump(&[b"caf\xc3", b"\xa9\n"], "p").await;
-        assert_eq!(stdout, "[p] caf\u{e9}\n");
+        assert_eq!(stdout, ["[p] caf\u{e9}\n"]);
         assert_eq!(log, "caf\u{e9}\n".as_bytes());
     }
 
@@ -2067,7 +2181,7 @@ mod tests {
         assert_eq!(log.len(), blob.len() + 1);
         assert_eq!(&log[..blob.len()], blob.as_slice());
         assert_eq!(log[blob.len()], b'\n');
-        assert_eq!(stdout.len(), blob.len() + 1 + "[p] ".len());
+        assert_eq!(stdout, [format!("[p] {}\n", "x".repeat(blob.len()))]);
     }
 
     #[test]
@@ -2130,16 +2244,48 @@ mod tests {
 
     // -- spawn_with_pumps / wait_child_proc tests --
 
+    /// A [`Sink`] that keeps every record it is handed.
+    ///
+    /// The records stay separate, so a test can assert exactly how the pump
+    /// framed its output — and, together with the log, that the two receivers
+    /// saw the same records in the same order.
+    #[derive(Default)]
+    struct RecordingSink {
+        writes: Mutex<Vec<String>>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        fn writes(&self) -> Vec<String> {
+            self.writes.lock().unwrap().clone()
+        }
+    }
+
+    impl Sink for RecordingSink {
+        fn write(&self, record: &str) -> io::Result<()> {
+            self.writes.lock().unwrap().push(record.to_string());
+            Ok(())
+        }
+    }
+
     #[tokio::test]
-    async fn test_spawn_with_pumps_relays_output() {
+    async fn test_pumps_relays_prefixed_records_to_the_sink() {
         // `echo` stands in for the interpreter: it prints its argv and exits.
-        let (mut child, pumps) =
-            spawn_with_pumps("echo", Path::new("/tmp/spec.json"), "attempt", None)
-                .await
-                .unwrap();
-        drain_pumps(pumps).await;
-        let status = child.wait().await.unwrap();
-        assert!(status.success());
+        let sink = RecordingSink::new();
+        let (mut child, mut pumps) = Pumps::new("echo", Path::new("/tmp/spec.json"), "attempt")
+            .sink(sink.clone())
+            .spawn()
+            .await
+            .unwrap();
+        drain_pumps(&mut pumps).await;
+        assert!(child.wait().await.unwrap().success());
+        assert_eq!(
+            sink.writes(),
+            vec!["[attempt] -m gremlins.spawn.child /tmp/spec.json\n"]
+        );
     }
 
     /// A child that will not exit on its own, for exercising the timeout paths.

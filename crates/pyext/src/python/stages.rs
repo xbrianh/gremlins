@@ -3146,6 +3146,35 @@ async fn run_child_subprocess(
     }
 }
 
+/// The relay [`proc::Sink`] the parallel children write through: Python's
+/// `sys.stdout`, exactly as the Python pump did.
+///
+/// Routing through the Python object rather than the OS handle is what keeps
+/// `contextlib.redirect_stdout`, pytest capture, and any host-provided stream
+/// working across the Rust pump.
+///
+/// `sys.stdout` is looked up per record rather than cached, so a stream that is
+/// swapped out mid-run is honoured, and each record is written and flushed in
+/// one call — so the GIL is held for exactly one stream operation.
+struct PythonStdout;
+
+impl proc::Sink for PythonStdout {
+    fn write(&self, record: &str) -> std::io::Result<()> {
+        // `try_attach` rather than `attach`: a pump can still be relaying as the
+        // interpreter winds down, and a record that cannot be written must be
+        // dropped rather than panicked on — the child's exit status, not its
+        // log, decides the outcome of the run.
+        Python::try_attach(|py| -> PyResult<()> {
+            let stdout = py.import("sys")?.getattr("stdout")?;
+            stdout.call_method1("write", (record,))?;
+            stdout.call_method0("flush")?;
+            Ok(())
+        })
+        .unwrap_or(Ok(()))
+        .map_err(|err| std::io::Error::other(err.to_string()))
+    }
+}
+
 /// Drive one child's process lifecycle on the Tokio runtime.
 ///
 /// Returns the child's Python-style returncode, or an error message when the
@@ -3158,23 +3187,30 @@ async fn run_child_lifecycle(
     log_path: Option<PathBuf>,
     child_key: String,
 ) -> Result<Option<i32>, String> {
-    let (child, pumps) =
-        proc::spawn_with_pumps(&python_exe, &spec_path, &attempt, log_path.as_deref())
-            .await
-            .map_err(|err| err.to_string())?;
+    let (child, pumps) = proc::Pumps::new(&python_exe, &spec_path, &attempt)
+        .log(log_path.as_deref())
+        .sink(Arc::new(PythonStdout))
+        .spawn()
+        .await
+        .map_err(|err| err.to_string())?;
     // If this task is dropped (asyncio cancellation), the explicit cleanup below
     // never runs; `ChildGuard` closes that gap.
     let mut guard = ChildGuard::new(child, pumps);
 
     let wait_result = proc::wait_child_proc(guard.child_mut(), timeout_s, &child_key).await;
-    // The wait is settled, so the child's fate is decided: disarm before
-    // retiring the pumps, or a cancellation during the drain would tear down a
-    // child this lifecycle is about to report on.
-    guard.disarm();
     // A completed child has closed its pipes, so draining relays every byte it
     // wrote; after a failed wait the pipes may still be held open by an
     // unterminated descendant, so the pumps are aborted instead of awaited.
     guard.retire_pumps(wait_result.is_err()).await;
+    // Only now that the pumps are retired is the guard stood down. Disarming
+    // earlier would let a cancellation during the drain skip the abort and
+    // detach the pumps, leaving them — and the child's pipes and log
+    // descriptors — open for as long as a descendant held them.
+    //
+    // The wait has already settled, so the child is reaped or has been torn down
+    // by `wait_child_proc`: standing down here can no longer abandon a child
+    // this lifecycle is about to report on.
+    guard.disarm();
     let returncode = match &wait_result {
         Ok(status) => Some(proc::exit_code(status)),
         Err(_) => None,
@@ -3258,11 +3294,16 @@ impl ChildGuard {
     /// no output. A failed wait leaves the possibility that a descendant still
     /// holds the pipes open; aborting there keeps the run from hanging on output
     /// that will never end.
+    ///
+    /// The guard stays armed throughout. Draining is a cancellation point, and
+    /// if this lifecycle is dropped mid-drain the pumps must still be aborted on
+    /// the way out — a detached pump task would keep the child's pipes, and its
+    /// log descriptors, open for as long as the descendant did.
     async fn retire_pumps(&mut self, wait_failed: bool) {
         if wait_failed {
             self.abort_pumps();
         }
-        proc::drain_pumps(std::mem::take(&mut self.pumps)).await;
+        proc::drain_pumps(&mut self.pumps).await;
     }
 
     /// Cancel the pumps, dropping their reads on the child's pipes.

@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 import signal
 import stat
 import sys
@@ -256,6 +257,33 @@ def test_large_stderr_drains_without_deadlock(
     parallel = _run_one(tmp_path, stage, state)
 
     asyncio.run(parallel())  # type: ignore[operator]  # must not hang or raise
+
+
+def test_child_output_is_relayed_through_python_stdout(
+    tmp_path: pathlib.Path,
+    fake_child: pathlib.Path,
+    child_plan: Callable[[dict[str, Any]], None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The pump relays each child record to Python's ``sys.stdout``, prefixed.
+
+    The sink is the Python stream object, not the OS handle, so
+    ``contextlib.redirect_stdout`` and pytest capture both still see the output
+    — the contract the Python ``proc`` pump had before the port.
+    """
+    child_plan({"child-a": {"stdout": "hello from the child\n"}})
+    stage = _child_stage("child-a")
+    state = _child_state(tmp_path / "child-a")
+    parallel = _run_one(tmp_path, stage, state)
+
+    asyncio.run(parallel())  # type: ignore[operator]
+
+    # The prefix is the child's attempt label: ``<child key>-<4 random bytes>``.
+    assert re.search(
+        r"^\[child-a-[0-9a-f]{8}\] hello from the child$",
+        capsys.readouterr().out,
+        re.MULTILINE,
+    )
 
 
 def _process_alive(pid: int) -> bool:
