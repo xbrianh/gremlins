@@ -376,7 +376,8 @@ mod tests {
             Arc::new(move |spec: &str| {
                 served.lock().unwrap().push(spec.to_string());
                 // Only serve "openai" provider.
-                spec.strip_prefix("openai:").map(|model| format!("built:{model}"))
+                spec.strip_prefix("openai:")
+                    .map(|model| format!("built:{model}"))
             })
         };
         let selector = TaskModelSelector::new(
