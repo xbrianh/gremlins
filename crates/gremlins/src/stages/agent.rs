@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use thiserror::Error;
 
@@ -240,13 +241,9 @@ pub(crate) fn build_workspace_preamble(cwd: &str, worktree: Option<&str>) -> Str
 impl AgentPrepared {
     /// The harness system prompt — the full output of agent_system_prompt().
     pub fn system_prompt(&self) -> String {
-        let scratch =
-            crate::config::scratch_dir(None).unwrap_or_else(|| crate::config::scratch_root(None));
-        crate::config::agent_system_prompt(
-            &crate::config::work_root(),
-            &scratch,
-            &crate::config::project_root(),
-        )
+        let scratch = Path::new(&self.artifact_dir);
+        let cwd = Path::new(&self.cwd);
+        crate::clients::config::agent_system_prompt(cwd, scratch)
     }
 
     /// Workspace preamble + stage prompt (no harness system content).
