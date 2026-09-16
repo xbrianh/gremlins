@@ -11,6 +11,10 @@ use super::backend::{Backend, ClientError, RunParams};
 use super::protocol::CompletedRun;
 use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use super::stream;
+use super::task::TaskModelSelector;
+
+/// The completion model type shared by every OpenAI-compatible backend.
+pub(crate) type OpenAiModel = <openai::CompletionsClient as CompletionClient>::CompletionModel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiProvider {
@@ -49,6 +53,7 @@ impl OpenAiProvider {
 }
 
 pub struct OpenAiBackend {
+    provider: OpenAiProvider,
     client: openai::CompletionsClient,
     model: String,
     tool_filter: Option<Vec<String>>,
@@ -72,6 +77,7 @@ impl OpenAiBackend {
             model
         };
         Self {
+            provider,
             client,
             model,
             tool_filter,
@@ -118,6 +124,7 @@ impl OpenAiBackend {
             self.extra_params(),
             self.tool_filter.as_deref(),
             None, // default classifier
+            task_model_selector(&self.client, self.provider.name()),
         )
         .await
     }
@@ -133,10 +140,12 @@ pub(crate) async fn run_with_agent_loop(
     extra: Option<serde_json::Value>,
     tool_filter: Option<&[String]>,
     classify_error: Option<ErrorClassifier>,
+    task_model_selector: Option<TaskModelSelector<OpenAiModel>>,
 ) -> Result<CompletedRun, ClientError> {
     let model = client.completion_model(model_name);
     let mut ctx = ctx.clone();
     ctx.params.model = Some(model_name.to_string());
+
     run_agent_loop(
         &model,
         prompt,
@@ -147,8 +156,77 @@ pub(crate) async fn run_with_agent_loop(
             tool_filter,
             classify_error,
         },
+        task_model_selector,
     )
     .await
+}
+
+/// Build the `task-clients` selector for an OpenAI-compatible client, or `None`
+/// when `config.json` declares no entries this backend can serve.
+///
+/// The config is read once per run; the returned selector is shared behind an
+/// `Arc`, so each Task clones a pointer rather than the maps themselves. When
+/// nothing is configured the selector is `None` and the common path is free.
+pub(super) fn task_model_selector(
+    client: &openai::CompletionsClient,
+    provider_name: &str,
+) -> Option<TaskModelSelector<OpenAiModel>> {
+    let config = crate::config::global_config().ok()?;
+    let (exact, prefix) = config.task_clients();
+    if exact.is_empty() && prefix.is_empty() {
+        return None;
+    }
+
+    let client = client.clone();
+    let provider_name = provider_name.to_string();
+    TaskModelSelector::new(
+        exact.clone(),
+        prefix.clone(),
+        Arc::new(move |spec: &str| {
+            let (provider, model) = provider_and_model(spec)?;
+            if provider == provider_name {
+                Some(client.completion_model(model))
+            } else {
+                log::warn!(
+                    "task-clients entry spec {spec:?} names provider {provider:?}, but this \
+                     backend serves {provider_name:?} — falling back to parent model"
+                );
+                None
+            }
+        }),
+    )
+}
+
+/// Split a client specifier into `(provider, model)`, or `None` when the
+/// provider or model part is empty.
+///
+/// The provider is everything before the first `:`; the remainder is the model
+/// identifier.  A trailing `:k=v,...` parameter suffix (where the segment after
+/// the last `:` contains `=`) is stripped, so `openai:gpt-4o:foo=bar` yields
+/// `("openai", "gpt-4o")`.  OpenRouter model IDs that carry colon suffixes
+/// like `:free` or `:online` are preserved — `openrouter:some/model:free`
+/// yields `("openrouter", "some/model:free")`.
+fn provider_and_model(spec: &str) -> Option<(&str, &str)> {
+    let (provider, rest) = spec.split_once(':')?;
+    if provider.is_empty() || rest.is_empty() {
+        return None;
+    }
+    // Strip a trailing `:k=v,...` params suffix.  That suffix always contains
+    // `=` in the segment following the last colon.
+    let model = if let Some(colon_pos) = rest.rfind(':') {
+        let after_last_colon = &rest[colon_pos + 1..];
+        if after_last_colon.contains('=') {
+            &rest[..colon_pos]
+        } else {
+            rest
+        }
+    } else {
+        rest
+    };
+    if model.is_empty() {
+        return None;
+    }
+    Some((provider, model))
 }
 
 pub(crate) fn build_extra_params(
@@ -422,5 +500,46 @@ mod tests {
         backend.reap_all();
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());
+    }
+
+    #[test]
+    fn provider_and_model_plain() {
+        assert_eq!(
+            provider_and_model("openai:gpt-4o"),
+            Some(("openai", "gpt-4o"))
+        );
+    }
+
+    #[test]
+    fn provider_and_model_strips_params_suffix() {
+        assert_eq!(
+            provider_and_model("openai:gpt-4o:foo=bar"),
+            Some(("openai", "gpt-4o"))
+        );
+        assert_eq!(
+            provider_and_model("openai:gpt-4o:top_p=0.7,n=3"),
+            Some(("openai", "gpt-4o"))
+        );
+    }
+
+    #[test]
+    fn provider_and_model_preserves_openrouter_colon_suffixes() {
+        // OpenRouter model IDs can contain `:free`, `:online`, etc.
+        assert_eq!(
+            provider_and_model("openrouter:anthropic/claude-sonnet-4:free"),
+            Some(("openrouter", "anthropic/claude-sonnet-4:free"))
+        );
+        assert_eq!(
+            provider_and_model("openrouter:google/gemini-2.5-flash:online"),
+            Some(("openrouter", "google/gemini-2.5-flash:online"))
+        );
+    }
+
+    #[test]
+    fn provider_and_model_rejects_empty_parts() {
+        assert_eq!(provider_and_model("only"), None);
+        assert_eq!(provider_and_model(":model"), None);
+        assert_eq!(provider_and_model("provider:"), None);
+        assert_eq!(provider_and_model(""), None);
     }
 }

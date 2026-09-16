@@ -98,6 +98,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     ctx: &RunContext,
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
+    task_model_selector: Option<super::task::TaskModelSelector<M>>,
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
     let extra_env = ctx.params.extra_env.clone();
@@ -171,6 +172,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     // Wire up the Task runner before entering the turn loop.
     let runner = super::task::make_task_runner(
         model.clone(),
+        task_model_selector,
         opts.tool_filter.map(|f| f.to_vec()),
         cancel.clone(),
         tool_ctx.clone(),
@@ -1000,6 +1002,7 @@ mod tests {
     use super::*;
     use http::StatusCode;
     use rig_core::message::UserContent;
+    use std::collections::HashMap;
 
     #[test]
     fn default_classifier() {
@@ -1196,7 +1199,7 @@ mod tests {
     async fn loop_idle_timeout_is_client_timeout() {
         let ctx = test_ctx(None, None);
         let cancel = CancelToken::new();
-        let err = run_agent_loop(&PendingModel, "hi", &ctx, cancel, loop_opts(None))
+        let err = run_agent_loop(&PendingModel, "hi", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap_err();
         assert!(matches!(err, ClientError::Timeout { .. }));
@@ -1240,7 +1243,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -1295,7 +1298,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "where am i", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "where am i", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         let events = result.events.unwrap();
@@ -1356,9 +1359,16 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let filter = vec!["Read".to_string()];
-        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(Some(&filter)))
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "write",
+            &ctx,
+            cancel,
+            loop_opts(Some(&filter)),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(!target.exists());
         let events = result.events.unwrap();
         let result_evt = events
@@ -1416,7 +1426,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
+        run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         let audit = dir.join("run.audit.jsonl");
@@ -1471,7 +1481,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "read both", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "read both", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("both read"));
@@ -1550,7 +1560,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "mix", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "mix", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
@@ -1622,7 +1632,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.params.system_prompt = Some("you are a harness".into());
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
@@ -1663,7 +1673,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
@@ -1715,7 +1725,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "read", &ctx, cancel, loop_opts(None))
+        run_agent_loop(&model, "read", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
 
@@ -1795,6 +1805,7 @@ mod tests {
             &ctx,
             CancelToken::new(),
             loop_opts(None),
+            None,
         )
         .await
         .unwrap();
@@ -1866,7 +1877,7 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
@@ -1909,7 +1920,7 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         // Returns normally — file is still missing (Python verify_produced catches it).
@@ -1953,7 +1964,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.completion_nudge_budget = 1;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "do it", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "do it", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         // Done succeeds; text is non-empty so it's the result.
@@ -2034,7 +2045,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         // File was written on the retry, not in the mixed turn.
@@ -2089,7 +2100,7 @@ mod tests {
         ctx.expected_artifact_paths = vec![];
         ctx.reminder_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None))
+        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("just text"));
@@ -2140,7 +2151,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "fan out", &ctx, cancel, loop_opts(None))
+        run_agent_loop(&model, "fan out", &ctx, cancel, loop_opts(None), None)
             .await
             .unwrap();
 
@@ -2175,5 +2186,107 @@ mod tests {
         assert_eq!(results.len(), over, "every call must get a result");
         let rejected = results.iter().filter(|r| r.contains("at most")).count();
         assert_eq!(rejected, 1, "only the call past the cap is rejected");
+    }
+
+    /// A `task-clients` entry matching the task's `description` must swap in the
+    /// model the factory builds, and nothing else about the Task call changes.
+    #[tokio::test]
+    async fn task_clients_override_selects_the_task_model() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let task_call = |id: &str| {
+            MockStreamEvent::tool_call(
+                id,
+                "Task",
+                serde_json::json!({"description": "Scout", "prompt": "look around"}),
+            )
+        };
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({"summary": summary}))
+        };
+
+        // The outer loop delegates once, then finishes.
+        let parent = MockCompletionModel::from_stream_turns([
+            vec![
+                task_call("t1"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                done_call("d1", "outer done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        // The overridden model is the one that actually answers the task.
+        let child = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("scout result"),
+            done_call("d2", "scout result"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+
+        let child_handle = child.clone();
+        let factory: super::super::task::TaskModelFactory<MockCompletionModel> =
+            Arc::new(move |spec: &str| {
+                assert_eq!(spec, "openai:mini", "factory receives the matched spec");
+                Some(child_handle.clone())
+            });
+
+        let selector = super::super::task::TaskModelSelector::new(
+            HashMap::from([("scout".to_string(), "openai:mini".to_string())]),
+            HashMap::new(),
+            factory,
+        )
+        .expect("a configured task-clients map yields a selector");
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+
+        run_agent_loop(
+            &parent,
+            "go",
+            &ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            Some(selector),
+        )
+        .await
+        .unwrap();
+
+        // The overridden model ran the task and its reply came back verbatim.
+        assert!(
+            !child.requests().is_empty(),
+            "the task-clients model must be the one that ran the Task"
+        );
+        let reqs = parent.requests();
+        let parent_history = &reqs.last().unwrap().chat_history;
+        let task_result = parent_history
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::ToolResult(r) => Some(
+                            r.content
+                                .iter()
+                                .filter_map(|rc| match rc {
+                                    rig_core::completion::message::ToolResultContent::Text(t) => {
+                                        Some(t.text.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<String>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .find(|t| t.contains("scout result"))
+            .expect("task result must reach the parent history");
+        assert!(
+            task_result.contains("# Scout"),
+            "task result should carry its description header, got: {task_result}"
+        );
     }
 }

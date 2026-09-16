@@ -8,10 +8,13 @@ use rig_core::providers::openai;
 
 use super::agent_loop::{CancelToken, ErrorClassifier, RunContext};
 use super::backend::{Backend, ClientError, RunParams};
-use super::openai_backend::{build_extra_params, run_with_agent_loop};
+use super::openai_backend::{build_extra_params, run_with_agent_loop, task_model_selector};
 use super::protocol::CompletedRun;
 use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use super::stream;
+
+/// Provider name this backend answers to, used to match `task-clients` specs.
+const PROVIDER_NAME: &str = "openrouter";
 
 const TRANSIENT_SUBSTRINGS: &[&str] = &[
     "capacity",
@@ -139,6 +142,7 @@ impl OpenRouterBackend {
             self.extra_params(),
             self.tool_filter.as_deref(),
             Some(classify),
+            task_model_selector(&self.client, PROVIDER_NAME),
         )
         .await
     }
