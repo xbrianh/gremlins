@@ -1653,7 +1653,7 @@ message to finish. The summary parameter briefly describes what you accomplished
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Short label for this task, used in logs and as the result header"
+                    "description": "Short label for this task, used in logs and as the result header. Known labels: Scout (codebase exploration)"
                 },
                 "prompt": {
                     "type": "string",

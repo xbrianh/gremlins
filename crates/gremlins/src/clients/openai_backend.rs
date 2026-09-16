@@ -134,9 +134,29 @@ pub(crate) async fn run_with_agent_loop(
     tool_filter: Option<&[String]>,
     classify_error: Option<ErrorClassifier>,
 ) -> Result<CompletedRun, ClientError> {
+    type M = <openai::CompletionsClient as CompletionClient>::CompletionModel;
     let model = client.completion_model(model_name);
     let mut ctx = ctx.clone();
     ctx.params.model = Some(model_name.to_string());
+
+    // Per-Task model overrides. Read once here so the closure the agent loop
+    // hands to each Task can build a model on demand. Skipped entirely when no
+    // `task-clients` entries exist, so the common path allocates nothing.
+    let (exact_task_clients, prefix_task_clients) = crate::config::global_config()
+        .map(|c| {
+            let (exact, prefix) = c.task_clients();
+            (exact.clone(), prefix.clone())
+        })
+        .unwrap_or_default();
+
+    let task_model_factory: Option<super::task::TaskModelFactory<M>> =
+        if exact_task_clients.is_empty() && prefix_task_clients.is_empty() {
+            None
+        } else {
+            let client = client.clone();
+            Some(Arc::new(move |name: &str| client.completion_model(name)))
+        };
+
     run_agent_loop(
         &model,
         prompt,
@@ -147,6 +167,9 @@ pub(crate) async fn run_with_agent_loop(
             tool_filter,
             classify_error,
         },
+        exact_task_clients,
+        prefix_task_clients,
+        task_model_factory,
     )
     .await
 }

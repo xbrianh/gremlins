@@ -105,6 +105,8 @@ pub struct Config {
     default_client: Option<String>,
     exact_stage_clients: HashMap<String, String>,
     prefix_stage_clients: HashMap<String, String>,
+    exact_task_clients: HashMap<String, String>,
+    prefix_task_clients: HashMap<String, String>,
     path_overrides: PathOverrides,
 }
 
@@ -129,6 +131,8 @@ impl Config {
 
         let (exact_stage_clients, prefix_stage_clients) = parse_stage_clients(&raw);
 
+        let (exact_task_clients, prefix_task_clients) = parse_task_clients(&raw);
+
         let path_overrides = raw
             .get("paths")
             .and_then(|v| v.as_object())
@@ -144,6 +148,8 @@ impl Config {
             default_client,
             exact_stage_clients,
             prefix_stage_clients,
+            exact_task_clients,
+            prefix_task_clients,
             path_overrides,
         })
     }
@@ -155,6 +161,16 @@ impl Config {
     /// Returns `(exact_map, prefix_map)` from `default-client-by-stage`.
     pub fn default_client_by_stage(&self) -> (&HashMap<String, String>, &HashMap<String, String>) {
         (&self.exact_stage_clients, &self.prefix_stage_clients)
+    }
+
+    /// Returns `(exact_map, prefix_map)` from `task-clients`.
+    ///
+    /// Exact-map keys are matched by equality; prefix-map keys by
+    /// `description.starts_with(prefix)`, longest prefix winning. All matching
+    /// is case-insensitive: map keys are lowercased at parse time and the
+    /// caller lowercases the `description` it looks up.
+    pub fn task_clients(&self) -> (&HashMap<String, String>, &HashMap<String, String>) {
+        (&self.exact_task_clients, &self.prefix_task_clients)
     }
 
     pub fn raw(&self) -> &HashMap<String, Value> {
@@ -212,6 +228,52 @@ fn parse_stage_clients(
             prefix.insert(p.to_string(), val_str.to_string());
         } else {
             exact.insert(key.clone(), val_str.to_string());
+        }
+    }
+
+    (exact, prefix)
+}
+
+/// Parse the `task-clients` map, which overrides the model used by a Task tool
+/// invocation whose `description` matches a key.
+///
+/// Keys are lowercased here so lookup is case-insensitive; a key ending in `*`
+/// denotes a prefix match, anything else an exact match.
+fn parse_task_clients(
+    raw: &HashMap<String, Value>,
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let obj = match raw.get("task-clients").and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return (HashMap::new(), HashMap::new()),
+    };
+
+    let mut exact = HashMap::new();
+    let mut prefix = HashMap::new();
+
+    for (key, value) in obj {
+        let val_str = match value.as_str() {
+            Some(s) => s,
+            None => {
+                warn!(
+                    "config key {:?} in task-clients has non-string value {:?} — skipping",
+                    key, value
+                );
+                continue;
+            }
+        };
+
+        if let Some(p) = key.strip_suffix('*') {
+            if p.is_empty() {
+                warn!(
+                    "config key {:?} in task-clients produces an empty prefix, \
+                     which would match every task — skipping",
+                    key
+                );
+                continue;
+            }
+            prefix.insert(p.to_lowercase(), val_str.to_string());
+        } else {
+            exact.insert(key.to_lowercase(), val_str.to_string());
         }
     }
 
@@ -669,6 +731,8 @@ mod tests {
                 .map(String::from),
             exact_stage_clients: HashMap::new(),
             prefix_stage_clients: HashMap::new(),
+            exact_task_clients: HashMap::new(),
+            prefix_task_clients: HashMap::new(),
             path_overrides: PathOverrides::default(),
         };
         assert_eq!(cfg.default_client(), Some("openai:gpt-4o"));
@@ -687,6 +751,8 @@ mod tests {
                 .map(String::from),
             exact_stage_clients: HashMap::new(),
             prefix_stage_clients: HashMap::new(),
+            exact_task_clients: HashMap::new(),
+            prefix_task_clients: HashMap::new(),
             path_overrides: PathOverrides::default(),
         };
         assert_eq!(cfg.default_client(), None);
@@ -741,6 +807,36 @@ mod tests {
         assert!(exact.is_empty());
         assert_eq!(prefix.len(), 1);
         assert_eq!(prefix.get("plan-").unwrap(), "openai:gpt-5");
+    }
+
+    #[test]
+    fn test_parse_task_clients() {
+        // Exact and prefix keys, both normalized to lowercase.
+        let raw: HashMap<String, Value> = serde_json::from_str(
+            r#"{"task-clients": {"Scout": "openai:gpt-4o-mini", "Implement*": "openai:gpt-4o"}}"#,
+        )
+        .unwrap();
+        let (exact, prefix) = parse_task_clients(&raw);
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact.get("scout").unwrap(), "openai:gpt-4o-mini");
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix.get("implement").unwrap(), "openai:gpt-4o");
+
+        // Non-string values and an empty prefix are dropped.
+        let raw: HashMap<String, Value> = serde_json::from_str(
+            r#"{"task-clients": {"bad": 42, "*": "openai:gpt-4o", "ok-*": "openai:gpt-5"}}"#,
+        )
+        .unwrap();
+        let (exact, prefix) = parse_task_clients(&raw);
+        assert!(exact.is_empty());
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix.get("ok-").unwrap(), "openai:gpt-5");
+
+        // Absent key yields empty maps.
+        let raw: HashMap<String, Value> =
+            serde_json::from_str(r#"{"default-client": "a:b"}"#).unwrap();
+        let (exact, prefix) = parse_task_clients(&raw);
+        assert!(exact.is_empty() && prefix.is_empty());
     }
 
     #[test]

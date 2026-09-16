@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -6,6 +7,11 @@ use rig_core::completion::CompletionModel;
 use super::tools::{self, ToolContext};
 
 const MAX_DEPTH: u32 = 3;
+
+/// Builds the model named by a matching `task-clients` entry, for use by one
+/// Task invocation. `None` at the call site means "no `task-clients` configured",
+/// so every task keeps the parent's model.
+pub(crate) type TaskModelFactory<M> = Arc<dyn Fn(&str) -> M + Send + Sync>;
 
 /// Per-process monotonic source of task id segments. A clock-derived value
 /// cannot separate siblings spawned microseconds apart, and duplicate segments
@@ -40,10 +46,45 @@ fn task_prefix(base: &str, chain: &str) -> String {
     format!("{base}[task.{chain}] ")
 }
 
+/// Resolve the model for one Task invocation. Matching is case-insensitive:
+/// the `description` is lowercased before lookup, and map keys were lowercased
+/// at parse time.
+///
+/// An exact key wins over any prefix; among matching prefixes the longest wins.
+/// Returns the default `model` when nothing matches, or when no factory is set
+/// to build the overridden model.
+fn resolve_task_model<M: Clone>(
+    description: &str,
+    default_model: &M,
+    exact_map: &HashMap<String, String>,
+    prefix_map: &HashMap<String, String>,
+    factory: Option<&(dyn Fn(&str) -> M + Send + Sync)>,
+) -> M {
+    let desc_lower = description.to_lowercase();
+    let spec = if let Some(s) = exact_map.get(&desc_lower) {
+        Some(s.as_str())
+    } else {
+        prefix_map
+            .iter()
+            .filter(|(prefix, _)| desc_lower.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())
+            .map(|(_, spec)| spec.as_str())
+    };
+
+    match (spec, factory) {
+        (Some(spec), Some(f)) => f(spec),
+        _ => default_model.clone(),
+    }
+}
+
 /// Build a task runner closure. Called once per backend before the agent loop.
 /// The returned closure captures the model, tool filter, cancel token,
 /// context prefix, and the original `ToolContext` — everything needed to run
 /// a nested agent loop.
+///
+/// `exact_task_clients` / `prefix_task_clients` describe the `task-clients`
+/// config map, and `task_model_factory` builds the model named by a matching
+/// entry. Each invocation resolves its own model from its own `description`.
 ///
 /// Recursive tasks are supported and bounded by `MAX_DEPTH`. Depth is a
 /// true per-call-chain recursion bound, not a concurrency cap: each invocation
@@ -53,6 +94,9 @@ fn task_prefix(base: &str, chain: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: M,
+    exact_task_clients: HashMap<String, String>,
+    prefix_task_clients: HashMap<String, String>,
+    task_model_factory: Option<TaskModelFactory<M>>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -63,6 +107,9 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
+        exact_task_clients,
+        prefix_task_clients,
+        task_model_factory,
         tool_filter,
         cancel,
         ctx,
@@ -78,6 +125,9 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
 #[allow(clippy::too_many_arguments)]
 fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: M,
+    exact_task_clients: HashMap<String, String>,
+    prefix_task_clients: HashMap<String, String>,
+    task_model_factory: Option<TaskModelFactory<M>>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -90,6 +140,9 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
 ) -> tools::TaskFn {
     Arc::new(move |description: String, task: String| {
         let model = model.clone();
+        let exact_task_clients = exact_task_clients.clone();
+        let prefix_task_clients = prefix_task_clients.clone();
+        let task_model_factory = task_model_factory.clone();
         let tool_filter = tool_filter.clone();
         let cancel = cancel.clone();
         let mut child_ctx = ctx.clone();
@@ -101,6 +154,14 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 return format!("Error: task max depth ({MAX_DEPTH}) exceeded");
             }
 
+            let selected_model = resolve_task_model(
+                &description,
+                &model,
+                &exact_task_clients,
+                &prefix_task_clients,
+                task_model_factory.as_deref(),
+            );
+
             let new_chain = child_chain(&id_chain);
             let child_prefix = task_prefix(&prefix, &new_chain);
 
@@ -110,7 +171,10 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
             // stack across nesting levels — each level appends its own id
             // segment to the chain instead.
             child_ctx.task_fn = Some(make_task_runner_at_depth(
-                model.clone(),
+                selected_model.clone(),
+                exact_task_clients.clone(),
+                prefix_task_clients.clone(),
+                task_model_factory.clone(),
                 tool_filter.clone(),
                 cancel.clone(),
                 child_ctx.clone(),
@@ -131,7 +195,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
             ));
 
             let result = crate::clients::agent_loop::run_agent_loop_nested(
-                &model,
+                &selected_model,
                 &task,
                 system_prompt,
                 &child_ctx,
@@ -208,6 +272,45 @@ mod tests {
         assert_eq!(segs.len(), 1000, "sibling segments must be distinct");
     }
 
+    #[test]
+    fn resolve_task_model_selects_by_description() {
+        let exact: HashMap<String, String> =
+            HashMap::from([("scout".into(), "openai:mini".into())]);
+        let prefix: HashMap<String, String> = HashMap::from([
+            ("sc".into(), "openai:sc".into()),
+            ("impl".into(), "openai:short".into()),
+            ("implement".into(), "openai:gpt-4o".into()),
+        ]);
+        let factory = |spec: &str| spec.to_string();
+        let f: Option<&(dyn Fn(&str) -> String + Send + Sync)> = Some(&factory);
+        let default = "openai:default".to_string();
+
+        // Exact match takes priority over a matching prefix, and the lookup
+        // lowercases the description so the key's case doesn't matter.
+        assert_eq!(
+            resolve_task_model("Scout", &default, &exact, &prefix, f),
+            "openai:mini"
+        );
+
+        // Prefix match is case-insensitive and the longest prefix wins.
+        assert_eq!(
+            resolve_task_model("Implementation of x", &default, &exact, &prefix, f),
+            "openai:gpt-4o"
+        );
+
+        // Nothing matches — the default model stands.
+        assert_eq!(
+            resolve_task_model("review", &default, &exact, &prefix, f),
+            default
+        );
+
+        // A spec matches, but with no factory there is nothing to build it.
+        assert_eq!(
+            resolve_task_model("Scout", &default, &exact, &prefix, None),
+            default
+        );
+    }
+
     fn depth_test_ctx() -> ToolContext {
         let dir = std::env::temp_dir().join(format!(
             "gremlins-sub-depth-{}-{}",
@@ -240,7 +343,19 @@ mod tests {
         ]]);
 
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_task_runner(model.clone(), None, cancel, ctx, String::new(), 5.0, 10, 0);
+        let runner = make_task_runner(
+            model.clone(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            5.0,
+            10,
+            0,
+        );
 
         // First invocation: depth 0 < 3, should succeed.
         let output = runner("label".into(), "first call".into()).await;
@@ -308,7 +423,19 @@ mod tests {
         // Hangs forever so all siblings overlap in time.
         let model = PendingModel;
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_task_runner(model, None, cancel, ctx, String::new(), 0.2, 10, 0);
+        let runner = make_task_runner(
+            model,
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            0.2,
+            10,
+            0,
+        );
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
         // "max depth" even though they overlap in time.
@@ -333,6 +460,9 @@ mod tests {
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner_at_depth(
             model,
+            HashMap::new(),
+            HashMap::new(),
+            None,
             None,
             cancel,
             ctx,
@@ -497,6 +627,9 @@ mod tests {
         ) -> tools::TaskFn {
             make_task_runner(
                 rig_core::test_utils::MockCompletionModel::from_stream_turns(turns),
+                HashMap::new(),
+                HashMap::new(),
+                None,
                 None,
                 super::super::super::agent_loop::CancelToken::new(),
                 depth_test_ctx(),
