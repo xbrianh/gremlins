@@ -12,7 +12,7 @@ review / address pipelines, the fleet manager
 - `spawn/child.py` — `python -m gremlins.spawn.child <spec_path>`. Spawned by the parallel runner to run a single stage in a fresh process (lands with #690).
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap model subprocess children.
 - `state.py` — session-dir resolution, `set_stage` / `write_bail_file` / `patch_state`.
-- `utils/git.py` — `in_git_repo`, `head_sha`, branch / worktree helpers.
+- `utils/git.py` — `setup_workdir` / `stage_gremlins_overlay` (overlay staging around a worktree). The git operations themselves live in the native `_gremlins_core.utils.git` module.
 - `fleet/` — fleet manager package: status listing + `stop` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
 - `clients/protocol.py` — `CompletedRun` dataclass.
 - `clients/stream.py` — `stream_events` + `_emit_event` (stream-json parser and stderr renderer).
@@ -31,7 +31,7 @@ review / address pipelines, the fleet manager
 Before shelling out to `subprocess`, `git`, or `gh`, check `gremlins/utils/`:
 
 - `utils/proc.py` — `run`, `run_or_raise`, `run_async`, etc. Use instead of `subprocess.run`.
-- `utils/git.py` — `head_sha`, `current_branch`, worktree helpers, etc. Use instead of shelling `git` directly.
+- `utils/git.py` — `setup_workdir` / `stage_gremlins_overlay`. For git operations (`in_git_repo`, `head_sha`, `current_branch`, worktree helpers, …) import from `_gremlins_core.utils.git`. Use these instead of shelling `git` directly.
 
 GitHub calls belong in exec/shell stages (YAML `cmds:`), not in Python. Add reusable GitHub shell interactions to `gremlins/recipes/stages/` rather than Python. For non-GitHub helpers, add to `utils/` rather than duplicating subprocess plumbing in the consumer.
 

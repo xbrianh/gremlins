@@ -7,7 +7,7 @@ import os
 import pathlib
 import subprocess
 
-from gremlins.utils.git import remove_worktrees_async
+from _gremlins_core.utils.git import remove_worktrees_async
 
 
 def test_noop_outside_git_repo(tmp_path: pathlib.Path) -> None:

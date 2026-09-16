@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::stream::StreamExt;
+use gremlins::core::git;
 use gremlins::core::proc;
 use gremlins::executor::state as rust_state;
 use gremlins::stages::agent as rust_agent;
@@ -28,6 +29,7 @@ use crate::python::artifacts::{ArtifactRegistry, MissingArtifact};
 use crate::python::clients::Client;
 use crate::python::executor::{PyState, PyStateData};
 use crate::python::json_conv::{py_to_value as py_to_json, value_to_py as json_value_to_py};
+use crate::python::utils::git::on_runtime;
 use crate::schemas::loader;
 
 // Type alias for the future returned by into_future
@@ -3886,7 +3888,7 @@ fn remove_worktrees_blocking(project_root: &Path, paths: &[String]) {
     let _ = gremlins::core::proc::run_quiet(&prune, Some(project_root));
 }
 
-// --- git helpers (thin wrappers over the Rust proc layer) ---
+// --- git helpers (thin wrappers over the Rust git layer) ---
 
 /// Await a Python coroutine, bridging it onto the Tokio runtime.
 async fn await_py(coro: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -3894,77 +3896,39 @@ async fn await_py(coro: Py<PyAny>) -> PyResult<Py<PyAny>> {
     fut.await
 }
 
-/// Call an async function in `gremlins.utils.git` and await it.
-async fn call_git_async(
-    func: &str,
-    args: Vec<Py<PyAny>>,
-    kwargs: Vec<(&str, Py<PyAny>)>,
-) -> PyResult<Py<PyAny>> {
-    let coro = Python::attach(|py| {
-        let git = py.import("gremlins.utils.git")?;
-        let py_kwargs = PyDict::new(py);
-        for (k, v) in kwargs {
-            py_kwargs.set_item(k, v)?;
-        }
-        git.getattr(func)?
-            .call(PyTuple::new(py, args)?, Some(&py_kwargs))
-            .map(|c| c.unbind())
-    })?;
-    await_py(coro).await
-}
-
-fn py_str(py: Python<'_>, s: &str) -> Py<PyAny> {
-    PyString::new(py, s).into_any().unbind()
-}
-
 async fn in_git_repo(cwd: &Path) -> bool {
-    let cwd = cwd.to_string_lossy().to_string();
-    let result = Python::attach(|py| {
-        call_git_async("in_git_repo_async", vec![], vec![("cwd", py_str(py, &cwd))])
-    });
-    match result.await {
-        Ok(v) => Python::attach(|py| v.bind(py).extract::<bool>().unwrap_or(false)),
-        Err(_) => false,
-    }
+    let cwd = cwd.to_path_buf();
+    on_runtime(async move { Ok(git::in_git_repo_async(Some(&cwd)).await) })
+        .await
+        .unwrap_or(false)
 }
 
 async fn head_sha(cwd: &str) -> String {
-    let result = Python::attach(|py| {
-        call_git_async("head_sha_async", vec![], vec![("cwd", py_str(py, cwd))])
-    });
-    match result.await {
-        Ok(v) => Python::attach(|py| v.bind(py).extract::<String>().unwrap_or_default()),
-        Err(_) => String::new(),
-    }
+    let cwd = PathBuf::from(cwd);
+    on_runtime(async move { Ok(git::head_sha_async(Some(&cwd)).await) })
+        .await
+        .unwrap_or_default()
 }
 
+/// Prune stale worktree entries. No-op outside a repo.
 async fn prune_worktrees(project_root: &Path) {
-    if !in_git_repo(project_root).await {
-        return;
-    }
-    let root = project_root.to_string_lossy().to_string();
-    let result = Python::attach(|py| {
-        call_git_async("prune_worktrees_async", vec![py_str(py, &root)], vec![])
-    });
-    let _ = result.await;
+    let root = project_root.to_string_lossy().into_owned();
+    let _ = on_runtime(async move {
+        git::prune_worktrees_async(&root).await;
+        Ok(())
+    })
+    .await;
 }
 
+/// Remove worktrees in bulk and prune stale entries. No-op outside a repo.
 async fn remove_worktrees(project_root: &Path, paths: &[String]) {
-    if !in_git_repo(project_root).await {
-        return;
-    }
-    let root = project_root.to_string_lossy().to_string();
-    let result = Python::attach(|py| -> PyResult<_> {
-        let paths = PyList::new(py, paths)?;
-        Ok(call_git_async(
-            "remove_worktrees_async",
-            vec![py_str(py, &root), paths.into_any().unbind()],
-            vec![],
-        ))
-    });
-    if let Ok(fut) = result {
-        let _ = fut.await;
-    }
+    let root = project_root.to_string_lossy().into_owned();
+    let paths = paths.to_vec();
+    let _ = on_runtime(async move {
+        git::remove_worktrees_async(&root, &paths).await;
+        Ok(())
+    })
+    .await;
 }
 
 async fn setup_detached_worktree(
@@ -3972,26 +3936,17 @@ async fn setup_detached_worktree(
     base_ref: &str,
     worktree_parent: Option<&Path>,
 ) -> PyResult<String> {
-    let root = project_root.to_string_lossy().to_string();
+    let root = project_root.to_string_lossy().into_owned();
     let base = if base_ref.is_empty() {
-        "HEAD"
+        "HEAD".to_string()
     } else {
-        base_ref
+        base_ref.to_string()
     };
-    let parent = worktree_parent.map(|p| p.to_string_lossy().to_string());
-    let result = Python::attach(|py| {
-        let mut kwargs: Vec<(&str, Py<PyAny>)> = Vec::new();
-        if let Some(parent) = &parent {
-            kwargs.push(("worktree_parent", py_str(py, parent)));
-        }
-        call_git_async(
-            "setup_detached_worktree_async",
-            vec![py_str(py, &root), py_str(py, base)],
-            kwargs,
-        )
-    });
-    let value = result.await?;
-    Python::attach(|py| value.bind(py).extract::<String>())
+    let parent = worktree_parent.map(Path::to_path_buf);
+    on_runtime(async move {
+        git::setup_detached_worktree_async(&root, &base, false, parent.as_deref()).await
+    })
+    .await
 }
 
 // --- Test seams for the parallel helpers ---

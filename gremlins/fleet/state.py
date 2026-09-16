@@ -17,9 +17,9 @@ from _gremlins_core.config import (
 from _gremlins_core.config import (
     state_root as _state_root,
 )
+from _gremlins_core.utils import git as _git_mod
 
 import gremlins.fleet.constants as _constants
-from gremlins.utils import git as _git_mod
 
 
 def iso_to_epoch(iso: str) -> float | None:

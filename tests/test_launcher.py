@@ -18,12 +18,14 @@ import shutil
 import subprocess
 import time
 
+import _gremlins_core.utils.git as git_mod
 import pytest
+from _gremlins_core.utils.git import GitError
 from conftest import _init_git_repo
 from fixtures.shell_env import install_fake_bin
 
-import gremlins.utils.git as git_mod
 from gremlins.launcher import GremlinAlreadyRunning, GremlinStateDirExists
+from gremlins.utils.git import setup_workdir
 
 FAKE_GH = pathlib.Path(__file__).resolve().parent / "fixtures" / "fake_gh.py"
 
@@ -519,7 +521,7 @@ def test_write_terminal_state_preserves_worktree_for_gh(lenv, monkeypatch, tmp_p
 
     removed = []
     monkeypatch.setattr(
-        "gremlins.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
+        "_gremlins_core.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
     )
 
     state_dir = lenv.state_root / "test-gr-id-abc123"
@@ -543,7 +545,7 @@ def test_write_terminal_state_preserves_worktree_for_local(lenv, monkeypatch, tm
 
     removed = []
     monkeypatch.setattr(
-        "gremlins.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
+        "_gremlins_core.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
     )
 
     state_dir = lenv.state_root / "test-gr-id-def456"
@@ -568,7 +570,7 @@ def test_write_terminal_state_preserves_worktree_for_boss(lenv, monkeypatch, tmp
 
     removed = []
     monkeypatch.setattr(
-        "gremlins.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
+        "_gremlins_core.utils.git.remove_worktree", lambda root, wd: removed.append(wd)
     )
 
     state_dir = lenv.state_root / "test-gr-id-ghi789"
@@ -819,7 +821,7 @@ def test_setup_workdir_overlay_goes_to_state_dir(lenv):
     state_dir = lenv.state_root / gremlin_id
     state_dir.mkdir(parents=True)
 
-    workdir = git_mod.setup_workdir(str(lenv.repo), "HEAD", state_dir=state_dir)
+    workdir = setup_workdir(str(lenv.repo), "HEAD", state_dir=state_dir)
 
     try:
         assert (state_dir / ".gremlins" / "custom-local.yaml").exists()
@@ -871,7 +873,7 @@ def test_setup_workdir_detached_with_fetch(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
-    workdir = git_mod.setup_workdir(str(repo), feature, fetch=True, state_dir=state_dir)
+    workdir = setup_workdir(str(repo), feature, fetch=True, state_dir=state_dir)
     try:
         wt_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -892,8 +894,8 @@ def test_setup_workdir_non_git_raises(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
-    with pytest.raises(git_mod.GitError) as exc_info:
-        git_mod.setup_workdir(str(non_repo), "HEAD", state_dir=state_dir)
+    with pytest.raises(GitError) as exc_info:
+        setup_workdir(str(non_repo), "HEAD", state_dir=state_dir)
 
     assert exc_info.value.returncode == 128
     assert "is not a git repository" in exc_info.value.stderr

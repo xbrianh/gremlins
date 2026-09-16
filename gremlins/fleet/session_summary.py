@@ -24,9 +24,9 @@ from _gremlins_core.config import (
 from _gremlins_core.config import (
     state_root as _state_root,
 )
+from _gremlins_core.utils import git as _git_mod
 
 from gremlins.fleet.state import liveness_of_state_file, read_description_artifact
-from gremlins.utils import git as _git_mod
 
 
 def main(argv: list[str]) -> int:
