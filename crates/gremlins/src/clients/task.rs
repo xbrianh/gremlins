@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -182,6 +183,8 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
         let prefix = prefix.clone();
         let id_chain = id_chain.clone();
 
+        let task_cwd = ctx.cwd.clone();
+
         Box::pin(async move {
             if depth >= MAX_DEPTH {
                 return format!("Error: task max depth ({MAX_DEPTH}) exceeded");
@@ -218,10 +221,9 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
 
             let scratch = crate::config::scratch_dir(None)
                 .unwrap_or_else(|| crate::config::scratch_root(None));
-            let system_prompt = Some(crate::config::task_system_prompt(
-                &crate::config::work_root(),
-                &scratch,
-                &crate::config::project_root(),
+            let work_root = task_cwd.as_deref().unwrap_or(Path::new("."));
+            let system_prompt = Some(crate::clients::config::task_system_prompt(
+                work_root, &scratch, work_root,
             ));
 
             let result = crate::clients::agent_loop::run_agent_loop_nested(
