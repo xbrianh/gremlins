@@ -8,7 +8,7 @@
 //! and `f64` stays a `float`, never an `int`.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyList};
+use pyo3::types::{PyBool, PyDict, PyInt, PyList};
 
 use gremlins::core::discovery::DiscoveryError;
 
@@ -29,6 +29,14 @@ pub fn pyval_to_serde(obj: &Bound<'_, PyAny>) -> PyResult<serde_yaml::Value> {
         // After `i64`: a Python `int` in `(i64::MAX, u64::MAX]` is still an
         // integer, and must not be widened to a lossy float below.
         Ok(serde_yaml::Value::Number(serde_yaml::Number::from(u)))
+    } else if obj.is_instance_of::<PyInt>() {
+        // An integer too large for u64 would lose precision if widened to
+        // f64 (the next branch). Reject it explicitly rather than silently
+        // rounding.
+        Err(pyo3::exceptions::PyOverflowError::new_err(format!(
+            "integer {} exceeds u64::MAX and cannot be represented without loss",
+            obj
+        )))
     } else if let Ok(f) = obj.extract::<f64>() {
         // After the integer branches, so an `int` is never widened to a
         // float: `f64` extraction accepts integers too, and would otherwise
@@ -87,7 +95,14 @@ pub fn serde_to_pyval(py: Python<'_>, value: &serde_yaml::Value) -> PyResult<Py<
             for (k, v) in mapping {
                 let key = match k {
                     serde_yaml::Value::String(s) => s.clone(),
-                    other => format!("{other:?}"),
+                    serde_yaml::Value::Bool(b) => {
+                        if *b { "true" } else { "false" }.to_string()
+                    }
+                    serde_yaml::Value::Number(n) => n.to_string(),
+                    serde_yaml::Value::Null => "null".to_string(),
+                    other => serde_yaml::to_string(&other)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|_| format!("{other:?}")),
                 };
                 dict.set_item(key, serde_to_pyval(py, v)?)?;
             }
@@ -142,6 +157,24 @@ mod tests {
             assert_eq!(pyval.bind(py).extract::<u64>().unwrap(), big);
 
             assert_eq!(pyval_to_serde(pyval.bind(py)).unwrap(), source);
+        });
+    }
+
+    #[test]
+    fn oversized_int_is_rejected_not_rounded() {
+        Python::attach(|py| {
+            // 2**64 + 1 fits in f64 but rounds to 2**64 — must be rejected.
+            use std::ffi::CStr;
+            let big = py
+                .eval(
+                    CStr::from_bytes_with_nul(b"2**64 + 1\0").unwrap(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            let err = pyval_to_serde(&big).unwrap_err();
+            assert!(err.is_instance_of::<pyo3::exceptions::PyOverflowError>(py));
+            assert!(err.to_string().contains("18446744073709551617"));
         });
     }
 
