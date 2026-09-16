@@ -73,11 +73,8 @@ pub enum YamlIoError {
     #[error("bundled prompt is empty: {name}")]
     PromptEmpty { name: String },
 
-    /// Placeholder substitution in a bundled prompt failed.
-    ///
-    /// The [`str::replace`]-based renderer here cannot fail, so nothing
-    /// constructs this today; it is kept so the exception mapping stays total
-    /// and a future renderer that *can* fail has a variant to reach for.
+    /// Placeholder substitution in a bundled prompt failed: a `{key}` had no
+    /// matching keyword argument, or the template held a stray brace.
     #[error("render failed for bundled prompt {name}: {detail}")]
     PromptRender { name: String, detail: String },
 }
@@ -120,20 +117,62 @@ pub fn load_bundled_prompt(name: &str) -> Result<String, YamlIoError> {
 
 /// Load a bundled prompt and substitute `{key}` placeholders from `kwargs`.
 ///
-/// The Python original used `str.format(**kwargs)`, which understands format
-/// specs, attribute lookups, and positional indices. Every bundled prompt uses
-/// only plain `{key}` placeholders, so plain [`str::replace`] substitution is
-/// equivalent here and keeps a stray brace in prompt text from being parsed as
-/// markup.
+/// Substitution is a single left-to-right pass, so a value that happens to
+/// contain braces is copied through verbatim and never re-scanned as template
+/// syntax — the result does not depend on the iteration order of `kwargs`.
+/// This mirrors the `str.format(**kwargs)` the Python module used: a
+/// placeholder with no matching key is a [`YamlIoError::PromptRender`] failure
+/// rather than a silently-kept brace, and `{{` / `}}` are the literal-brace
+/// escapes.
 pub fn render_bundled_prompt(
     name: &str,
     kwargs: &HashMap<String, String>,
 ) -> Result<String, YamlIoError> {
-    let mut text = load_bundled_prompt(name)?;
-    for (key, value) in kwargs {
-        text = text.replace(&format!("{{{key}}}"), value);
+    let text = load_bundled_prompt(name)?;
+    render_placeholders(&text, kwargs).map_err(|detail| YamlIoError::PromptRender {
+        name: name.to_string(),
+        detail,
+    })
+}
+
+/// Substitute `{key}` placeholders in a single pass over `text`.
+///
+/// Returns a description of the offending construct on failure so the caller
+/// can name it in the [`YamlIoError::PromptRender`] message.
+fn render_placeholders(text: &str, kwargs: &HashMap<String, String>) -> Result<String, String> {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' if bytes.get(i + 1) == Some(&b'{') => {
+                out.push('{');
+                i += 2;
+            }
+            b'}' if bytes.get(i + 1) == Some(&b'}') => {
+                out.push('}');
+                i += 2;
+            }
+            b'{' => {
+                let close = text[i + 1..]
+                    .find('}')
+                    .ok_or_else(|| "unmatched '{' in prompt".to_string())?;
+                let key = &text[i + 1..i + 1 + close];
+                let value = kwargs
+                    .get(key)
+                    .ok_or_else(|| format!("missing placeholder {{{key}}}"))?;
+                out.push_str(value);
+                i += close + 2;
+            }
+            b'}' => return Err("single '}' in prompt".to_string()),
+            _ => {
+                let ch = text[i..].chars().next().expect("index is a char boundary");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
     }
-    Ok(text)
+    Ok(out)
 }
 
 fn parse_mapping(text: &str, label: &str) -> Result<serde_yaml::Value, YamlIoError> {
@@ -282,6 +321,39 @@ mod tests {
         assert!(rendered.contains("hello"));
         assert!(!rendered.contains("{state_json}"));
         assert!(!rendered.contains("{log_text}"));
+    }
+
+    #[test]
+    fn render_does_not_rescan_substituted_values() {
+        // A value that itself looks like a placeholder must survive verbatim,
+        // regardless of the order the map yields its entries.
+        let kwargs = HashMap::from([
+            ("a".to_string(), "{b}".to_string()),
+            ("b".to_string(), "clobbered".to_string()),
+        ]);
+
+        assert_eq!(render_placeholders("{a}", &kwargs).unwrap(), "{b}");
+    }
+
+    #[test]
+    fn render_rejects_a_missing_placeholder() {
+        let error = render_bundled_prompt("analyze.md", &HashMap::new()).unwrap_err();
+
+        assert!(matches!(error, YamlIoError::PromptRender { .. }));
+        assert!(error.to_string().contains("missing placeholder"));
+    }
+
+    #[test]
+    fn render_unescapes_doubled_braces() {
+        let rendered = render_placeholders("a {{b}} c", &HashMap::new()).unwrap();
+
+        assert_eq!(rendered, "a {b} c");
+    }
+
+    #[test]
+    fn render_rejects_a_stray_brace() {
+        assert!(render_placeholders("a } b", &HashMap::new()).is_err());
+        assert!(render_placeholders("a { b", &HashMap::new()).is_err());
     }
 
     fn load_labeled(text: &str) -> YamlIoError {

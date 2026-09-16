@@ -25,9 +25,14 @@ pub fn pyval_to_serde(obj: &Bound<'_, PyAny>) -> PyResult<serde_yaml::Value> {
         Ok(serde_yaml::Value::Bool(b))
     } else if let Ok(i) = obj.extract::<i64>() {
         Ok(serde_yaml::Value::Number(serde_yaml::Number::from(i)))
+    } else if let Ok(u) = obj.extract::<u64>() {
+        // After `i64`: a Python `int` in `(i64::MAX, u64::MAX]` is still an
+        // integer, and must not be widened to a lossy float below.
+        Ok(serde_yaml::Value::Number(serde_yaml::Number::from(u)))
     } else if let Ok(f) = obj.extract::<f64>() {
-        // After `i64`, so an `int` is never widened to a float: `f64`
-        // extraction accepts integers too, and would otherwise swallow them.
+        // After the integer branches, so an `int` is never widened to a
+        // float: `f64` extraction accepts integers too, and would otherwise
+        // swallow them.
         Ok(serde_yaml::Value::Number(serde_yaml::Number::from(f)))
     } else if let Ok(d) = obj.cast::<PyDict>() {
         let mut mapping = serde_yaml::Mapping::new();
@@ -59,6 +64,10 @@ pub fn serde_to_pyval(py: Python<'_>, value: &serde_yaml::Value) -> PyResult<Py<
         serde_yaml::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Ok(i.into_pyobject(py)?.into_any().unbind())
+            } else if let Some(u) = n.as_u64() {
+                // An unsigned value above `i64::MAX` is still an integer; keep
+                // it exact as a Python `int` rather than a lossy float.
+                Ok(u.into_pyobject(py)?.into_any().unbind())
             } else if let Some(f) = n.as_f64() {
                 Ok(f.into_pyobject(py)?.into_any().unbind())
             } else {
@@ -117,6 +126,22 @@ mod tests {
                     .unwrap(),
                 1.5
             );
+        });
+    }
+
+    #[test]
+    fn large_unsigned_integers_stay_exact() {
+        Python::attach(|py| {
+            // `u64::MAX` is beyond `i64::MAX`, so it exercises the unsigned
+            // branch in both directions of the bridge.
+            let big = u64::MAX;
+            let source = serde_yaml::Value::Number(serde_yaml::Number::from(big));
+
+            let pyval = serde_to_pyval(py, &source).unwrap();
+            assert!(pyval.bind(py).is_instance_of::<pyo3::types::PyInt>());
+            assert_eq!(pyval.bind(py).extract::<u64>().unwrap(), big);
+
+            assert_eq!(pyval_to_serde(pyval.bind(py)).unwrap(), source);
         });
     }
 

@@ -63,9 +63,14 @@ pub fn load_bundled_prompt(name: &str) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(signature = (name, **kwargs))]
 pub fn render_bundled_prompt(name: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<String> {
-    let kwargs = kwargs
-        .map(|dict| dict.extract::<HashMap<String, String>>())
-        .transpose()?
-        .unwrap_or_default();
-    yaml_io::render_bundled_prompt(name, &kwargs).map_err(map_yaml_io_error)
+    let mut subs = HashMap::new();
+    if let Some(dict) = kwargs {
+        for (key, value) in dict.iter() {
+            // The Python original formatted arbitrary `**kwargs` with
+            // `str.format`, so coerce each value the same way rather than
+            // rejecting a non-string argument with a `TypeError`.
+            subs.insert(key.extract::<String>()?, value.str()?.to_string());
+        }
+    }
+    yaml_io::render_bundled_prompt(name, &subs).map_err(map_yaml_io_error)
 }
