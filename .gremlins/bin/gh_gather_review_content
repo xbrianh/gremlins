@@ -52,5 +52,5 @@ gh pr view "$PR_URL" --json number,title,body,author,headRefName,baseRefName --j
     echo
     echo "## Issue Comments"
     echo
-    gh pr view "$PR_URL" --comments --json comments --jq '.comments[] | "### Comment by \(.author.login) (\(.createdAt))\n\n\(.body)\n\n---\n"'
+    gh pr view "$PR_URL" --json comments --jq '.comments[] | "### Comment by \(.author.login) (\(.createdAt))\n\n\(.body)\n\n---\n"'
 }
