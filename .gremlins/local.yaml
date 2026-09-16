@@ -93,6 +93,9 @@ stages:
     type: agent
     prompt: [style_guide.md, dev-env-howto.md, address.md]
     interpolation:
+      diff: content("artifact://diff.txt")
       review_one: content("artifact://review-one.md")
       review_two: content("artifact://review-two.md")
+    bind:
+      address_summary: "artifact://address-summary.md"
   - { type: check-and-fix }

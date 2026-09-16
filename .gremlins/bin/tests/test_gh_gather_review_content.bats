@@ -20,7 +20,7 @@ teardown() {
     mock_gh "api.*repos/owner/repo/pulls/42/comments.*--paginate" \
         "$(cat "$BATS_TEST_DIRNAME/fixtures/gh_gather_review_comments.txt")"
     # gh pr view for issue comments.
-    mock_gh "pr view $PR_URL.*--comments.*--json comments" \
+    mock_gh "pr view $PR_URL.*--json comments" \
         "$(cat "$BATS_TEST_DIRNAME/fixtures/gh_gather_issue_comments.json")"
 
     run bash "$SCRIPT" "$PR_URL"
@@ -44,7 +44,7 @@ teardown() {
     mock_gh_file "pr view $PR_URL.*--json number,title,body,author,headRefName,baseRefName" \
         "$BATS_TEST_DIRNAME/fixtures/gh_gather_pr_meta_null_body.bin"
     mock_gh "api.*repos/owner/repo/pulls/42/comments.*--paginate" ''
-    mock_gh "pr view $PR_URL.*--comments.*--json comments" '{"comments":[]}'
+    mock_gh "pr view $PR_URL.*--json comments" '{"comments":[]}'
 
     run bash "$SCRIPT" "$PR_URL"
     [ "$status" -eq 0 ]
