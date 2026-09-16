@@ -71,16 +71,31 @@ where
 /// the runtime-owning futures it depends on (process spawning, in
 /// [`gremlins::core::proc`]) must be spawned onto Tokio explicitly. This is the
 /// same runtime `future_into_py` hands work to, reached by name instead.
+///
+/// The spawned task is aborted when this future is dropped, so cancelling the
+/// Python coroutine cancels the git operation rather than detaching it. Because
+/// `proc` spawns children with `kill_on_drop`, the abort also reaps the child.
 pub(crate) async fn on_runtime<T, F>(fut: F) -> PyResult<T>
 where
     F: Future<Output = Result<T, CoreGitError>> + Send + 'static,
     T: Send + 'static,
 {
-    pyo3_async_runtimes::tokio::get_runtime()
-        .spawn(fut)
+    let handle = pyo3_async_runtimes::tokio::get_runtime().spawn(fut);
+    let _abort_on_drop = AbortOnDrop(handle.abort_handle());
+    handle
         .await
         .map_err(|e| PyRuntimeError::new_err(format!("tokio task failed: {e}")))?
         .map_err(map_git_error)
+}
+
+/// Aborts the wrapped task when dropped, propagating cancellation from the
+/// Python coroutine to the Tokio task it drives.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 // --- Predicates and best-effort readers ---
@@ -146,14 +161,14 @@ pub fn ls_others(cwd: Option<PathBuf>) -> String {
 }
 
 #[pyfunction]
-#[pyo3(signature = (remote="origin".to_string(), *, cwd=None, timeout=None))]
+#[pyo3(signature = (remote="origin", *, cwd=None, timeout=None))]
 pub fn try_fetch_all(
     py: Python<'_>,
-    remote: String,
+    remote: &str,
     cwd: Option<PathBuf>,
     timeout: Option<f64>,
 ) -> bool {
-    py.detach(|| git::try_fetch_all(&remote, cwd.as_deref(), timeout))
+    py.detach(|| git::try_fetch_all(remote, cwd.as_deref(), timeout))
 }
 
 // --- Fallible operations ---
@@ -198,9 +213,9 @@ pub fn squash_merge(py: Python<'_>, r: String, cwd: Option<PathBuf>) -> PyResult
 }
 
 #[pyfunction]
-#[pyo3(signature = (r#ref="HEAD".to_string(), *, cwd=None))]
-pub fn reset_hard(py: Python<'_>, r#ref: String, cwd: Option<PathBuf>) -> PyResult<()> {
-    detached(py, || git::reset_hard(&r#ref, cwd.as_deref()))
+#[pyo3(signature = (r#ref="HEAD", *, cwd=None))]
+pub fn reset_hard(py: Python<'_>, r#ref: &str, cwd: Option<PathBuf>) -> PyResult<()> {
+    detached(py, || git::reset_hard(r#ref, cwd.as_deref()))
 }
 
 #[pyfunction]
@@ -240,7 +255,7 @@ pub fn force_update_branch(
 #[pyo3(signature = (project_root, base_ref, *, fetch=false, worktree_parent=None))]
 pub fn setup_detached_worktree(
     py: Python<'_>,
-    project_root: String,
+    project_root: PathBuf,
     base_ref: String,
     fetch: bool,
     worktree_parent: Option<PathBuf>,
@@ -252,7 +267,7 @@ pub fn setup_detached_worktree(
 
 #[pyfunction]
 #[pyo3(signature = (project_root, workdir))]
-pub fn remove_worktree(py: Python<'_>, project_root: String, workdir: String) {
+pub fn remove_worktree(py: Python<'_>, project_root: PathBuf, workdir: String) {
     py.detach(|| git::remove_worktree(&project_root, &workdir));
 }
 
@@ -285,7 +300,7 @@ pub async fn status_porcelain_async(cwd: Option<PathBuf>) -> String {
 #[pyfunction]
 #[pyo3(signature = (project_root, base_ref, *, fetch=false, worktree_parent=None))]
 pub async fn setup_detached_worktree_async(
-    project_root: String,
+    project_root: PathBuf,
     base_ref: String,
     fetch: bool,
     worktree_parent: Option<PathBuf>,
@@ -304,7 +319,7 @@ pub async fn setup_detached_worktree_async(
 
 #[pyfunction]
 #[pyo3(signature = (project_root, workdir))]
-pub async fn remove_worktree_async(project_root: String, workdir: String) -> PyResult<()> {
+pub async fn remove_worktree_async(project_root: PathBuf, workdir: String) -> PyResult<()> {
     on_runtime(async move {
         git::remove_worktree_async(&project_root, &workdir).await;
         Ok(())
@@ -314,7 +329,7 @@ pub async fn remove_worktree_async(project_root: String, workdir: String) -> PyR
 
 #[pyfunction]
 #[pyo3(signature = (project_root,))]
-pub async fn prune_worktrees_async(project_root: String) -> PyResult<()> {
+pub async fn prune_worktrees_async(project_root: PathBuf) -> PyResult<()> {
     on_runtime(async move {
         git::prune_worktrees_async(&project_root).await;
         Ok(())
@@ -324,7 +339,7 @@ pub async fn prune_worktrees_async(project_root: String) -> PyResult<()> {
 
 #[pyfunction]
 #[pyo3(signature = (project_root, paths))]
-pub async fn remove_worktrees_async(project_root: String, paths: Vec<String>) -> PyResult<()> {
+pub async fn remove_worktrees_async(project_root: PathBuf, paths: Vec<String>) -> PyResult<()> {
     on_runtime(async move {
         git::remove_worktrees_async(&project_root, &paths).await;
         Ok(())

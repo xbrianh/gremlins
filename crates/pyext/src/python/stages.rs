@@ -3912,7 +3912,7 @@ async fn head_sha(cwd: &str) -> String {
 
 /// Prune stale worktree entries. No-op outside a repo.
 async fn prune_worktrees(project_root: &Path) {
-    let root = project_root.to_string_lossy().into_owned();
+    let root = project_root.to_path_buf();
     let _ = on_runtime(async move {
         git::prune_worktrees_async(&root).await;
         Ok(())
@@ -3922,7 +3922,7 @@ async fn prune_worktrees(project_root: &Path) {
 
 /// Remove worktrees in bulk and prune stale entries. No-op outside a repo.
 async fn remove_worktrees(project_root: &Path, paths: &[String]) {
-    let root = project_root.to_string_lossy().into_owned();
+    let root = project_root.to_path_buf();
     let paths = paths.to_vec();
     let _ = on_runtime(async move {
         git::remove_worktrees_async(&root, &paths).await;
@@ -3936,7 +3936,7 @@ async fn setup_detached_worktree(
     base_ref: &str,
     worktree_parent: Option<&Path>,
 ) -> PyResult<String> {
-    let root = project_root.to_string_lossy().into_owned();
+    let root = project_root.to_path_buf();
     let base = if base_ref.is_empty() {
         "HEAD".to_string()
     } else {
