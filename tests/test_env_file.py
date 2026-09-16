@@ -1,12 +1,11 @@
-"""Tests for gremlins.env_file."""
+"""Tests for _gremlins_core.utils.env_file."""
 
 from __future__ import annotations
 
 import os
 
 import pytest
-
-from gremlins.env_file import load_env_file_isolated
+from _gremlins_core.utils.env_file import load_env_file_isolated
 
 # ---------------------------------------------------------------------------
 # load_env_file_isolated

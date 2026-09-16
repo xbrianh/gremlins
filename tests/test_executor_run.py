@@ -116,7 +116,7 @@ def _run_isolation_subprocess(
             code += f"os.environ[{k!r}] = {v!r}\n"
 
     code += f"""
-from gremlins.env_file import source_env_string
+from _gremlins_core.utils.env_file import source_env_string
 
 _project_root = {project_root!r}
 state_dir = pathlib.Path({state_root!r}) / "test-gremlin"

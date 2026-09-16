@@ -127,19 +127,7 @@ pub fn run(
             return Err(ProcError::InvalidTimeout(t));
         }
     }
-    let mut c = Command::new(&cmd[0]);
-    c.args(&cmd[1..]);
-    c.stdout(std::process::Stdio::piped());
-    c.stderr(std::process::Stdio::piped());
-    if let Some(dir) = cwd {
-        c.current_dir(dir);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        c.process_group(0);
-    }
-    let mut child = c.spawn().map_err(ProcError::Io)?;
+    let mut child = command_for(cmd, cwd, None).spawn().map_err(ProcError::Io)?;
 
     let output = match timeout {
         Some(t) => run_with_timeout(&mut child, t)?,
@@ -161,6 +149,65 @@ pub fn run(
         ));
     }
     Ok(output)
+}
+
+/// Run `cmd` to completion with exactly the environment `env`, returning its
+/// output whether or not it succeeded.
+///
+/// The environment is replaced wholesale rather than extended, mirroring
+/// Python's `subprocess.run(..., env=...)`: the child sees `env` and nothing
+/// else. `check` semantics do not apply here — the caller reads
+/// [`ProcResult::returncode`] itself, which is how the bootstrap-env loader
+/// distinguishes "bash is missing" from "the script failed".
+///
+/// No timeout: a bootstrap script is trusted to finish, and its child is
+/// reaped by `wait_with_output`.
+pub fn run_with_env(
+    cmd: &[String],
+    cwd: Option<&Path>,
+    env: &HashMap<String, String>,
+) -> Result<ProcResult, ProcError> {
+    if cmd.is_empty() {
+        return Err(ProcError::EmptyCommand);
+    }
+    let child = command_for(cmd, cwd, Some(env))
+        .spawn()
+        .map_err(ProcError::Io)?;
+    let output = child.wait_with_output().map_err(ProcError::Io)?;
+    Ok(ProcResult {
+        returncode: exit_code(&output.status),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+/// Assemble the command the synchronous runners spawn: pipes captured, in its
+/// own process group, optionally with a replaced environment.
+///
+/// `env: None` inherits this process's environment — the behavior [`run`]
+/// relies on — while `env: Some(..)` gives the child that environment alone.
+fn command_for(
+    cmd: &[String],
+    cwd: Option<&Path>,
+    env: Option<&HashMap<String, String>>,
+) -> Command {
+    let mut c = Command::new(&cmd[0]);
+    c.args(&cmd[1..]);
+    c.stdout(std::process::Stdio::piped());
+    c.stderr(std::process::Stdio::piped());
+    if let Some(dir) = cwd {
+        c.current_dir(dir);
+    }
+    if let Some(env) = env {
+        c.env_clear();
+        c.envs(env);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+    }
+    c
 }
 
 fn run_with_timeout(
@@ -1423,6 +1470,64 @@ mod tests {
     fn test_run_with_cwd() {
         let r = run(&["pwd".to_string()], Some(Path::new("/")), false, None).unwrap();
         assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "/");
+    }
+
+    #[test]
+    fn test_run_with_env_visible_to_child() {
+        let r = run_with_env(
+            &["sh".to_string(), "-c".to_string(), "echo $FOO".to_string()],
+            None,
+            &HashMap::from([("FOO".to_string(), "bar".to_string())]),
+        )
+        .unwrap();
+        assert_eq!(r.returncode, 0);
+        assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "bar");
+    }
+
+    #[test]
+    fn test_run_with_env_replaces_environment() {
+        // `env` prints exactly the environment it was handed, so it shows us
+        // what the child really saw. Only `FOO` is passed, and the (typically
+        // much larger) parent environment must not leak in alongside it —
+        // unlike a shell, `env` invents no variables of its own to confuse the
+        // comparison.
+        let r = run_with_env(
+            &["env".to_string()],
+            None,
+            &HashMap::from([("FOO".to_string(), "bar".to_string())]),
+        )
+        .unwrap();
+        assert_eq!(r.returncode, 0);
+        assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "FOO=bar");
+    }
+
+    #[test]
+    fn test_run_with_env_reports_nonzero_exit() {
+        let r = run_with_env(&["false".to_string()], None, &HashMap::new()).unwrap();
+        assert_ne!(r.returncode, 0);
+    }
+
+    #[test]
+    fn test_run_with_env_missing_command() {
+        let err = run_with_env(
+            &["_nonexistent_command_xyzzy_".to_string()],
+            None,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        match err {
+            ProcError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
+            _ => panic!("expected Io error, got {err}"),
+        }
+    }
+
+    #[test]
+    fn test_run_with_env_empty_cmd() {
+        let err = run_with_env(&[], None, &HashMap::new()).unwrap_err();
+        match err {
+            ProcError::EmptyCommand => {}
+            _ => panic!("expected EmptyCommand, got {err}"),
+        }
     }
 
     #[test]
