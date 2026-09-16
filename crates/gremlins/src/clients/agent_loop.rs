@@ -2229,7 +2229,7 @@ mod tests {
         let factory: super::super::task::TaskModelFactory<MockCompletionModel> =
             Arc::new(move |spec: &str| {
                 assert_eq!(spec, "openai:mini", "factory receives the matched spec");
-                child_handle.clone()
+                Some(child_handle.clone())
             });
 
         let selector = super::super::task::TaskModelSelector::new(

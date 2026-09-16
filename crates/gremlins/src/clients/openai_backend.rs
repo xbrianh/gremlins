@@ -178,54 +178,52 @@ pub(super) fn task_model_selector(
     }
 
     let client = client.clone();
+    let provider_name = provider_name.to_string();
     TaskModelSelector::new(
-        served_by(exact, provider_name),
-        served_by(prefix, provider_name),
-        Arc::new(move |model: &str| client.completion_model(model)),
+        exact.clone(),
+        prefix.clone(),
+        Arc::new(move |spec: &str| {
+            let (provider, model) = provider_and_model(spec)?;
+            if provider == provider_name {
+                Some(client.completion_model(model))
+            } else {
+                log::warn!(
+                    "task-clients entry spec {spec:?} names provider {provider:?}, but this \
+                     backend serves {provider_name:?} — falling back to parent model"
+                );
+                None
+            }
+        }),
     )
 }
 
-/// Fold a `task-clients` map down to what this backend can actually serve:
-/// each entry's spec kept only if its provider is `provider_name`, reduced to the
-/// bare model identifier the client expects.
+/// Split a client specifier into `(provider, model)`, or `None` when the
+/// provider or model part is empty.
 ///
-/// A task override swaps the *model* on the parent's client — provider, API key,
-/// base URL, and client params all stay put — so an entry naming another
-/// provider, or carrying its own `:k=v` params, has no faithful meaning here. Both
-/// are dropped with a warning rather than silently mistranslated.
-fn served_by(specs: &HashMap<String, String>, provider_name: &str) -> HashMap<String, String> {
-    specs
-        .iter()
-        .filter_map(|(key, spec)| match provider_and_model(spec) {
-            Some((provider, model)) if provider == provider_name => {
-                Some((key.clone(), model.to_string()))
-            }
-            Some((provider, _)) => {
-                log::warn!(
-                    "task-clients entry {key:?} names provider {provider:?}, but this backend \
-                     serves {provider_name:?} — ignoring it"
-                );
-                None
-            }
-            None => {
-                log::warn!(
-                    "task-clients entry {key:?} spec {spec:?} is not a plain `provider:model` \
-                     specifier — ignoring it"
-                );
-                None
-            }
-        })
-        .collect()
-}
-
-/// Split a client specifier into `(provider, model)`, or `None` if it is not a
-/// plain `provider:model` (missing provider or model, or carrying a trailing
-/// `:k=v,...` params suffix).
+/// The provider is everything before the first `:`; the remainder is the model
+/// identifier.  A trailing `:k=v,...` parameter suffix (where the segment after
+/// the last `:` contains `=`) is stripped, so `openai:gpt-4o:foo=bar` yields
+/// `("openai", "gpt-4o")`.  OpenRouter model IDs that carry colon suffixes
+/// like `:free` or `:online` are preserved — `openrouter:some/model:free`
+/// yields `("openrouter", "some/model:free")`.
 fn provider_and_model(spec: &str) -> Option<(&str, &str)> {
-    let mut parts = spec.splitn(3, ':');
-    let provider = parts.next().unwrap_or_default();
-    let model = parts.next().unwrap_or_default();
-    if provider.is_empty() || model.is_empty() || parts.next().is_some() {
+    let (provider, rest) = spec.split_once(':')?;
+    if provider.is_empty() || rest.is_empty() {
+        return None;
+    }
+    // Strip a trailing `:k=v,...` params suffix.  That suffix always contains
+    // `=` in the segment following the last colon.
+    let model = if let Some(colon_pos) = rest.rfind(':') {
+        let after_last_colon = &rest[colon_pos + 1..];
+        if after_last_colon.contains('=') {
+            &rest[..colon_pos]
+        } else {
+            rest
+        }
+    } else {
+        rest
+    };
+    if model.is_empty() {
         return None;
     }
     Some((provider, model))
@@ -502,5 +500,46 @@ mod tests {
         backend.reap_all();
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());
+    }
+
+    #[test]
+    fn provider_and_model_plain() {
+        assert_eq!(
+            provider_and_model("openai:gpt-4o"),
+            Some(("openai", "gpt-4o"))
+        );
+    }
+
+    #[test]
+    fn provider_and_model_strips_params_suffix() {
+        assert_eq!(
+            provider_and_model("openai:gpt-4o:foo=bar"),
+            Some(("openai", "gpt-4o"))
+        );
+        assert_eq!(
+            provider_and_model("openai:gpt-4o:top_p=0.7,n=3"),
+            Some(("openai", "gpt-4o"))
+        );
+    }
+
+    #[test]
+    fn provider_and_model_preserves_openrouter_colon_suffixes() {
+        // OpenRouter model IDs can contain `:free`, `:online`, etc.
+        assert_eq!(
+            provider_and_model("openrouter:anthropic/claude-sonnet-4:free"),
+            Some(("openrouter", "anthropic/claude-sonnet-4:free"))
+        );
+        assert_eq!(
+            provider_and_model("openrouter:google/gemini-2.5-flash:online"),
+            Some(("openrouter", "google/gemini-2.5-flash:online"))
+        );
+    }
+
+    #[test]
+    fn provider_and_model_rejects_empty_parts() {
+        assert_eq!(provider_and_model("only"), None);
+        assert_eq!(provider_and_model(":model"), None);
+        assert_eq!(provider_and_model("provider:"), None);
+        assert_eq!(provider_and_model(""), None);
     }
 }

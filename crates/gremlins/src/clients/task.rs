@@ -9,9 +9,9 @@ use super::tools::{self, ToolContext};
 const MAX_DEPTH: u32 = 3;
 
 /// Builds the model named by a matching `task-clients` entry, for use by one
-/// Task invocation. `None` at the call site means "no `task-clients` configured",
-/// so every task keeps the parent's model.
-pub(crate) type TaskModelFactory<M> = Arc<dyn Fn(&str) -> M + Send + Sync>;
+/// Task invocation.  Returns `None` when the spec names a provider this
+/// backend does not serve — the caller falls back to the parent's model.
+pub(crate) type TaskModelFactory<M> = Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
 
 /// Lookup maps for `task-clients`, already lowercased at parse time. Shared
 /// behind an `Arc` so a Task fan-out clones one pointer per invocation rather
@@ -69,13 +69,17 @@ impl<M> TaskModelSelector<M> {
     }
 
     /// The model for a Task described by `description`, or a clone of
-    /// `default_model` when no entry matches.
+    /// `default_model` when no entry matches or when the matching entry names
+    /// a provider this backend cannot serve.
     fn model_for(&self, description: &str, default_model: &M) -> M
     where
         M: Clone,
     {
         match self.overrides.spec_for(description) {
-            Some(spec) => (self.factory)(spec),
+            Some(spec) => match (self.factory)(spec) {
+                Some(m) => m,
+                None => default_model.clone(),
+            },
             None => default_model.clone(),
         }
     }
@@ -323,7 +327,8 @@ mod tests {
 
     #[test]
     fn task_model_selector_builds_matched_model_or_defaults() {
-        let factory: TaskModelFactory<String> = Arc::new(|spec: &str| format!("built:{spec}"));
+        let factory: TaskModelFactory<String> =
+            Arc::new(|spec: &str| Some(format!("built:{spec}")));
         let selector = TaskModelSelector::new(
             HashMap::from([("scout".into(), "openai:mini".into())]),
             HashMap::new(),
@@ -343,8 +348,63 @@ mod tests {
     }
 
     #[test]
+    fn task_model_selector_falls_back_when_factory_returns_none() {
+        let factory: TaskModelFactory<String> = Arc::new(|_spec: &str| None);
+        let selector = TaskModelSelector::new(
+            HashMap::from([("scout".into(), "openai:mini".into())]),
+            HashMap::new(),
+            factory,
+        )
+        .expect("a non-empty map yields a selector");
+
+        // Spec matches but factory returns None — fall back to default.
+        assert_eq!(
+            selector.model_for("Scout", &"default".to_string()),
+            "default"
+        );
+    }
+
+    #[test]
+    fn task_model_selector_precedence_is_provider_agnostic() {
+        // Precedence (exact > longest prefix) is resolved on raw entries
+        // before the factory sees a spec.  A factory that only serves one
+        // provider must not leak a lower-precedence match for another
+        // provider when the winner is unsupported.
+        let served = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let factory: TaskModelFactory<String> = {
+            let served = served.clone();
+            Arc::new(move |spec: &str| {
+                served.lock().unwrap().push(spec.to_string());
+                // Only serve "openai" provider.
+                if let Some(model) = spec.strip_prefix("openai:") {
+                    Some(format!("built:{model}"))
+                } else {
+                    None
+                }
+            })
+        };
+        let selector = TaskModelSelector::new(
+            HashMap::from([("scout".into(), "openrouter:gpt-4o-mini".into())]),
+            HashMap::from([("s".into(), "openai:gpt-4o".into())]),
+            factory,
+        )
+        .expect("configured");
+
+        // "Scout" has an exact match — the factory receives the openrouter
+        // spec, returns None, and we fall back to default.  The lower-priority
+        // prefix "s*" must not be exposed.
+        let result = selector.model_for("Scout", &"default".to_string());
+        assert_eq!(result, "default");
+        assert_eq!(
+            served.lock().unwrap().as_slice(),
+            &["openrouter:gpt-4o-mini"],
+            "only the winning spec should be presented to the factory"
+        );
+    }
+
+    #[test]
     fn task_model_selector_is_none_when_unconfigured() {
-        let factory: TaskModelFactory<String> = Arc::new(|_: &str| String::new());
+        let factory: TaskModelFactory<String> = Arc::new(|_: &str| Some(String::new()));
         assert!(TaskModelSelector::new(HashMap::new(), HashMap::new(), factory).is_none());
     }
 

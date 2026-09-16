@@ -249,6 +249,7 @@ fn parse_task_clients(
 
     let mut exact = HashMap::new();
     let mut prefix = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
 
     for (key, value) in obj {
         let val_str = match value.as_str() {
@@ -262,7 +263,7 @@ fn parse_task_clients(
             }
         };
 
-        if let Some(p) = key.strip_suffix('*') {
+        let normalized = if let Some(p) = key.strip_suffix('*') {
             if p.is_empty() {
                 warn!(
                     "config key {:?} in task-clients produces an empty prefix, \
@@ -271,9 +272,24 @@ fn parse_task_clients(
                 );
                 continue;
             }
-            prefix.insert(p.to_lowercase(), val_str.to_string());
+            p.to_lowercase()
         } else {
-            exact.insert(key.to_lowercase(), val_str.to_string());
+            key.to_lowercase()
+        };
+
+        if !seen.insert(normalized.clone()) {
+            warn!(
+                "config key {:?} in task-clients normalizes to {:?}, \
+                 which duplicates another key — skipping",
+                key, normalized
+            );
+            continue;
+        }
+
+        if key.ends_with('*') {
+            prefix.insert(normalized, val_str.to_string());
+        } else {
+            exact.insert(normalized, val_str.to_string());
         }
     }
 
@@ -831,6 +847,15 @@ mod tests {
         assert!(exact.is_empty());
         assert_eq!(prefix.len(), 1);
         assert_eq!(prefix.get("ok-").unwrap(), "openai:gpt-5");
+
+        // Case-only duplicates are detected and the later one is skipped.
+        let raw: HashMap<String, Value> = serde_json::from_str(
+            r#"{"task-clients": {"Scout": "openai:gpt-4o-mini", "scout": "openai:gpt-5"}}"#,
+        )
+        .unwrap();
+        let (exact, _) = parse_task_clients(&raw);
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact.get("scout").unwrap(), "openai:gpt-4o-mini");
 
         // Absent key yields empty maps.
         let raw: HashMap<String, Value> =
