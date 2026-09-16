@@ -1065,8 +1065,7 @@ def do_land(target: str, force: bool = False, mode: str | None = None) -> bool:
     if pipeline_path and project_root:
         from _gremlins_core.discovery import resolve_pipeline_path
         from _gremlins_core.schemas import Bootstrap
-
-        from gremlins.utils.yaml_io import YamlLoadError, load_yaml_file
+        from _gremlins_core.utils.yaml_io import YamlLoadError, load_yaml_file
 
         try:
             if project_root:

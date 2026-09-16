@@ -11,10 +11,10 @@ from typing import Any
 
 from _gremlins_core.clients import Client
 from _gremlins_core.config import get_config, state_root
+from _gremlins_core.utils.yaml_io import render_bundled_prompt
 
 from gremlins.fleet.resolve import resolve_gremlin
 from gremlins.fleet.state import load_state
-from gremlins.utils.yaml_io import render_bundled_prompt
 
 _LOG_MAX_BYTES = 50_000
 _ARTIFACT_MAX_BYTES = 20_000

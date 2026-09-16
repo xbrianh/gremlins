@@ -1,5 +1,6 @@
+from _gremlins_core.utils.yaml_io import load_bundled_prompt
+
 from gremlins.cli import main
-from gremlins.utils.yaml_io import load_bundled_prompt
 
 
 def test_prompt_for_assistant_matches_bundled_file(capsys):

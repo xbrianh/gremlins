@@ -83,7 +83,8 @@ Bundled stage recipes live under `gremlins/recipes/stages/`. Each recipe is a mu
   a model subprocess directly** — that bypasses the test seam.
 - Prompt-based stages join `self.prompts` (already-loaded text list) with `"\n\n"`.
   Bundled internal prompts are loaded via `load_bundled_prompt` / `render_bundled_prompt`
-  from `gremlins.utils.yaml_io`. Bundled prompt files live under `gremlins/prompts/`. See
+  from `_gremlins_core.utils.yaml_io`. Bundled prompt files live under
+  `crates/gremlins/src/assets/data/prompts/`. See
   `gremlins/prompts/README.md` for the runtime placeholder inventory.
 - Stages that should respect a bail marker delegate to the Rust agent's
   `check_bail`, which parses the agent's final transcript message for a
