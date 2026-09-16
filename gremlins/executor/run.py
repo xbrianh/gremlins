@@ -25,18 +25,14 @@ from _gremlins_core.config import (
     state_root,
 )
 from _gremlins_core.stages import Bail
+from _gremlins_core.utils.git import has_commits, has_dirty_worktree, in_git_repo
 
 from gremlins.env_file import source_env_string
 from gremlins.errors import die
 from gremlins.executor.gremlin import Gremlin
 from gremlins.logging_setup import configure_logging
 from gremlins.protocols import StageProtocol
-from gremlins.utils.git import (
-    has_commits,
-    has_dirty_worktree,
-    in_git_repo,
-    stage_gremlins_overlay,
-)
+from gremlins.utils.git import stage_gremlins_overlay
 
 logger = logging.getLogger(__name__)
 

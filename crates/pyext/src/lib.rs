@@ -41,12 +41,84 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         proc.py().get_type::<python::utils::proc::TimeoutExpired>(),
     )?;
     utils.add_submodule(&proc)?;
+
+    // git submodule
+    let git = PyModule::new(m.py(), "git")?;
+    git.add_function(wrap_pyfunction!(python::utils::git::in_git_repo, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::head_sha, &git)?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::status_porcelain,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::has_dirty_worktree,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::has_commits, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::current_branch, &git)?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::resolve_base_ref,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::is_ancestor, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::merge_base, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::rev_list_count, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::log_oneline, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::diff_stat, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::ls_others, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::toplevel, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::squash_merge, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::reset_hard, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::clean_fd, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::commit, &git)?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::ff_merge, &git)?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::force_update_branch,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::try_fetch_all, &git)?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::setup_detached_worktree,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::remove_worktree, &git)?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::in_git_repo_async,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(python::utils::git::head_sha_async, &git)?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::status_porcelain_async,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::setup_detached_worktree_async,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::remove_worktree_async,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::prune_worktrees_async,
+        &git
+    )?)?;
+    git.add_function(wrap_pyfunction!(
+        python::utils::git::remove_worktrees_async,
+        &git
+    )?)?;
+    git.add(
+        "GitError",
+        git.py().get_type::<python::utils::git::GitError>(),
+    )?;
+    utils.add_submodule(&git)?;
     m.add_submodule(&utils)?;
     // Register in sys.modules immediately so that Python imports triggered
     // by later submodule registration (e.g. schemas) can find them.
     let modules = m.py().import("sys")?.getattr("modules")?;
     modules.set_item("_gremlins_core.utils", &utils)?;
     modules.set_item("_gremlins_core.utils.proc", &proc)?;
+    modules.set_item("_gremlins_core.utils.git", &git)?;
 
     // clients submodule
     let clients = PyModule::new(m.py(), "clients")?;

@@ -27,9 +27,9 @@ from _gremlins_core.config import state_root as _state_root_fn
 from _gremlins_core.discovery import list_pipelines, resolve_pipeline_path
 from _gremlins_core.schemas import Pipeline as _PipelineData
 from _gremlins_core.schemas import validate_source_values
+from _gremlins_core.utils import git as _git_mod
 
 from gremlins.executor.gremlin import Gremlin, validate_gremlin_id, write_initial_state
-from gremlins.utils import git as _git_mod
 from gremlins.utils import proc
 from gremlins.utils.spawn_logged_process import (
     spawn_logged_process as _spawn_logged_process,

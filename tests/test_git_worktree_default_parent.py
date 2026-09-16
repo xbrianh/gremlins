@@ -7,8 +7,7 @@ import pathlib
 import subprocess
 
 from _gremlins_core.config import work_root
-
-from gremlins.utils.git import setup_detached_worktree
+from _gremlins_core.utils.git import setup_detached_worktree
 
 _GIT_ENV = {
     **os.environ,

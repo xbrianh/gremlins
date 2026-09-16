@@ -24,9 +24,10 @@ from _gremlins_core.executor import (
     write_state,
 )
 from _gremlins_core.schemas import Pipeline as _PipelineData
+from _gremlins_core.utils import git as _git_mod
 
 from gremlins.protocols import StageProtocol
-from gremlins.utils import git as _git_mod
+from gremlins.utils.git import setup_workdir
 from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
 from gremlins.utils.yaml_io import dump_yaml_text
 
@@ -592,7 +593,7 @@ class Gremlin:
         worktree_created: str | None = None
         try:
             if self.worktree_dir is None and self.project_root and self.gremlin_id:
-                workdir = _git_mod.setup_workdir(
+                workdir = setup_workdir(
                     self.project_root,
                     self.base_ref_sha,
                     fetch=self.fetch_worktree,
