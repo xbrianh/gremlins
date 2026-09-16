@@ -7,8 +7,8 @@
 //! carrying `returncode` and `stderr`), `OSError`, and `TimeoutError`.
 //!
 //! Blocking calls release the GIL through `py.detach`, matching the
-//! conventions in [`crate::python::utils::proc`]. The pure predicates are
-//! cheap enough that they stay attached, as `proc::run_ok` does.
+//! conventions in [`crate::python::utils::proc`], including the predicates
+//! and best-effort readers that spawn git processes.
 //!
 //! The async bindings are genuine `async fn` coroutine functions rather than
 //! `pyo3_async_runtimes::tokio::future_into_py` futures. That choice is
@@ -102,62 +102,62 @@ impl Drop for AbortOnDrop {
 
 #[pyfunction]
 #[pyo3(signature = (*, cwd=None))]
-pub fn in_git_repo(cwd: Option<PathBuf>) -> bool {
-    git::in_git_repo(cwd.as_deref())
+pub fn in_git_repo(py: Python<'_>, cwd: Option<PathBuf>) -> bool {
+    py.detach(|| git::in_git_repo(cwd.as_deref()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (*, cwd=None))]
-pub fn head_sha(cwd: Option<PathBuf>) -> String {
-    git::head_sha(cwd.as_deref())
+pub fn head_sha(py: Python<'_>, cwd: Option<PathBuf>) -> String {
+    py.detach(|| git::head_sha(cwd.as_deref()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (*, cwd=None))]
-pub fn status_porcelain(cwd: Option<PathBuf>) -> String {
-    git::status_porcelain(cwd.as_deref())
+pub fn status_porcelain(py: Python<'_>, cwd: Option<PathBuf>) -> String {
+    py.detach(|| git::status_porcelain(cwd.as_deref()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (*, cwd=None))]
-pub fn has_dirty_worktree(cwd: Option<PathBuf>) -> bool {
-    git::has_dirty_worktree(cwd.as_deref())
+pub fn has_dirty_worktree(py: Python<'_>, cwd: Option<PathBuf>) -> bool {
+    py.detach(|| git::has_dirty_worktree(cwd.as_deref()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (*, cwd=None))]
-pub fn has_commits(cwd: Option<PathBuf>) -> bool {
-    git::has_commits(cwd.as_deref())
+pub fn has_commits(py: Python<'_>, cwd: Option<PathBuf>) -> bool {
+    py.detach(|| git::has_commits(cwd.as_deref()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (*, cwd=None))]
-pub fn current_branch(cwd: Option<PathBuf>) -> String {
-    git::current_branch(cwd.as_deref())
+pub fn current_branch(py: Python<'_>, cwd: Option<PathBuf>) -> String {
+    py.detach(|| git::current_branch(cwd.as_deref()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (ref_a, ref_b, *, cwd=None))]
-pub fn is_ancestor(ref_a: String, ref_b: String, cwd: Option<PathBuf>) -> bool {
-    git::is_ancestor(&ref_a, &ref_b, cwd.as_deref())
+pub fn is_ancestor(py: Python<'_>, ref_a: String, ref_b: String, cwd: Option<PathBuf>) -> bool {
+    py.detach(|| git::is_ancestor(&ref_a, &ref_b, cwd.as_deref()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (rev_range, *, cwd=None))]
-pub fn log_oneline(rev_range: String, cwd: Option<PathBuf>) -> String {
-    git::log_oneline(&rev_range, cwd.as_deref())
+pub fn log_oneline(py: Python<'_>, rev_range: String, cwd: Option<PathBuf>) -> String {
+    py.detach(|| git::log_oneline(&rev_range, cwd.as_deref()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (rev_range, *, cwd=None))]
-pub fn diff_stat(rev_range: String, cwd: Option<PathBuf>) -> String {
-    git::diff_stat(&rev_range, cwd.as_deref())
+pub fn diff_stat(py: Python<'_>, rev_range: String, cwd: Option<PathBuf>) -> String {
+    py.detach(|| git::diff_stat(&rev_range, cwd.as_deref()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (*, cwd=None))]
-pub fn ls_others(cwd: Option<PathBuf>) -> String {
-    git::ls_others(cwd.as_deref())
+pub fn ls_others(py: Python<'_>, cwd: Option<PathBuf>) -> String {
+    py.detach(|| git::ls_others(cwd.as_deref()))
 }
 
 #[pyfunction]
@@ -207,9 +207,9 @@ pub fn toplevel(py: Python<'_>, cwd: Option<PathBuf>) -> PyResult<String> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (r, *, cwd=None))]
-pub fn squash_merge(py: Python<'_>, r: String, cwd: Option<PathBuf>) -> PyResult<()> {
-    detached(py, || git::squash_merge(&r, cwd.as_deref()))
+#[pyo3(signature = (r#ref, *, cwd=None))]
+pub fn squash_merge(py: Python<'_>, r#ref: String, cwd: Option<PathBuf>) -> PyResult<()> {
+    detached(py, || git::squash_merge(&r#ref, cwd.as_deref()))
 }
 
 #[pyfunction]
@@ -231,9 +231,9 @@ pub fn commit(py: Python<'_>, message: String, cwd: Option<PathBuf>) -> PyResult
 }
 
 #[pyfunction]
-#[pyo3(signature = (r, *, cwd=None))]
-pub fn ff_merge(py: Python<'_>, r: String, cwd: Option<PathBuf>) -> PyResult<()> {
-    detached(py, || git::ff_merge(&r, cwd.as_deref()))
+#[pyo3(signature = (r#ref, *, cwd=None))]
+pub fn ff_merge(py: Python<'_>, r#ref: String, cwd: Option<PathBuf>) -> PyResult<()> {
+    detached(py, || git::ff_merge(&r#ref, cwd.as_deref()))
 }
 
 #[pyfunction]
