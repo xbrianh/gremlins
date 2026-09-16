@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -219,11 +218,10 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 completion_nudge_budget,
             ));
 
-            let scratch = crate::config::scratch_dir(None)
-                .unwrap_or_else(|| crate::config::scratch_root(None));
-            let work_root = task_cwd.as_deref().unwrap_or(Path::new("."));
+            let work_root = tools::worktree_root(task_cwd.as_deref());
+            let scratch = tools::scratch_root().unwrap_or_else(|| work_root.clone());
             let system_prompt = Some(crate::clients::config::task_system_prompt(
-                work_root, &scratch,
+                &work_root, &scratch,
             ));
 
             let result = crate::clients::agent_loop::run_agent_loop_nested(
