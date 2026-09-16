@@ -223,7 +223,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 .unwrap_or_else(|| crate::config::scratch_root(None));
             let work_root = task_cwd.as_deref().unwrap_or(Path::new("."));
             let system_prompt = Some(crate::clients::config::task_system_prompt(
-                work_root, &scratch, work_root,
+                work_root, &scratch,
             ));
 
             let result = crate::clients::agent_loop::run_agent_loop_nested(

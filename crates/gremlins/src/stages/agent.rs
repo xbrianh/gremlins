@@ -243,7 +243,7 @@ impl AgentPrepared {
     pub fn system_prompt(&self) -> String {
         let scratch = Path::new(&self.artifact_dir);
         let cwd = Path::new(&self.cwd);
-        crate::clients::config::agent_system_prompt(cwd, scratch, cwd)
+        crate::clients::config::agent_system_prompt(cwd, scratch)
     }
 
     /// Workspace preamble + stage prompt (no harness system content).
