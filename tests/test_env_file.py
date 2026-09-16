@@ -76,6 +76,17 @@ def test_isolated_cwd(tmp_path):
     assert result["CWD"] == str(subdir)
 
 
+def test_isolated_missing_cwd_is_not_reported_as_missing_bash(tmp_path):
+    """A deleted working directory is blamed on the directory, not on bash."""
+    env_file = tmp_path / "env"
+    env_file.write_text("export FOO=bar\n")
+    base = {"PATH": os.environ.get("PATH", ""), "HOME": "/h"}
+    missing = tmp_path / "gone"
+    with pytest.raises(RuntimeError, match="working directory") as excinfo:
+        load_env_file_isolated(env_file, base_env=base, cwd=missing)
+    assert "bash not found" not in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # source_env_string
 # ---------------------------------------------------------------------------

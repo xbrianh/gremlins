@@ -45,6 +45,14 @@ pub enum EnvFileError {
     /// `bash` could not be found on `PATH`.
     #[error("failed to source {path}: bash not found")]
     BashNotFound { path: String },
+    /// The directory the script was to run in is missing or not a directory.
+    ///
+    /// Kept distinct from [`BashNotFound`](EnvFileError::BashNotFound) because
+    /// `Command::spawn` reports a bad `cwd` and a missing `bash` alike as
+    /// [`io::ErrorKind::NotFound`]; without this check a deleted project
+    /// directory would be blamed on bash.
+    #[error("failed to source {path}: working directory {cwd} is not a directory")]
+    InvalidWorkingDirectory { path: String, cwd: String },
     /// `bash` ran, but the script exited non-zero; `rc` is its exit status and
     /// `stderr` its (trimmed) complaint.
     #[error("failed to source {path} (exit {rc}): {stderr}")]
@@ -71,6 +79,7 @@ pub fn load_env_file_isolated(
     cwd: Option<&Path>,
 ) -> Result<HashMap<String, String>, EnvFileError> {
     let path_label = path.display().to_string();
+    ensure_cwd(cwd, &path_label)?;
 
     let env: HashMap<String, String> = base_env
         .iter()
@@ -107,6 +116,30 @@ pub fn load_env_file_isolated(
     }
 
     Ok(parse_env_output(&result.stdout))
+}
+
+/// Reject a `cwd` that is not a directory before bash is spawned.
+///
+/// `Command::spawn` reports a missing `cwd` and a missing `bash` alike as
+/// [`io::ErrorKind::NotFound`], so checking the directory first keeps
+/// [`EnvFileError::BashNotFound`] for the binary it names and blames a deleted
+/// project directory on the directory instead.
+fn ensure_cwd(cwd: Option<&Path>, path_label: &str) -> Result<(), EnvFileError> {
+    let Some(dir) = cwd else {
+        return Ok(());
+    };
+    let invalid = || EnvFileError::InvalidWorkingDirectory {
+        path: path_label.to_string(),
+        cwd: dir.display().to_string(),
+    };
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(invalid()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(invalid()),
+        Err(e) => Err(EnvFileError::Io(format!(
+            "failed to source {path_label}: {e}"
+        ))),
+    }
 }
 
 /// Source a bash script held in memory and return the environment it produces.
@@ -201,6 +234,32 @@ mod tests {
         assert_eq!(
             parse_env_output(b"FOO=\xff\0"),
             env_of(&[("FOO", "\u{FFFD}")])
+        );
+    }
+
+    #[test]
+    fn missing_working_directory_is_not_blamed_on_bash() {
+        // `Command::spawn` reports a deleted `cwd` as `NotFound` too, so the
+        // loader must check the directory itself rather than call it a missing
+        // bash.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        let err = source_env_string("export FOO=bar", &HashMap::new(), Some(&missing)).unwrap_err();
+        assert!(
+            matches!(err, EnvFileError::InvalidWorkingDirectory { .. }),
+            "unexpected {err:?}"
+        );
+    }
+
+    #[test]
+    fn working_directory_that_is_a_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"").unwrap();
+        let err = source_env_string("export FOO=bar", &HashMap::new(), Some(&file)).unwrap_err();
+        assert!(
+            matches!(err, EnvFileError::InvalidWorkingDirectory { .. }),
+            "unexpected {err:?}"
         );
     }
 

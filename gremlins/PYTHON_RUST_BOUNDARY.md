@@ -34,9 +34,16 @@ The primary process execution path. Python `gremlins/utils/proc.py` imports from
 same names (`run`, `run_or_raise`, `run_async`, `run_ok`, etc.).
 
 Most call sites in the codebase go through this module, but a few still use
-`subprocess` directly: `gremlins/env_file.py`, `gremlins/queue/core.py`,
+`subprocess` directly: `gremlins/queue/core.py`,
 `gremlins/utils/spawn_logged_process.py`, and some specialized async helpers
 in `gremlins/utils/proc.py` itself.
+
+### `_gremlins_core.utils.env_file`
+
+The isolated environment-file loader. Python `gremlins/env_file.py` has been
+deleted; call sites import `load_env_file_isolated` and `source_env_string`
+directly from `_gremlins_core.utils.env_file` (backed by
+`crates/gremlins/src/core/env_file.rs`).
 
 ### `_gremlins_core.clients.Client`
 
@@ -108,6 +115,7 @@ The Python `gremlins/pipeline/discovery.py` has been deleted.
 | File | Role |
 |---|---|
 | `gremlins/utils/proc.py` | Re-exports `_gremlins_core.utils.proc.*` — **active** |
+| `gremlins/env_file.py` | ~~Pure Python `load_env_file_isolated`, `source_env_string` — **active**~~ **deleted** — replaced by `_gremlins_core.utils.env_file.*` |
 | `gremlins/pipeline/discovery.py` | ~~Pure Python `list_pipelines`, `resolve_pipeline_name`, `resolve_pipeline_path` — **active**~~ **deleted** — replaced by `_gremlins_core.discovery.*` |
 | `gremlins/pipeline/loader.py` | ~~Pure Python `parse_stage`, `parse_stages`, `fill_names`, `check_duplicate_producers` — **active**~~ **deleted** — replaced by `_gremlins_core.schemas.*` |
 | `gremlins/pipeline/__init__.py` | ~~Python `Pipeline` class — **active**~~ **deleted** — replaced by `_gremlins_core.schemas.Pipeline` |
