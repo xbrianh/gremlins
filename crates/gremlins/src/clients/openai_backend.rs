@@ -11,6 +11,10 @@ use super::backend::{Backend, ClientError, RunParams};
 use super::protocol::CompletedRun;
 use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use super::stream;
+use super::task::TaskModelSelector;
+
+/// The completion model type shared by every OpenAI-compatible backend.
+pub(crate) type OpenAiModel = <openai::CompletionsClient as CompletionClient>::CompletionModel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiProvider {
@@ -49,6 +53,7 @@ impl OpenAiProvider {
 }
 
 pub struct OpenAiBackend {
+    provider: OpenAiProvider,
     client: openai::CompletionsClient,
     model: String,
     tool_filter: Option<Vec<String>>,
@@ -72,6 +77,7 @@ impl OpenAiBackend {
             model
         };
         Self {
+            provider,
             client,
             model,
             tool_filter,
@@ -118,6 +124,7 @@ impl OpenAiBackend {
             self.extra_params(),
             self.tool_filter.as_deref(),
             None, // default classifier
+            task_model_selector(&self.client, self.provider.name()),
         )
         .await
     }
@@ -133,29 +140,11 @@ pub(crate) async fn run_with_agent_loop(
     extra: Option<serde_json::Value>,
     tool_filter: Option<&[String]>,
     classify_error: Option<ErrorClassifier>,
+    task_model_selector: Option<TaskModelSelector<OpenAiModel>>,
 ) -> Result<CompletedRun, ClientError> {
-    type M = <openai::CompletionsClient as CompletionClient>::CompletionModel;
     let model = client.completion_model(model_name);
     let mut ctx = ctx.clone();
     ctx.params.model = Some(model_name.to_string());
-
-    // Per-Task model overrides. Read once here so the closure the agent loop
-    // hands to each Task can build a model on demand. Skipped entirely when no
-    // `task-clients` entries exist, so the common path allocates nothing.
-    let (exact_task_clients, prefix_task_clients) = crate::config::global_config()
-        .map(|c| {
-            let (exact, prefix) = c.task_clients();
-            (exact.clone(), prefix.clone())
-        })
-        .unwrap_or_default();
-
-    let task_model_factory: Option<super::task::TaskModelFactory<M>> =
-        if exact_task_clients.is_empty() && prefix_task_clients.is_empty() {
-            None
-        } else {
-            let client = client.clone();
-            Some(Arc::new(move |name: &str| client.completion_model(name)))
-        };
 
     run_agent_loop(
         &model,
@@ -167,11 +156,79 @@ pub(crate) async fn run_with_agent_loop(
             tool_filter,
             classify_error,
         },
-        exact_task_clients,
-        prefix_task_clients,
-        task_model_factory,
+        task_model_selector,
     )
     .await
+}
+
+/// Build the `task-clients` selector for an OpenAI-compatible client, or `None`
+/// when `config.json` declares no entries this backend can serve.
+///
+/// The config is read once per run; the returned selector is shared behind an
+/// `Arc`, so each Task clones a pointer rather than the maps themselves. When
+/// nothing is configured the selector is `None` and the common path is free.
+pub(super) fn task_model_selector(
+    client: &openai::CompletionsClient,
+    provider_name: &str,
+) -> Option<TaskModelSelector<OpenAiModel>> {
+    let config = crate::config::global_config().ok()?;
+    let (exact, prefix) = config.task_clients();
+    if exact.is_empty() && prefix.is_empty() {
+        return None;
+    }
+
+    let client = client.clone();
+    TaskModelSelector::new(
+        served_by(exact, provider_name),
+        served_by(prefix, provider_name),
+        Arc::new(move |model: &str| client.completion_model(model)),
+    )
+}
+
+/// Fold a `task-clients` map down to what this backend can actually serve:
+/// each entry's spec kept only if its provider is `provider_name`, reduced to the
+/// bare model identifier the client expects.
+///
+/// A task override swaps the *model* on the parent's client — provider, API key,
+/// base URL, and client params all stay put — so an entry naming another
+/// provider, or carrying its own `:k=v` params, has no faithful meaning here. Both
+/// are dropped with a warning rather than silently mistranslated.
+fn served_by(specs: &HashMap<String, String>, provider_name: &str) -> HashMap<String, String> {
+    specs
+        .iter()
+        .filter_map(|(key, spec)| match provider_and_model(spec) {
+            Some((provider, model)) if provider == provider_name => {
+                Some((key.clone(), model.to_string()))
+            }
+            Some((provider, _)) => {
+                log::warn!(
+                    "task-clients entry {key:?} names provider {provider:?}, but this backend \
+                     serves {provider_name:?} — ignoring it"
+                );
+                None
+            }
+            None => {
+                log::warn!(
+                    "task-clients entry {key:?} spec {spec:?} is not a plain `provider:model` \
+                     specifier — ignoring it"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+/// Split a client specifier into `(provider, model)`, or `None` if it is not a
+/// plain `provider:model` (missing provider or model, or carrying a trailing
+/// `:k=v,...` params suffix).
+fn provider_and_model(spec: &str) -> Option<(&str, &str)> {
+    let mut parts = spec.splitn(3, ':');
+    let provider = parts.next().unwrap_or_default();
+    let model = parts.next().unwrap_or_default();
+    if provider.is_empty() || model.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((provider, model))
 }
 
 pub(crate) fn build_extra_params(

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,9 +98,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     ctx: &RunContext,
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
-    exact_task_clients: HashMap<String, String>,
-    prefix_task_clients: HashMap<String, String>,
-    task_model_factory: Option<super::task::TaskModelFactory<M>>,
+    task_model_selector: Option<super::task::TaskModelSelector<M>>,
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
     let extra_env = ctx.params.extra_env.clone();
@@ -175,9 +172,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     // Wire up the Task runner before entering the turn loop.
     let runner = super::task::make_task_runner(
         model.clone(),
-        exact_task_clients,
-        prefix_task_clients,
-        task_model_factory,
+        task_model_selector,
         opts.tool_filter.map(|f| f.to_vec()),
         cancel.clone(),
         tool_ctx.clone(),
@@ -1007,6 +1002,7 @@ mod tests {
     use super::*;
     use http::StatusCode;
     use rig_core::message::UserContent;
+    use std::collections::HashMap;
 
     #[test]
     fn default_classifier() {
@@ -1203,18 +1199,9 @@ mod tests {
     async fn loop_idle_timeout_is_client_timeout() {
         let ctx = test_ctx(None, None);
         let cancel = CancelToken::new();
-        let err = run_agent_loop(
-            &PendingModel,
-            "hi",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap_err();
+        let err = run_agent_loop(&PendingModel, "hi", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ClientError::Timeout { .. }));
     }
 
@@ -1256,18 +1243,9 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "write",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.text_result.as_deref(), Some("wrote it"));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
@@ -1320,18 +1298,9 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "where am i",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "where am i", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         let events = result.events.unwrap();
         let result_evt = events
             .iter()
@@ -1396,8 +1365,6 @@ mod tests {
             &ctx,
             cancel,
             loop_opts(Some(&filter)),
-            HashMap::new(),
-            HashMap::new(),
             None,
         )
         .await
@@ -1459,18 +1426,9 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(
-            &model,
-            "write",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         let audit = dir.join("run.audit.jsonl");
         assert!(audit.exists());
         let entry: serde_json::Value =
@@ -1523,18 +1481,9 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "read both",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "read both", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("both read"));
         let events = result.events.unwrap();
         // Two tool_use events, then two tool_result events, in order
@@ -1611,18 +1560,9 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "mix",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "mix", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
         let events = result.events.unwrap();
         let tool_uses: Vec<_> = events
@@ -1692,18 +1632,9 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.params.system_prompt = Some("you are a harness".into());
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "hi",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
 
         let requests = model.requests();
@@ -1742,18 +1673,9 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "hi",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
 
         for req in model.requests() {
@@ -1803,18 +1725,9 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(
-            &model,
-            "read",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        run_agent_loop(&model, "read", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
 
         let reqs = model.requests();
         assert_eq!(reqs.len(), 2);
@@ -1892,8 +1805,6 @@ mod tests {
             &ctx,
             CancelToken::new(),
             loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
             None,
         )
         .await
@@ -1966,18 +1877,9 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "write",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
@@ -2018,18 +1920,9 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "write",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         // Returns normally — file is still missing (Python verify_produced catches it).
         assert_eq!(result.text_result.as_deref(), Some("still no write"));
         assert!(!target.exists());
@@ -2071,18 +1964,9 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.completion_nudge_budget = 1;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "do it",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "do it", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         // Done succeeds; text is non-empty so it's the result.
         assert_eq!(result.text_result.as_deref(), Some("all done"));
         // Two requests: initial turn + post-nudge turn.
@@ -2161,18 +2045,9 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "write",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         // File was written on the retry, not in the mixed turn.
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
         assert_eq!(result.text_result.as_deref(), Some("done"));
@@ -2225,18 +2100,9 @@ mod tests {
         ctx.expected_artifact_paths = vec![];
         ctx.reminder_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            &model,
-            "hi",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("just text"));
         // Only one request — no reminder loop.
         assert_eq!(model.requests().len(), 1);
@@ -2285,18 +2151,9 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(
-            &model,
-            "fan out",
-            &ctx,
-            cancel,
-            loop_opts(None),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        run_agent_loop(&model, "fan out", &ctx, cancel, loop_opts(None), None)
+            .await
+            .unwrap();
 
         let reqs = model.requests();
         // The outer loop's second request carries every Task result.
@@ -2336,17 +2193,8 @@ mod tests {
     #[tokio::test]
     async fn task_clients_override_selects_the_task_model() {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
-        use std::collections::HashMap;
 
-        let dir = std::env::temp_dir().join(format!(
-            "gremlins-oa-taskclients-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
 
         let task_call = |id: &str| {
             MockStreamEvent::tool_call(
@@ -2384,8 +2232,13 @@ mod tests {
                 child_handle.clone()
             });
 
-        let exact = HashMap::from([("scout".to_string(), "openai:mini".to_string())]);
-        let mut ctx = test_ctx(Some(dir.clone()), None);
+        let selector = super::super::task::TaskModelSelector::new(
+            HashMap::from([("scout".to_string(), "openai:mini".to_string())]),
+            HashMap::new(),
+            factory,
+        )
+        .expect("a configured task-clients map yields a selector");
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
 
@@ -2395,9 +2248,7 @@ mod tests {
             &ctx,
             CancelToken::new(),
             loop_opts(None),
-            exact,
-            HashMap::new(),
-            Some(factory),
+            Some(selector),
         )
         .await
         .unwrap();

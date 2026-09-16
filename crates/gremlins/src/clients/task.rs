@@ -13,6 +13,74 @@ const MAX_DEPTH: u32 = 3;
 /// so every task keeps the parent's model.
 pub(crate) type TaskModelFactory<M> = Arc<dyn Fn(&str) -> M + Send + Sync>;
 
+/// Lookup maps for `task-clients`, already lowercased at parse time. Shared
+/// behind an `Arc` so a Task fan-out clones one pointer per invocation rather
+/// than the whole map.
+struct TaskClientOverrides {
+    exact: HashMap<String, String>,
+    prefix: HashMap<String, String>,
+}
+
+impl TaskClientOverrides {
+    /// The spec configured for `description`, if any. An exact key wins over any
+    /// prefix; among matching prefixes the longest wins. Lookup is
+    /// case-insensitive — keys were lowercased at parse time, so only the
+    /// description is folded here.
+    fn spec_for(&self, description: &str) -> Option<&str> {
+        let desc = description.to_lowercase();
+        if let Some(spec) = self.exact.get(&desc) {
+            return Some(spec);
+        }
+        self.prefix
+            .iter()
+            .filter(|(prefix, _)| desc.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())
+            .map(|(_, spec)| spec.as_str())
+    }
+}
+
+/// Everything a Task invocation needs to pick a model from `task-clients`: the
+/// lookup maps and a factory that builds the model a matching entry names.
+///
+/// `None` at a call site means no `task-clients` is configured, so every task
+/// keeps the parent's model. Cloning a selector is O(1) — both halves sit behind
+/// an `Arc` — which matters because a Task fan-out clones one per invocation.
+#[derive(Clone)]
+pub(crate) struct TaskModelSelector<M> {
+    overrides: Arc<TaskClientOverrides>,
+    factory: TaskModelFactory<M>,
+}
+
+impl<M> TaskModelSelector<M> {
+    /// Assemble a selector from parsed config. Returns `None` when both maps are
+    /// empty — the common case, where nothing ever needs building.
+    pub(crate) fn new(
+        exact: HashMap<String, String>,
+        prefix: HashMap<String, String>,
+        factory: TaskModelFactory<M>,
+    ) -> Option<Self> {
+        if exact.is_empty() && prefix.is_empty() {
+            return None;
+        }
+        Some(Self {
+            overrides: Arc::new(TaskClientOverrides { exact, prefix }),
+            factory,
+        })
+    }
+
+    /// The model for a Task described by `description`, or a clone of
+    /// `default_model` when no entry matches.
+    fn model_for(&self, description: &str, default_model: &M) -> M
+    where
+        M: Clone,
+    {
+        match self.overrides.spec_for(description) {
+            Some(spec) => (self.factory)(spec),
+            None => default_model.clone(),
+        }
+    }
+}
+
 /// Per-process monotonic source of task id segments. A clock-derived value
 /// cannot separate siblings spawned microseconds apart, and duplicate segments
 /// are exactly the log ambiguity this id exists to remove.
@@ -46,45 +114,14 @@ fn task_prefix(base: &str, chain: &str) -> String {
     format!("{base}[task.{chain}] ")
 }
 
-/// Resolve the model for one Task invocation. Matching is case-insensitive:
-/// the `description` is lowercased before lookup, and map keys were lowercased
-/// at parse time.
-///
-/// An exact key wins over any prefix; among matching prefixes the longest wins.
-/// Returns the default `model` when nothing matches, or when no factory is set
-/// to build the overridden model.
-fn resolve_task_model<M: Clone>(
-    description: &str,
-    default_model: &M,
-    exact_map: &HashMap<String, String>,
-    prefix_map: &HashMap<String, String>,
-    factory: Option<&(dyn Fn(&str) -> M + Send + Sync)>,
-) -> M {
-    let desc_lower = description.to_lowercase();
-    let spec = if let Some(s) = exact_map.get(&desc_lower) {
-        Some(s.as_str())
-    } else {
-        prefix_map
-            .iter()
-            .filter(|(prefix, _)| desc_lower.starts_with(prefix.as_str()))
-            .max_by_key(|(prefix, _)| prefix.len())
-            .map(|(_, spec)| spec.as_str())
-    };
-
-    match (spec, factory) {
-        (Some(spec), Some(f)) => f(spec),
-        _ => default_model.clone(),
-    }
-}
-
 /// Build a task runner closure. Called once per backend before the agent loop.
 /// The returned closure captures the model, tool filter, cancel token,
 /// context prefix, and the original `ToolContext` — everything needed to run
 /// a nested agent loop.
 ///
-/// `exact_task_clients` / `prefix_task_clients` describe the `task-clients`
-/// config map, and `task_model_factory` builds the model named by a matching
-/// entry. Each invocation resolves its own model from its own `description`.
+/// `task_model_selector` carries the `task-clients` configuration, so each
+/// invocation resolves its own model from its own `description`. `None` means
+/// no overrides are configured.
 ///
 /// Recursive tasks are supported and bounded by `MAX_DEPTH`. Depth is a
 /// true per-call-chain recursion bound, not a concurrency cap: each invocation
@@ -94,9 +131,7 @@ fn resolve_task_model<M: Clone>(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: M,
-    exact_task_clients: HashMap<String, String>,
-    prefix_task_clients: HashMap<String, String>,
-    task_model_factory: Option<TaskModelFactory<M>>,
+    task_model_selector: Option<TaskModelSelector<M>>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -107,9 +142,7 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
-        exact_task_clients,
-        prefix_task_clients,
-        task_model_factory,
+        task_model_selector,
         tool_filter,
         cancel,
         ctx,
@@ -125,9 +158,7 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
 #[allow(clippy::too_many_arguments)]
 fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: M,
-    exact_task_clients: HashMap<String, String>,
-    prefix_task_clients: HashMap<String, String>,
-    task_model_factory: Option<TaskModelFactory<M>>,
+    task_model_selector: Option<TaskModelSelector<M>>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -140,9 +171,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
 ) -> tools::TaskFn {
     Arc::new(move |description: String, task: String| {
         let model = model.clone();
-        let exact_task_clients = exact_task_clients.clone();
-        let prefix_task_clients = prefix_task_clients.clone();
-        let task_model_factory = task_model_factory.clone();
+        let task_model_selector = task_model_selector.clone();
         let tool_filter = tool_filter.clone();
         let cancel = cancel.clone();
         let mut child_ctx = ctx.clone();
@@ -154,13 +183,12 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 return format!("Error: task max depth ({MAX_DEPTH}) exceeded");
             }
 
-            let selected_model = resolve_task_model(
-                &description,
-                &model,
-                &exact_task_clients,
-                &prefix_task_clients,
-                task_model_factory.as_deref(),
-            );
+            // A selector, when configured, may swap in a different model based
+            // on this task's own `description`; otherwise the parent's stands.
+            let selected_model = match &task_model_selector {
+                Some(selector) => selector.model_for(&description, &model),
+                None => model.clone(),
+            };
 
             let new_chain = child_chain(&id_chain);
             let child_prefix = task_prefix(&prefix, &new_chain);
@@ -172,9 +200,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
             // segment to the chain instead.
             child_ctx.task_fn = Some(make_task_runner_at_depth(
                 selected_model.clone(),
-                exact_task_clients.clone(),
-                prefix_task_clients.clone(),
-                task_model_factory.clone(),
+                task_model_selector.clone(),
                 tool_filter.clone(),
                 cancel.clone(),
                 child_ctx.clone(),
@@ -273,42 +299,53 @@ mod tests {
     }
 
     #[test]
-    fn resolve_task_model_selects_by_description() {
-        let exact: HashMap<String, String> =
-            HashMap::from([("scout".into(), "openai:mini".into())]);
-        let prefix: HashMap<String, String> = HashMap::from([
-            ("sc".into(), "openai:sc".into()),
-            ("impl".into(), "openai:short".into()),
-            ("implement".into(), "openai:gpt-4o".into()),
-        ]);
-        let factory = |spec: &str| spec.to_string();
-        let f: Option<&(dyn Fn(&str) -> String + Send + Sync)> = Some(&factory);
-        let default = "openai:default".to_string();
+    fn task_client_overrides_match_case_insensitively() {
+        let overrides = TaskClientOverrides {
+            exact: HashMap::from([("scout".into(), "openai:mini".into())]),
+            prefix: HashMap::from([
+                ("sc".into(), "openai:sc".into()),
+                ("impl".into(), "openai:short".into()),
+                ("implement".into(), "openai:gpt-4o".into()),
+            ]),
+        };
 
-        // Exact match takes priority over a matching prefix, and the lookup
-        // lowercases the description so the key's case doesn't matter.
+        // An exact key wins over any matching prefix; the description is folded
+        // so the key's case doesn't matter.
+        assert_eq!(overrides.spec_for("Scout"), Some("openai:mini"));
+        // Among matching prefixes the longest wins.
         assert_eq!(
-            resolve_task_model("Scout", &default, &exact, &prefix, f),
-            "openai:mini"
+            overrides.spec_for("Implementation of x"),
+            Some("openai:gpt-4o")
         );
+        // Nothing matches.
+        assert_eq!(overrides.spec_for("review"), None);
+    }
 
-        // Prefix match is case-insensitive and the longest prefix wins.
-        assert_eq!(
-            resolve_task_model("Implementation of x", &default, &exact, &prefix, f),
-            "openai:gpt-4o"
-        );
+    #[test]
+    fn task_model_selector_builds_matched_model_or_defaults() {
+        let factory: TaskModelFactory<String> = Arc::new(|spec: &str| format!("built:{spec}"));
+        let selector = TaskModelSelector::new(
+            HashMap::from([("scout".into(), "openai:mini".into())]),
+            HashMap::new(),
+            factory,
+        )
+        .expect("a non-empty task-clients map yields a selector");
 
-        // Nothing matches — the default model stands.
         assert_eq!(
-            resolve_task_model("review", &default, &exact, &prefix, f),
-            default
+            selector.model_for("Scout", &"default".to_string()),
+            "built:openai:mini"
         );
+        // No match — the default model stands.
+        assert_eq!(
+            selector.model_for("review", &"default".to_string()),
+            "default"
+        );
+    }
 
-        // A spec matches, but with no factory there is nothing to build it.
-        assert_eq!(
-            resolve_task_model("Scout", &default, &exact, &prefix, None),
-            default
-        );
+    #[test]
+    fn task_model_selector_is_none_when_unconfigured() {
+        let factory: TaskModelFactory<String> = Arc::new(|_: &str| String::new());
+        assert!(TaskModelSelector::new(HashMap::new(), HashMap::new(), factory).is_none());
     }
 
     fn depth_test_ctx() -> ToolContext {
@@ -345,8 +382,6 @@ mod tests {
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
             model.clone(),
-            HashMap::new(),
-            HashMap::new(),
             None,
             None,
             cancel,
@@ -423,19 +458,7 @@ mod tests {
         // Hangs forever so all siblings overlap in time.
         let model = PendingModel;
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_task_runner(
-            model,
-            HashMap::new(),
-            HashMap::new(),
-            None,
-            None,
-            cancel,
-            ctx,
-            String::new(),
-            0.2,
-            10,
-            0,
-        );
+        let runner = make_task_runner(model, None, None, cancel, ctx, String::new(), 0.2, 10, 0);
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
         // "max depth" even though they overlap in time.
@@ -460,8 +483,6 @@ mod tests {
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner_at_depth(
             model,
-            HashMap::new(),
-            HashMap::new(),
             None,
             None,
             cancel,
@@ -627,8 +648,6 @@ mod tests {
         ) -> tools::TaskFn {
             make_task_runner(
                 rig_core::test_utils::MockCompletionModel::from_stream_turns(turns),
-                HashMap::new(),
-                HashMap::new(),
                 None,
                 None,
                 super::super::super::agent_loop::CancelToken::new(),
