@@ -45,10 +45,14 @@ pub enum EnvFileError {
     /// `bash` could not be found on `PATH`.
     #[error("failed to source {path}: bash not found")]
     BashNotFound { path: String },
-    /// `bash` ran, but the script exited non-zero; `stderr` is its (trimmed)
-    /// complaint.
-    #[error("failed to source {path}:\n{stderr}")]
-    SourceFailed { path: String, stderr: String },
+    /// `bash` ran, but the script exited non-zero; `rc` is its exit status and
+    /// `stderr` its (trimmed) complaint.
+    #[error("failed to source {path} (exit {rc}): {stderr}")]
+    SourceFailed {
+        path: String,
+        rc: i32,
+        stderr: String,
+    },
     /// Anything else: a spawn or filesystem failure, already described.
     #[error("{0}")]
     Io(String),
@@ -97,6 +101,7 @@ pub fn load_env_file_isolated(
     if result.returncode != 0 {
         return Err(EnvFileError::SourceFailed {
             path: path_label,
+            rc: result.returncode,
             stderr: String::from_utf8_lossy(&result.stderr).trim().to_string(),
         });
     }
@@ -197,5 +202,17 @@ mod tests {
             parse_env_output(b"FOO=\xff\0"),
             env_of(&[("FOO", "\u{FFFD}")])
         );
+    }
+
+    #[test]
+    fn source_failure_carries_exit_code() {
+        // `exit 3` short-circuits the `&&`, so bash reports status 3; the error
+        // must name it, both structurally and in its message.
+        let err = source_env_string("exit 3", &HashMap::new(), None).unwrap_err();
+        match &err {
+            EnvFileError::SourceFailed { rc, .. } => assert_eq!(*rc, 3),
+            other => panic!("expected SourceFailed, got {other}"),
+        }
+        assert!(err.to_string().contains("(exit 3)"), "message: {err}");
     }
 }

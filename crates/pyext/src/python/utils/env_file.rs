@@ -2,9 +2,11 @@
 //! `_gremlins_core.utils.env_file`.
 //!
 //! Both functions mirror the Python signatures the module they replace
-//! offered: `base_env` and `cwd` are keyword-only, and `cwd` is optional.
-//! Every failure — a missing `bash`, a script that exits non-zero — surfaces
-//! as a `RuntimeError`, which is exactly what the Python call sites already
+//! offered: `load_env_file_isolated` takes `base_env` keyword-only, while
+//! `source_env_string` accepts it positionally or by keyword; `cwd` is
+//! keyword-only and optional in both. Every failure — a missing `bash`, a
+//! script that exits non-zero — surfaces as a `RuntimeError`, which is exactly
+//! what the Python call sites already
 //! catch and what the old module raised. The message carries the detail, so no
 //! bespoke exception type is needed.
 //!
@@ -49,7 +51,7 @@ pub fn load_env_file_isolated(
 }
 
 #[pyfunction]
-#[pyo3(signature = (script, *, base_env, cwd=None))]
+#[pyo3(signature = (script, base_env, *, cwd=None))]
 pub fn source_env_string(
     py: Python<'_>,
     script: String,
