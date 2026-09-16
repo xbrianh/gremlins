@@ -35,7 +35,7 @@ gremlins/                    Python package — see gremlins/AGENTS.md
   spawn/                     Internal spawn boundaries (pipeline + child subprocess entry points)
   queue/                     Sequential gremlin dispatch queue
   recipes/                   Reusable stage recipes (shell stages for YAML cmds:)
-  utils/                     proc, git, text, yaml_io, state_file helpers
+  utils/                     proc, git, text, state_file helpers
 Cargo.toml                   Rust workspace root
 crates/                      Rust crates
   gremlins-core/             PyO3 native extension (maturin)

@@ -124,6 +124,38 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         &env_file
     )?)?;
     utils.add_submodule(&env_file)?;
+
+    // yaml_io submodule
+    let yaml_io = PyModule::new(m.py(), "yaml_io")?;
+    yaml_io.add_function(wrap_pyfunction!(
+        python::utils::yaml_io::load_yaml_file,
+        &yaml_io
+    )?)?;
+    yaml_io.add_function(wrap_pyfunction!(
+        python::utils::yaml_io::dump_yaml_text,
+        &yaml_io
+    )?)?;
+    yaml_io.add_function(wrap_pyfunction!(
+        python::utils::yaml_io::load_bundled_prompt,
+        &yaml_io
+    )?)?;
+    yaml_io.add_function(wrap_pyfunction!(
+        python::utils::yaml_io::render_bundled_prompt,
+        &yaml_io
+    )?)?;
+    yaml_io.add(
+        "YamlLoadError",
+        yaml_io
+            .py()
+            .get_type::<python::utils::yaml_io::YamlLoadError>(),
+    )?;
+    yaml_io.add(
+        "PromptLoadError",
+        yaml_io
+            .py()
+            .get_type::<python::utils::yaml_io::PromptLoadError>(),
+    )?;
+    utils.add_submodule(&yaml_io)?;
     m.add_submodule(&utils)?;
     // Register in sys.modules immediately so that Python imports triggered
     // by later submodule registration (e.g. schemas) can find them.
@@ -132,6 +164,7 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     modules.set_item("_gremlins_core.utils.proc", &proc)?;
     modules.set_item("_gremlins_core.utils.git", &git)?;
     modules.set_item("_gremlins_core.utils.env_file", &env_file)?;
+    modules.set_item("_gremlins_core.utils.yaml_io", &yaml_io)?;
 
     // clients submodule
     let clients = PyModule::new(m.py(), "clients")?;

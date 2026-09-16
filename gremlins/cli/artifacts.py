@@ -9,8 +9,7 @@ from _gremlins_core.artifacts import ArtifactRegistry, Uri
 from _gremlins_core.config import scratch_root, state_root
 from _gremlins_core.discovery import resolve_pipeline_name
 from _gremlins_core.schemas import Pipeline
-
-from gremlins.utils.yaml_io import YamlLoadError
+from _gremlins_core.utils.yaml_io import YamlLoadError
 
 
 def artifacts_main(argv: list[str]) -> int:

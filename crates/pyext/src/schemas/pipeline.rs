@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyList, PyType};
+use pyo3::types::{PyDict, PyList, PyType};
 
-use crate::convert::pyval_to_serde;
+use crate::convert::{pyval_to_serde, serde_to_pyval};
 use crate::python::clients::Client;
 use crate::python::stages::PyExec;
 use crate::schemas::bootstrap::Bootstrap;
@@ -344,7 +344,7 @@ fn serde_yaml_value_to_py_dict<'a>(
                     .as_str()
                     .map(String::from)
                     .unwrap_or_else(|| format!("{k:?}"));
-                let val = serde_yaml_to_py(py, v)?;
+                let val = serde_to_pyval(py, v)?;
                 dict.set_item(key_str, val)?;
             }
         }
@@ -355,42 +355,6 @@ fn serde_yaml_value_to_py_dict<'a>(
         }
     }
     Ok(dict)
-}
-
-fn serde_yaml_to_py(py: Python<'_>, value: &serde_yaml::Value) -> PyResult<Py<PyAny>> {
-    match value {
-        serde_yaml::Value::Null => Ok(py.None()),
-        serde_yaml::Value::Bool(b) => Ok(PyBool::new(py, *b).to_owned().into_any().unbind()),
-        serde_yaml::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(i.into_pyobject(py)?.into_any().unbind())
-            } else if let Some(f) = n.as_f64() {
-                Ok(f.into_pyobject(py)?.into_any().unbind())
-            } else {
-                Ok(py.None())
-            }
-        }
-        serde_yaml::Value::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
-        serde_yaml::Value::Sequence(seq) => {
-            let list = PyList::empty(py);
-            for item in seq {
-                list.append(serde_yaml_to_py(py, item)?)?;
-            }
-            Ok(list.into())
-        }
-        serde_yaml::Value::Mapping(m) => {
-            let dict = PyDict::new(py);
-            for (k, v) in m {
-                let key_str = k
-                    .as_str()
-                    .map(String::from)
-                    .unwrap_or_else(|| format!("{k:?}"));
-                dict.set_item(key_str, serde_yaml_to_py(py, v)?)?;
-            }
-            Ok(dict.into())
-        }
-        serde_yaml::Value::Tagged(t) => serde_yaml_to_py(py, &t.value),
-    }
 }
 
 #[cfg(test)]

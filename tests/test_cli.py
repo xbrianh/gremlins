@@ -9,11 +9,11 @@ from unittest.mock import MagicMock
 
 import _gremlins_core.executor as state_mod
 import pytest
+from _gremlins_core.utils.yaml_io import YamlLoadError
 
 import gremlins.cli as cli_mod
 from gremlins.cli import main
 from gremlins.spawn.pipeline import main as run_pipeline_main
-from gremlins.utils.yaml_io import YamlLoadError
 
 
 def _make_state(state_root: pathlib.Path, gremlin_id: str) -> pathlib.Path:

@@ -25,11 +25,11 @@ from _gremlins_core.executor import (
 )
 from _gremlins_core.schemas import Pipeline as _PipelineData
 from _gremlins_core.utils import git as _git_mod
+from _gremlins_core.utils.yaml_io import YamlLoadError as _YamlLoadError
+from _gremlins_core.utils.yaml_io import dump_yaml_text
 
 from gremlins.protocols import StageProtocol
 from gremlins.utils.git import setup_workdir
-from gremlins.utils.yaml_io import YamlLoadError as _YamlLoadError
-from gremlins.utils.yaml_io import dump_yaml_text
 
 
 def _get_stage_types() -> dict:

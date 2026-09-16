@@ -262,8 +262,7 @@ def _append_graft(
     from _gremlins_core.discovery import resolve_pipeline_name
     from _gremlins_core.schemas import expand_pipeline as _expand_pipeline
     from _gremlins_core.schemas import fill_names
-
-    from gremlins.utils.yaml_io import dump_yaml_text, load_yaml_file
+    from _gremlins_core.utils.yaml_io import dump_yaml_text, load_yaml_file
 
     hermetic = state_dir / "pipeline.yaml"
     if not hermetic.is_file():
@@ -362,9 +361,9 @@ def _persist_expanded_pipeline(state_dir: pathlib.Path, pipeline_path: str) -> s
     from _gremlins_core.config import get_config as _get_config
     from _gremlins_core.discovery import resolve_pipeline_name as _resolve_pipeline_name
     from _gremlins_core.schemas import expand_pipeline as _expand_pipeline
+    from _gremlins_core.utils.yaml_io import dump_yaml_text
 
     from gremlins.cli.pipeline_args import load_prefix_clients
-    from gremlins.utils.yaml_io import dump_yaml_text
 
     def _resolve(n):
         return _resolve_pipeline_name(n)

@@ -7,9 +7,9 @@ from _gremlins_core.artifacts import ArtifactRegistry
 from _gremlins_core.executor import StateData, build_state
 from _gremlins_core.schemas import Pipeline
 from _gremlins_core.stages import Agent
+from _gremlins_core.utils.yaml_io import load_bundled_prompt
 from conftest import MINIMAL_EVENTS, MockGremlin
 
-from gremlins.utils.yaml_io import load_bundled_prompt
 from tests.fake_client import FakeClient
 
 if TYPE_CHECKING:

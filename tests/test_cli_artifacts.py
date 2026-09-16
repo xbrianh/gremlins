@@ -5,10 +5,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from _gremlins_core.schemas import Pipeline
+from _gremlins_core.utils.yaml_io import YamlLoadError
 
 import gremlins.cli as cli
 import gremlins.cli.artifacts as mod
-from gremlins.utils.yaml_io import YamlLoadError
 
 
 def _pipe(name="p", stages=None, land=None):
