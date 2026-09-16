@@ -112,6 +112,18 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         git.py().get_type::<python::utils::git::GitError>(),
     )?;
     utils.add_submodule(&git)?;
+
+    // env_file submodule
+    let env_file = PyModule::new(m.py(), "env_file")?;
+    env_file.add_function(wrap_pyfunction!(
+        python::utils::env_file::load_env_file_isolated,
+        &env_file
+    )?)?;
+    env_file.add_function(wrap_pyfunction!(
+        python::utils::env_file::source_env_string,
+        &env_file
+    )?)?;
+    utils.add_submodule(&env_file)?;
     m.add_submodule(&utils)?;
     // Register in sys.modules immediately so that Python imports triggered
     // by later submodule registration (e.g. schemas) can find them.
@@ -119,6 +131,7 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     modules.set_item("_gremlins_core.utils", &utils)?;
     modules.set_item("_gremlins_core.utils.proc", &proc)?;
     modules.set_item("_gremlins_core.utils.git", &git)?;
+    modules.set_item("_gremlins_core.utils.env_file", &env_file)?;
 
     // clients submodule
     let clients = PyModule::new(m.py(), "clients")?;

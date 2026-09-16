@@ -18,7 +18,6 @@ gremlins/                    Python package — see gremlins/AGENTS.md
   errors.py                  die(msg) helper
   paths.py                   Single source of truth for filesystem locations (state dir, worktree, etc.)
   logging_setup.py           configure_logging — UTC timestamp formatter, stdout, GREMLINS_LOG_LEVEL
-  env_file.py                .env file loading (shell-like parsing)
   protocols.py               GremlinProtocol, StageProtocol — shared protocols to avoid circular imports
   cli/                       Subcommand entry points — one file per subcommand group
   clients/                   Client classes + provider impls — see gremlins/clients/AGENTS.md

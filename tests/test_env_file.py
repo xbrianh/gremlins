@@ -1,12 +1,11 @@
-"""Tests for gremlins.env_file."""
+"""Tests for _gremlins_core.utils.env_file."""
 
 from __future__ import annotations
 
 import os
 
 import pytest
-
-from gremlins.env_file import load_env_file_isolated
+from _gremlins_core.utils.env_file import load_env_file_isolated, source_env_string
 
 # ---------------------------------------------------------------------------
 # load_env_file_isolated
@@ -75,3 +74,33 @@ def test_isolated_cwd(tmp_path):
     base = {"PATH": os.environ.get("PATH", ""), "HOME": "/h"}
     result = load_env_file_isolated(env_file, base_env=base, cwd=subdir)
     assert result["CWD"] == str(subdir)
+
+
+def test_isolated_missing_cwd_is_not_reported_as_missing_bash(tmp_path):
+    """A deleted working directory is blamed on the directory, not on bash."""
+    env_file = tmp_path / "env"
+    env_file.write_text("export FOO=bar\n")
+    base = {"PATH": os.environ.get("PATH", ""), "HOME": "/h"}
+    missing = tmp_path / "gone"
+    with pytest.raises(RuntimeError, match="working directory") as excinfo:
+        load_env_file_isolated(env_file, base_env=base, cwd=missing)
+    assert "bash not found" not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# source_env_string
+# ---------------------------------------------------------------------------
+
+
+def test_source_string_accepts_positional_base_env():
+    """base_env is positional-or-keyword, matching the original Python API."""
+    base = {"PATH": os.environ.get("PATH", ""), "HOME": "/h"}
+    result = source_env_string("export FOO=bar\n", base)
+    assert result["FOO"] == "bar"
+
+
+def test_source_string_failure_reports_exit_code():
+    """A non-zero script surfaces as RuntimeError naming the exit status."""
+    base = {"PATH": os.environ.get("PATH", ""), "HOME": "/h"}
+    with pytest.raises(RuntimeError, match=r"\(exit 3\)"):
+        source_env_string("exit 3\n", base)

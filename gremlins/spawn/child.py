@@ -43,8 +43,8 @@ from typing import Any, cast
 from _gremlins_core.config import scratch_root
 from _gremlins_core.schemas import parse_stage
 from _gremlins_core.stages import Bail
+from _gremlins_core.utils.env_file import source_env_string
 
-from gremlins.env_file import source_env_string
 from gremlins.executor.gremlin import Gremlin
 from gremlins.logging_setup import configure_logging
 

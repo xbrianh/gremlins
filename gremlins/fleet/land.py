@@ -1087,7 +1087,7 @@ def do_land(target: str, force: bool = False, mode: str | None = None) -> bool:
         env_script = ""
 
     if env_script:
-        from gremlins.env_file import source_env_string
+        from _gremlins_core.utils.env_file import source_env_string
 
         try:
             env_vars = source_env_string(

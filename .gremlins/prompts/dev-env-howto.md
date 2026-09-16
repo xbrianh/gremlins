@@ -114,8 +114,11 @@ This project has an incremental Rust port. Two crates exist:
 
 - **`_gremlins_core.utils.proc`** — Process execution (`run`, `run_or_raise`, etc.).
   Re-exported by `gremlins/utils/proc.py`. Most call sites use it.
-  A few still use `subprocess` directly: `gremlins/env_file.py`, `gremlins/queue/core.py`,
+  A few still use `subprocess` directly: `gremlins/queue/core.py`,
   `gremlins/utils/spawn_logged_process.py`, and some helpers in `gremlins/utils/proc.py`.
+- **`_gremlins_core.utils.env_file`** — Isolated `.env` loading
+  (`load_env_file_isolated`, `source_env_string`). Imported directly from
+  `_gremlins_core.utils.env_file`; the Python `gremlins/env_file.py` is deleted.
 - **`_gremlins_core.clients.Client`** — LLM client backend. Imported directly
   from `_gremlins_core.clients`; handles all provider API calls.
 - **`_gremlins_core.config`** — Config accessors (`project_root`, `scratch_root`,
