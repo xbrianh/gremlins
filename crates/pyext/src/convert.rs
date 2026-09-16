@@ -95,9 +95,7 @@ pub fn serde_to_pyval(py: Python<'_>, value: &serde_yaml::Value) -> PyResult<Py<
             for (k, v) in mapping {
                 let key = match k {
                     serde_yaml::Value::String(s) => s.clone(),
-                    serde_yaml::Value::Bool(b) => {
-                        if *b { "true" } else { "false" }.to_string()
-                    }
+                    serde_yaml::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
                     serde_yaml::Value::Number(n) => n.to_string(),
                     serde_yaml::Value::Null => "null".to_string(),
                     other => serde_yaml::to_string(&other)
@@ -164,14 +162,7 @@ mod tests {
     fn oversized_int_is_rejected_not_rounded() {
         Python::attach(|py| {
             // 2**64 + 1 fits in f64 but rounds to 2**64 — must be rejected.
-            use std::ffi::CStr;
-            let big = py
-                .eval(
-                    CStr::from_bytes_with_nul(b"2**64 + 1\0").unwrap(),
-                    None,
-                    None,
-                )
-                .unwrap();
+            let big = py.eval(c"2**64 + 1", None, None).unwrap();
             let err = pyval_to_serde(&big).unwrap_err();
             assert!(err.is_instance_of::<pyo3::exceptions::PyOverflowError>(py));
             assert!(err.to_string().contains("18446744073709551617"));
