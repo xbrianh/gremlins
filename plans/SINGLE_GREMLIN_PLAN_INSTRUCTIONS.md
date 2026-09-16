@@ -39,14 +39,22 @@ Each change specifies:
 - **What file** to edit
 - **What to do** in that file (delete a function, add a parameter, re-route an
   import, etc.)
-- **The exact old/new text** when the edit is a straightforward replacement.
-  When the change is structural (extract a module, refactor an interface),
-  describe the before/after shape clearly enough that the gremlin can
-  reconstruct it from reading the current code.
+- **Any non-obvious constraints** the implement agent must respect (e.g., "this
+  function must handle None inputs," "the error type must match the existing
+  pattern in convert.rs").
 
-Prefer showing the edit inline over prose when the edit is small and
-unambiguous. Use fenced code blocks with `python`, `yaml`, `rust`, or `diff`
-as appropriate.
+Describe the transformation, not the code. The implement agent reads the
+current source and writes the edit — it does not need the plan to contain
+the exact diff. An import-rewiring step is one sentence ("change all
+`from gremlins.utils.yaml_io import ...` to
+`from _gremlins_core.utils.yaml_io import ...`"), not a diff annotated
+with line numbers.
+
+Do not write implementation code in the plan. Providing exact source code
+is counterproductive: it leaves the implement agent with nothing to design,
+which causes it to fill the vacuum with endless verification loops. If a
+change truly needs a code sketch, show only the interface or a minimal
+snippet that communicates a constraint — never the full body.
 
 ### 4. Test impact
 
