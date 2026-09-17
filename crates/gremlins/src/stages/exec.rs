@@ -152,6 +152,13 @@ pub struct ExecPrepared {
     pub artifact_dir: PathBuf,
     pub state_dir: PathBuf,
     pub timeout: Option<f64>,
+    /// The environment the commands run under.
+    ///
+    /// The native executor supplies a fully-resolved env (the gremlin's
+    /// system variables plus anything its bootstrap script sourced); the
+    /// pyext path leaves it empty and the commands inherit the process
+    /// environment instead.
+    pub env: HashMap<String, String>,
     pub(crate) loop_iter: String,
 }
 
@@ -246,6 +253,7 @@ pub fn prepare_exec(
         artifact_dir: PathBuf::new(),
         state_dir: PathBuf::new(),
         timeout,
+        env: HashMap::new(),
         loop_iter: loop_iter.to_string(),
     })
 }
@@ -260,7 +268,12 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
     }
 
     let joined = prepared.cmds.join(" && ");
-    let mut env: HashMap<String, String> = std::env::vars().collect();
+    // A prepared env is authoritative when present; otherwise inherit ours.
+    let mut env: HashMap<String, String> = if prepared.env.is_empty() {
+        std::env::vars().collect()
+    } else {
+        prepared.env.clone()
+    };
     env.insert(
         "GREMLINS_ARTIFACT_DIR".to_string(),
         prepared.artifact_dir.to_string_lossy().to_string(),

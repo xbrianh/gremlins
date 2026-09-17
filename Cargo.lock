@@ -547,6 +547,7 @@ dependencies = [
  "futures",
  "glob",
  "http",
+ "indexmap",
  "libc",
  "log",
  "phf",
