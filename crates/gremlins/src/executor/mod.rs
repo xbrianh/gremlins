@@ -2,7 +2,9 @@
 //!
 //! [`state`] owns `state.json` I/O and [`state::StateData`]; [`gremlin`] owns
 //! the [`gremlin::Gremlin`] handle — id validation, environment resolution,
-//! and the `launch`/`open`/`fork` constructors the run loop builds on.
+//! and the `launch`/`open`/`fork` constructors the run loop builds on; [`run`]
+//! owns the sequential run loop that walks a pipeline's stages and drives each
+//! one through its guard, scope, and bail bookkeeping.
 
 use thiserror::Error;
 
@@ -10,6 +12,7 @@ use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
 pub mod gremlin;
+pub mod run;
 pub mod state;
 
 /// Why a gremlin run failed.
