@@ -30,10 +30,10 @@ bootstrap:
 
 land:
   interpolation:
-    PR_URL: content("artifact://pr-url.txt")
+    pr_url: content("artifact://pr-url.txt")
   options:
     cmds:
-      - gh pr merge --squash --delete-branch "{PR_URL}"
+      - gh pr merge --squash --delete-branch "{pr_url}"
       - git fetch origin
       - git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main
 
@@ -71,7 +71,7 @@ stage-definitions:
 
 stages:
   - { type: plan-gh, prompt: [style_guide.md, plan_gh.md] }
-  - { type: gremlins:implement, prompt: [style_guide.md, dev-env-howto.md, implement.md] }
+  - { type: gremlins:implement, prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
   - { type: check-and-fix }
 
   - name: compute-diff
@@ -90,7 +90,7 @@ stages:
         interpolation:
           plan: content("artifact://plan.md")
           diff: content("artifact://diff.txt")
-        prompt: [style_guide.md, dev-env-howto.md, review.md]
+        prompt: [review.md]
         bind:
           filepath: "artifact://review-one.md"
       - name: review-two
@@ -98,7 +98,7 @@ stages:
         interpolation:
           plan: content("artifact://plan.md")
           diff: content("artifact://diff.txt")
-        prompt: [style_guide.md, dev-env-howto.md, review.md]
+        prompt: [review.md]
         bind:
           filepath: "artifact://review-two.md"
 
@@ -106,6 +106,7 @@ stages:
     type: agent
     prompt: [style_guide.md, dev-env-howto.md, address.md]
     interpolation:
+      plan: content("artifact://plan.md")
       diff: content("artifact://diff.txt")
       review_one: content("artifact://review-one.md")
       review_two: content("artifact://review-two.md")
@@ -130,9 +131,6 @@ stages:
     interpolation:
       pr: content("artifact://pr-url.txt")
       content: content("artifact://github-review-content.md")
-    prompt:
-      - style_guide.md
-      - dev-env-howto.md
-      - github_address_pull_request_reviews.md
+    prompt: [style_guide.md, dev-env-howto.md, github_address_pull_request_reviews.md]
   - { type: check-and-fix }
   - { type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, gremlins:ci_fix.md] }

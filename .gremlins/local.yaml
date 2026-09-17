@@ -48,7 +48,7 @@ stage-definitions:
           cmds:
             - "make -j8 check && make -j8 test"
           max_iterations: 7
-        prompt: [dev-env-howto.md, verify_fix.md]
+        prompt: [style_guide.md, dev-env-howto.md, verify_fix.md]
       - name: commit
         type: exec
         options:
@@ -58,7 +58,7 @@ stage-definitions:
 
 stages:
   - { type: gremlins:plan,      prompt: [style_guide.md, gremlins:plan.md] }
-  - { type: gremlins:implement,  prompt: [style_guide.md, dev-env-howto.md, implement.md] }
+  - { type: gremlins:implement,  prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
   - { type: check-and-fix }
   - name: compute-diff
     type: exec
@@ -75,7 +75,7 @@ stages:
         interpolation:
           plan: content("artifact://plan.md")
           diff: content("artifact://diff.txt")
-        prompt: [style_guide.md, dev-env-howto.md, review.md]
+        prompt: [review.md]
         bind:
           filepath: "artifact://review-one.md"
       - name: review-two
@@ -83,13 +83,14 @@ stages:
         interpolation:
           plan: content("artifact://plan.md")
           diff: content("artifact://diff.txt")
-        prompt: [style_guide.md, dev-env-howto.md, review.md]
+        prompt: [review.md]
         bind:
           filepath: "artifact://review-two.md"
   - name: address
     type: agent
     prompt: [style_guide.md, dev-env-howto.md, address.md]
     interpolation:
+      plan: content("artifact://plan.md")
       diff: content("artifact://diff.txt")
       review_one: content("artifact://review-one.md")
       review_two: content("artifact://review-two.md")
