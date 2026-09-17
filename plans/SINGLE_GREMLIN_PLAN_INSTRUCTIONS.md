@@ -9,8 +9,6 @@ a PR — no back-and-forth.
 A plan must be completable in one gremlin invocation. If the work is too large,
 ask the operator for clarification before writing the plan.
 
-If you're unsure whether the work fits in one gremlin, ask the operator to clarify before writing the plan.
-
 ## No design options
 
 A plan states **what will be done and how**. It does not present alternatives,
@@ -32,7 +30,48 @@ A crisp list of files or modules affected. This is the contract: the gremlin
 should not touch anything outside this list unless the plan explicitly says
 it's a "ripple" or "call-site" change with a justification.
 
-### 3. Changes (step-by-step, concrete)
+### 3. Task decomposition — separate concerns, run in parallel
+
+A plan isn't a linear script — it's a set of independent workstreams.
+Before listing file-level changes, decompose the work into tasks that can
+scout and implement in parallel via the `Task` tool. This isn't just about
+speed; it's a design quality check. If you can't separate the work into
+independent tasks, the design likely has tangled concerns that should be
+untangled first.
+
+Each task should:
+
+- **Own one concern.** If a task touches three unrelated modules, split it.
+- **Be independently verifiable.** A task's work should compile and pass its
+own tests without waiting for another task to finish.
+- **Self-contained.** A task knows exactly which code to read and what to
+change. It doesn't need to coordinate with another task mid-flight;
+the plan gives it everything it needs to complete its concern independently.
+
+The plan should list tasks explicitly and flag dependencies:
+
+```
+Tasks:
+  A. Move yaml_io helpers to _gremlins_core (no deps — can run immediately)
+  B. Rewire Python call sites to import from new location (depends on A)
+  C. Update Rust-side YAML error types (no deps — parallel with A)
+```
+
+If two tasks must be sequential, name the dependency and explain why.
+If the reason is weak ("they touch the same file" is not a reason — let
+the second task rebase), reconsider whether they're truly one task.
+
+Common decomposition patterns:
+
+| Pattern | When to use |
+|---------|-------------|
+| **Per-module** | Each task owns a file or module group |
+| **Per-layer** | Core logic vs. CLI surface vs. test fixtures |
+| **Per-concern** | Error handling, happy path, logging, types |
+
+### 4. Changes (per-task detail)
+
+For each task identified above, specify the concrete changes:
 
 Each change specifies:
 
@@ -56,7 +95,7 @@ which causes it to fill the vacuum with endless verification loops. If a
 change truly needs a code sketch, show only the interface or a minimal
 snippet that communicates a constraint — never the full body.
 
-### 4. Test impact
+### 5. Test impact
 
 Which tests are affected and whether new tests are needed. If the plan says
 "no test impact", say why (e.g., "existing integration tests cover this
