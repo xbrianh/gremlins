@@ -21,6 +21,7 @@ use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
 use crate::executor::bootstrap::run_pipeline_bootstrap;
 use crate::executor::gremlin::Gremlin;
+use crate::executor::parallel::run_parallel;
 use crate::executor::state;
 use crate::executor::RunError;
 use crate::stages::agent::{check_bail, commit_agent, prepare_agent, AgentError};
@@ -184,12 +185,7 @@ async fn run_stage_scoped(
         RunnableStage::Exec { .. } => run_exec(stage, gremlin).await,
         RunnableStage::Sequence { .. } => run_sequence(stage, gremlin, scope).await,
         RunnableStage::Loop { .. } => run_loop(stage, gremlin).await,
-        // Parallel needs a spawn/join layer the sequential runner does not
-        // have; refusing is louder than silently serialising a fan-out.
-        RunnableStage::Parallel { .. } => Err(RunError::StageFailed {
-            stage: stage.name().to_string(),
-            message: "parallel stages are not supported by the sequential runner".to_string(),
-        }),
+        RunnableStage::Parallel { .. } => run_parallel(stage, gremlin).await,
     }
 }
 
@@ -1293,7 +1289,9 @@ mod tests {
     // --- parallel ---
 
     #[tokio::test]
-    async fn parallel_is_reported_as_unsupported() {
+    async fn parallel_is_dispatched_to_run_parallel() {
+        // A single-child parallel group with a trivially successful exec
+        // stage exercises the new path through `run_parallel`.
         let yaml = r#"
 - name: group
   parallel:
@@ -1305,13 +1303,8 @@ mod tests {
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
         let stage = gremlin.pipeline.stages[0].clone();
 
-        match run_stage(&stage, &mut gremlin).await {
-            Err(RunError::StageFailed { stage, message }) => {
-                assert_eq!(stage, "group");
-                assert!(message.contains("not supported"), "{message}");
-            }
-            other => panic!("expected StageFailed, got {other:?}"),
-        }
+        let result = run_stage(&stage, &mut gremlin).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
     // --- the run loop ---

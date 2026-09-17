@@ -49,6 +49,19 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    /// Clone this pipeline, replacing its stage list with `stages`.
+    ///
+    /// Used by the parallel executor to give each child a pipeline that
+    /// contains only the child's own stage(s), while inheriting every other
+    /// field (name, path, default_client, base_ref, bootstrap, land) from
+    /// the parent.
+    pub fn clone_with_stages(&self, stages: Vec<RunnableStage>) -> Self {
+        Pipeline {
+            stages,
+            ..self.clone()
+        }
+    }
+
     /// Load and resolve a pipeline. `default_client_override` is the CLI
     /// `--client` value; it is consulted only when the YAML declares none.
     pub fn from_yaml(
