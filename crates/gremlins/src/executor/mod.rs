@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
+pub mod bootstrap;
 pub mod gremlin;
 pub mod run;
 pub mod state;

@@ -19,6 +19,7 @@ use crate::artifacts::registry::ArtifactRegistry;
 use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
+use crate::executor::bootstrap::run_pipeline_bootstrap;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 use crate::executor::RunError;
@@ -531,6 +532,28 @@ impl Gremlin {
     /// the terminal state is written either way so `status` and the `finished`
     /// marker always agree with what actually happened.
     pub async fn run(&mut self) -> Result<i32, RunError> {
+        // A first start owes its checkout a bootstrap before any stage can use
+        // it. The Python guard was `worktree_dir and not resume_from and
+        // _has_bootstrap`; a run without a worktree has no dev environment to
+        // prepare, and a resumed run's was prepared by the attempt that made
+        // the worktree.
+        let bootstrap = &self.pipeline.bootstrap;
+        let has_bootstrap = !bootstrap.cmds.is_empty()
+            || !bootstrap.launch_cmds.is_empty()
+            || !bootstrap.cli_out.is_empty();
+        let first_start = self.worktree.is_some() && self.resume_from.is_none();
+        if first_start && has_bootstrap {
+            if let Err(error) = run_pipeline_bootstrap(self).await {
+                log::error!("bootstrap failed");
+                self.state.write_bail_file(
+                    "other",
+                    &truncate(&format!("bootstrap failed: {error}"), 200),
+                );
+                self.finish(1);
+                return Ok(1);
+            }
+        }
+
         // Cloning the stage list keeps `self.pipeline` out of the loop's borrow,
         // which `&mut self` would otherwise hold for its whole duration.
         let stages = self.pipeline.stages.clone();
@@ -625,7 +648,7 @@ impl Gremlin {
 ///
 /// The Python executor sliced the operator-facing reason (`reason[:200]`) for
 /// the bail file; this keeps that budget without splitting a codepoint.
-fn truncate(text: &str, max: usize) -> String {
+pub(crate) fn truncate(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
@@ -710,6 +733,7 @@ mod tests {
             env: HashMap::new(),
             client: Client::parse(default_client).unwrap(),
             loop_stack: Vec::new(),
+            stage_inputs: HashMap::new(),
         };
         (tmp, gremlin)
     }
@@ -1440,6 +1464,93 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bail["detail"], "stopped");
+    }
+
+    // --- bootstrap integration ---
+
+    /// The run-loop half of bootstrap: `run` runs the block before the stage
+    /// walk, and a failure is a bail — recorded and terminal, never a crash.
+    #[tokio::test]
+    async fn run_fails_the_bootstrap_and_records_a_bail() {
+        let yaml = r#"
+- name: never
+  type: exec
+  options:
+    cmds: ["touch never.marker"]
+"#;
+        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        gremlin.worktree = Some(worktree.clone());
+        gremlin.pipeline.bootstrap = Bootstrap {
+            cmds: vec!["exit 5".to_string()],
+            ..Default::default()
+        };
+        let state_dir = tmp.path().join("state").join("gr-test");
+
+        assert_eq!(gremlin.run().await.unwrap(), 1);
+        assert!(!worktree.join("never.marker").exists());
+
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(state_dir.join("state.json")).unwrap())
+                .unwrap();
+        assert_eq!(raw["status"], "stopped");
+        assert_eq!(raw["exit_code"], 1);
+        let bail: Value = serde_json::from_str(
+            &std::fs::read_to_string(state_dir.join("bail_test-0001.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bail["class"], "other");
+        assert!(bail["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("bootstrap failed:"));
+    }
+
+    #[tokio::test]
+    async fn run_runs_the_bootstrap_before_the_stages() {
+        let yaml = r#"
+- name: reader
+  type: exec
+  options:
+    cmds: ["cat marker.txt > read.txt"]
+"#;
+        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        gremlin.worktree = Some(worktree.clone());
+        gremlin.pipeline.bootstrap = Bootstrap {
+            cmds: vec!["echo prepared > marker.txt".to_string()],
+            ..Default::default()
+        };
+
+        // The stage `cat`s a file only the bootstrap wrote: a non-zero exit
+        // here would mean the ordering was wrong.
+        assert_eq!(gremlin.run().await.unwrap(), 0);
+        assert!(worktree.join("marker.txt").is_file());
+        assert!(worktree.join("read.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn run_skips_the_bootstrap_on_resume() {
+        let yaml = r#"
+- name: only
+  type: exec
+  options:
+    cmds: ["true"]
+"#;
+        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        gremlin.worktree = Some(worktree.clone());
+        gremlin.resume_from = Some("only".to_string());
+        gremlin.pipeline.bootstrap = Bootstrap {
+            cmds: vec!["touch bootstrap.marker".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(gremlin.run().await.unwrap(), 0);
+        assert!(!worktree.join("bootstrap.marker").exists());
     }
 
     // --- git-backed end to end ---

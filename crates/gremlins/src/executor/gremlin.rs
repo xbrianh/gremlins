@@ -125,6 +125,11 @@ pub struct Gremlin {
     pub env: HashMap<String, String>,
     pub client: Client,
     pub loop_stack: Vec<(String, u32)>,
+    /// The CLI/source values this run was launched with, keyed by source name.
+    ///
+    /// Bootstrap's `bind_artifact` DSL reads from here: a source key that is
+    /// absent or empty is an optional source with nothing to bind.
+    pub stage_inputs: HashMap<String, String>,
 }
 
 impl Gremlin {
@@ -354,6 +359,21 @@ impl Gremlin {
             &overlay_dir,
         )?;
 
+        // `stage_inputs` is what bootstrap's `bind_artifact` resolves against;
+        // an absent or null field is an empty map, exactly as the Python
+        // `state_json.get("stage_inputs") or {}` read it.
+        let stage_inputs: HashMap<String, String> = state
+            .read_field("stage_inputs")
+            .and_then(|value| match value {
+                Value::Object(map) => Some(
+                    map.into_iter()
+                        .map(|(key, value)| (key, value.as_str().unwrap_or("").to_string()))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+
         Ok(Gremlin {
             id: gremlin_id,
             state_dir,
@@ -370,6 +390,7 @@ impl Gremlin {
             env,
             client,
             loop_stack: Vec::new(),
+            stage_inputs,
         })
     }
 
@@ -513,6 +534,9 @@ impl Gremlin {
             env: self.env.clone(),
             client: self.client.clone(),
             loop_stack: Vec::new(),
+            // A child inherits the parent's source values: its bootstrap binds
+            // the same inputs the parent launched with.
+            stage_inputs: self.stage_inputs.clone(),
         })
     }
 
@@ -680,6 +704,7 @@ fn finish_launch(
         env,
         client,
         loop_stack: Vec::new(),
+        stage_inputs: stage_inputs.clone(),
     })
 }
 
