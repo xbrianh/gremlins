@@ -19,7 +19,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use serde_json::{Map, Value};
 
@@ -809,26 +808,18 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), RunError> {
     Ok(())
 }
 
-/// Resolve a pipeline kind against `project_root`, without touching the
-/// process environment.
+/// Resolve a pipeline kind against `project_root`, ignoring the process-wide
+/// overlay override.
 ///
 /// Discovery threads the project root through its `base_dir` argument, but it
-/// reads `GREMLINS_OVERLAY_DIR` from the process environment, and this process
-/// exports that variable as its own overlay path. A holder of the env mutex
-/// stands in for saving and restoring the variable by hand — cheaper, and it
-/// cannot be observed in a half-swapped state by a concurrent caller.
+/// would otherwise read `GREMLINS_OVERLAY_DIR` from the process environment,
+/// and a running gremlin exports that variable as its own overlay path. Naming
+/// the project's own overlay explicitly is what lets `status` look inside the
+/// project the state file names rather than the overlay of whoever asked —
+/// without the process-global env ever being cleared, and so without a lock.
 fn resolve_pipeline_in_project(kind: &str, project_root: &Path) -> Option<PathBuf> {
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let _guard = ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let previous = std::env::var_os("GREMLINS_OVERLAY_DIR");
-    std::env::remove_var("GREMLINS_OVERLAY_DIR");
-    let resolved = discovery::resolve_pipeline_path(kind, project_root.to_path_buf());
-    if let Some(value) = previous {
-        std::env::set_var("GREMLINS_OVERLAY_DIR", value);
-    }
-    resolved.ok()
+    let overlay = config::overlay_dir_without_env(project_root);
+    discovery::resolve_pipeline_path_in(kind, Some(&overlay), project_root.to_path_buf()).ok()
 }
 
 /// A pipeline placeholder carrying only an identity, for a run whose pipeline
@@ -973,30 +964,7 @@ pub fn resolve_env(
 mod tests {
     use super::*;
 
-    /// Serialises the tests that touch process-global config or the
-    /// environment, following the pattern in `config.rs`.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Point the process-global config at a throwaway sandbox for the duration
-    /// of `body`, then restore the environment and drop the cached config.
-    fn with_sandbox_config<T>(body: impl FnOnce(&Path) -> T) -> T {
-        let _guard = ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("GREMLINS_SANDBOX_ROOT");
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
-        config::clear_global();
-
-        let result = body(dir.path());
-
-        config::clear_global();
-        match previous {
-            Some(value) => std::env::set_var("GREMLINS_SANDBOX_ROOT", value),
-            None => std::env::remove_var("GREMLINS_SANDBOX_ROOT"),
-        }
-        result
-    }
+    use crate::test_support::{with_sandbox, EnvGuard};
 
     // --- id validation ---
 
@@ -1244,7 +1212,7 @@ mod tests {
             eprintln!("git is unavailable; skipping launch_creates_state_and_worktree");
             return;
         }
-        with_sandbox_config(|sandbox| {
+        with_sandbox(None, |sandbox| {
             let repo = tempfile::tempdir().unwrap();
             if !init_repo(repo.path()) {
                 eprintln!("could not prepare a git fixture; skipping");
@@ -1295,7 +1263,7 @@ mod tests {
             eprintln!("git is unavailable; skipping launch_then_open_roundtrips");
             return;
         }
-        with_sandbox_config(|_sandbox| {
+        with_sandbox(None, |_sandbox| {
             let repo = tempfile::tempdir().unwrap();
             if !init_repo(repo.path()) {
                 eprintln!("could not prepare a git fixture; skipping");
@@ -1331,7 +1299,7 @@ mod tests {
             eprintln!("git is unavailable; skipping fork_copies_artifacts_and_seeds_child_state");
             return;
         }
-        with_sandbox_config(|sandbox| {
+        with_sandbox(None, |sandbox| {
             let repo = tempfile::tempdir().unwrap();
             if !init_repo(repo.path()) {
                 eprintln!("could not prepare a git fixture; skipping");
@@ -1390,7 +1358,7 @@ mod tests {
             eprintln!("git is unavailable; skipping fork_keeps_parent_id_unless_one_is_given");
             return;
         }
-        with_sandbox_config(|sandbox| {
+        with_sandbox(None, |sandbox| {
             let repo = tempfile::tempdir().unwrap();
             if !init_repo(repo.path()) {
                 eprintln!("could not prepare a git fixture; skipping");
@@ -1431,9 +1399,7 @@ mod tests {
 
     #[test]
     fn resolve_pipeline_in_project_ignores_the_overlay_override() {
-        let _guard = ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = EnvGuard::lock();
         let project = tempfile::tempdir().unwrap();
         let overlay = project.path().join(config::overlay_dirname());
         std::fs::create_dir_all(&overlay).unwrap();
@@ -1445,21 +1411,11 @@ mod tests {
 
         // A running gremlin exports its own overlay path; `open` still has to
         // find the pipeline inside the project the state file names.
-        let previous = std::env::var_os("GREMLINS_OVERLAY_DIR");
-        std::env::set_var("GREMLINS_OVERLAY_DIR", "/nonexistent/overlay");
+        env.set("GREMLINS_OVERLAY_DIR", "/nonexistent/overlay");
         let found = resolve_pipeline_in_project("demo", project.path());
         let missing = resolve_pipeline_in_project("nope", project.path());
-        match previous.clone() {
-            Some(value) => std::env::set_var("GREMLINS_OVERLAY_DIR", value),
-            None => std::env::remove_var("GREMLINS_OVERLAY_DIR"),
-        }
 
         assert!(found.is_some_and(|path| path.ends_with("demo.yaml")));
         assert!(missing.is_none());
-        assert_eq!(
-            std::env::var_os("GREMLINS_OVERLAY_DIR"),
-            previous,
-            "the overlay override must be restored"
-        );
     }
 }

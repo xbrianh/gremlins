@@ -240,7 +240,7 @@ fn resolve_default_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use crate::test_support::Sandbox;
 
     const WITH_CLIENT: &str = r#"
 default_client: 'xai:grok-4'
@@ -284,36 +284,6 @@ stages:
         let path = overlay.join(format!("{stem}.yaml"));
         std::fs::write(&path, body).unwrap();
         path
-    }
-
-    /// Serialises the tests that touch the process-global config.
-    static GLOBAL_CONFIG: Mutex<()> = Mutex::new(());
-
-    /// Point `config::global_config()` at a throwaway sandbox for the duration
-    /// of `body`, then restore the environment and drop the cached config.
-    fn with_sandbox_config<T>(config_json: Option<&str>, body: impl FnOnce() -> T) -> T {
-        let _guard: MutexGuard<'_, ()> = GLOBAL_CONFIG
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        if let Some(json) = config_json {
-            let config_dir = dir.path().join("config");
-            std::fs::create_dir_all(&config_dir).unwrap();
-            std::fs::write(config_dir.join("config.json"), json).unwrap();
-        }
-
-        let previous = std::env::var_os("GREMLINS_SANDBOX_ROOT");
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
-        config::clear_global();
-
-        let result = body();
-
-        config::clear_global();
-        match previous {
-            Some(value) => std::env::set_var("GREMLINS_SANDBOX_ROOT", value),
-            None => std::env::remove_var("GREMLINS_SANDBOX_ROOT"),
-        }
-        result
     }
 
     #[test]
@@ -407,29 +377,34 @@ stages:
         );
     }
 
+    /// A pipeline whose client has to come from the sandbox's config, plus
+    /// the sandbox that supplies (or withholds) it and the project directory
+    /// the pipeline file lives in.
+    fn pipeline_needing_a_client(
+        config_json: Option<&str>,
+    ) -> (Sandbox, tempfile::TempDir, PathBuf) {
+        let sandbox = Sandbox::with_config(config_json);
+        let project = tempfile::tempdir().unwrap();
+        let path = write_fixture(project.path(), "demo", WITHOUT_CLIENT);
+        (sandbox, project, path)
+    }
+
     #[test]
     fn config_supplies_the_client_when_nothing_else_does() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_fixture(dir.path(), "demo", WITHOUT_CLIENT);
-
-        with_sandbox_config(Some(r#"{"default-client": "cfg:model"}"#), || {
-            let pipeline = Pipeline::from_yaml(&path, None).unwrap();
-            assert_eq!(pipeline.default_client, "cfg:model");
-        });
+        let (_sandbox, _project, path) =
+            pipeline_needing_a_client(Some(r#"{"default-client": "cfg:model"}"#));
+        let pipeline = Pipeline::from_yaml(&path, None).unwrap();
+        assert_eq!(pipeline.default_client, "cfg:model");
     }
 
     #[test]
     fn a_client_is_required_from_somewhere() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_fixture(dir.path(), "demo", WITHOUT_CLIENT);
-
-        with_sandbox_config(None, || {
-            let err = Pipeline::from_yaml(&path, None).unwrap_err();
-            assert!(
-                err.to_string().contains("missing 'default_client'"),
-                "{err}"
-            );
-        });
+        let (_sandbox, _project, path) = pipeline_needing_a_client(None);
+        let err = Pipeline::from_yaml(&path, None).unwrap_err();
+        assert!(
+            err.to_string().contains("missing 'default_client'"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -638,27 +613,20 @@ land:
 
     #[test]
     fn a_blank_override_never_becomes_the_client() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_fixture(dir.path(), "demo", WITHOUT_CLIENT);
-
-        with_sandbox_config(None, || {
-            let err = Pipeline::from_yaml(&path, Some("   ")).unwrap_err();
-            assert!(
-                err.to_string().contains("missing 'default_client'"),
-                "{err}"
-            );
-        });
+        let (_sandbox, _project, path) = pipeline_needing_a_client(None);
+        let err = Pipeline::from_yaml(&path, Some("   ")).unwrap_err();
+        assert!(
+            err.to_string().contains("missing 'default_client'"),
+            "{err}"
+        );
     }
 
     #[test]
     fn a_blank_override_falls_through_to_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_fixture(dir.path(), "demo", WITHOUT_CLIENT);
-
-        with_sandbox_config(Some(r#"{"default-client": "cfg:model"}"#), || {
-            let pipeline = Pipeline::from_yaml(&path, Some("")).unwrap();
-            assert_eq!(pipeline.default_client, "cfg:model");
-        });
+        let (_sandbox, _project, path) =
+            pipeline_needing_a_client(Some(r#"{"default-client": "cfg:model"}"#));
+        let pipeline = Pipeline::from_yaml(&path, Some("")).unwrap();
+        assert_eq!(pipeline.default_client, "cfg:model");
     }
 
     #[test]

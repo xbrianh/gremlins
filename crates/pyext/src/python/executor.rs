@@ -225,25 +225,6 @@ impl PyStateData {
         self.with(StateData::clear_parallel_attempts);
     }
 
-    fn write_parallel_bail(&self, child_key: &str, reason: &str) {
-        self.with(|d| d.write_parallel_bail(child_key, reason));
-    }
-
-    fn read_bail_scan_inputs(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let (state_dir, attempts) = self.with(StateData::read_bail_scan_inputs);
-        let out = PyTuple::new(
-            py,
-            [
-                state_dir
-                    .map(|p| p.to_string_lossy().to_string())
-                    .into_pyobject(py)?
-                    .into_any(),
-                attempts.into_pyobject(py)?.into_any(),
-            ],
-        )?;
-        Ok(out.into())
-    }
-
     fn write_terminal_state(&self, exit_code: i32) {
         self.with(|d| d.write_terminal_state(exit_code));
     }

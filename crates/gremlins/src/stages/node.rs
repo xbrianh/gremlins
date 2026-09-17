@@ -23,7 +23,7 @@ use crate::schemas::loader::{self as schema_loader, StageEntry, StageNode};
 use crate::stages::agent::Agent;
 use crate::stages::composite::{get_client_from_dict, ClientSpec, StageAttrs};
 use crate::stages::exec::Exec;
-use crate::stages::parallel::{validate_child_names, BailPolicy, ParallelGroup};
+use crate::stages::parallel::{validate_child_names, ErrorPolicy, ParallelGroup};
 use crate::stages::r#loop::Loop;
 use crate::stages::sequence::Sequence;
 
@@ -83,8 +83,8 @@ pub enum RunnableStage {
     Parallel {
         attrs: StageAttrs,
         max_concurrent: Option<u32>,
-        cancel_on_bail: bool,
-        bail_policy: BailPolicy,
+        cancel_on_error: bool,
+        error_policy: ErrorPolicy,
         client: Option<ClientSpec>,
         body: Vec<RunnableStage>,
     },
@@ -352,8 +352,8 @@ fn parse_parallel(
     Ok(RunnableStage::Parallel {
         attrs: parsed.attrs,
         max_concurrent: parsed.max_concurrent,
-        cancel_on_bail: parsed.cancel_on_bail,
-        bail_policy: parsed.bail_policy,
+        cancel_on_error: parsed.cancel_on_error,
+        error_policy: parsed.error_policy,
         client: parsed.client,
         body,
     })
@@ -591,8 +591,8 @@ mod tests {
       options:
         cmds: ["true"]
   max_concurrent: 3
-  cancel_on_bail: true
-  bail_policy: all
+  cancel_on_error: true
+  error_policy: all
 "#,
         )
         .unwrap();
@@ -600,13 +600,13 @@ mod tests {
         match &stages[0] {
             RunnableStage::Parallel {
                 max_concurrent,
-                cancel_on_bail,
-                bail_policy,
+                cancel_on_error,
+                error_policy,
                 ..
             } => {
                 assert_eq!(*max_concurrent, Some(3));
-                assert!(cancel_on_bail);
-                assert_eq!(*bail_policy, BailPolicy::All);
+                assert!(cancel_on_error);
+                assert_eq!(*error_policy, ErrorPolicy::All);
             }
             other => panic!("expected parallel, got {other:?}"),
         }

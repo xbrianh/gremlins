@@ -1,10 +1,10 @@
 """Tests for the parallel three-stage decomposition and related state fixes.
 
 Covers:
-- Per-child bail shards: children write to parallel_bails, not top-level.
-- bail_policy: 'any' and 'all' aggregation rules.
+- Per-child bail shards: children write bail files, not the top-level slot.
+- error_policy: 'any' and 'all' aggregation rules over those shards.
 - fcntl.flock race: concurrent patch_state calls produce no lost updates.
-- cancel_on_bail: children that haven't started are skipped on first bail.
+- cancel_on_error: children that haven't started are skipped on first error.
 - Fan-in resume: --resume-from <group>-fanin aggregates existing shards.
 - Worktree lifecycle: fan-out creates worktrees, fan-in removes them.
 - Existing review-lens pipeline behaviour is unchanged with defaults.
@@ -58,8 +58,8 @@ def _make_parallel_stages(
     *,
     max_concurrent: int | None = None,
     set_stage_fn=None,
-    cancel_on_bail: bool = False,
-    bail_policy: str = "any",
+    cancel_on_error: bool = False,
+    error_policy: str = "any",
     parent_state: State | None = None,
     project_root_path: pathlib.Path | None = None,
 ) -> list:
@@ -76,8 +76,8 @@ def _make_parallel_stages(
         group_name,
         [],
         max_concurrent=max_concurrent,
-        cancel_on_bail=cancel_on_bail,
-        bail_policy=bail_policy,
+        cancel_on_error=cancel_on_error,
+        error_policy=error_policy,
     ).build_runtime_stages(
         child_runners,
         parent_state=parent_state,
@@ -146,7 +146,7 @@ def test_patch_state_concurrent_no_lost_updates(sandbox):
 
 
 # ---------------------------------------------------------------------------
-# bail_policy via build_parallel_stages
+# error_policy via build_parallel_stages
 # ---------------------------------------------------------------------------
 
 
@@ -163,8 +163,8 @@ def _build_fanin_test(
     tmp_path: pathlib.Path,
     state_root: pathlib.Path,
     gremlin_id: str,
-    shards: dict[str, str],  # child_key -> bail_class (empty = no bail)
-    bail_policy: str,
+    shards: dict[str, str],  # child_key -> bail_class (empty = no error)
+    error_policy: str,
     parent_attempt: str = "parent-attempt",
 ) -> tuple[pathlib.Path, list]:
     sf = _make_state(state_root, gremlin_id)
@@ -195,15 +195,15 @@ def _build_fanin_test(
         children,
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy=bail_policy,
+        cancel_on_error=False,
+        error_policy=error_policy,
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=project_root,
     )
     return sf, stages
 
 
-def test_bail_policy_any_one_bailed_sets_parent_bail(tmp_path, sandbox):
+def test_error_policy_any_one_error_sets_parent_error(tmp_path, sandbox):
     gremlin_id = "gr-policy-any"
     shards = {"child-a": "other", "child-b": ""}
     sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "any")
@@ -221,12 +221,12 @@ def test_bail_policy_any_one_bailed_sets_parent_bail(tmp_path, sandbox):
     assert "parallel_attempts" not in data
 
 
-def test_bail_policy_all_one_bailed_no_parent_bail(tmp_path, sandbox):
+def test_error_policy_all_one_error_no_parent_error(tmp_path, sandbox):
     gremlin_id = "gr-policy-all-partial"
     shards = {"child-a": "other", "child-b": ""}
     sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "all")
 
-    # Only one bailed; policy=all requires all → no parent bail.
+    # Only one child failed; policy=all requires every child to fail.
     asyncio.run(stages[2][1]())  # fanin should not raise
 
     state_dir = sf.parent
@@ -235,7 +235,7 @@ def test_bail_policy_all_one_bailed_no_parent_bail(tmp_path, sandbox):
     assert "parallel_attempts" not in data
 
 
-def test_bail_policy_all_both_bailed_sets_parent_bail(tmp_path, sandbox):
+def test_error_policy_all_both_errors_set_parent_error(tmp_path, sandbox):
     gremlin_id = "gr-policy-all-both"
     shards = {"child-a": "other", "child-b": "reviewer_requested_changes"}
     sf, stages = _build_fanin_test(tmp_path, sandbox.state, gremlin_id, shards, "all")
@@ -251,11 +251,11 @@ def test_bail_policy_all_both_bailed_sets_parent_bail(tmp_path, sandbox):
 
 
 # ---------------------------------------------------------------------------
-# cancel_on_bail: unstarted children are skipped after first bail
+# cancel_on_error: unstarted children are skipped after the first error
 # ---------------------------------------------------------------------------
 
 
-def test_cancel_on_bail_skips_unstarted_children():
+def test_cancel_on_error_skips_unstarted_children():
     ran: list[str] = []
 
     async def child_a() -> None:
@@ -294,8 +294,8 @@ def test_cancel_on_bail_skips_unstarted_children():
         children,
         max_concurrent=2,  # only 2 concurrent; c starts only after a or b finishes
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=True,
-        bail_policy="any",
+        cancel_on_error=True,
+        error_policy="any",
         project_root_path=pathlib.Path.cwd(),
     )
 
@@ -307,7 +307,7 @@ def test_cancel_on_bail_skips_unstarted_children():
     assert "c" not in ran
 
 
-def test_cancel_on_bail_aborts_in_flight_siblings():
+def test_cancel_on_error_aborts_in_flight_siblings():
     """A bail cancels siblings that are already running, not just queued ones."""
     ran: list[str] = []
 
@@ -333,8 +333,8 @@ def test_cancel_on_bail_aborts_in_flight_siblings():
         "workers",
         children,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=True,
-        bail_policy="any",
+        cancel_on_error=True,
+        error_policy="any",
         project_root_path=pathlib.Path.cwd(),
     )
 
@@ -387,8 +387,8 @@ def test_run_stages_resume_from_fanin_name(tmp_path, sandbox):
         [("c", ctx, lambda: None)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=project_root,
     )
@@ -432,8 +432,8 @@ def test_fanin_tears_down_when_gather_fails(tmp_path, sandbox, monkeypatch):
         [(child_key, ctx, lambda: None)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=project_root,
     )
@@ -510,8 +510,8 @@ def test_worktree_lifecycle_fanout_creates_and_fanin_removes(tmp_path):
         [("a", ctx_a, _noop), ("b", ctx_b, _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         project_root_path=repo,
     )
 
@@ -588,8 +588,8 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, sandbo
         [("a", _make_ctx("a"), _noop), ("b", _make_ctx("b"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=repo,
     )
@@ -612,8 +612,8 @@ def test_fanout_persists_worktrees_and_fresh_fanin_can_clean_up(tmp_path, sandbo
         [("a", _make_ctx("a"), _noop), ("b", _make_ctx("b"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=repo,
     )
@@ -651,8 +651,8 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, sandbox):
         [("a", _make_ctx("a"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=repo,
     )
@@ -671,8 +671,8 @@ def test_fanout_resume_tears_down_prior_worktrees(tmp_path, sandbox):
         [("a", _make_ctx("a"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=repo,
     )
@@ -701,8 +701,8 @@ def test_build_parallel_stages_returns_three_named_stages():
         [("r1", ctx, lambda: None)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         project_root_path=pathlib.Path.cwd(),
     )
     names = [n for n, _ in stages]
@@ -735,8 +735,8 @@ def test_parallel_all_children_complete_with_defaults():
         [("a", ctx_a, child_a), ("b", ctx_b, child_b)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         project_root_path=pathlib.Path.cwd(),
     )
 
@@ -749,7 +749,7 @@ def test_parallel_all_children_complete_with_defaults():
     assert sorted(ran) == ["a", "b"]
 
 
-def test_pipeline_cancel_on_bail_and_bail_policy_parsed(tmp_path):
+def test_pipeline_cancel_on_error_and_error_policy_parsed(tmp_path):
     from _gremlins_core.schemas import Pipeline
 
     yaml_content = """\
@@ -760,8 +760,8 @@ prompts:
     Fix it.
 stages:
   - name: reviews
-    cancel_on_bail: true
-    bail_policy: all
+    cancel_on_error: true
+    error_policy: all
     parallel:
       - {name: r1, type: verify, options: {cmds: ['true']}, prompt: fix}
       - {name: r2, type: verify, options: {cmds: ['true']}, prompt: fix}
@@ -770,11 +770,11 @@ stages:
     p.write_text(yaml_content)
     pipeline = Pipeline.from_yaml(p)
     entry = pipeline.stages[0]
-    assert entry.cancel_on_bail is True
-    assert entry.bail_policy == "all"
+    assert entry.cancel_on_error is True
+    assert entry.error_policy == "all"
 
 
-def test_pipeline_bail_policy_invalid_raises(tmp_path):
+def test_pipeline_error_policy_invalid_raises(tmp_path):
     from _gremlins_core.schemas import Pipeline
 
     yaml_content = """\
@@ -785,13 +785,13 @@ prompts:
     Fix it.
 stages:
   - name: reviews
-    bail_policy: bogus
+    error_policy: bogus
     parallel:
       - {name: r1, type: verify, options: {cmds: ['true']}, prompt: fix}
 """
     p = tmp_path / "pipeline.yaml"
     p.write_text(yaml_content)
-    with pytest.raises(ValueError, match="bail_policy"):
+    with pytest.raises(ValueError, match="error_policy"):
         Pipeline.from_yaml(p)
 
 
@@ -889,8 +889,8 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
         [("a", _make_ctx("a"), _noop), ("b", _make_ctx("b"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=repo,
     )
@@ -935,8 +935,8 @@ def test_fanin_allows_child_worktree_mutations(tmp_path, sandbox, caplog):
         [("a", _make_ctx("a"), _noop), ("b", _make_ctx("b"), _noop)],
         max_concurrent=None,
         set_stage_fn=lambda _n: None,
-        cancel_on_bail=False,
-        bail_policy="any",
+        cancel_on_error=False,
+        error_policy="any",
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=repo,
     )
@@ -981,7 +981,7 @@ def test_in_process_child_bail_reaches_fan_in(tmp_path, sandbox):
             ("b", _make_simple_ctx(tmp_path, "b"), child_b),
         ],
         set_stage_fn=lambda _n: None,
-        bail_policy="any",
+        error_policy="any",
         parent_state=make_parent_state(StateData(gremlin_id)),
         project_root_path=project_root,
     )

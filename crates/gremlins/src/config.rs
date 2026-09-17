@@ -486,6 +486,18 @@ pub fn resolve_project_root(overrides: Option<&PathOverrides>) -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// The overlay of `project_root`, with the `paths.overlay-dir` override from
+/// config.json (`overrides`) still winning: it is part of the resolved
+/// configuration, not a per-process accident.
+fn overlay_dir_for(overrides: Option<&PathOverrides>, project_root: &Path) -> PathBuf {
+    if let Some(o) = overrides {
+        if let Some(ref p) = o.overlay_dir {
+            return p.clone();
+        }
+    }
+    project_root.join(OVERLAY_DIRNAME)
+}
+
 pub fn resolve_project_overlay_dir(
     overrides: Option<&PathOverrides>,
     project_root: &Path,
@@ -493,12 +505,33 @@ pub fn resolve_project_overlay_dir(
     if let Some(p) = overlay_dir_env_override() {
         return p;
     }
-    if let Some(o) = overrides {
-        if let Some(ref p) = o.overlay_dir {
-            return p.clone();
-        }
+    overlay_dir_for(overrides, project_root)
+}
+
+/// The overlay dir for `project_root`, with `explicit` honoured before
+/// `GREMLINS_OVERLAY_DIR`.
+///
+/// A caller that knows which overlay it means — `status` resolving a pipeline
+/// inside the project its state file names — passes it as `explicit`, so the
+/// process-wide export a running gremlin carries cannot redirect the lookup.
+/// Reading the choice rather than clearing the variable for the duration of a
+/// resolution keeps the environment from ever being observed half-swapped, and
+/// so needs no lock.
+pub(crate) fn overlay_dir_preferring(explicit: Option<&Path>, project_root: &Path) -> PathBuf {
+    match explicit {
+        Some(p) => p.to_path_buf(),
+        None => project_overlay_dir(project_root),
     }
-    project_root.join(OVERLAY_DIRNAME)
+}
+
+/// The configured overlay of `project_root`, ignoring `GREMLINS_OVERLAY_DIR`.
+///
+/// The process-wide export a running gremlin carries must not redirect a
+/// resolution meant for the project a state file names; the config.json
+/// override, by contrast, is part of the resolved layout and is honoured.
+pub(crate) fn overlay_dir_without_env(project_root: &Path) -> PathBuf {
+    let overrides = get_global().map(|c| c.path_overrides().clone());
+    overlay_dir_for(overrides.as_ref(), project_root)
 }
 
 pub fn resolve_scratch_root(
@@ -661,16 +694,8 @@ pub fn api_key(env_var_name: &str, provider_name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::Mutex as StdMutex;
 
-    // Serialize env-var tests to prevent races.
-    static ENV_MUTEX: StdMutex<()> = StdMutex::new(());
-
-    fn clear_sandbox_env() {
-        std::env::remove_var("GREMLINS_SANDBOX_ROOT");
-        std::env::remove_var("GREMLINS_PROJECT_ROOT");
-        std::env::remove_var("GREMLINS_OVERLAY_DIR");
-    }
+    use crate::test_support::{EnvGuard, Sandbox};
 
     // -----------------------------------------------------------------------
     // Config parsing tests
@@ -832,17 +857,13 @@ mod tests {
 
     #[test]
     fn test_paths_section_absent() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_json = dir.path().join("config.json");
-        fs::write(&config_json, r#"{"default-client": "a:b"}"#).unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        // A real config.json, with no `paths` key: the loader must not invent
+        // overrides for a section that is simply absent.
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "a:b"}"#));
         let cfg = Config::load().unwrap();
         let overrides = cfg.path_overrides();
         assert!(overrides.state_root.is_none());
         assert!(overrides.work_root.is_none());
-        clear_sandbox_env();
     }
 
     // -----------------------------------------------------------------------
@@ -851,20 +872,15 @@ mod tests {
 
     #[test]
     fn test_state_root_env_override() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let sandbox = Sandbox::new();
         let result = resolve_state_root(None);
-        assert_eq!(result, dir.path().join("state"));
+        assert_eq!(result, sandbox.path().join("state"));
         assert!(result.exists());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_state_root_config_override() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         let overrides = PathOverrides {
             state_root: Some(dir.path().join("my-state")),
@@ -873,13 +889,11 @@ mod tests {
         let result = resolve_state_root(Some(&overrides));
         assert_eq!(result, dir.path().join("my-state"));
         assert!(result.exists());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_state_root_default() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let result = resolve_state_root(None);
         // Should be under the platform state dir
         assert!(result.to_str().unwrap().contains("gremlins"));
@@ -888,19 +902,16 @@ mod tests {
 
     #[test]
     fn test_project_root_env_override() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let mut env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GREMLINS_PROJECT_ROOT", dir.path());
+        env.set("GREMLINS_PROJECT_ROOT", dir.path());
         let result = resolve_project_root(None);
         assert_eq!(result, dir.path());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_project_root_config_override() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         let overrides = PathOverrides {
             project_root: Some(dir.path().to_path_buf()),
@@ -908,33 +919,26 @@ mod tests {
         };
         let result = resolve_project_root(Some(&overrides));
         assert_eq!(result, dir.path());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_project_root_default() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let result = resolve_project_root(None);
         assert_eq!(result, std::env::current_dir().unwrap());
     }
 
     #[test]
     fn test_work_root_sandbox() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let sandbox = Sandbox::new();
         let result = resolve_work_root(None);
-        assert_eq!(result, dir.path().join("work"));
+        assert_eq!(result, sandbox.path().join("work"));
         assert!(result.exists());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_work_root_default() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let result = resolve_work_root(None);
         assert!(result.to_str().unwrap().contains("gremlins"));
         assert!(result.exists());
@@ -942,38 +946,30 @@ mod tests {
 
     #[test]
     fn test_user_config_root_sandbox() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let sandbox = Sandbox::new();
         let result = resolve_user_config_root(None);
-        assert_eq!(result, dir.path().join("config"));
-        clear_sandbox_env();
+        assert_eq!(result, sandbox.path().join("config"));
     }
 
     #[test]
     fn test_user_config_root_default() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let result = resolve_user_config_root(None);
         assert!(result.to_str().unwrap().contains("gremlins"));
     }
 
     #[test]
     fn test_project_overlay_dir_env() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let mut env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GREMLINS_OVERLAY_DIR", dir.path());
+        env.set("GREMLINS_OVERLAY_DIR", dir.path());
         let result = resolve_project_overlay_dir(None, Path::new("/fake/project"));
         assert_eq!(result, dir.path());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_project_overlay_dir_config() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         let overrides = PathOverrides {
             overlay_dir: Some(dir.path().to_path_buf()),
@@ -981,13 +977,11 @@ mod tests {
         };
         let result = resolve_project_overlay_dir(Some(&overrides), Path::new("/fake/project"));
         assert_eq!(result, dir.path());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_project_overlay_dir_default() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let result = resolve_project_overlay_dir(None, Path::new("/fake/project"));
         assert_eq!(result, Path::new("/fake/project").join(".gremlins"));
     }
@@ -999,20 +993,15 @@ mod tests {
 
     #[test]
     fn test_scratch_root_sandbox() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let sandbox = Sandbox::new();
         let result = resolve_scratch_root(None, Some("my-gremlin"));
-        assert_eq!(result, dir.path().join("scratch").join("my-gremlin"));
+        assert_eq!(result, sandbox.path().join("scratch").join("my-gremlin"));
         assert!(result.exists());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_scratch_root_default() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let result = resolve_scratch_root(None, Some("my-gremlin"));
         assert!(result.to_str().unwrap().contains("gremlins-scratch"));
         assert!(result.to_str().unwrap().contains("my-gremlin"));
@@ -1021,8 +1010,7 @@ mod tests {
 
     #[test]
     fn test_scratch_root_no_id() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let _env = EnvGuard::lock();
         let result = resolve_scratch_root(None, None);
         assert!(result.to_str().unwrap().contains("direct"));
         assert!(result.exists());
@@ -1030,11 +1018,10 @@ mod tests {
 
     #[test]
     fn test_precedence_env_over_config() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
+        let mut env = EnvGuard::lock();
         let env_dir = tempfile::tempdir().unwrap();
         let cfg_dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", env_dir.path());
+        env.set("GREMLINS_SANDBOX_ROOT", env_dir.path());
 
         let overrides = PathOverrides {
             state_root: Some(cfg_dir.path().join("cfg-state")),
@@ -1043,13 +1030,11 @@ mod tests {
         let result = resolve_state_root(Some(&overrides));
         // Env var wins
         assert_eq!(result, env_dir.path().join("state"));
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_global_singleton() {
-        // Init / clear
-        clear_global();
+        let _env = EnvGuard::lock();
         assert!(get_global().is_none());
         init_global().unwrap();
         assert!(get_global().is_some());
@@ -1073,160 +1058,80 @@ mod tests {
 
     #[test]
     fn test_api_keys_load_missing() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let _sandbox = Sandbox::new();
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_api_keys_load_valid() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
+        let sandbox = Sandbox::new();
+        let config_dir = sandbox.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("providers.json"),
             r#"{"openai": {"api-key": "sk-test"}, "xai": {"api-key": "xai-test"}}"#,
         )
         .unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
         let keys = ApiKeys::load();
         assert_eq!(keys.get("openai"), Some("sk-test"));
         assert_eq!(keys.get("xai"), Some("xai-test"));
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_api_keys_object_empty_api_key_ignored() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("providers.json"),
-            r#"{"openai": {"api-key": ""}}"#,
-        )
-        .unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": ""}}"#);
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_api_keys_object_whitespace_api_key_ignored() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("providers.json"),
-            r#"{"openai": {"api-key": "   "}}"#,
-        )
-        .unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": "   "}}"#);
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_api_keys_object_non_string_api_key_ignored() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("providers.json"),
-            r#"{"openai": {"api-key": 42}}"#,
-        )
-        .unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": 42}}"#);
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_api_keys_malformed_json() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("providers.json"), "{bad").unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let _sandbox = Sandbox::with_providers("{bad");
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_api_keys_not_an_object() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("providers.json"), "[1, 2, 3]").unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let _sandbox = Sandbox::with_providers("[1, 2, 3]");
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_api_keys_string_value_ignored() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("providers.json"),
-            r#"{"openai": "sk-test"}"#,
-        )
-        .unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let _sandbox = Sandbox::with_providers(r#"{"openai": "sk-test"}"#);
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_api_keys_object_missing_api_key() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("providers.json"), r#"{"openai": {}}"#).unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let _sandbox = Sandbox::with_providers(r#"{"openai": {}}"#);
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
-        clear_sandbox_env();
     }
 
     #[test]
     fn test_api_keys_unknown_provider() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        clear_sandbox_env();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("providers.json"), r#"{"foo": "bar"}"#).unwrap();
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", dir.path());
+        let _sandbox = Sandbox::with_providers(r#"{"foo": "bar"}"#);
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
-        clear_sandbox_env();
     }
 
     // -----------------------------------------------------------------------
@@ -1235,31 +1140,29 @@ mod tests {
 
     #[test]
     fn test_artifact_reminder_budget_default() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::remove_var("GREMLINS_ARTIFACT_REMINDER_BUDGET");
+        let mut env = EnvGuard::lock();
+        env.remove("GREMLINS_ARTIFACT_REMINDER_BUDGET");
         assert_eq!(artifact_reminder_budget(), 3);
     }
 
     #[test]
     fn test_artifact_reminder_budget_from_env() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("GREMLINS_ARTIFACT_REMINDER_BUDGET", "5");
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_ARTIFACT_REMINDER_BUDGET", "5");
         assert_eq!(artifact_reminder_budget(), 5);
-        std::env::remove_var("GREMLINS_ARTIFACT_REMINDER_BUDGET");
     }
 
     #[test]
     fn test_completion_nudge_budget_default() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::remove_var("GREMLINS_COMPLETION_NUDGE_BUDGET");
+        let mut env = EnvGuard::lock();
+        env.remove("GREMLINS_COMPLETION_NUDGE_BUDGET");
         assert_eq!(completion_nudge_budget(), 11);
     }
 
     #[test]
     fn test_completion_nudge_budget_from_env() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("GREMLINS_COMPLETION_NUDGE_BUDGET", "7");
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_COMPLETION_NUDGE_BUDGET", "7");
         assert_eq!(completion_nudge_budget(), 7);
-        std::env::remove_var("GREMLINS_COMPLETION_NUDGE_BUDGET");
     }
 }

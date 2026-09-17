@@ -248,8 +248,8 @@ stages:
 | `max-iterations` | Max loop iterations (for `loop` type; also settable via `options.max_iterations`) |
 | `stop_when_exists` | Artifact key that terminates the loop when bound (for `loop` type) |
 | `max_concurrent` | Max simultaneously running children (for `parallel` groups) |
-| `cancel_on_bail` | If true, cancel outstanding parallel children when one bails (default: false) |
-| `bail_policy` | `"any"` (default) or `"all"` — when to halt the parallel group on child bail |
+| `cancel_on_error` | If true, cancel outstanding parallel children when one bails (default: false) |
+| `error_policy` | `"any"` (default) or `"all"` — when to halt the parallel group on child bail |
 
 **Client precedence:** CLI `--client` beats per-stage `client:`; per-stage `client:` beats pipeline `default_client:`.
 
@@ -441,9 +441,9 @@ stages:
 3. **Fan-in** — all children finish or one bails; siblings continue running until group completion
 
 If any child fails (raises `Bail`), the pipeline halts after the group finishes —
-siblings are not cancelled mid-run by default. This can be changed with `cancel_on_bail: true`
-to cancel outstanding tasks immediately. The bail is evaluated via `bail_policy` (default: `any`,
-meaning one failed child halts the group; set `bail_policy: all` to halt only when all children bail).
+siblings are not cancelled mid-run by default. This can be changed with `cancel_on_error: true`
+to cancel outstanding tasks immediately. The bail is evaluated via `error_policy` (default: `any`,
+meaning one failed child halts the group; set `error_policy: all` to halt only when all children bail).
 Subsequent stages are skipped; the operator can resume or ack the group via CLI.
 
 **State isolation:** Each child gets its own state directory and subprocess.
@@ -633,7 +633,7 @@ in the fleet; the new attempt begins from the start.
 ### Handling parallel group failures
 
 When a child in a parallel group bails:
-- The group halts after all currently-running children finish (not mid-run), unless `cancel_on_bail: true`
+- The group halts after all currently-running children finish (not mid-run), unless `cancel_on_error: true`
 - The bail reason is attributed to the child stage name
 - `gremlins resume <parent-id>` re-spawns all children that haven't landed
 - `gremlins resume <parent-id>--<group-name>--<child-key>` resumes only that child (use the full child ID from fleet view)

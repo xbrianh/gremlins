@@ -669,16 +669,12 @@ mod tests {
     use std::path::Path as StdPath;
 
     use crate::artifacts::uri::Uri;
-    use crate::config;
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
     use crate::schemas::pipeline::Pipeline;
     use crate::stages::composite::StageAttrs;
-
-    /// Serialises the tests that touch process-global config or the
-    /// environment, following the pattern in `gremlin.rs`.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::test_support::EnvGuard;
 
     fn parse_stages(yaml: &str) -> Vec<RunnableStage> {
         let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("valid YAML");
@@ -1610,11 +1606,11 @@ mod tests {
     }
 
     #[tokio::test]
-    // The guard is a plain `std::sync::Mutex` held across the run's awaits. That
-    // is safe here: `#[tokio::test]` drives a current-thread runtime, so no
-    // other task can be scheduled on this thread while the lock is held, and
-    // the lock exists precisely to keep the env override from being observed
-    // half-swapped.
+    // The shared env guard holds a plain `std::sync::Mutex` across the run's
+    // awaits. That is safe here: `#[tokio::test]` drives a current-thread
+    // runtime, so no other task can be scheduled on this thread while the lock
+    // is held, and the lock exists precisely to keep the sandbox override from
+    // being observed half-swapped by another test.
     #[allow(clippy::await_holding_lock)]
     async fn launch_then_run_end_to_end() {
         if !git_available() {
@@ -1622,13 +1618,9 @@ mod tests {
             return;
         }
 
-        let _guard = ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = EnvGuard::lock();
         let sandbox = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("GREMLINS_SANDBOX_ROOT");
-        std::env::set_var("GREMLINS_SANDBOX_ROOT", sandbox.path());
-        config::clear_global();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
 
         let repo = tempfile::tempdir().unwrap();
         let prepared = init_repo(
@@ -1679,13 +1671,6 @@ mod tests {
         } else {
             Err("could not prepare a git fixture".to_string())
         };
-
-        config::clear_global();
-        match previous {
-            Some(value) => std::env::set_var("GREMLINS_SANDBOX_ROOT", value),
-            None => std::env::remove_var("GREMLINS_SANDBOX_ROOT"),
-        }
-        drop(_guard);
 
         let (code, raw) = outcome.unwrap();
         assert_eq!(code, 0);

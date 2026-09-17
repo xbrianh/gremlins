@@ -18,7 +18,7 @@ use gremlins::stages::composite::{
 use gremlins::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 use gremlins::stages::exec as rust_exec;
 use gremlins::stages::outcome::Done as RustDone;
-use gremlins::stages::parallel::BailPolicy;
+use gremlins::stages::parallel::ErrorPolicy;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError};
 use pyo3::prelude::*;
@@ -26,6 +26,7 @@ use pyo3::types::{PyCFunction, PyDict, PyFrozenSet, PyList, PyString, PyTuple, P
 use tokio::sync::Semaphore;
 
 use crate::python::artifacts::{ArtifactRegistry, MissingArtifact};
+use crate::python::bail_files as bail;
 use crate::python::clients::Client;
 use crate::python::executor::{PyState, PyStateData};
 use crate::python::json_conv::{py_to_value as py_to_json, value_to_py as json_value_to_py};
@@ -1290,12 +1291,12 @@ impl PyLoop {
 ///
 /// The heavy lifting lives in [`parallel_run_async`]; this class owns the
 /// parsed configuration and the Python-visible surface (`with_dict`, `run`,
-/// and the `max_concurrent` / `cancel_on_bail` / `bail_policy` properties).
+/// and the `max_concurrent` / `cancel_on_error` / `error_policy` properties).
 #[pyclass(name = "ParallelStage", module = "_gremlins_core.stages", extends = PyStageAttrs, subclass, skip_from_py_object)]
 struct PyParallelStage {
     max_concurrent: Option<u32>,
-    cancel_on_bail: bool,
-    bail_policy: String,
+    cancel_on_error: bool,
+    error_policy: String,
 }
 
 impl PyParallelStage {
@@ -1324,23 +1325,23 @@ impl PyParallelStage {
 #[pymethods]
 impl PyParallelStage {
     #[new]
-    #[pyo3(signature = (name, body = None, *, max_concurrent = None, cancel_on_bail = false, bail_policy = "any".to_string()))]
+    #[pyo3(signature = (name, body = None, *, max_concurrent = None, cancel_on_error = false, error_policy = "any".to_string()))]
     fn new(
         py: Python<'_>,
         name: String,
         body: Option<&Bound<'_, PyList>>,
         max_concurrent: Option<u32>,
-        cancel_on_bail: bool,
-        bail_policy: String,
+        cancel_on_error: bool,
+        error_policy: String,
     ) -> PyResult<PyClassInitializer<Self>> {
         if max_concurrent == Some(0) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "parallel group {name:?}: 'max_concurrent' must be a positive integer"
             )));
         }
-        if bail_policy != "any" && bail_policy != "all" {
+        if error_policy != "any" && error_policy != "all" {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "parallel group {name:?}: 'bail_policy' must be 'any' or 'all'"
+                "parallel group {name:?}: 'error_policy' must be 'any' or 'all'"
             )));
         }
         let body = body.cloned().unwrap_or_else(|| PyList::empty(py));
@@ -1348,8 +1349,8 @@ impl PyParallelStage {
         Ok(
             PyClassInitializer::from(base).add_subclass(PyParallelStage {
                 max_concurrent,
-                cancel_on_bail,
-                bail_policy,
+                cancel_on_error,
+                error_policy,
             }),
         )
     }
@@ -1384,8 +1385,8 @@ impl PyParallelStage {
         let kwargs = PyDict::new(py);
         kwargs.set_item("body", PyList::new(py, parsed)?)?;
         kwargs.set_item("max_concurrent", group.max_concurrent)?;
-        kwargs.set_item("cancel_on_bail", group.cancel_on_bail)?;
-        kwargs.set_item("bail_policy", group.bail_policy.as_str())?;
+        kwargs.set_item("cancel_on_error", group.cancel_on_error)?;
+        kwargs.set_item("error_policy", group.error_policy.as_str())?;
         let obj = cls.call((group.attrs.name.as_str(),), Some(&kwargs))?;
 
         let client = match &group.client {
@@ -1424,32 +1425,32 @@ impl PyParallelStage {
     }
 
     #[getter]
-    fn cancel_on_bail(&self) -> bool {
-        self.cancel_on_bail
+    fn cancel_on_error(&self) -> bool {
+        self.cancel_on_error
     }
 
     #[setter]
-    fn set_cancel_on_bail(&mut self, value: bool) {
-        self.cancel_on_bail = value;
+    fn set_cancel_on_error(&mut self, value: bool) {
+        self.cancel_on_error = value;
     }
 
     #[getter]
-    fn bail_policy(&self) -> String {
-        self.bail_policy.clone()
+    fn error_policy(&self) -> String {
+        self.error_policy.clone()
     }
 
     /// Mirror the constructor's invariant. `config()` maps anything other than
-    /// `"all"` onto `BailPolicy::Any`, so a typo here would silently widen the
+    /// `"all"` onto `ErrorPolicy::Any`, so a typo here would silently widen the
     /// policy instead of failing.
     #[setter]
-    fn set_bail_policy(mut slf: PyRefMut<'_, Self>, value: String) -> PyResult<()> {
+    fn set_error_policy(mut slf: PyRefMut<'_, Self>, value: String) -> PyResult<()> {
         if value != "any" && value != "all" {
             let name = slf.as_super().inner.name.clone();
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "parallel group {name:?}: 'bail_policy' must be 'any' or 'all'"
+                "parallel group {name:?}: 'error_policy' must be 'any' or 'all'"
             )));
         }
-        slf.bail_policy = value;
+        slf.error_policy = value;
         Ok(())
     }
 
@@ -1567,17 +1568,17 @@ impl ParallelRuntime {
         }
     }
 
-    fn config(&self, py: Python<'_>) -> PyResult<(Option<u32>, bool, BailPolicy)> {
+    fn config(&self, py: Python<'_>) -> PyResult<(Option<u32>, bool, ErrorPolicy)> {
         let stage = self.stage.bind(py);
         let max_concurrent: Option<u32> = stage.getattr("max_concurrent")?.extract()?;
-        let cancel_on_bail: bool = stage.getattr("cancel_on_bail")?.extract()?;
-        let raw: String = stage.getattr("bail_policy")?.extract()?;
+        let cancel_on_error: bool = stage.getattr("cancel_on_error")?.extract()?;
+        let raw: String = stage.getattr("error_policy")?.extract()?;
         let policy = if raw == "all" {
-            BailPolicy::All
+            ErrorPolicy::All
         } else {
-            BailPolicy::Any
+            ErrorPolicy::Any
         };
-        Ok((max_concurrent, cancel_on_bail, policy))
+        Ok((max_concurrent, cancel_on_error, policy))
     }
 }
 
@@ -1606,9 +1607,9 @@ impl ParallelRuntime {
     }
 
     async fn parallel(&self) -> PyResult<Py<PyAny>> {
-        let (max_concurrent, cancel_on_bail, children, state) = Python::attach(|py| {
+        let (max_concurrent, cancel_on_error, children, state) = Python::attach(|py| {
             self.set_stage(py, &self.group_name);
-            let (max_concurrent, cancel_on_bail, _) = self.config(py)?;
+            let (max_concurrent, cancel_on_error, _) = self.config(py)?;
             // Skip children already recorded as done on a prior run.
             let done: HashSet<String> = self
                 .parent_state
@@ -1623,7 +1624,7 @@ impl ParallelRuntime {
                 .collect();
             Ok::<_, PyErr>((
                 max_concurrent,
-                cancel_on_bail,
+                cancel_on_error,
                 children,
                 self.parent_state.clone_ref(py),
             ))
@@ -1641,7 +1642,7 @@ impl ParallelRuntime {
             &group_name,
             &parent_id,
             max_concurrent,
-            cancel_on_bail,
+            cancel_on_error,
             cancel,
         )
         .await?;
@@ -1649,12 +1650,12 @@ impl ParallelRuntime {
     }
 
     async fn fanin(&self) -> PyResult<Py<PyAny>> {
-        let (bail_policy, children, all_child_keys, state) = Python::attach(|py| {
+        let (error_policy, children, all_child_keys, state) = Python::attach(|py| {
             self.set_stage(py, &format!("{}-fanin", self.group_name));
-            let (_, _, bail_policy) = self.config(py)?;
+            let (_, _, error_policy) = self.config(py)?;
             let children: Vec<ChildSpec> = self.children.iter().map(|c| c.clone_ref(py)).collect();
             Ok::<_, PyErr>((
-                bail_policy,
+                error_policy,
                 children,
                 self.all_child_keys.clone(),
                 self.parent_state.clone_ref(py),
@@ -1673,7 +1674,7 @@ impl ParallelRuntime {
             &stage_path,
             &group_name,
             &parent_id,
-            bail_policy,
+            error_policy,
             &project_root,
         )
         .await?;
@@ -2579,27 +2580,22 @@ impl ParallelGroupState {
     }
 
     fn write_bail(&self, py: Python<'_>, child_key: &str, reason: &str) {
-        let _ = self
-            .parent_data
-            .bind(py)
-            .call_method1("write_parallel_bail", (child_key, reason));
+        let state_file = self.state_file(py);
+        bail::write_parallel_bail(state_file.as_deref(), child_key, reason);
     }
 
+    /// `(state_dir, parallel_attempts)` used to scan for per-child bail files.
     fn read_bail_scan_inputs(&self, py: Python<'_>) -> (Option<PathBuf>, HashMap<String, String>) {
-        let Ok(tuple) = self
-            .parent_data
+        bail::read_bail_scan_inputs(self.state_file(py).as_deref())
+    }
+
+    /// The parent state.json path, read through `StateData.state_file`.
+    fn state_file(&self, py: Python<'_>) -> Option<PathBuf> {
+        self.parent_data
             .bind(py)
-            .call_method0("read_bail_scan_inputs")
-        else {
-            return (None, HashMap::new());
-        };
-        let dir: Option<String> = tuple.get_item(0).ok().and_then(|v| v.extract().ok());
-        let attempts: HashMap<String, String> = tuple
-            .get_item(1)
+            .getattr("state_file")
             .ok()
             .and_then(|v| v.extract().ok())
-            .unwrap_or_default();
-        (dir.map(PathBuf::from), attempts)
     }
 }
 
@@ -2776,7 +2772,7 @@ async fn dispatch_children(
     group_name: &str,
     parent_id: &str,
     max_concurrent: Option<u32>,
-    cancel_on_bail: bool,
+    cancel_on_error: bool,
     cancel: Arc<AtomicBool>,
 ) -> PyResult<()> {
     if children.is_empty() {
@@ -2838,7 +2834,7 @@ async fn dispatch_children(
                 Some(sem) => Some(sem.acquire_owned().await.expect("semaphore open")),
                 None => None,
             };
-            if cancel_on_bail && cancel.load(Ordering::SeqCst) {
+            if cancel_on_error && cancel.load(Ordering::SeqCst) {
                 return Ok(());
             }
             run_parallel_child(
@@ -2851,7 +2847,7 @@ async fn dispatch_children(
                 &stage_path,
                 &group_name,
                 &parent_id,
-                cancel_on_bail,
+                cancel_on_error,
                 &cancel,
             )
             .await
@@ -2881,7 +2877,7 @@ async fn dispatch_children(
             // A sibling aborted by the bail path; nothing to record.
             Err(_aborted) => {}
         }
-        if cancel_on_bail && cancel.load(Ordering::SeqCst) {
+        if cancel_on_error && cancel.load(Ordering::SeqCst) {
             for handle in &handles {
                 handle.abort();
             }
@@ -2967,7 +2963,7 @@ async fn run_parallel_child(
     stage_path: &str,
     group_name: &str,
     parent_id: &str,
-    cancel_on_bail: bool,
+    cancel_on_error: bool,
     cancel: &Arc<AtomicBool>,
 ) -> PyResult<()> {
     let outcome = match stage_obj {
@@ -2979,7 +2975,7 @@ async fn run_parallel_child(
                 group,
                 group_name,
                 parent_id,
-                cancel_on_bail,
+                cancel_on_error,
                 cancel,
             )
             .await
@@ -3005,7 +3001,7 @@ async fn run_parallel_child(
         Err(err) => {
             let is_bail = Python::attach(|py| err.is_instance_of::<Bail>(py));
             if is_bail {
-                if cancel_on_bail {
+                if cancel_on_error {
                     cancel.store(true, Ordering::SeqCst);
                 }
                 let reason = Python::attach(|py| bail_message(py, &err))?;
@@ -3019,7 +3015,7 @@ async fn run_parallel_child(
                 });
                 Ok(())
             } else {
-                if cancel_on_bail {
+                if cancel_on_error {
                     cancel.store(true, Ordering::SeqCst);
                 }
                 Err(err)
@@ -3055,7 +3051,7 @@ async fn run_child_subprocess(
     group: &Arc<ParallelGroupState>,
     group_name: &str,
     parent_id: &str,
-    cancel_on_bail: bool,
+    cancel_on_error: bool,
     cancel: &Arc<AtomicBool>,
 ) -> PyResult<ChildOutcome> {
     let child_id = if parent_id.is_empty() {
@@ -3128,7 +3124,7 @@ async fn run_child_subprocess(
     match result.get("status").and_then(|v| v.as_str()) {
         Some("done") | Some("needs_fix") => Ok(ChildOutcome::Done),
         Some("bail") => {
-            if cancel_on_bail {
+            if cancel_on_error {
                 cancel.store(true, Ordering::SeqCst);
             }
             let detail = result
@@ -3534,7 +3530,7 @@ async fn fan_in(
     stage_path: &str,
     group_name: &str,
     parent_id: &str,
-    bail_policy: BailPolicy,
+    error_policy: ErrorPolicy,
     project_root: &Path,
 ) -> PyResult<()> {
     Python::attach(|py| group.hydrate(py));
@@ -3552,7 +3548,7 @@ async fn fan_in(
         state,
         stage_path,
         group_name,
-        bail_policy,
+        error_policy,
         project_root,
     )
     .await;
@@ -3716,17 +3712,17 @@ async fn do_fan_in(
     state: &Py<PyAny>,
     stage_path: &str,
     group_name: &str,
-    bail_policy: BailPolicy,
+    error_policy: ErrorPolicy,
     project_root: &Path,
 ) -> PyResult<()> {
     prune_worktrees(project_root).await;
 
     let (state_dir, attempts) = Python::attach(|py| group.read_bail_scan_inputs(py));
     let bailed = match state_dir {
-        Some(dir) => gremlins::stages::parallel_bail::collect_bails(&dir, child_keys, &attempts),
+        Some(dir) => bail::collect_bails(&dir, child_keys, &attempts),
         None => Vec::new(),
     };
-    let decision = gremlins::stages::parallel_bail::decide(&bailed, child_keys.len(), bail_policy);
+    let decision = bail::decide(&bailed, child_keys.len(), error_policy);
 
     if decision.should_bail {
         let bail_class = decision.bail_class();
@@ -3748,7 +3744,7 @@ async fn do_fan_in(
         return Err(Bail::new_err(format!(
             "parallel group {group_name:?} bailed ({} child(ren), policy={:?})",
             bailed.len(),
-            bail_policy.as_str()
+            error_policy.as_str()
         )));
     }
     Ok(())

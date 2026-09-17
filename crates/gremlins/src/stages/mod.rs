@@ -7,5 +7,4 @@ pub mod r#loop;
 pub mod node;
 pub mod outcome;
 pub mod parallel;
-pub mod parallel_bail;
 pub mod sequence;

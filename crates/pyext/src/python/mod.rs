@@ -1,5 +1,6 @@
 pub(crate) mod artifacts;
 pub(crate) mod assets;
+pub(crate) mod bail_files;
 pub(crate) mod clients;
 pub(crate) mod config;
 pub(crate) mod coroutine;

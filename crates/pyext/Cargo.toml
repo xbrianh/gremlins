@@ -23,6 +23,7 @@ futures = "0.3"
 
 [dev-dependencies]
 pyo3 = { version = "0.29", features = ["auto-initialize"] }
+tempfile = "3"
 
 [features]
 extension-module = ["pyo3/extension-module"]

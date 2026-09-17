@@ -51,8 +51,8 @@ def _make_parallel_stages(
     *,
     max_concurrent: int | None = None,
     set_stage_fn: Callable[[str], None] | None = None,
-    cancel_on_bail: bool = False,
-    bail_policy: str = "any",
+    cancel_on_error: bool = False,
+    error_policy: str = "any",
     parent_state: State | None = None,
     project_root_path: pathlib.Path | None = None,
 ) -> list[tuple[str, Callable[[], Any]]]:
@@ -62,8 +62,8 @@ def _make_parallel_stages(
         group_name,
         [],
         max_concurrent=max_concurrent,
-        cancel_on_bail=cancel_on_bail,
-        bail_policy=bail_policy,
+        cancel_on_error=cancel_on_error,
+        error_policy=error_policy,
     ).build_runtime_stages(
         child_runners,
         parent_state=parent_state,
