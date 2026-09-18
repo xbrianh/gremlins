@@ -13,9 +13,11 @@
 //! fresh worktree at the parent's commit.
 //!
 //! The environment rules are the subtle part and live in [`resolve_env`]: the
-//! eight `GREMLIN*` system variables are injected *after* any `bootstrap.env`
-//! script has been sourced, so a script can shape the environment but can
-//! never redirect the harness's own paths.
+//! eight `GREMLIN*` system variables are seeded into the base environment
+//! *before* any `bootstrap.env` script is sourced (so the script can read
+//! them, e.g. to point `VIRTUAL_ENV` at the worktree's venv), then re-asserted
+//! on top afterwards — a script can shape the environment but can never
+//! redirect the harness's own paths.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1046,36 +1048,19 @@ pub fn framework_subs(
     ])
 }
 
-/// Resolve the process environment a gremlin's stages and bootstrap inherit.
+/// The eight harness-owned system variables, built from a gremlin's paths.
 ///
-/// The order is what matters: the bootstrap script (when there is one) runs
-/// first, against the current environment, and *replaces* it — that is the
-/// script's whole job — after which the eight system variables are written on
-/// top. System variables therefore win unconditionally, so no script can
-/// redirect the harness's paths.
-pub fn resolve_env(
-    bootstrap_env: Option<&str>,
+/// These are both *seeded into* the base the bootstrap script is sourced
+/// against and *re-asserted* on top of the result, so the script can read
+/// them but can never override them.
+fn system_env(
     artifact_dir: &Path,
     state_dir: &Path,
     gremlin_id: &str,
     project_root: &Path,
     worktree: Option<&Path>,
     overlay_dir: &Path,
-) -> Result<HashMap<String, String>, RunError> {
-    let base: HashMap<String, String> = std::env::vars().collect();
-
-    let mut env = match bootstrap_env {
-        Some(script) if !script.trim().is_empty() => {
-            env_file::source_env_string(script, &base, Some(project_root)).map_err(|error| {
-                RunError::BootstrapFailed {
-                    exit_code: 1,
-                    stderr: error.to_string(),
-                }
-            })?
-        }
-        _ => base,
-    };
-
+) -> HashMap<String, String> {
     let worktree_path = worktree
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -1097,29 +1082,74 @@ pub fn resolve_env(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| config::scratch_root(Some(gremlin_id)));
 
-    env.insert("GREMLINS_GREMLIN_ID".to_string(), gremlin_id.to_string());
-    env.insert(
+    let mut vars = HashMap::new();
+    vars.insert("GREMLINS_GREMLIN_ID".to_string(), gremlin_id.to_string());
+    vars.insert(
         "GREMLINS_PROJECT_ROOT".to_string(),
         project_root.to_string_lossy().into_owned(),
     );
-    env.insert(
+    vars.insert(
         "GREMLINS_OVERLAY_DIR".to_string(),
         overlay_dir.to_string_lossy().into_owned(),
     );
-    env.insert("GREMLINS_WORKTREE_PATH".to_string(), worktree_path);
-    env.insert(
+    vars.insert("GREMLINS_WORKTREE_PATH".to_string(), worktree_path);
+    vars.insert(
         "GREMLINS_ARTIFACT_DIR".to_string(),
         artifact_dir.to_string_lossy().into_owned(),
     );
-    env.insert("GREMLIN_WORKSPACE_DIR".to_string(), workspace_dir);
-    env.insert(
+    vars.insert("GREMLIN_WORKSPACE_DIR".to_string(), workspace_dir);
+    vars.insert(
         "GREMLIN_STATE_DIR".to_string(),
         state_dir.to_string_lossy().into_owned(),
     );
-    env.insert(
+    vars.insert(
         "GREMLINS_SCRATCH_DIR".to_string(),
         scratch_dir.to_string_lossy().into_owned(),
     );
+    vars
+}
+
+/// Resolve the process environment a gremlin's stages and bootstrap inherit.
+///
+/// The system variables are seeded into the base *before* the bootstrap script
+/// is sourced, so the script can read them (e.g. to point `VIRTUAL_ENV` at the
+/// worktree's venv), then re-asserted on top afterwards. The script can shape
+/// the environment but can never redirect the harness's paths.
+pub fn resolve_env(
+    bootstrap_env: Option<&str>,
+    artifact_dir: &Path,
+    state_dir: &Path,
+    gremlin_id: &str,
+    project_root: &Path,
+    worktree: Option<&Path>,
+    overlay_dir: &Path,
+) -> Result<HashMap<String, String>, RunError> {
+    let system = system_env(
+        artifact_dir,
+        state_dir,
+        gremlin_id,
+        project_root,
+        worktree,
+        overlay_dir,
+    );
+
+    let mut base: HashMap<String, String> = std::env::vars().collect();
+    base.extend(system.clone());
+
+    let mut env = match bootstrap_env {
+        Some(script) if !script.trim().is_empty() => {
+            env_file::source_env_string(script, &base, Some(project_root)).map_err(|error| {
+                RunError::BootstrapFailed {
+                    exit_code: 1,
+                    stderr: error.to_string(),
+                }
+            })?
+        }
+        _ => base,
+    };
+
+    // Re-assert the system variables on top of whatever the script produced.
+    env.extend(system);
     Ok(env)
 }
 
@@ -1262,6 +1292,38 @@ mod tests {
             env["GREMLINS_SCRATCH_DIR"],
             artifact_dir.parent().unwrap().to_string_lossy()
         );
+    }
+
+    #[test]
+    fn resolve_env_lets_the_script_read_system_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact_dir = dir.path().join("scratch").join("gr-test").join("artifacts");
+        let state_dir = dir.path().join("state").join("gr-test");
+        let project_root = dir.path().join("project");
+        let worktree = dir.path().join("wt");
+        let overlay_dir = state_dir.join(config::overlay_dirname());
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&overlay_dir).unwrap();
+
+        // The script derives VIRTUAL_ENV from the worktree path — the shape the
+        // bundled pipelines use — then tries to redirect a system variable.
+        let script = "export VIRTUAL_ENV=\"${GREMLINS_WORKTREE_PATH}/.venv\"\n\
+                       export GREMLINS_WORKTREE_PATH=/hijacked\n";
+        let env = resolve_env(
+            Some(script),
+            &artifact_dir,
+            &state_dir,
+            "gr-test",
+            &project_root,
+            Some(&worktree),
+            &overlay_dir,
+        )
+        .unwrap();
+
+        assert_eq!(env["VIRTUAL_ENV"], format!("{}/.venv", worktree.display()));
+        // The script can read the system variables but cannot override them.
+        assert_eq!(env["GREMLINS_WORKTREE_PATH"], worktree.to_string_lossy());
     }
 
     #[test]
