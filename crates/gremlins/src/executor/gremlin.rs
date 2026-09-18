@@ -809,10 +809,7 @@ fn finish_launch(
     // The process running the pipeline is the one a later `gremlins stop`
     // must signal. Record our own pid rather than clobbering the launcher's
     // value with null (which left live gremlins unstoppable).
-    initial.insert(
-        "pid".to_string(),
-        Value::from(std::process::id() as i64),
-    );
+    initial.insert("pid".to_string(), Value::from(std::process::id() as i64));
     initial.insert("stage_inputs".to_string(), Value::Object(inputs));
     if !initial.contains_key("attempt") {
         initial.insert("attempt".to_string(), Value::String(String::new()));
