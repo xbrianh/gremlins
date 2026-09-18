@@ -408,6 +408,67 @@ impl Gremlin {
         child_key: &str,
         child_pipeline_path: Option<&Path>,
     ) -> Result<Gremlin, RunError> {
+        let pipeline = match child_pipeline_path {
+            Some(path) => Pipeline::from_yaml(path, None).unwrap_or_else(|_| self.pipeline.clone()),
+            None => self.pipeline.clone(),
+        };
+        self.fork_child(
+            child_id,
+            parent_id,
+            group_name,
+            child_key,
+            child_pipeline_path,
+            pipeline,
+        )
+    }
+
+    /// Fork a child gremlin that runs only the given `stages`.
+    ///
+    /// Like [`Gremlin::fork`], but instead of loading a child pipeline from
+    /// disk, the child inherits the parent's pipeline metadata and runs only
+    /// the provided stage list. Used by the parallel executor so each child
+    /// runs exactly one stage without needing a separate pipeline file.
+    pub fn fork_with_stages(
+        &self,
+        child_id: &str,
+        parent_id: &str,
+        group_name: &str,
+        child_key: &str,
+        stages: Vec<RunnableStage>,
+    ) -> Result<Gremlin, RunError> {
+        log::debug!(
+            "fork_with_stages: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}, stage_count={}",
+            stages.len()
+        );
+        let mut pipeline = self.pipeline.clone_with_stages(stages);
+        // launch_cmds and cli_out belong to the parent's initial launch;
+        // children inherit the artifacts via the registry copy in `fork_child`.
+        // cmds (worktree setup) still runs — each child has its own worktree.
+        pipeline.bootstrap.launch_cmds.clear();
+        pipeline.bootstrap.cli_out.clear();
+        self.fork_child(child_id, parent_id, group_name, child_key, None, pipeline)
+    }
+
+    /// The shared body of [`Gremlin::fork`] and [`Gremlin::fork_with_stages`].
+    ///
+    /// Owns the whole fork sequence — id validation, child directory
+    /// derivation and creation, artifact copy, worktree branching, registry
+    /// rebuild, child-state seeding, and the state/log write — for a child
+    /// whose `pipeline` the caller has already resolved. `child_pipeline_path`
+    /// is the branch's hermetic `pipeline.yaml`, recorded in the child state
+    /// when present and otherwise inherited from the parent's persisted path.
+    fn fork_child(
+        &self,
+        child_id: &str,
+        parent_id: &str,
+        group_name: &str,
+        child_key: &str,
+        child_pipeline_path: Option<&Path>,
+        pipeline: Pipeline,
+    ) -> Result<Gremlin, RunError> {
+        log::debug!(
+            "fork: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}"
+        );
         let child_gremlin_id = validate_gremlin_id(child_id).map_err(RunError::Message)?;
 
         let child_state_dir = self
@@ -420,7 +481,14 @@ impl Gremlin {
         std::fs::create_dir_all(&child_state_dir)?;
         std::fs::create_dir_all(&child_artifact_dir)?;
 
+        log::debug!(
+            "fork: child_state_dir={}, child_artifact_dir={}",
+            child_state_dir.display(),
+            child_artifact_dir.display()
+        );
+
         copy_tree(&self.artifact_dir, &child_artifact_dir)?;
+        log::debug!("fork: copied parent artifacts to child artifact dir");
 
         // A child of a run that has no worktree has none either: there is no
         // commit for it to branch from. When it does branch one, the commit it
@@ -446,6 +514,12 @@ impl Gremlin {
             })?;
             child_worktree = Some(PathBuf::from(path));
             child_worktree_base = sha;
+            log::debug!(
+                "fork: created worktree for child at {}",
+                child_worktree.as_ref().unwrap().display()
+            );
+        } else {
+            log::debug!("fork: no parent worktree — child inherits no worktree");
         }
 
         let registry = ArtifactRegistry::from_registry_file(
@@ -514,172 +588,8 @@ impl Gremlin {
         state::write_state(&child_state_dir, &child)?;
         std::fs::write(child_state_dir.join("log"), "")?;
 
-        let pipeline = match child_pipeline_path {
-            Some(path) => Pipeline::from_yaml(path, None).unwrap_or_else(|_| self.pipeline.clone()),
-            None => self.pipeline.clone(),
-        };
-
-        Ok(Gremlin {
-            id: child_gremlin_id,
-            state_dir: child_state_dir,
-            artifact_dir: child_artifact_dir,
-            pipeline,
-            registry,
-            worktree: child_worktree,
-            worktree_parent: self.worktree_parent.clone(),
-            project_root: self.project_root.clone(),
-            base_ref_sha: child_worktree_base,
-            base_ref: self.base_ref.clone(),
-            resume_from: None,
-            state: StateData::new(Some(child_id.to_string())),
-            env: self.env.clone(),
-            client: self.client.clone(),
-            loop_stack: Vec::new(),
-            // A child inherits the parent's source values: its bootstrap binds
-            // the same inputs the parent launched with.
-            stage_inputs: self.stage_inputs.clone(),
-        })
-    }
-
-    /// Fork a child gremlin that runs only the given `stages`.
-    ///
-    /// Like [`Gremlin::fork`], but instead of loading a child pipeline from
-    /// disk, the child inherits the parent's pipeline metadata and runs only
-    /// the provided stage list. Used by the parallel executor so each child
-    /// runs exactly one stage without needing a separate pipeline file.
-    pub fn fork_with_stages(
-        &self,
-        child_id: &str,
-        parent_id: &str,
-        group_name: &str,
-        child_key: &str,
-        stages: Vec<RunnableStage>,
-    ) -> Result<Gremlin, RunError> {
         log::debug!(
-            "fork_with_stages: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}, stage_count={}",
-            stages.len()
-        );
-        let child_gremlin_id = validate_gremlin_id(child_id).map_err(RunError::Message)?;
-
-        let child_state_dir = self
-            .state_dir
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(child_gremlin_id.as_str());
-        let child_artifact_dir =
-            config::scratch_root(Some(child_gremlin_id.as_str())).join("artifacts");
-        std::fs::create_dir_all(&child_state_dir)?;
-        std::fs::create_dir_all(&child_artifact_dir)?;
-
-        log::debug!(
-            "fork_with_stages: child_state_dir={}, child_artifact_dir={}",
-            child_state_dir.display(),
-            child_artifact_dir.display()
-        );
-
-        copy_tree(&self.artifact_dir, &child_artifact_dir)?;
-        log::debug!("fork_with_stages: copied parent artifacts to child artifact dir");
-
-        let mut child_worktree: Option<PathBuf> = None;
-        let mut child_worktree_base = String::new();
-        if let Some(parent_worktree) = &self.worktree {
-            let sha = git::head_sha(Some(parent_worktree));
-            if sha.is_empty() {
-                return Err(RunError::Message(format!(
-                    "could not resolve HEAD in {}",
-                    parent_worktree.display()
-                )));
-            }
-            let path = git::setup_detached_worktree(
-                &self.project_root,
-                &sha,
-                false,
-                self.worktree_parent.as_deref(),
-            )
-            .map_err(|error| RunError::Git {
-                message: error.to_string(),
-            })?;
-            child_worktree = Some(PathBuf::from(path));
-            child_worktree_base = sha;
-            log::debug!(
-                "fork_with_stages: created worktree for child at {}",
-                child_worktree.as_ref().unwrap().display()
-            );
-        } else {
-            log::debug!("fork_with_stages: no parent worktree — child inherits no worktree");
-        }
-
-        let registry = ArtifactRegistry::from_registry_file(
-            &self.registry.registry_path,
-            child_artifact_dir.clone(),
-        )
-        .map_err(|error| RunError::Message(error.to_string()))?;
-
-        let parent = state::read_state_json(self.state.state_file.as_deref());
-        let mut child = Map::new();
-        for name in state::field_names() {
-            if FORK_TRANSIENT.contains(&name) {
-                continue;
-            }
-            if let Some(value) = parent.get(name) {
-                child.insert(name.to_string(), value.clone());
-            } else if let Some(default) = state::default_for(name) {
-                child.insert(name.to_string(), default);
-            }
-        }
-        for key in FORK_TRANSIENT {
-            child.remove(key);
-        }
-
-        child.insert(
-            "id".to_string(),
-            Value::String(child_gremlin_id.to_string()),
-        );
-        child.insert(
-            "parent_id".to_string(),
-            Value::String(inherit(parent_id, &parent, "parent_id")),
-        );
-        child.insert(
-            "group_name".to_string(),
-            Value::String(inherit(group_name, &parent, "group_name")),
-        );
-        child.insert(
-            "child_key".to_string(),
-            Value::String(inherit(child_key, &parent, "child_key")),
-        );
-        child.insert(
-            "pipeline_path".to_string(),
-            Value::String(str_field(&parent, "pipeline_path")),
-        );
-        if let Some(path) = &child_worktree {
-            child.insert(
-                "workdir".to_string(),
-                Value::String(path.to_string_lossy().into_owned()),
-            );
-            child.insert(
-                "worktree_base".to_string(),
-                Value::String(child_worktree_base.clone()),
-            );
-        }
-
-        child.insert("status".to_string(), Value::String("running".to_string()));
-        child.insert("pid".to_string(), Value::Null);
-        child.insert("exit_code".to_string(), Value::Null);
-
-        state::write_state(&child_state_dir, &child)?;
-        std::fs::write(child_state_dir.join("log"), "")?;
-
-        log::debug!("fork_with_stages: wrote child state and log for {child_id}");
-
-        let mut pipeline = self.pipeline.clone_with_stages(stages);
-        // launch_cmds and cli_out belong to the parent's initial launch;
-        // children inherit the artifacts via the registry copy above.
-        // cmds (worktree setup) still runs — each child has its own worktree.
-        pipeline.bootstrap.launch_cmds.clear();
-        pipeline.bootstrap.cli_out.clear();
-
-        log::debug!(
-            "fork_with_stages: child {child_id} ready (client={})",
+            "fork: child {child_id} ready (client={})",
             self.client.model()
         );
 
@@ -699,6 +609,8 @@ impl Gremlin {
             env: self.env.clone(),
             client: self.client.clone(),
             loop_stack: Vec::new(),
+            // A child inherits the parent's source values: its bootstrap binds
+            // the same inputs the parent launched with.
             stage_inputs: self.stage_inputs.clone(),
         })
     }
