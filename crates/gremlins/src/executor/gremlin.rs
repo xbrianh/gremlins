@@ -615,6 +615,82 @@ impl Gremlin {
         })
     }
 
+    /// Remove every filesystem asset this gremlin owns: its worktree, its
+    /// scratch directory, and — when `remove_state_dir` is set — its state
+    /// directory.
+    ///
+    /// Best-effort and never-raising: a removal that fails is logged at `warn`
+    /// and the rest of the cleanup proceeds. Consuming `self` is the point —
+    /// the handle points at paths that no longer exist, so any use after a
+    /// `clean` is a compile error rather than a silent read of a dead run.
+    ///
+    /// Two ordering rules carry the meaning. The `closed` marker is touched
+    /// *first*, so fleet viewers (`liveness_of_state_file`) see the gremlin as
+    /// closed even if filesystem removal fails part-way. The state directory
+    /// is removed *last*, so a partial cleanup never strands a worktree or
+    /// scratch directory that nothing can trace back to a gremlin: if
+    /// `state.json` is gone, every other asset is already gone.
+    pub fn clean(self, remove_state_dir: bool) {
+        // Mark closed before touching anything: a run that vanished without a
+        // marker reads as a crash, not an intentional cleanup.
+        let closed = self.state_dir.join("closed");
+        if let Err(error) = std::fs::write(&closed, "") {
+            log::warn!("clean: could not touch {}: {error}", closed.display());
+        }
+
+        self.clean_worktree();
+        self.clean_scratch();
+
+        if remove_state_dir {
+            if let Err(error) = std::fs::remove_dir_all(&self.state_dir) {
+                log::warn!(
+                    "clean: could not remove state dir {}: {error}",
+                    self.state_dir.display()
+                );
+            }
+        }
+    }
+
+    /// Remove the worktree, best-effort.
+    ///
+    /// `git worktree remove` is the clean path — it drops the administrative
+    /// record under `.git/worktrees` as well as the checkout. It is run
+    /// whenever a `project_root` is available, *even if the checkout is already
+    /// gone*: the administrative record outlives the directory, and skipping
+    /// git would leave stale metadata behind forever. When the directory is
+    /// still present afterwards (or there is no `project_root` to run against)
+    /// an `rmtree` fallback finishes the job.
+    fn clean_worktree(&self) {
+        let Some(worktree) = &self.worktree else {
+            return;
+        };
+        if !self.project_root.as_os_str().is_empty() {
+            git::remove_worktree(&self.project_root, &worktree.to_string_lossy());
+        }
+        if worktree.exists() {
+            if let Err(error) = std::fs::remove_dir_all(worktree) {
+                log::warn!(
+                    "clean: could not remove worktree {}: {error}",
+                    worktree.display()
+                );
+            }
+        }
+    }
+
+    /// Remove the scratch directory — the parent of `artifact_dir` — best-effort.
+    fn clean_scratch(&self) {
+        let scratch = config::scratch_root(Some(self.id.as_str()));
+        if !scratch.is_dir() {
+            return;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&scratch) {
+            log::warn!(
+                "clean: could not remove scratch dir {}: {error}",
+                scratch.display()
+            );
+        }
+    }
+
     /// The directory commands run in: the worktree, else the project root, else
     /// the CWD.
     pub fn cwd(&self) -> PathBuf {
@@ -1604,5 +1680,213 @@ mod tests {
 
         assert!(found.is_some_and(|path| path.ends_with("demo.yaml")));
         assert!(missing.is_none());
+    }
+
+    // --- cleanup ---
+
+    /// A hand-built gremlin whose paths point wherever the test wants.
+    ///
+    /// `clean` only reads `id`, `state_dir`, `artifact_dir`, `worktree` and
+    /// `project_root`, so a full `launch` would just be git fixture noise for
+    /// the cases that are not about launch at all.
+    fn test_gremlin(
+        id: &str,
+        state_dir: PathBuf,
+        artifact_dir: PathBuf,
+        worktree: Option<PathBuf>,
+        project_root: PathBuf,
+    ) -> Gremlin {
+        Gremlin {
+            id: validate_gremlin_id(id).unwrap(),
+            state_dir,
+            registry: ArtifactRegistry::new(artifact_dir.clone()),
+            artifact_dir,
+            pipeline: stub_pipeline("demo", PathBuf::from(".")),
+            worktree,
+            worktree_parent: None,
+            project_root,
+            base_ref_sha: String::new(),
+            base_ref: String::new(),
+            resume_from: None,
+            state: StateData::new(Some(id.to_string())),
+            env: HashMap::new(),
+            client: Client::parse("cmd:true").unwrap(),
+            loop_stack: Vec::new(),
+            stage_inputs: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn clean_true_removes_everything() {
+        with_sandbox(None, |sandbox| {
+            let id = "gr-clean";
+            let state_dir = sandbox.join("state").join(id);
+            let scratch_dir = sandbox.join("scratch").join(id);
+            let artifact_dir = scratch_dir.join("artifacts");
+            let worktree = sandbox.join("worktree");
+            std::fs::create_dir_all(&artifact_dir).unwrap();
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::write(worktree.join("file"), "data").unwrap();
+
+            test_gremlin(
+                id,
+                state_dir.clone(),
+                artifact_dir.clone(),
+                Some(worktree.clone()),
+                PathBuf::new(),
+            )
+            .clean(true);
+
+            assert!(!state_dir.exists(), "state dir should be gone");
+            assert!(!scratch_dir.exists(), "scratch dir should be gone");
+            assert!(!worktree.exists(), "worktree should be gone");
+        });
+    }
+
+    #[test]
+    fn clean_false_leaves_state_dir_with_closed_marker() {
+        with_sandbox(None, |sandbox| {
+            let id = "gr-clean-keep";
+            let state_dir = sandbox.join("state").join(id);
+            let scratch_dir = sandbox.join("scratch").join(id);
+            let artifact_dir = scratch_dir.join("artifacts");
+            let worktree = sandbox.join("worktree-keep");
+            std::fs::create_dir_all(&artifact_dir).unwrap();
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+            std::fs::create_dir_all(&worktree).unwrap();
+
+            test_gremlin(
+                id,
+                state_dir.clone(),
+                artifact_dir.clone(),
+                Some(worktree.clone()),
+                PathBuf::new(),
+            )
+            .clean(false);
+
+            assert!(!worktree.exists(), "worktree should be gone");
+            assert!(!scratch_dir.exists(), "scratch dir should be gone");
+            assert!(state_dir.is_dir(), "state dir should remain");
+            assert!(
+                state_dir.join("closed").is_file(),
+                "closed marker should be present"
+            );
+        });
+    }
+
+    #[test]
+    fn clean_succeeds_without_a_worktree() {
+        with_sandbox(None, |sandbox| {
+            let id = "gr-clean-nowt";
+            let state_dir = sandbox.join("state").join(id);
+            let artifact_dir = sandbox.join("scratch").join(id).join("artifacts");
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::create_dir_all(&artifact_dir).unwrap();
+
+            test_gremlin(id, state_dir.clone(), artifact_dir, None, PathBuf::new()).clean(true);
+
+            assert!(!state_dir.exists());
+            assert!(!sandbox.join("scratch").join(id).exists());
+        });
+    }
+
+    #[test]
+    fn clean_falls_back_to_rmtree_outside_a_git_repo() {
+        with_sandbox(None, |sandbox| {
+            let id = "gr-clean-nogit";
+            let state_dir = sandbox.join("state").join(id);
+            let artifact_dir = sandbox.join("scratch").join(id).join("artifacts");
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::create_dir_all(&artifact_dir).unwrap();
+
+            // A worktree with a `project_root` that is not a repository: the
+            // `git worktree remove` fails silently and the rmtree fallback is
+            // what actually deletes the checkout.
+            let worktree = sandbox.join("worktree-nogit");
+            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::write(worktree.join("file"), "data").unwrap();
+            let project_root = sandbox.join("not-a-repo");
+            std::fs::create_dir_all(&project_root).unwrap();
+
+            test_gremlin(
+                id,
+                state_dir,
+                artifact_dir,
+                Some(worktree.clone()),
+                project_root,
+            )
+            .clean(true);
+
+            assert!(!worktree.exists(), "rmtree fallback should remove it");
+        });
+    }
+
+    /// How many administrative worktree records git keeps under
+    /// `.git/worktrees` — counted rather than path-matched, because git
+    /// resolves a tempdir to its `/private` form and the test's own path does
+    /// not.
+    fn admin_worktree_entries(root: &Path) -> usize {
+        std::fs::read_dir(root.join(".git").join("worktrees"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn clean_prunes_metadata_for_a_vanished_worktree() {
+        if !git_available() {
+            eprintln!("git is unavailable; skipping clean_prunes_metadata_for_a_vanished_worktree");
+            return;
+        }
+        with_sandbox(None, |sandbox| {
+            let repo = tempfile::tempdir().unwrap();
+            if !init_repo(repo.path()) {
+                eprintln!("could not prepare a git fixture; skipping");
+                return;
+            }
+            let id = "gr-clean-stale";
+            let state_dir = sandbox.join("state").join(id);
+            let artifact_dir = sandbox.join("scratch").join(id).join("artifacts");
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::create_dir_all(&artifact_dir).unwrap();
+
+            // A registered worktree whose checkout is deleted out from under
+            // git: the directory is gone, the admin record is not. The `clean`
+            // path has to reach git *despite* the missing directory, or the
+            // record outlives every gremlin that could explain it.
+            let worktree = repo.path().join("stale-worktree");
+            let worktree_str = worktree.to_string_lossy().into_owned();
+            assert!(
+                git(repo.path(), &["worktree", "add", "--detach", &worktree_str])
+                    .status
+                    .success(),
+                "worktree add should succeed"
+            );
+            assert_eq!(admin_worktree_entries(repo.path()), 1);
+            std::fs::remove_dir_all(&worktree).unwrap();
+            assert!(!worktree.exists(), "checkout should be gone");
+            assert_eq!(
+                admin_worktree_entries(repo.path()),
+                1,
+                "git should still hold the stale record"
+            );
+
+            test_gremlin(
+                id,
+                state_dir,
+                artifact_dir,
+                Some(worktree.clone()),
+                repo.path().to_path_buf(),
+            )
+            .clean(true);
+
+            assert_eq!(
+                admin_worktree_entries(repo.path()),
+                0,
+                "clean should prune git's administrative record"
+            );
+        });
     }
 }
