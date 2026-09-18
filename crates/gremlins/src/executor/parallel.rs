@@ -11,13 +11,12 @@
 //! accepts a `Vec<RunnableStage>` instead of a child pipeline path — the child
 //! pipeline inherits parent metadata but runs only the given stages.
 //!
-//! Because [`Gremlin`] is not `Send` (its [`StateData`] carries a
-//! [`RefCell`]), each child runs in its own `std::thread` with a
-//! single-threaded tokio runtime. The [`JoinSet`] manages the concurrency
-//! bound and cancellation: each spawned task awaits a [`oneshot`] receiver
-//! from its worker thread. Thread join handles are collected so that every
-//! worker thread is joined before `run_parallel` returns — no orphaned
-//! threads, even after `cancel_on_error`.
+//! Each child runs on a dedicated [`std::thread`] worker thread (spawned via
+//! [`std::thread::spawn`]) with its own single-threaded tokio runtime.
+//! The [`JoinSet`] manages the concurrency bound and cancellation: each
+//! spawned task awaits a [`oneshot`] receiver from its worker thread. Thread
+//! join handles are collected so that every worker thread is joined before
+//! `run_parallel` returns — no orphaned threads, even after `cancel_on_error`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};

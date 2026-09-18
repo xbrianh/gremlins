@@ -76,7 +76,6 @@ impl PyStateData {
     fn set_gremlin_id(&self, value: Option<String>) {
         let mut d = self.lock();
         d.gremlin_id = value;
-        d.invalidate();
     }
 
     #[getter]
@@ -88,7 +87,6 @@ impl PyStateData {
     fn set_state_file(&self, value: Option<PathBuf>) {
         let mut d = self.lock();
         d.state_file = value;
-        d.invalidate();
     }
 
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {

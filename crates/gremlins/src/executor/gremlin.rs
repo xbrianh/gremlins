@@ -1099,6 +1099,14 @@ mod tests {
 
     use crate::test_support::{with_sandbox, EnvGuard};
 
+    #[test]
+    fn gremlin_is_send_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<Gremlin>();
+        assert_sync::<Gremlin>();
+    }
+
     // --- id validation ---
 
     #[test]
