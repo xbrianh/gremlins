@@ -804,9 +804,9 @@ fn finish_launch(
 
     stage_overlay(project_root, state_dir);
 
-    let mut registry = ArtifactRegistry::new(artifact_dir.to_path_buf());
-    register_stage_inputs(&mut registry, &pipeline.bootstrap, stage_inputs);
-    register_base_sha(&mut registry, worktree.as_deref().unwrap_or(project_root));
+    let registry = ArtifactRegistry::new(artifact_dir.to_path_buf());
+    register_stage_inputs(&registry, &pipeline.bootstrap, stage_inputs);
+    register_base_sha(&registry, worktree.as_deref().unwrap_or(project_root));
 
     let overlay_dir = state_dir.join(config::overlay_dirname());
     let env = resolve_env(
@@ -850,7 +850,7 @@ fn finish_launch(
 /// about, but it must not abort a launch, because the stage that wanted the
 /// artifact will report it precisely.
 fn register_stage_inputs(
-    registry: &mut ArtifactRegistry,
+    registry: &ArtifactRegistry,
     bootstrap: &Bootstrap,
     stage_inputs: &HashMap<String, String>,
 ) {
@@ -879,7 +879,7 @@ fn register_stage_inputs(
 }
 
 /// Record the commit the run started from, once, as `artifact://base_sha`.
-fn register_base_sha(registry: &mut ArtifactRegistry, cwd: &Path) {
+fn register_base_sha(registry: &ArtifactRegistry, cwd: &Path) {
     if registry.is_live("artifact://base_sha") {
         return;
     }

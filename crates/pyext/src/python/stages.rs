@@ -347,8 +347,8 @@ impl PyExec {
         let mut prepared = {
             let arts_ref = artifacts.bind(py);
             let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
-            let mut inner = arts_inner.inner.lock().unwrap();
-            match rust_exec::prepare_exec(&exec, &mut inner, &loop_iter_str, &fw) {
+            let inner = &arts_inner.inner;
+            match rust_exec::prepare_exec(&exec, inner, &loop_iter_str, &fw) {
                 Ok(p) => p,
                 Err(rust_exec::ExecError::Resolve {
                     source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
@@ -371,9 +371,8 @@ impl PyExec {
             // Empty commands: everything is synchronous — lock, commit, return.
             let arts_ref = artifacts.bind(py);
             let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
-            let mut inner = arts_inner.inner.lock().unwrap();
-            rust_exec::commit_exec(&prepared, &mut inner)
-                .map_err(|e| Bail::new_err(e.to_string()))?;
+            let inner = &arts_inner.inner;
+            rust_exec::commit_exec(&prepared, inner).map_err(|e| Bail::new_err(e.to_string()))?;
 
             return pyo3_async_runtimes::tokio::future_into_py::<_, Py<PyAny>>(py, async move {
                 Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()))
@@ -445,8 +444,8 @@ impl PyExec {
             Python::attach(|py| {
                 let arts_ref = artifacts.bind(py);
                 let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
-                let mut inner = arts_inner.inner.lock().unwrap();
-                rust_exec::commit_exec(&prepared, &mut inner)
+                let inner = &arts_inner.inner;
+                rust_exec::commit_exec(&prepared, inner)
                     .map_err(|e| Bail::new_err(e.to_string()))?;
 
                 let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();
@@ -720,8 +719,8 @@ impl PyAgent {
         let mut prepared = {
             let arts_ref = artifacts.bind(py);
             let arts_inner: PyRef<'_, ArtifactRegistry> = arts_ref.extract()?;
-            let mut inner = arts_inner.inner.lock().unwrap();
-            match rust_agent::prepare_agent(&agent, &mut inner, &loop_iter_str, &fw) {
+            let inner = &arts_inner.inner;
+            match rust_agent::prepare_agent(&agent, inner, &loop_iter_str, &fw) {
                 Ok(p) => p,
                 Err(rust_agent::AgentError::Resolve {
                     source: gremlins::artifacts::resolve::ResolveError::MissingArtifact(key),
@@ -867,8 +866,8 @@ impl PyAgent {
                 }
 
                 let arts_inner: PyRef<'_, ArtifactRegistry> = artifacts.bind(py).extract()?;
-                let mut inner = arts_inner.inner.lock().unwrap();
-                rust_agent::commit_agent(&prepared, &mut inner)
+                let inner = &arts_inner.inner;
+                rust_agent::commit_agent(&prepared, inner)
                     .map_err(|e| Bail::new_err(e.to_string()))?;
 
                 let done_obj: Py<PyAny> = Py::new(py, Done(RustDone))?.into();

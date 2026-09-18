@@ -359,7 +359,7 @@ async fn run_cli_out(
         stderr: error,
     };
 
-    let mut prepared = prepare_exec(&exec, &mut gremlin.registry, &loop_iter, &framework_subs)
+    let mut prepared = prepare_exec(&exec, &gremlin.registry, &loop_iter, &framework_subs)
         .map_err(|error| failed(error.to_string()))?;
     prepared.cwd = cwd.to_path_buf();
     prepared.artifact_dir = gremlin.artifact_dir.clone();
@@ -369,7 +369,7 @@ async fn run_cli_out(
     run_shell(&prepared)
         .await
         .map_err(|error| failed(error.to_string()))?;
-    commit_exec(&prepared, &mut gremlin.registry).map_err(|error| failed(error.to_string()))?;
+    commit_exec(&prepared, &gremlin.registry).map_err(|error| failed(error.to_string()))?;
 
     Ok(())
 }

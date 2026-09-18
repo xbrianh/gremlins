@@ -163,12 +163,12 @@ pub struct ExecPrepared {
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
-/// Requires `&mut ArtifactRegistry` (for interpolation lookups). Returns a
+/// Requires `&ArtifactRegistry` (for interpolation lookups). Returns a
 /// fully-prepared struct that can be passed to `run_shell` and `commit_exec`
 /// without further registry mutation.
 pub fn prepare_exec(
     exec: &Exec,
-    artifacts: &mut ArtifactRegistry,
+    artifacts: &ArtifactRegistry,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<ExecPrepared, ExecError> {
@@ -342,10 +342,7 @@ pub fn process_shell_result(
 
 /// Phase 3: commit produced artifacts into the registry.
 /// Non-optional artifacts that are absent abort the stage, except bail URIs.
-pub fn commit_exec(
-    prepared: &ExecPrepared,
-    artifacts: &mut ArtifactRegistry,
-) -> Result<(), ExecError> {
+pub fn commit_exec(prepared: &ExecPrepared, artifacts: &ArtifactRegistry) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
         if Path::new(path).exists() {
@@ -421,7 +418,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         // A sibling already committed this URI.
         let uri = Uri::parse("artifact://out.txt").unwrap();
@@ -436,7 +433,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
-        let prepared = prepare_exec(&optional_exec, &mut registry, "", &fw).unwrap();
+        let prepared = prepare_exec(&optional_exec, &registry, "", &fw).unwrap();
         assert_eq!(prepared.bind_uris[0].0, "out");
         assert!(prepared.bind_uris[0].2);
 
@@ -447,7 +444,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
-        let err = prepare_exec(&non_optional_exec, &mut registry, "", &fw)
+        let err = prepare_exec(&non_optional_exec, &registry, "", &fw)
             .err()
             .expect("expected duplicate-producer error");
         assert!(matches!(err, ExecError::Generic { .. }));
@@ -458,7 +455,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         // Registered but its file is gone: a skip_if_exists producer must be
         // able to run (and commit) again.
@@ -472,9 +469,9 @@ mod tests {
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([("plan".to_string(), "artifact://plan.md".to_string())]),
         };
-        let prepared = prepare_exec(&exec, &mut registry, "", &HashMap::new()).unwrap();
+        let prepared = prepare_exec(&exec, &registry, "", &HashMap::new()).unwrap();
         fs::write(&prepared.bind_paths["plan"], "# new plan").unwrap();
-        commit_exec(&prepared, &mut registry).unwrap();
+        commit_exec(&prepared, &registry).unwrap();
         assert_eq!(
             registry.content("artifact://plan.md", None).unwrap(),
             "# new plan",
@@ -486,7 +483,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -495,8 +492,8 @@ mod tests {
             bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &mut registry, "", &fw).unwrap();
-        let err = commit_exec(&prepared, &mut registry).unwrap_err();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).unwrap();
+        let err = commit_exec(&prepared, &registry).unwrap_err();
         assert!(matches!(err, ExecError::MissingArtifact { .. }));
         assert!(!registry.is_registered("artifact://out.txt"));
     }
@@ -506,7 +503,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -515,8 +512,8 @@ mod tests {
             bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &mut registry, "", &fw).unwrap();
-        commit_exec(&prepared, &mut registry).unwrap();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).unwrap();
+        commit_exec(&prepared, &registry).unwrap();
         assert!(!registry.is_registered("artifact://out.txt"));
     }
 
@@ -525,7 +522,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -534,9 +531,9 @@ mod tests {
             bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &mut registry, "", &fw).unwrap();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).unwrap();
         fs::write(&prepared.bind_paths["out"], "data").unwrap();
-        commit_exec(&prepared, &mut registry).unwrap();
+        commit_exec(&prepared, &registry).unwrap();
         assert!(registry.is_registered("artifact://out.txt"));
     }
 

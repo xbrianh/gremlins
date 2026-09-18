@@ -77,7 +77,7 @@ fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
     if !registry.is_registered(uri) {
         return None;
     }
-    let raw = registry.data_uri(uri).ok()?.to_string();
+    let raw = registry.data_uri(uri).ok()?;
     if !raw.starts_with('/') {
         return non_empty(raw.trim());
     }
@@ -137,7 +137,7 @@ fn clear_stale_bail(registry: &ArtifactRegistry, scope: &str) {
     if !raw.starts_with('/') {
         return;
     }
-    if let Err(error) = std::fs::remove_file(raw) {
+    if let Err(error) = std::fs::remove_file(&raw) {
         log::debug!("clear_stale_bail: nothing to remove at {raw}: {error}");
     }
 }
@@ -217,7 +217,7 @@ async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Ru
     let framework_subs = gremlin.framework_subs(node);
     let loop_iter = loop_iter_of(&gremlin.loop_stack);
 
-    let mut prepared = prepare_agent(agent, &mut gremlin.registry, &loop_iter, &framework_subs)
+    let mut prepared = prepare_agent(agent, &gremlin.registry, &loop_iter, &framework_subs)
         .map_err(|error| match error {
             // An unbound interpolation input is a bail, not a crash: the run
             // cannot proceed, but nothing is broken.
@@ -308,7 +308,7 @@ async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Ru
         },
     })?;
 
-    commit_agent(&prepared, &mut gremlin.registry).map_err(|error| match error {
+    commit_agent(&prepared, &gremlin.registry).map_err(|error| match error {
         // A declared output that never materialised is the agent's bail.
         AgentError::MissingArtifact { .. } => RunError::Bail {
             reason: error.to_string(),
@@ -334,18 +334,20 @@ async fn run_exec(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Run
     let framework_subs = gremlin.framework_subs(node);
     let loop_iter = loop_iter_of(&gremlin.loop_stack);
 
-    let mut prepared = prepare_exec(exec, &mut gremlin.registry, &loop_iter, &framework_subs)
-        .map_err(|error| match error {
-            ExecError::Resolve {
-                source: ResolveError::MissingArtifact(key),
-                ..
-            } => RunError::Bail {
-                reason: format!("artifact not bound: {key:?}"),
-            },
-            other => RunError::StageFailed {
-                stage: exec.name.clone(),
-                message: other.to_string(),
-            },
+    let mut prepared =
+        prepare_exec(exec, &gremlin.registry, &loop_iter, &framework_subs).map_err(|error| {
+            match error {
+                ExecError::Resolve {
+                    source: ResolveError::MissingArtifact(key),
+                    ..
+                } => RunError::Bail {
+                    reason: format!("artifact not bound: {key:?}"),
+                },
+                other => RunError::StageFailed {
+                    stage: exec.name.clone(),
+                    message: other.to_string(),
+                },
+            }
         })?;
 
     prepared.cwd = gremlin.cwd();
@@ -367,7 +369,7 @@ async fn run_exec(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Run
             })?;
     }
 
-    commit_exec(&prepared, &mut gremlin.registry).map_err(|error| match error {
+    commit_exec(&prepared, &gremlin.registry).map_err(|error| match error {
         // An unproduced output that is not a bail URI aborts the run.
         ExecError::MissingArtifact { .. } => RunError::Bail {
             reason: error.to_string(),
@@ -770,7 +772,7 @@ mod tests {
 
     #[test]
     fn bail_reason_reads_the_bound_file() {
-        let (_tmp, mut registry) = scratch_registry();
+        let (_tmp, registry) = scratch_registry();
         assert!(bail_reason(&registry, "scope").is_none());
 
         let uri = Uri::parse("artifact://scope/bail").unwrap();
@@ -788,7 +790,7 @@ mod tests {
 
     #[test]
     fn global_bail_and_is_bail_set() {
-        let (_tmp, mut registry) = scratch_registry();
+        let (_tmp, registry) = scratch_registry();
         assert!(!is_bail_set(&registry, "scope"));
         assert!(global_bail_reason(&registry).is_none());
 
@@ -800,7 +802,7 @@ mod tests {
 
     #[test]
     fn clear_stale_bail_unreads_a_previous_bail() {
-        let (_tmp, mut registry) = scratch_registry();
+        let (_tmp, registry) = scratch_registry();
         let uri = Uri::parse("artifact://scope/bail").unwrap();
         registry.write_into_registry(&uri, "old\n").unwrap();
         assert!(bail_reason(&registry, "scope").is_some());

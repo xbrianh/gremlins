@@ -357,7 +357,7 @@ fn merge_child_artifacts(gremlin: &mut Gremlin, outcome: &ChildOutcome) -> Resul
     let mut key_map = HashMap::new();
     for key in child_registry.keys() {
         // Strip the artifact:// prefix, prepend the child name.
-        let bare = key.strip_prefix("artifact://").unwrap_or(key);
+        let bare = key.strip_prefix("artifact://").unwrap_or(&key);
         let parent_key = format!("artifact://{}/{}", outcome.child_name, bare);
         key_map.insert(key.clone(), parent_key);
     }
