@@ -806,7 +806,13 @@ fn finish_launch(
         Value::String(pipeline_path_str.clone()),
     );
     initial.insert("stage".to_string(), Value::String("starting".to_string()));
-    initial.insert("pid".to_string(), Value::Null);
+    // The process running the pipeline is the one a later `gremlins stop`
+    // must signal. Record our own pid rather than clobbering the launcher's
+    // value with null (which left live gremlins unstoppable).
+    initial.insert(
+        "pid".to_string(),
+        Value::from(std::process::id() as i64),
+    );
     initial.insert("stage_inputs".to_string(), Value::Object(inputs));
     if !initial.contains_key("attempt") {
         initial.insert("attempt".to_string(), Value::String(String::new()));
@@ -1473,6 +1479,7 @@ mod tests {
             let raw = read_state(&state_file);
             assert_eq!(raw["id"], "gr-test");
             assert_eq!(raw["status"], "running");
+            assert_eq!(raw["pid"].as_i64().unwrap(), std::process::id() as i64);
             assert!(raw["pipeline_path"]
                 .as_str()
                 .unwrap()
