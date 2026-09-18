@@ -52,6 +52,10 @@ pub(crate) async fn run_parallel(
     let group_name = &attrs.name;
     let total_children = body.len();
 
+    log::debug!(
+        "parallel group {group_name}: starting with {total_children} children (max_concurrent={max_concurrent:?}, cancel_on_error={cancel_on_error}, error_policy={error_policy:?})"
+    );
+
     // --- Resumption guard ---
     //
     // A group is fully complete when every child is in `done_for`. The check
@@ -100,6 +104,9 @@ pub(crate) async fn run_parallel(
         let group_name_owned = group_name.to_string();
         let child_stages = vec![child.clone()];
 
+        log::debug!(
+            "parallel group {group_name}: forking child {child_name} (child_id={child_id})"
+        );
         // Fork the child gremlin synchronously (before spawning), so the
         // worker thread only has to call `run()`.
         let mut child_gremlin = gremlin.fork_with_stages(
@@ -109,6 +116,12 @@ pub(crate) async fn run_parallel(
             &child_name,
             child_stages,
         )?;
+
+        log::debug!(
+            "parallel group {group_name}: child {child_name} forked (state_dir={}, artifact_dir={})",
+            child_gremlin.state_dir.display(),
+            child_gremlin.artifact_dir.display()
+        );
 
         spawned_ids.push((child_name.clone(), child_id.clone()));
 
@@ -145,7 +158,17 @@ pub(crate) async fn run_parallel(
                 return;
             }
 
+            log::debug!(
+                "parallel group {group_name_owned}: child {child_name_for_thread} starting run() on thread"
+            );
             let outcome = rt.block_on(async { child_gremlin.run().await.map(|_| ()) });
+            log::debug!(
+                "parallel group {group_name_owned}: child {child_name_for_thread} run() completed (outcome={})",
+                match &outcome {
+                    Ok(()) => "Ok".to_string(),
+                    Err(e) => format!("Err: {e}"),
+                }
+            );
 
             let _ = tx.send((child_name_for_thread, child_id_for_thread, outcome));
         });
@@ -168,6 +191,9 @@ pub(crate) async fn run_parallel(
         });
 
         spawned += 1;
+        log::debug!(
+            "parallel group {group_name}: spawned child {child_name} on thread"
+        );
     }
 
     if spawned == 0 {
@@ -187,6 +213,13 @@ pub(crate) async fn run_parallel(
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok((child_name, child_id, outcome)) => {
+                log::debug!(
+                    "parallel group {group_name}: child {child_name} completed (outcome={})",
+                    match &outcome {
+                        Ok(()) => "Ok".to_string(),
+                        Err(e) => format!("Err: {e}"),
+                    }
+                );
                 match outcome {
                     Ok(()) => {
                         child_results.push(ChildOutcome {
@@ -263,7 +296,8 @@ pub(crate) async fn run_parallel(
     let mut success_count = done.len();
 
     for outcome in &mut child_results {
-        if outcome.outcome.is_ok() {
+        let outcome_ok = outcome.outcome.is_ok();
+        if outcome_ok {
             success_count += 1;
         } else {
             failed_names.insert(outcome.child_name.clone());
@@ -274,7 +308,20 @@ pub(crate) async fn run_parallel(
             let err = std::mem::replace(&mut outcome.outcome, Ok(())).unwrap_err();
             real_errors.push(err);
         }
+        log::debug!(
+            "parallel group {group_name}: child {} recorded as {} (success_count={}, failed_names={:?})",
+            outcome.child_name,
+            if outcome_ok { "success" } else { "failure" },
+            success_count,
+            failed_names
+        );
     }
+
+    log::debug!(
+        "parallel group {group_name}: applying error_policy={error_policy:?} (success_count={success_count}, failed_count={}, errors={:?})",
+        real_errors.len(),
+        real_errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+    );
 
     let group_error = match *error_policy {
         ErrorPolicy::Any => real_errors.into_iter().next(),
@@ -291,7 +338,13 @@ pub(crate) async fn run_parallel(
     // use that in preference to the policy-derived error.
     let group_error = first_error.or(group_error);
 
+    log::debug!(
+        "parallel group {group_name}: group_error={:?}",
+        group_error.as_ref().map(|e| e.to_string())
+    );
+
     // --- Merge artifacts from successful children ---
+    log::debug!("parallel group {group_name}: merging artifacts from {} successful children", child_results.len() - failed_names.len());
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
             if let Err(e) = merge_child_artifacts(gremlin, outcome) {
@@ -304,11 +357,13 @@ pub(crate) async fn run_parallel(
     }
 
     // --- Aggregate child costs ---
+    log::debug!("parallel group {group_name}: aggregating costs from {} children", child_results.len());
     for outcome in &child_results {
         aggregate_child_costs(gremlin, outcome);
     }
 
     // --- Clean up child worktrees (best-effort) ---
+    log::debug!("parallel group {group_name}: cleaning up worktrees for {} spawned children", spawned_ids.len());
     //
     // Iterate over *all* spawned children — not just those that reported a
     // result — so worktrees created during `fork_with_stages` for cancelled

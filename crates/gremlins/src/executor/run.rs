@@ -172,6 +172,12 @@ async fn run_stage_scoped(
 ) -> Result<(), RunError> {
     let loop_iter = loop_iter_of(&gremlin.loop_stack);
     let skip = stage.skip_if_exists();
+    log::debug!(
+        "stage '{}' (gremlin={}): entering (type={}, scope={scope:?}, skip_if_exists={skip:?})",
+        stage.name(),
+        gremlin.id.as_str(),
+        stage.stage_type(),
+    );
     if !skip.is_empty() {
         let resolved = skip.replace("{loop_iter}", &loop_iter);
         if is_live_uri(&gremlin.registry, &resolved) {
@@ -183,9 +189,15 @@ async fn run_stage_scoped(
     match stage {
         RunnableStage::Agent { .. } => run_agent(stage, gremlin).await,
         RunnableStage::Exec { .. } => run_exec(stage, gremlin).await,
-        RunnableStage::Sequence { .. } => run_sequence(stage, gremlin, scope).await,
+        RunnableStage::Sequence { .. } => {
+            log::debug!("stage '{}': entering sequence", stage.name());
+            run_sequence(stage, gremlin, scope).await
+        }
         RunnableStage::Loop { .. } => run_loop(stage, gremlin).await,
-        RunnableStage::Parallel { .. } => run_parallel(stage, gremlin).await,
+        RunnableStage::Parallel { .. } => {
+            log::debug!("dispatching stage '{}' to run_parallel", stage.name());
+            run_parallel(stage, gremlin).await
+        }
     }
 }
 
@@ -216,6 +228,13 @@ async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Ru
     let client = resolve_client(node, gremlin)?;
     let framework_subs = gremlin.framework_subs(node);
     let loop_iter = loop_iter_of(&gremlin.loop_stack);
+
+    log::debug!(
+        "agent stage '{}' (gremlin={}): preparing (client={})",
+        agent.name,
+        gremlin.id.as_str(),
+        client.model()
+    );
 
     let mut prepared = prepare_agent(agent, &gremlin.registry, &loop_iter, &framework_subs)
         .map_err(|error| match error {
@@ -268,6 +287,13 @@ async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Ru
         system_prompt: Some(prepared.system_prompt()),
     };
 
+    log::debug!(
+        "agent stage '{}' (gremlin={}): invoking client.run (model={})",
+        prepared.name,
+        gremlin.id.as_str(),
+        params.model.as_deref().unwrap_or("default")
+    );
+
     let completed = client
         .run(params)
         .await
@@ -275,6 +301,13 @@ async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Ru
             stage: prepared.name.clone(),
             message: error.to_string(),
         })?;
+
+    log::debug!(
+        "agent stage '{}' (gremlin={}): client.run completed (turns={})",
+        prepared.name,
+        gremlin.id.as_str(),
+        completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
+    );
 
     if let Some(usage) = &completed.token_usage {
         let delta = HashMap::from([
@@ -334,6 +367,12 @@ async fn run_exec(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Run
     let framework_subs = gremlin.framework_subs(node);
     let loop_iter = loop_iter_of(&gremlin.loop_stack);
 
+    log::debug!(
+        "exec stage '{}' (gremlin={}): preparing",
+        exec.name,
+        gremlin.id.as_str()
+    );
+
     let mut prepared =
         prepare_exec(exec, &gremlin.registry, &loop_iter, &framework_subs).map_err(|error| {
             match error {
@@ -356,6 +395,13 @@ async fn run_exec(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Run
     prepared.env = gremlin.env.clone();
 
     if !prepared.cmds.is_empty() {
+        log::debug!(
+           "exec stage '{}' (gremlin={}): running {} command(s): {:?}",
+            prepared.name,
+            gremlin.id.as_str(),
+            prepared.cmds.len(),
+            prepared.cmds
+        );
         // `run_shell` runs the commands and hands the result to
         // `process_shell_result`, which is what classifies the exit status: a
         // non-zero status is an error *unless* one of the stage's binds is a
@@ -576,6 +622,13 @@ impl Gremlin {
                 Value::String(format!("{}-{}", stage.name(), state::token_hex(4))),
             );
             self.state.patch(&[], &fields);
+
+            log::debug!(
+                "gremlin {}: running top-level stage '{}' (type={})",
+                self.id.as_str(),
+                stage.name(),
+                stage.stage_type()
+            );
 
             match run_stage(stage, self).await {
                 Ok(()) => {}

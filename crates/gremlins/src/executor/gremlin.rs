@@ -555,6 +555,10 @@ impl Gremlin {
         child_key: &str,
         stages: Vec<RunnableStage>,
     ) -> Result<Gremlin, RunError> {
+        log::debug!(
+            "fork_with_stages: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}, stage_count={}",
+            stages.len()
+        );
         let child_gremlin_id = validate_gremlin_id(child_id).map_err(RunError::Message)?;
 
         let child_state_dir = self
@@ -567,7 +571,14 @@ impl Gremlin {
         std::fs::create_dir_all(&child_state_dir)?;
         std::fs::create_dir_all(&child_artifact_dir)?;
 
+        log::debug!(
+            "fork_with_stages: child_state_dir={}, child_artifact_dir={}",
+            child_state_dir.display(),
+            child_artifact_dir.display()
+        );
+
         copy_tree(&self.artifact_dir, &child_artifact_dir)?;
+        log::debug!("fork_with_stages: copied parent artifacts to child artifact dir");
 
         let mut child_worktree: Option<PathBuf> = None;
         let mut child_worktree_base = String::new();
@@ -590,6 +601,12 @@ impl Gremlin {
             })?;
             child_worktree = Some(PathBuf::from(path));
             child_worktree_base = sha;
+            log::debug!(
+                "fork_with_stages: created worktree for child at {}",
+                child_worktree.as_ref().unwrap().display()
+            );
+        } else {
+            log::debug!("fork_with_stages: no parent worktree — child inherits no worktree");
         }
 
         let registry = ArtifactRegistry::from_registry_file(
@@ -652,7 +669,14 @@ impl Gremlin {
         state::write_state(&child_state_dir, &child)?;
         std::fs::write(child_state_dir.join("log"), "")?;
 
+        log::debug!("fork_with_stages: wrote child state and log for {child_id}");
+
         let pipeline = self.pipeline.clone_with_stages(stages);
+
+        log::debug!(
+            "fork_with_stages: child {child_id} ready (client={})",
+            self.client.model()
+        );
 
         Ok(Gremlin {
             id: child_gremlin_id,
