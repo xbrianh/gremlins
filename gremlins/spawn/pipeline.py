@@ -172,7 +172,9 @@ async def run_pipeline(
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
     stage_inputs: dict[str, str] = {
-        k: str(v) for k, v in state_json.get("stage_inputs", {}).items()
+        k: v
+        for k, v in state_json.get("stage_inputs", {}).items()
+        if v is not None and isinstance(v, str)
     }
 
     # Stage the gremlins overlay so Rust's launch (which also stages it) sees a
