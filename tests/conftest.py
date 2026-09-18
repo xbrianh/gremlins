@@ -13,9 +13,8 @@ from typing import Any
 
 import pytest
 from _gremlins_core.config import scratch_root
-from _gremlins_core.executor import StateData, build_state
+from _gremlins_core.executor import State, StateData, build_state
 
-from gremlins.executor.gremlin import State
 from tests.fake_client import FakeClient
 
 os.environ.setdefault("GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME", "main")

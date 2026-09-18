@@ -199,5 +199,8 @@ fn _gremlins_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // discovery submodule
     python::discovery::register_discovery_module(m)?;
 
+    // PyGremlin class — lives at the top level of _gremlins_core
+    m.add_class::<python::gremlin::PyGremlin>()?;
+
     Ok(())
 }

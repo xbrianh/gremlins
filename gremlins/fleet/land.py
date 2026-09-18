@@ -992,7 +992,7 @@ def _land_with_stage(
     land_stage: Any,
 ) -> bool:
     """Run the pipeline's land: stage as the merge step, with shared teardown."""
-    from gremlins.executor.gremlin import Gremlin
+    from _gremlins_core import Gremlin as PyGremlin
 
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
@@ -1002,7 +1002,7 @@ def _land_with_stage(
         print("you are inside this gremlin's worktree — cd elsewhere before landing")
         return False
 
-    gremlin = Gremlin.open(gremlin_id)
+    gremlin = PyGremlin.open(gremlin_id)
     gremlin.state = gremlin.build_state_with_cwd(cwd or "")
     _remove_worktree(wdir, state, cwd)
 

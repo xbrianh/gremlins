@@ -699,7 +699,15 @@ impl Gremlin {
 ///
 /// Mirrors the private `project_root_for` in `schemas::pipeline`: the parent of
 /// the nearest ancestor `.gremlins` directory, else the pipeline's own parent.
+/// Falls back to `GREMLINS_PROJECT_ROOT` when the env var is set, so a running
+/// gremlin whose state dir has a staged overlay still resolves the real project.
 fn project_root_for(pipeline_path: &Path) -> PathBuf {
+    if let Ok(env_root) = std::env::var("GREMLINS_PROJECT_ROOT") {
+        let path = PathBuf::from(&env_root);
+        if path.is_dir() {
+            return path;
+        }
+    }
     let canonical = pipeline_path
         .canonicalize()
         .unwrap_or_else(|_| pipeline_path.to_path_buf());
@@ -751,8 +759,16 @@ fn finish_launch(
         .iter()
         .map(|(key, value)| (key.clone(), Value::String(value.clone())))
         .collect();
-    let mut initial = Map::new();
-    initial.insert("kind".to_string(), Value::String(String::new()));
+
+    // Merge with existing state.json if present (the Python launcher may have
+    // already written initial state before spawning the subprocess).
+    let existing = state::read_state_json(Some(&state_dir.join("state.json")));
+    let mut initial = existing;
+    // Always set these fields from the Rust launch context.
+    initial.insert("id".to_string(), Value::String(gremlin_id.to_string()));
+    if !initial.contains_key("kind") {
+        initial.insert("kind".to_string(), Value::String(String::new()));
+    }
     initial.insert(
         "project_root".to_string(),
         Value::String(project_root.to_string_lossy().into_owned()),
@@ -767,10 +783,18 @@ fn finish_launch(
         Value::String(base_ref_sha.clone()),
     );
     initial.insert("status".to_string(), Value::String("running".to_string()));
-    initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
-    initial.insert("description".to_string(), Value::String(String::new()));
-    initial.insert("parent_id".to_string(), Value::String(String::new()));
-    initial.insert("pipeline_args".to_string(), Value::Array(Vec::new()));
+    if !initial.contains_key("started_at") {
+        initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
+    }
+    if !initial.contains_key("description") {
+        initial.insert("description".to_string(), Value::String(String::new()));
+    }
+    if !initial.contains_key("parent_id") {
+        initial.insert("parent_id".to_string(), Value::String(String::new()));
+    }
+    if !initial.contains_key("pipeline_args") {
+        initial.insert("pipeline_args".to_string(), Value::Array(Vec::new()));
+    }
     initial.insert(
         "client".to_string(),
         Value::String(pipeline.default_client.clone()),
@@ -782,9 +806,15 @@ fn finish_launch(
     initial.insert("stage".to_string(), Value::String("starting".to_string()));
     initial.insert("pid".to_string(), Value::Null);
     initial.insert("stage_inputs".to_string(), Value::Object(inputs));
-    initial.insert("attempt".to_string(), Value::String(String::new()));
-    initial.insert("group_name".to_string(), Value::String(String::new()));
-    initial.insert("child_key".to_string(), Value::String(String::new()));
+    if !initial.contains_key("attempt") {
+        initial.insert("attempt".to_string(), Value::String(String::new()));
+    }
+    if !initial.contains_key("group_name") {
+        initial.insert("group_name".to_string(), Value::String(String::new()));
+    }
+    if !initial.contains_key("child_key") {
+        initial.insert("child_key".to_string(), Value::String(String::new()));
+    }
     initial.insert("exit_code".to_string(), Value::Null);
     state.persist(state_dir, &initial)?;
 

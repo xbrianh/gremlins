@@ -9,9 +9,9 @@ import sys
 import time
 from collections.abc import Iterator
 
+from _gremlins_core import Gremlin as PyGremlin
 from _gremlins_core.config import scratch_root
 
-from gremlins.executor.gremlin import Gremlin
 from gremlins.fleet.duration import parse_duration
 from gremlins.fleet.render import FleetRow, build_row, print_table
 from gremlins.fleet.resolve import collect_gremlin_matches, resolve_gremlin
@@ -222,7 +222,7 @@ def do_drill_in(target: str) -> None:
 
     _gremlin_id_for_bail = str(state.get("id") or "")
     _bail_file = (
-        Gremlin.bail_info_for(_gremlin_id_for_bail) if _gremlin_id_for_bail else None
+        PyGremlin.bail_info_for(_gremlin_id_for_bail) if _gremlin_id_for_bail else None
     )
     bail_class = (
         (_bail_file.get("class") or "")
@@ -384,7 +384,7 @@ def do_drill_in_json(target: str) -> None:
 
     gremlin_id_for_bail = str(state.get("id") or "")
     bail_file = (
-        Gremlin.bail_info_for(gremlin_id_for_bail) if gremlin_id_for_bail else None
+        PyGremlin.bail_info_for(gremlin_id_for_bail) if gremlin_id_for_bail else None
     )
     bail_class = (
         (bail_file.get("class") or "") if bail_file else (state.get("bail_class") or "")

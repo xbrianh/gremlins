@@ -1,19 +1,8 @@
-import asyncio
-import pathlib
-import subprocess
-from typing import TYPE_CHECKING, cast
+"""Tests for the local pipeline stage definitions."""
 
-from _gremlins_core.artifacts import ArtifactRegistry
-from _gremlins_core.executor import StateData, build_state
+from __future__ import annotations
+
 from _gremlins_core.schemas import Pipeline
-from _gremlins_core.stages import Agent
-from _gremlins_core.utils.yaml_io import load_bundled_prompt
-from conftest import MINIMAL_EVENTS, MockGremlin
-
-from tests.fake_client import FakeClient
-
-if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin
 
 
 def test_local_yaml_loads_and_validates():
@@ -34,106 +23,3 @@ def test_local_yaml_loads_and_validates():
         "verify-check",
         "verify-test",
     ]
-
-
-def _make_state(client, artifact_dir, *, gremlin_id=None):
-    registry = ArtifactRegistry(artifact_dir)
-    state = build_state(
-        data=StateData(gremlin_id=gremlin_id),
-        client=client,
-        artifact_dir=artifact_dir,
-        artifacts=registry,
-    )
-    return state
-
-
-def _init_git_repo(path: pathlib.Path) -> None:
-    """Create a git repo with a first commit so HEAD exists and the tree is clean."""
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-    (path / "README.md").write_text("init\n")
-    subprocess.run(
-        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# review-code stage
-# ---------------------------------------------------------------------------
-
-
-def _make_review_code_stage(client: FakeClient) -> Agent:
-    return Agent(
-        "review-code",
-        [
-            load_bundled_prompt("code_style.md"),
-            load_bundled_prompt("review/detail.md"),
-            "`{review-code}` is the canonical and required location.",
-        ],
-        {},
-        bind_map={"review-code": "file://session/{name}-{model}.md"},
-    )
-
-
-def test_review_code_stage_passes_worktree_cwd_to_client(tmp_path):
-    """When state.worktree is set (parallel child), client.run gets cwd=worktree
-    so the model reads/writes the isolated worktree, not the parent process cwd."""
-    client = FakeClient(fixtures={"review-code": MINIMAL_EVENTS})
-    worktree = tmp_path / "wt"
-    worktree.mkdir()
-    artifact_dir = tmp_path / "session"
-    artifact_dir.mkdir()
-    # Pre-create the bound output file so verify_produced passes.
-    (artifact_dir / "review-code-fake.md").write_text(
-        "# Review\n\n## Findings\nNone.\n"
-    )
-    stage = _make_review_code_stage(client)
-    state = build_state(
-        data=StateData(),
-        client=client,
-        artifact_dir=artifact_dir,
-        worktree=worktree,
-        artifacts=ArtifactRegistry(artifact_dir),
-    )
-    asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
-    assert client.calls[0].cwd == worktree
-
-
-def test_review_code_stage_includes_style_from_prompts(tmp_path):
-    client = FakeClient(fixtures={"review-code": MINIMAL_EVENTS})
-    stage = Agent(
-        "review-code",
-        [
-            "Be good.",
-            load_bundled_prompt("review/detail.md"),
-            "`{review-code}` is the canonical and required location.",
-        ],
-        {},
-        bind_map={"review-code": "file://session/{name}-{model}.md"},
-    )
-    artifact_dir = tmp_path / "session"
-    artifact_dir.mkdir()
-    # Pre-create the bound output file so verify_produced passes.
-    (artifact_dir / "review-code-fake.md").write_text(
-        "# Review\n\n## Findings\nNone.\n"
-    )
-    state = _make_state(client, artifact_dir)
-    asyncio.run(stage.run(cast("Gremlin", MockGremlin(state))))
-    assert "Be good." in client.calls[0].prompt

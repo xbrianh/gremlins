@@ -4,14 +4,12 @@ use std::sync::Mutex;
 
 use gremlins::executor::state::{self as rust_state, StateData};
 use gremlins::stages::constants::FRAMEWORK_KEYS;
-use gremlins::stages::outcome::Done as RustDone;
 use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyTuple};
 
 use crate::python::artifacts::ArtifactRegistry;
 use crate::python::json_conv::{key_to_string, py_to_value, value_to_py};
-use crate::python::stages::Done;
 
 fn py_dict_to_map(d: &Bound<'_, PyDict>) -> PyResult<serde_json::Map<String, serde_json::Value>> {
     let mut map = serde_json::Map::new();
@@ -46,14 +44,6 @@ impl PyStateData {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, StateData> {
         self.inner.lock().unwrap()
-    }
-
-    fn patch_rs(&self, delete: &[String], fields: &serde_json::Map<String, serde_json::Value>) {
-        self.lock().patch(delete, fields);
-    }
-
-    fn read_field_rs(&self, field: &str) -> Option<serde_json::Value> {
-        self.lock().read_field(field)
     }
 }
 
@@ -473,226 +463,6 @@ impl PyState {
             .set_stage(name, sub.as_ref(), parent_stage);
         Ok(())
     }
-
-    #[pyo3(signature = (entry, scope=None, record_stage=true))]
-    fn _make_runner_impl(
-        &self,
-        py: Python<'_>,
-        entry: &Bound<'_, PyAny>,
-        scope: Option<&Bound<'_, PyAny>>,
-        record_stage: bool,
-    ) -> PyResult<Py<PyState>> {
-        let name: String = entry.getattr("name")?.extract()?;
-
-        if record_stage {
-            self.data
-                .bind(py)
-                .borrow()
-                .lock()
-                .set_stage(&name, None, &self.parent_stage);
-        }
-
-        let client_repr = self.client.bind(py).str()?.to_string();
-        let stored: String = self
-            .data
-            .bind(py)
-            .borrow()
-            .read_field_rs("client")
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
-        if client_repr != stored {
-            let mut fields = serde_json::Map::new();
-            fields.insert("client".into(), serde_json::Value::String(client_repr));
-            self.data.bind(py).borrow().patch_rs(&[], &fields);
-        }
-
-        let gremlin_id = self.data.bind(py).borrow().lock().gremlin_id.clone();
-        let attempt = match &gremlin_id {
-            Some(_) => format!("{name}-{}", rust_state::token_hex(4)),
-            None => String::new(),
-        };
-        if !attempt.is_empty() {
-            match &self.child_key {
-                Some(ck) => self
-                    .data
-                    .bind(py)
-                    .borrow()
-                    .lock()
-                    .patch_parallel_attempt(ck, &attempt),
-                None => {
-                    let mut fields = serde_json::Map::new();
-                    fields.insert("attempt".into(), serde_json::Value::String(attempt));
-                    self.data.bind(py).borrow().patch_rs(&[], &fields);
-                }
-            }
-        }
-
-        let fresh = Py::new(
-            py,
-            PyStateData {
-                inner: Mutex::new(StateData::new(gremlin_id)),
-            },
-        )?;
-
-        let scope_list: Vec<Py<PyAny>> = match scope {
-            Some(s) if !s.is_none() => s
-                .try_iter()?
-                .map(|i| i.map(|x| x.unbind()))
-                .collect::<PyResult<_>>()?,
-            _ => Vec::new(),
-        };
-        // Child copies, not shared handles: the child must not mutate the parent.
-        let current_scope = PyList::new(py, scope_list)?.unbind();
-        let loop_stack = PyList::empty(py);
-        for item in self.loop_stack.bind(py).iter() {
-            loop_stack.append(item)?;
-        }
-
-        Py::new(
-            py,
-            PyState {
-                data: fresh,
-                client: self.client.clone_ref(py),
-                artifact_dir: self.artifact_dir.clone(),
-                artifacts: self.artifacts.clone_ref(py),
-                cwd: self.cwd.clone(),
-                args: self.args.clone_ref(py),
-                pipeline_data: self.pipeline_data.as_ref().map(|p| p.clone_ref(py)),
-                current_scope,
-                child_key: self.child_key.clone(),
-                parent_stage: self.parent_stage.clone(),
-                worktree: self.worktree.clone(),
-                worktree_parent: self.worktree_parent.clone(),
-                base_ref: self.base_ref.clone(),
-                loop_stack: loop_stack.unbind(),
-            },
-        )
-    }
-
-    #[pyo3(signature = (entry, gremlin, scope=None, *, record_stage=true))]
-    fn make_runner(
-        slf: pyo3::PyRef<'_, Self>,
-        py: Python<'_>,
-        entry: &Bound<'_, PyAny>,
-        gremlin: &Bound<'_, PyAny>,
-        scope: Option<&Bound<'_, PyAny>>,
-        record_stage: bool,
-    ) -> PyResult<Py<PyAny>> {
-        // The runner calls itself "runner(<stage name>)" so tracebacks and
-        // `repr` identify the stage it drives.
-        let entry_name: String = entry.getattr("name")?.extract()?;
-        let runner = Py::new(
-            py,
-            StageRunner {
-                state: slf.into(),
-                entry: entry.clone().unbind(),
-                gremlin: gremlin.clone().unbind(),
-                scope: scope.filter(|s| !s.is_none()).map(|s| s.clone().unbind()),
-                record_stage,
-            },
-        )?;
-        crate::python::coroutine::mark_as_coroutine_function(
-            py,
-            runner.bind(py).as_any(),
-            &format!("runner({entry_name})"),
-        )?;
-        Ok(runner.into_any())
-    }
-}
-
-// --- StageRunner ---
-
-/// A zero-argument coroutine function that runs a single stage.
-///
-/// Returned by [`PyState::make_runner`]. It is a `#[pyclass(dict)]` whose
-/// `__call__` is an `async fn`, so calling it produces a loop-independent
-/// coroutine (see [`crate::python::coroutine`]).
-#[pyclass(dict, name = "_StageRunner", module = "_gremlins_core.executor")]
-struct StageRunner {
-    state: Py<PyState>,
-    entry: Py<PyAny>,
-    gremlin: Py<PyAny>,
-    scope: Option<Py<PyAny>>,
-    record_stage: bool,
-}
-
-#[pymethods]
-impl StageRunner {
-    async fn __call__(&self) -> PyResult<Py<PyAny>> {
-        let (name, skip, loop_iter, artifacts) = Python::attach(|py| {
-            let entry = self.entry.bind(py);
-            let name: String = entry.getattr("name")?.extract()?;
-            let skip: String = entry
-                .getattr("skip_if_exists")
-                .ok()
-                .and_then(|v| v.extract().ok())
-                .unwrap_or_default();
-            let state = self.state.bind(py);
-            let loop_iter: String = state.getattr("loop_iter")?.extract()?;
-            let artifacts = state.getattr("artifacts")?.unbind();
-            Ok::<_, PyErr>((name, skip, loop_iter, artifacts))
-        })?;
-
-        if !skip.is_empty() {
-            let resolved = skip.replace("{loop_iter}", &loop_iter);
-            let is_live: bool = Python::attach(|py| {
-                artifacts
-                    .bind(py)
-                    .call_method1("is_live", (resolved,))?
-                    .extract()
-            })?;
-            if is_live {
-                log::info!(
-                    target: "gremlins.executor.state",
-                    "stage skipped (artifact exists): {name}"
-                );
-                return Python::attach(|py| Ok(Py::new(py, Done(RustDone))?.into_any()));
-            }
-        }
-
-        let coro: Py<PyAny> = Python::attach(|py| {
-            let state = self.state.bind(py);
-            let entry = self.entry.bind(py);
-            let scope = match &self.scope {
-                Some(s) => s.bind(py).clone(),
-                None => py.None().into_bound(py),
-            };
-            let prepared =
-                state.call_method1("_make_runner_impl", (entry, scope, self.record_stage))?;
-            let child = py
-                .import("copy")?
-                .call_method1("copy", (self.gremlin.bind(py),))?;
-            child.setattr("state", &prepared)?;
-            child.setattr("registry", prepared.getattr("artifacts")?)?;
-            let entry_type: String = entry.getattr("type")?.extract()?;
-            log::info!(
-                target: "gremlins.executor.state",
-                "stage starting: {name} (type={entry_type})"
-            );
-            entry.call_method1("run", (child,)).map(|c| c.unbind())
-        })?;
-
-        let fut =
-            Python::attach(|py| pyo3_async_runtimes::tokio::into_future(coro.bind(py).clone()))?;
-        let result = fut.await;
-
-        log::info!(target: "gremlins.executor.state", "stage finished: {name}");
-        Python::attach(flush_log_handlers).ok();
-        result
-    }
-}
-
-/// Flush every root-logger handler, mirroring the pre-port Python runner.
-fn flush_log_handlers(py: Python<'_>) -> PyResult<()> {
-    let handlers = py
-        .import("logging")?
-        .call_method0("getLogger")?
-        .getattr("handlers")?;
-    for handler in handlers.try_iter()? {
-        let handler = handler?;
-        let _ = handler.call_method0("flush");
-    }
-    Ok(())
 }
 
 // --- free functions ---

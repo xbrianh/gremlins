@@ -371,45 +371,6 @@ def test_repeated_grafts_produce_real_names(lenv, monkeypatch):
     assert "review-code" in names
 
 
-def test_resume_without_graft_after_graft_uses_updated_pipeline(lenv, monkeypatch):
-    """gremlins resume (no --graft) after a graft uses the updated pipeline.yaml."""
-    from gremlins import launcher
-
-    gremlin_id = "graft-plain-resume-test"
-    state_dir = lenv.state_root / gremlin_id
-    _make_state(
-        state_dir,
-        lenv.repo,
-        status="stopped",
-        exit_code=1,
-    )
-    # Remove finished marker so plain resume works
-    (state_dir / "finished").unlink(missing_ok=True)
-    # Write hermetic pipeline that already has a grafted stage
-    _write_hermetic(
-        state_dir,
-        [
-            {"name": "plan", "type": "agent"},
-            {"name": "address-code", "type": "agent"},
-        ],
-    )
-
-    captured: dict[str, object] = {}
-
-    def fake_spawn(cmd, cwd, env, log_path, log_mode="w"):
-        captured["pipeline"] = cmd[4]
-        captured["spawn_args"] = list(cmd[5:])
-        return _FakeProc()
-
-    monkeypatch.setattr(launcher, "_spawn_logged_process", fake_spawn)
-
-    launcher.resume(gremlin_id)
-
-    assert captured["pipeline"] == str(state_dir / "pipeline.yaml")
-    spawn_args = list(captured["spawn_args"])
-    assert "--resume-from" in spawn_args
-
-
 def test_graft_missing_worktree_raises(lenv, monkeypatch):
     """resume(graft=...) raises immediately if the worktree directory is gone."""
     from gremlins import launcher

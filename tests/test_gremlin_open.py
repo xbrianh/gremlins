@@ -7,8 +7,7 @@ import pathlib
 import subprocess
 
 import pytest
-
-from gremlins.executor.gremlin import Gremlin
+from _gremlins_core import Gremlin as PyGremlin
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -82,56 +81,56 @@ def test_gremlin_open_valid_state(sandbox, project_dir, pipeline_yaml):
     }
     (state_dir / "state.json").write_text(json.dumps(state_data), encoding="utf-8")
 
-    gremlin = Gremlin.open(gremlin_id)
+    gremlin = PyGremlin.open(gremlin_id)
 
     assert gremlin.gremlin_id == gremlin_id
-    assert gremlin.project_root == str(project_dir)
-    assert gremlin.worktree_dir == pathlib.Path("/tmp/worktree")
+    assert str(gremlin.project_root) == str(project_dir)
+    assert gremlin.worktree == pathlib.Path("/tmp/worktree")
     assert gremlin.pipeline_data is not None
 
 
 def test_gremlin_open_nonexistent_state_raises(sandbox):
-    """Gremlin.open() raises FileNotFoundError for nonexistent state directory."""
-    with pytest.raises(FileNotFoundError, match="no state at"):
-        Gremlin.open("nonexistent-id")
+    """PyGremlin.open() raises RuntimeError for nonexistent state directory."""
+    with pytest.raises(RuntimeError, match="no state at"):
+        PyGremlin.open("nonexistent-id")
 
 
 def test_gremlin_open_missing_state_json_raises(sandbox):
-    """Gremlin.open() raises FileNotFoundError if state.json is missing."""
+    """PyGremlin.open() raises RuntimeError if state.json is missing."""
     gremlin_id = "test-open-no-json"
     state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
 
-    with pytest.raises(FileNotFoundError, match="no state.json"):
-        Gremlin.open(gremlin_id)
+    with pytest.raises(RuntimeError, match="no state.json"):
+        PyGremlin.open(gremlin_id)
 
 
 def test_gremlin_open_malformed_json_raises(sandbox):
-    """Gremlin.open() raises ValueError for malformed state.json."""
+    """PyGremlin.open() raises RuntimeError for malformed state.json."""
     gremlin_id = "test-open-bad-json"
     state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
 
     (state_dir / "state.json").write_text("not valid json", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="could not parse state.json"):
-        Gremlin.open(gremlin_id)
+    with pytest.raises(RuntimeError, match="could not parse state.json"):
+        PyGremlin.open(gremlin_id)
 
 
 def test_gremlin_open_non_dict_json_raises(sandbox):
-    """Gremlin.open() raises ValueError if state.json is not a dict."""
+    """PyGremlin.open() raises RuntimeError if state.json is not a dict."""
     gremlin_id = "test-open-list-json"
     state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
 
     (state_dir / "state.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="must be a JSON object"):
-        Gremlin.open(gremlin_id)
+    with pytest.raises(RuntimeError, match="must be a JSON object"):
+        PyGremlin.open(gremlin_id)
 
 
 def test_gremlin_open_with_hermetic_pipeline(sandbox, project_dir):
-    """Gremlin.open() uses hermetic pipeline.yaml if present."""
+    """PyGremlin.open() uses hermetic pipeline.yaml if present."""
     gremlin_id = "test-open-hermetic"
     state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
@@ -158,7 +157,7 @@ stages:
     }
     (state_dir / "state.json").write_text(json.dumps(state_data), encoding="utf-8")
 
-    gremlin = Gremlin.open(gremlin_id)
+    gremlin = PyGremlin.open(gremlin_id)
 
     assert gremlin.gremlin_id == gremlin_id
     assert gremlin.pipeline_data is not None
@@ -166,7 +165,7 @@ stages:
 
 
 def test_gremlin_open_filters_pipeline_args(sandbox, project_dir, pipeline_yaml):
-    """Gremlin.open() filters --pipeline flags from pipeline_args."""
+    """PyGremlin.open() filters --pipeline flags from pipeline_args."""
     gremlin_id = "test-open-filter-args"
     state_dir = sandbox.state / gremlin_id
     state_dir.mkdir(parents=True)
@@ -180,7 +179,7 @@ def test_gremlin_open_filters_pipeline_args(sandbox, project_dir, pipeline_yaml)
     }
     (state_dir / "state.json").write_text(json.dumps(state_data), encoding="utf-8")
 
-    gremlin = Gremlin.open(gremlin_id)
+    gremlin = PyGremlin.open(gremlin_id)
 
     assert gremlin.gremlin_id == gremlin_id
     assert gremlin.pipeline_data is not None

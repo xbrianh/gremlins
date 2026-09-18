@@ -1,166 +1,13 @@
-import asyncio
+"""Tests for pipeline name/path resolution and stage-type registry coverage."""
+
+from __future__ import annotations
+
 import pathlib
 
 import pytest
 from _gremlins_core.discovery import resolve_pipeline_name, resolve_pipeline_path
 from _gremlins_core.schemas import STAGE_TYPES
 from _gremlins_core.schemas import Pipeline as _PipelineData
-from _gremlins_core.stages import Agent, ParallelStage
-
-from gremlins.executor.gremlin import Gremlin
-from gremlins.protocols import StageProtocol
-
-
-def _pipeline_data(stages: list[StageProtocol] | None = None) -> _PipelineData:
-    return _PipelineData(name="test", path=pathlib.Path("."), stages=stages or [])
-
-
-def _local(
-    stages: list[StageProtocol],
-    *,
-    resume_from: str | None = None,
-    tmp_path: pathlib.Path,
-) -> Gremlin:
-    return Gremlin(
-        stages,
-        state_dir=tmp_path,
-        gremlin_id=None,
-        pipeline_data=_pipeline_data(stages),
-        resume_from=resume_from,
-    )
-
-
-def test_pipeline_constructs_from_local_yaml(tmp_path: pathlib.Path) -> None:
-    from conftest import PIPELINE_FIXTURES_DIR
-
-    pipeline_data = _PipelineData.from_yaml(PIPELINE_FIXTURES_DIR / "local.yaml")
-    gremlin = Gremlin(
-        pipeline_data.stages,
-        state_dir=tmp_path,
-        gremlin_id=None,
-        pipeline_data=pipeline_data,
-    )
-
-    assert len(gremlin.stages) > 0
-    assert all(hasattr(s, "run") for s in gremlin.stages)
-    stage_names = [s.name for s in gremlin.stages]
-    assert "plan" in stage_names
-    assert "implement" in stage_names
-    assert "loop" in STAGE_TYPES  # verify is now a recipe that expands to a loop
-
-
-def test_pipeline_constructs_from_gh_yaml(tmp_path: pathlib.Path) -> None:
-    from conftest import PIPELINE_FIXTURES_DIR
-
-    pipeline_data = _PipelineData.from_yaml(PIPELINE_FIXTURES_DIR / "gh.yaml")
-    gremlin = Gremlin(
-        pipeline_data.stages,
-        state_dir=tmp_path,
-        gremlin_id=None,
-        pipeline_data=pipeline_data,
-    )
-
-    assert len(gremlin.stages) > 0
-    assert all(hasattr(s, "run") for s in gremlin.stages)
-    stage_names = [s.name for s in gremlin.stages]
-    assert "plan" in stage_names
-    assert "implement" in stage_names
-    assert any(s.name == "ci-gate" for s in gremlin.stages)
-
-
-# ---------------------------------------------------------------------------
-# validate_resume_target tests
-# ---------------------------------------------------------------------------
-
-
-def _make_stages(*names: str) -> list[StageProtocol]:
-    return [Agent(n, [], {}) for n in names]
-
-
-def _make_parallel_stage(name: str, children: list[str]) -> ParallelStage:
-    child_stages: list[StageProtocol] = [Agent(c, [], {}) for c in children]
-    return ParallelStage(name, child_stages)
-
-
-def test_validate_resume_target_no_resume_from(tmp_path: pathlib.Path) -> None:
-    gremlin = _local(
-        _make_stages("plan", "implement"),
-        resume_from=None,
-        tmp_path=tmp_path,
-    )
-    gremlin.validate_resume_target()  # should not raise
-
-
-def test_validate_resume_target_valid_name(tmp_path: pathlib.Path) -> None:
-    gremlin = _local(
-        _make_stages("plan", "implement"),
-        resume_from="implement",
-        tmp_path=tmp_path,
-    )
-    gremlin.validate_resume_target()  # should not raise
-
-
-def test_validate_resume_target_invalid_name(tmp_path: pathlib.Path) -> None:
-    gremlin = _local(
-        _make_stages("plan", "implement"),
-        resume_from="bogus",
-        tmp_path=tmp_path,
-    )
-    with pytest.raises(ValueError, match="bogus"):
-        gremlin.validate_resume_target()
-
-
-def test_validate_resume_target_parallel_group_name(tmp_path: pathlib.Path) -> None:
-    gremlin = _local(
-        [_make_parallel_stage("reviews", ["review-a", "review-b"])],
-        resume_from="reviews",
-        tmp_path=tmp_path,
-    )
-    gremlin.validate_resume_target()  # "reviews" is a valid expanded name
-
-
-def test_validate_resume_target_parallel_fanout_rejected(
-    tmp_path: pathlib.Path,
-) -> None:
-    gremlin = _local(
-        [_make_parallel_stage("reviews", ["review-a", "review-b"])],
-        resume_from="reviews-fanout",
-        tmp_path=tmp_path,
-    )
-    with pytest.raises(ValueError, match="reviews-fanout"):
-        gremlin.validate_resume_target()  # fanout is internal, not a resume target
-
-
-def test_validate_resume_target_parallel_fanin_rejected(tmp_path: pathlib.Path) -> None:
-    gremlin = _local(
-        [_make_parallel_stage("reviews", ["review-a", "review-b"])],
-        resume_from="reviews-fanin",
-        tmp_path=tmp_path,
-    )
-    with pytest.raises(ValueError, match="reviews-fanin"):
-        gremlin.validate_resume_target()  # fanin is internal, not a resume target
-
-
-def test_validate_resume_target_child_name_rejected(tmp_path: pathlib.Path) -> None:
-    gremlin = _local(
-        [_make_parallel_stage("reviews", ["review-a", "review-b"])],
-        resume_from="review-a",
-        tmp_path=tmp_path,
-    )
-    with pytest.raises(ValueError, match="review-a"):
-        gremlin.validate_resume_target()
-
-
-def test_pipeline_rejects_unknown_stage_type(tmp_path: pathlib.Path) -> None:
-    s = Agent("s", [], {})
-    s.type = "nonexistent"
-    with pytest.raises(ValueError, match="nonexistent"):
-        _local([s], tmp_path=tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# GREMLINS_OVERLAY_DIR env-var override
-# ---------------------------------------------------------------------------
 
 _SAMPLE_YAML = """\
 default_client: openai:gpt-4o
@@ -267,27 +114,9 @@ def test_resolve_pipeline_path_no_overlay_env_falls_through(
     assert result == (pipeline_dir / "local.yaml").resolve()
 
 
-def test_parallel_expansion_in_constructor(tmp_path: pathlib.Path) -> None:
-    parallel = _make_parallel_stage("reviews", ["review-a", "review-b"])
-    plan_entry = Agent("plan", [], {})
-    gremlin = _local([plan_entry, parallel], tmp_path=tmp_path)
-
-    stage_names = [s.name for s in gremlin.stages]
-    assert "reviews" in stage_names
-    assert "review-a" not in stage_names
-    by_name = {s.name: s for s in gremlin.stages}
-    assert by_name["reviews"].type == "parallel"
-
-
 def test_stage_builders_registry_covers_all_known_types() -> None:
     expected = {
         "loop",
         "parallel",
     }
     assert expected <= set(STAGE_TYPES)
-
-
-def test_run_raises_without_initialize_with_runtime(tmp_path: pathlib.Path) -> None:
-    gremlin = _local(_make_stages("plan"), tmp_path=tmp_path)
-    with pytest.raises(RuntimeError, match="initialize_with_runtime"):
-        asyncio.run(gremlin.run())

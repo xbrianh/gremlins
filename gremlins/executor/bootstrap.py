@@ -27,7 +27,7 @@ from _gremlins_core.schemas import (
 from gremlins.utils import proc
 
 if TYPE_CHECKING:
-    from gremlins.executor.gremlin import Gremlin
+    from _gremlins_core import Gremlin as PyGremlin
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ async def _execute_bind_artifact(
     uri_str: str,
     *,
     stage_inputs: Mapping[str, Any],
-    gremlin: Gremlin,
+    gremlin: PyGremlin,
 ) -> None:
     """Resolve a source value, write it to the artifact dir, and register it."""
     value = stage_inputs.get(source_key)
@@ -160,7 +160,7 @@ async def _run_dsl_command(
     args: list[str],
     *,
     stage_inputs: Mapping[str, Any],
-    gremlin: Gremlin,
+    gremlin: PyGremlin,
 ) -> None:
     """Dispatch a parsed gremlins: DSL command to its handler."""
     handler = _DSL_DISPATCH.get(cmd_name)
@@ -186,7 +186,7 @@ async def run_pipeline_bootstrap(
     *,
     cwd: pathlib.Path,
     stage_inputs: Mapping[str, Any],
-    gremlin: Gremlin,
+    gremlin: PyGremlin,
     include_launch: bool,
 ) -> None:
     """Run worktree cmds, then (main first start only) launch_cmds and cli_out.

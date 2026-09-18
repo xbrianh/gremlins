@@ -7,31 +7,27 @@ import atexit
 import datetime
 import json
 import logging
-import math
 import os
 import pathlib
 import secrets
 import shutil
 import signal
 import types
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any
 
-from _gremlins_core.artifacts import ArtifactRegistry
+from _gremlins_core import Gremlin as PyGremlin
 from _gremlins_core.clients import Client
 from _gremlins_core.config import (
     project_root,
     scratch_root,
     state_root,
 )
-from _gremlins_core.stages import Bail
 from _gremlins_core.utils.env_file import source_env_string
-from _gremlins_core.utils.git import has_commits, has_dirty_worktree, in_git_repo
+from _gremlins_core.utils.git import in_git_repo
 
 from gremlins.errors import die
-from gremlins.executor.gremlin import Gremlin
 from gremlins.logging_setup import configure_logging
-from gremlins.protocols import StageProtocol
 from gremlins.utils.git import stage_gremlins_overlay
 
 logger = logging.getLogger(__name__)
@@ -44,31 +40,21 @@ _HANDLED_SIGS = tuple(
 _atexit_log_fn: Callable[[], None] | None = None
 
 
-def _load_stage_attempt(gremlin: Gremlin) -> tuple[str, str]:
-    if gremlin.state and gremlin.state.data:
-        return gremlin.state.data.stage or "", gremlin.state.data.attempt or ""
-    return "", ""
+def _install_signal_handlers(gremlin: PyGremlin) -> None:
+    """Install signal handlers that flush logs and re-raise the signal.
 
-
-def _install_signal_handlers(clients: Sequence[Client], gremlin: Gremlin) -> None:
+    No Python clients to reap — the Rust executor owns client lifecycle.
+    """
     global _atexit_log_fn
 
-    def handler(signum: int, _frame: types.FrameType | None) -> None:  # pyright: ignore[reportUnusedParameter]
-        stage, attempt = _load_stage_attempt(gremlin)
+    def handler(signum: int, _frame: types.FrameType | None) -> None:
         logger.warning(
-            "received %s at stage=%s attempt=%s",
+            "received %s",
             signal.Signals(signum).name,
-            stage or "(none)",
-            attempt or "(none)",
         )
         for h in logging.getLogger().handlers:
             try:
                 h.flush()
-            except Exception:
-                pass
-        for c in clients:
-            try:
-                c.reap_all()
             except Exception:
                 pass
         signal.signal(signum, signal.SIG_DFL)
@@ -78,14 +64,7 @@ def _install_signal_handlers(clients: Sequence[Client], gremlin: Gremlin) -> Non
         signal.signal(sig, handler)
 
     def _atexit_log() -> None:
-        stage, attempt = _load_stage_attempt(gremlin)
-        if not stage:
-            return
-        logger.warning(
-            "exiting via atexit at stage=%s attempt=%s",
-            stage,
-            attempt or "(none)",
-        )
+        logger.warning("exiting via atexit")
         for h in logging.getLogger().handlers:
             try:
                 h.flush()
@@ -103,23 +82,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--client", dest="client", default=None)
     parser.add_argument("--resume-from", dest="resume_from", default=None)
     return parser.parse_args(argv)
-
-
-def _unique_clients(stages: Sequence[StageProtocol]) -> list[Client]:
-    seen: set[int] = set()
-    result: list[Client] = []
-    for stage in stages:
-        c = stage.client
-        if c is not None and id(c) not in seen:
-            seen.add(id(c))
-            result.append(c)
-        body = getattr(stage, "body", [])
-        if body:
-            for bc in _unique_clients(body):
-                if id(bc) not in seen:
-                    seen.add(id(bc))
-                    result.append(bc)
-    return result
 
 
 def _prepend_overlay_bin_to_path(overlay_dir: str) -> None:
@@ -141,6 +103,26 @@ def _read_state_json(gremlin_id: str | None) -> dict[str, Any]:
         return json.loads(sf.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def _read_bootstrap_env(pipeline_path: pathlib.Path) -> str:
+    """Read bootstrap.env from the raw pipeline YAML.
+
+    We only need the env script string for the pre-launch env isolation block;
+    the full pipeline parse (stages, clients, expansion) is done natively in
+    Rust's ``Gremlin::launch``.
+    """
+    try:
+        from _gremlins_core.utils.yaml_io import load_yaml_file
+
+        raw = load_yaml_file(str(pipeline_path))
+        if isinstance(raw, dict):
+            bs = raw.get("bootstrap")
+            if isinstance(bs, dict):
+                return str(bs.get("env", ""))
+    except Exception:
+        logger.warning("failed to read bootstrap.env from pipeline YAML", exc_info=True)
+    return ""
 
 
 async def run_pipeline(
@@ -167,98 +149,45 @@ async def run_pipeline(
             f"gremlins requires a git repository; {project_root()} is not inside a git worktree"
         )
 
+    # --- pre-launch: resolve directories, resume info, and a valid id ---
     state_json = _read_state_json(gremlin_id)
-    if gremlin_id:
-        state_dir = pathlib.Path(state_root()) / gremlin_id
-        artifact_dir = pathlib.Path(scratch_root(gremlin_id)) / "artifacts"
-    else:
+    if not gremlin_id:
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         rand = secrets.token_hex(3)
-        artifact_dir = (
-            pathlib.Path(scratch_root(gremlin_id)) / f"{ts}-{rand}" / "artifacts"
-        )
-        state_dir = artifact_dir.parent
+        gremlin_id = f"{ts}-{rand}"
+    state_dir = pathlib.Path(state_root()) / gremlin_id
+    artifact_dir = pathlib.Path(scratch_root(gremlin_id)) / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
-    _stored_project_root = str(state_json.get("project_root") or "")
-    stage_inputs: dict[str, Any] = dict(state_json.get("stage_inputs") or {})
+    stage_inputs: dict[str, str] = {
+        k: str(v) for k, v in state_json.get("stage_inputs", {}).items()
+    }
 
-    # base_ref_sha and base_ref are bound in registry.json at launch time
-    try:
-        _registry = ArtifactRegistry(artifact_dir=artifact_dir)
-        raw_base_sha = (
-            _registry.content("artifact://base_sha")
-            if _registry.is_live("artifact://base_sha")
-            else ""
-        )
-        # base_sha may be stored as a raw SHA or a git://commit/<sha> URI
-        base_ref_sha = str(raw_base_sha).removeprefix("git://commit/")
-        raw_base_ref = (
-            _registry.content("artifact://base_ref")
-            if _registry.is_live("artifact://base_ref")
-            else ""
-        )
-        # base_ref may be stored as a raw ref or a git://ref/<name> URI
-        base_ref = str(raw_base_ref).removeprefix("git://ref/")
-    except Exception:
-        logger.warning(
-            "failed to read base_sha/base_ref from registry.json", exc_info=True
-        )
-        base_ref_sha = ""
-        base_ref = ""
-
-    fetch_worktree = False
-
-    try:
-        gremlin = Gremlin.initialize_with_runtime(
-            gremlin_id=gremlin_id,
-            state_dir=state_dir,
-            project_dir=pathlib.Path(_stored_project_root)
-            if _stored_project_root
-            else pathlib.Path(project_root()),
-            pipeline_ref=str(pipeline_path),
-            resume_from=resume_from,
-            worktree_dir=worktree_dir,
-            project_root=_stored_project_root,
-            base_ref_sha=base_ref_sha,
-            base_ref=base_ref,
-            fetch_worktree=fetch_worktree,
-            client_label=args.client or "",
-            stage_inputs=stage_inputs,
-            client=client,
-        )
-        gremlin.validate_resume_target()
-    except ValueError as exc:
-        die(str(exc))
-
-    logger.info("artifact: %s", artifact_dir)
+    # Stage the gremlins overlay so Rust's launch (which also stages it) sees a
+    # pre-populated destination — the Rust copy is a no-op when already present.
     stage_gremlins_overlay(str(_project_root), state_dir)
 
     # --- env isolation ---
-    # Build the system vars table. These are available during
-    # bootstrap.env sourcing and forcibly re-injected afterward.
+    # Must happen *before* PyGremlin.launch because the Rust Gremlin captures
+    # std::env::vars() at construction time inside resolve_env().
+    _bootstrap_env = _read_bootstrap_env(pipeline_path)
+
     _system = {
         k: v
         for k, v in {
-            "GREMLINS_GREMLIN_ID": gremlin_id or "",
+            "GREMLINS_GREMLIN_ID": gremlin_id,
             "GREMLINS_PROJECT_ROOT": str(_project_root),
             "GREMLINS_OVERLAY_DIR": str(state_dir / ".gremlins"),
-            "GREMLINS_WORKTREE_PATH": str(gremlin.worktree_dir)
-            if gremlin.worktree_dir
-            else None,
-            "GREMLINS_ARTIFACT_DIR": str(gremlin.artifact_dir),
-            "GREMLIN_WORKSPACE_DIR": str(gremlin.worktree_dir)
-            if gremlin.worktree_dir
-            else None,
-            "GREMLIN_STATE_DIR": str(gremlin.state_dir),
+            "GREMLINS_WORKTREE_PATH": str(worktree_dir) if worktree_dir else None,
+            "GREMLINS_ARTIFACT_DIR": str(artifact_dir),
+            "GREMLIN_WORKSPACE_DIR": str(worktree_dir) if worktree_dir else None,
+            "GREMLIN_STATE_DIR": str(state_dir),
         }.items()
         if v is not None
     }
 
-    # Source bootstrap.env inline. Write to a temp file so bash's `source`
-    # builtin works.
-    env_script = gremlin.pipeline_data.bootstrap.env.strip()
+    env_script = _bootstrap_env.strip()
     if env_script:
         _base = dict(os.environ)
         _base.update(_system)
@@ -288,91 +217,29 @@ async def run_pipeline(
 
     _prepend_overlay_bin_to_path(_system["GREMLINS_OVERLAY_DIR"])
 
-    os.environ["GREMLINS_SCRATCH_DIR"] = str(
-        pathlib.Path(scratch_root(gremlin.gremlin_id))
-    )
+    os.environ["GREMLINS_SCRATCH_DIR"] = str(pathlib.Path(scratch_root(gremlin_id)))
 
-    _bootstrap = gremlin.pipeline_data.bootstrap
-    _has_bootstrap = bool(
-        _bootstrap.cmds or _bootstrap.launch_cmds or _bootstrap.cli_out
-    )
-    if gremlin.worktree_dir and not resume_from and _has_bootstrap:
-        from gremlins.executor.bootstrap import run_pipeline_bootstrap
-
-        try:
-            await run_pipeline_bootstrap(
-                _bootstrap,
-                cwd=gremlin.worktree_dir,
-                stage_inputs=stage_inputs,
-                gremlin=gremlin,
-                include_launch=True,
-            )
-        except Exception as exc:
-            logger.exception("bootstrap failed")
-            if gremlin.state:
-                gremlin.state.data.write_bail_file(
-                    "other",
-                    f"bootstrap failed: {exc}"[:200],
-                )
-            return 1
-
-    _stage_clients = _unique_clients(gremlin.stages)
-    _signal_clients = [client] if client is not None else _stage_clients
-
-    if resume_from:
-        _expanded_stage_names = [s.name for s in gremlin.stages]
-
-        def _name_idx(stage_name: str) -> int:
-            for i, s in enumerate(gremlin.stages):
-                if s.name == stage_name:
-                    return i
-            return len(gremlin.stages)
-
-        start_idx = (
-            _expanded_stage_names.index(resume_from)
-            if resume_from in _expanded_stage_names
-            else 0
-        )
-        if start_idx >= _name_idx("review-code"):
-            if not has_dirty_worktree() and not has_commits():
-                die(
-                    f"--resume-from {resume_from} requires implementation changes in the worktree"
-                )
-
-    _install_signal_handlers(_signal_clients, gremlin)
-    logger.info("running %d stages", len(gremlin.stages))
+    # --- launch the native gremlin ---
+    # PyGremlin.launch does: worktree setup, state initialization, artifact
+    # registration, env resolution (capturing the isolated os.environ above),
+    # and overlay staging — everything the Python Gremlin.initialize_with_runtime
+    # used to do plus the inline bootstrap block.
     try:
-        await gremlin.run()
-    except Bail as b:
-        assert gremlin.state is not None
-        gremlin.state.data.write_bail_file("other", b.reason)
-        return 1
+        gremlin = PyGremlin.launch(
+            id=gremlin_id,
+            pipeline_path=pipeline_path,
+            client_override=args.client or None,
+            worktree_parent=None,
+            resume_from=resume_from,
+            stage_inputs=stage_inputs,
+            fetch_worktree=False,
+            worktree_dir=worktree_dir,
+        )
     except Exception as exc:
-        logger.exception("unexpected error during pipeline execution")
-        assert gremlin.state is not None
-        gremlin.state.data.write_bail_file(
-            "other",
-            f"unexpected error: {exc}"[:200],
-        )
-        raise
+        die(str(exc))
 
-    total_cost = 0.0
-    for c in [client] if client else _stage_clients:
-        total_cost += getattr(c, "total_cost_usd", 0.0) or 0.0
-    assert gremlin.state is not None
-    try:
-        subprocess_cost = float(
-            gremlin.state.data.read_str("subprocess_cost_usd") or 0.0
-        )
-    except (ValueError, TypeError):
-        subprocess_cost = 0.0
-    if math.isfinite(subprocess_cost) and subprocess_cost >= 0:
-        total_cost += subprocess_cost
-    if total_cost > 0:
-        gremlin.state.data.patch(total_cost_usd=total_cost)
-
+    _install_signal_handlers(gremlin)
+    logger.info("running stages")
+    exit_code = await gremlin.run()
     logger.info("done. artifacts in: %s", artifact_dir)
-    if total_cost > 0:
-        logger.info("total cost: $%.4f", total_cost)
-
-    return 0
+    return exit_code

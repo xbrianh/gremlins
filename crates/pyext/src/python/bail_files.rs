@@ -20,6 +20,7 @@ use serde_json::Value;
 /// (e.g. `{"class": 1}`) still parses instead of silently degrading to the
 /// `{"class": "other"}` fallback.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub struct BailedChild {
     pub key: String,
     pub bail: HashMap<String, Value>,
@@ -27,11 +28,13 @@ pub struct BailedChild {
 
 /// The outcome of applying an error policy to the collected bails.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[allow(dead_code)]
 pub struct BailDecision {
     pub should_bail: bool,
     pub first_bail: HashMap<String, Value>,
 }
 
+#[allow(dead_code)]
 impl BailDecision {
     /// The bail class to record, mirroring Python's `first_bail.get("class") or "other"`.
     pub fn bail_class(&self) -> String {
@@ -47,6 +50,7 @@ impl BailDecision {
 /// Read a bail field as a string, applying Python's `value or default` semantics:
 /// a missing, null, or otherwise falsy value falls back to `default`, while a
 /// truthy non-string value is stringified.
+#[allow(dead_code)]
 fn field_or(bail: &HashMap<String, Value>, key: &str, default: &str) -> String {
     match bail.get(key) {
         None | Some(Value::Null) => default.to_string(),
@@ -66,6 +70,7 @@ fn field_or(bail: &HashMap<String, Value>, key: &str, default: &str) -> String {
 /// A child with no recorded attempt, or no bail file on disk, is skipped. A
 /// bail file that fails to parse contributes `{"class": "other"}`, matching the
 /// Python helper's fallback.
+#[allow(dead_code)]
 pub fn collect_bails(
     state_dir: &Path,
     child_keys: &[String],
@@ -101,6 +106,7 @@ pub fn collect_bails(
 ///
 /// `Any` bails when at least one child bailed; `All` bails only when every
 /// child bailed. `first_bail` is the first collected bail, or empty.
+#[allow(dead_code)]
 pub fn decide(bailed: &[BailedChild], total: usize, policy: ErrorPolicy) -> BailDecision {
     let should_bail = match policy {
         ErrorPolicy::Any => !bailed.is_empty(),
@@ -117,6 +123,7 @@ pub fn decide(bailed: &[BailedChild], total: usize, policy: ErrorPolicy) -> Bail
 /// The attempt is resolved through `parallel_attempts[child_key]`, falling back
 /// to the top-level `attempt`. An existing bail file is never clobbered, so the
 /// first child to bail wins.
+#[allow(dead_code)]
 pub fn write_parallel_bail(state_file: Option<&Path>, child_key: &str, reason: &str) {
     let Some(sf) = state_file else { return };
     if !sf.exists() {
@@ -154,6 +161,7 @@ pub fn write_parallel_bail(state_file: Option<&Path>, child_key: &str, reason: &
 /// each other's payload: the loser's link fails with `AlreadyExists` and its
 /// temporary file is removed. This replaces the racy `exists()`-then-`rename`
 /// check-then-act sequence.
+#[allow(dead_code)]
 fn write_bail_atomically(state_dir: &Path, bail_path: &Path, attempt: &str, payload: &Value) {
     let tmp = state_dir.join(format!(".bail_{attempt}_{}.tmp", token_hex(4)));
     if std::fs::write(&tmp, payload.to_string()).is_err() {
@@ -167,6 +175,7 @@ fn write_bail_atomically(state_dir: &Path, bail_path: &Path, attempt: &str, payl
 }
 
 /// The state directory and per-child attempt map used to scan for bails.
+#[allow(dead_code)]
 pub fn read_bail_scan_inputs(
     state_file: Option<&Path>,
 ) -> (Option<PathBuf>, HashMap<String, String>) {
