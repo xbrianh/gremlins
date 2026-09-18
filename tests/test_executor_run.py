@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from gremlins.executor.run import (
+from gremlins.spawn.pipeline import (
     _HANDLED_SIGS,
     _install_signal_handlers,
     _prepend_overlay_bin_to_path,
@@ -26,7 +26,7 @@ def _restore_signals():
 @pytest.mark.parametrize("sig", _HANDLED_SIGS)
 def test_signal_handler_redelivers(sig):
     """Signal handler flushes logs and re-raises the signal."""
-    with patch("gremlins.executor.run.atexit.register"):
+    with patch("gremlins.spawn.pipeline.atexit.register"):
         gremlin = object()  # PyGremlin stub — handler only needs it to exist
         _install_signal_handlers(gremlin)
     handler = signal.getsignal(sig)
@@ -43,7 +43,9 @@ def test_signal_handler_redelivers(sig):
 def test_atexit_log_always_logs(caplog):
     """atexit handler logs unconditionally — no stage/attempt check needed."""
     registered: list = []
-    with patch("gremlins.executor.run.atexit.register", side_effect=registered.append):
+    with patch(
+        "gremlins.spawn.pipeline.atexit.register", side_effect=registered.append
+    ):
         gremlin = object()
         _install_signal_handlers(gremlin)
 

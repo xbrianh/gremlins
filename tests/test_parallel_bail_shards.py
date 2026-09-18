@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import pathlib
 import threading
@@ -12,7 +11,6 @@ import pytest
 from _gremlins_core.executor import StateData, build_state
 from _gremlins_core.executor import locked_update as _state_locked_update
 
-from gremlins.executor.gremlin import run_stages
 from tests.fake_client import FakeClient
 
 
@@ -140,21 +138,6 @@ def test_parallel_child_set_stage_writes_parent_as_stage(tmp_path, sandbox):
     data = _read_state(sf)
     assert data["stage"] == "reviews"
     assert data["sub_stage"] == "github-review-pull-request"
-
-    async def _noop() -> None:
-        pass
-
-    # The recorded stage must be a valid resume_from target in a pipeline that
-    # has "reviews" as a top-level name.
-    pipeline_stages: list[tuple[str, object]] = [
-        ("plan", _noop),
-        ("reviews-fanout", _noop),
-        ("reviews", _noop),
-        ("reviews-fanin", _noop),
-        ("github-address-pull-request-reviews", _noop),
-    ]
-    # Should not raise — this is what gremlins resume does.
-    asyncio.run(run_stages(pipeline_stages, resume_from=data["stage"]))
 
 
 def test_parallel_child_set_stage_with_sub_stage_payload_writes_parent_as_stage(

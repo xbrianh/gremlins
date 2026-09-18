@@ -55,12 +55,12 @@ class TestAnalyzeHappyPath:
         monkeypatch.setenv("GREMLINS_CWD_OF_CLI_CMD", str(sandbox.project))
 
         log_text = (
-            "2025-01-01T00:00:00Z INFO gremlins.executor entering plan\n"
-            "2025-01-01T00:01:00Z INFO gremlins.executor exiting plan\n"
-            "2025-01-01T00:01:00Z INFO gremlins.executor entering implement\n"
-            "2025-01-01T00:04:00Z INFO gremlins.executor exiting implement\n"
-            "2025-01-01T00:04:00Z INFO gremlins.executor entering review-code\n"
-            "2025-01-01T00:05:00Z INFO gremlins.executor exiting review-code\n"
+            "2025-01-01T00:00:00Z INFO gremlins.spawn.pipeline entering plan\n"
+            "2025-01-01T00:01:00Z INFO gremlins.spawn.pipeline exiting plan\n"
+            "2025-01-01T00:01:00Z INFO gremlins.spawn.pipeline entering implement\n"
+            "2025-01-01T00:04:00Z INFO gremlins.spawn.pipeline exiting implement\n"
+            "2025-01-01T00:04:00Z INFO gremlins.spawn.pipeline entering review-code\n"
+            "2025-01-01T00:05:00Z INFO gremlins.spawn.pipeline exiting review-code\n"
         )
 
         artifacts = {

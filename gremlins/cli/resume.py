@@ -3,8 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from gremlins.executor.gremlin import validate_gremlin_id
-from gremlins.launcher import resume
+from gremlins.launcher import resume, validate_gremlin_id
 
 
 def resume_main(argv: list[str]) -> int:

@@ -14,6 +14,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import subprocess
@@ -26,16 +27,18 @@ from _gremlins_core.config import project_root as _project_root_fn
 from _gremlins_core.config import scratch_root as _scratch_root_fn
 from _gremlins_core.config import state_root as _state_root_fn
 from _gremlins_core.discovery import list_pipelines, resolve_pipeline_path
+from _gremlins_core.executor import write_state
 from _gremlins_core.schemas import Pipeline as _PipelineData
 from _gremlins_core.schemas import validate_source_values
 from _gremlins_core.utils import git as _git_mod
 
-from gremlins.executor.gremlin import validate_gremlin_id, write_initial_state
 from gremlins.utils import proc
 from gremlins.utils.spawn_logged_process import (
     spawn_logged_process as _spawn_logged_process,
 )
 from gremlins.utils.text import slugify
+
+_GREMLIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class GremlinAlreadyRunning(RuntimeError):
@@ -44,6 +47,52 @@ class GremlinAlreadyRunning(RuntimeError):
 
 class GremlinStateDirExists(RuntimeError):
     pass
+
+
+def validate_gremlin_id(gremlin_id: str) -> None:
+    """Raise ValueError if gremlin_id is not a safe, non-path-traversing identifier."""
+    if ".." in gremlin_id or not _GREMLIN_ID_RE.match(gremlin_id):
+        raise ValueError(f"gremlin_id contains illegal characters: {gremlin_id!r}")
+
+
+def write_initial_state(
+    gremlin_id: str,
+    kind: str,
+    project_root: str,
+    started_at: str,
+    description: str,
+    parent_id: str,
+    pipeline_args: list[str],
+    client_label: str,
+    pipeline_path: str,
+    stage_inputs: dict[str, Any],
+    state_dir: pathlib.Path,
+) -> None:
+    """Create and persist initial state data for a gremlin."""
+    validate_gremlin_id(gremlin_id)
+    state_dict = {
+        "id": gremlin_id,
+        "kind": kind,
+        "project_root": project_root,
+        "workdir": "",
+        "setup_kind": "worktree-detached",
+        "worktree_base": "",
+        "status": "running",
+        "started_at": started_at,
+        "description": description,
+        "parent_id": parent_id,
+        "pipeline_args": pipeline_args,
+        "client": client_label,
+        "pipeline_path": pipeline_path,
+        "stage": "starting",
+        "pid": None,
+        "stage_inputs": stage_inputs,
+        "attempt": "",
+        "group_name": "",
+        "child_key": "",
+        "exit_code": None,
+    }
+    write_state(state_dir, state_dict)
 
 
 def _state_root() -> pathlib.Path:
