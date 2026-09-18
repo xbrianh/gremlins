@@ -259,7 +259,7 @@ async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Ru
         cwd: Some(gremlin.cwd()),
         artifact_dir: Some(gremlin.artifact_dir.clone()),
         idle_timeout: None,
-        extra_env: None,
+        extra_env: Some(gremlin.env.clone()),
         expected_artifact_paths: prepared
             .expected_artifact_paths
             .iter()

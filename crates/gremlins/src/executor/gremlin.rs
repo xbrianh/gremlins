@@ -854,6 +854,15 @@ fn finish_launch(
         &overlay_dir,
     )?;
 
+    // The Python launcher sources bootstrap.env before the worktree exists,
+    // so GREMLINS_WORKTREE_PATH (and any variable the script derives from it)
+    // is absent.  resolve_env produces the correct map now that the worktree
+    // is real — write it back to the process so agent stages and their child
+    // processes inherit the correct PATH, VIRTUAL_ENV, etc.
+    for (key, value) in &env {
+        std::env::set_var(key, value);
+    }
+
     let base_ref = pipeline.base_ref.clone();
     Ok(Gremlin {
         id: gremlin_id,

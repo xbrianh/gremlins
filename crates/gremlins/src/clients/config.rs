@@ -7,6 +7,9 @@ use std::path::Path;
 pub(crate) fn agent_system_prompt(work_root: &Path, scratch_root: &Path) -> String {
     format!(
         "\
+<important>\n\
+Think and write in a terse, to-the-point style. Make brief statements that get to the point. Do this for reasoning and writing \
+</important>\n\
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
