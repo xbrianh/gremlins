@@ -1620,6 +1620,12 @@ fn gather_child_artifacts(
                     Some(&kwargs),
                 )?;
             }
+            // When multiple children produce the same key, the bare key must
+            // not be left registered — the first merge_from registers it as a
+            // side effect, and it would silently alias one child's result.
+            if multi {
+                parent_artifacts.call_method1("unregister", (&key,))?;
+            }
         }
         Ok::<_, PyErr>(())
     })

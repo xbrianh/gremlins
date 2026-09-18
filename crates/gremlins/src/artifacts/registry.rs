@@ -321,9 +321,17 @@ impl ArtifactRegistry {
                     }
                     fs::copy(&src_path, &dest_path)?;
                     self_data.insert(parent_key.clone(), dest_path.to_string_lossy().to_string());
+                    // Also register under the original (un-remapped) key so
+                    // stages can reference child artifacts by their bound URI.
+                    if key_map.is_some() && key != parent_key && !self_data.contains_key(key) {
+                        self_data.insert(key.clone(), dest_path.to_string_lossy().to_string());
+                    }
                     merged += 1;
                 } else {
                     self_data.insert(parent_key.clone(), uri_str.clone());
+                    if key_map.is_some() && key != parent_key && !self_data.contains_key(key) {
+                        self_data.insert(key.clone(), uri_str.clone());
+                    }
                     merged += 1;
                 }
             }
@@ -331,6 +339,15 @@ impl ArtifactRegistry {
         })?;
         log::info!("merge_from: merged {} entries", merged);
         Ok(())
+    }
+
+    /// Remove a key from the registry (the backing file is untouched).
+    pub fn unregister(&self, key: &str) {
+        self.locked_write(|data| {
+            data.remove(key);
+            Ok(())
+        })
+        .ok();
     }
 
     pub fn from_registry_file(

@@ -671,7 +671,12 @@ impl Gremlin {
 
         log::debug!("fork_with_stages: wrote child state and log for {child_id}");
 
-        let pipeline = self.pipeline.clone_with_stages(stages);
+        let mut pipeline = self.pipeline.clone_with_stages(stages);
+        // launch_cmds and cli_out belong to the parent's initial launch;
+        // children inherit the artifacts via the registry copy above.
+        // cmds (worktree setup) still runs — each child has its own worktree.
+        pipeline.bootstrap.launch_cmds.clear();
+        pipeline.bootstrap.cli_out.clear();
 
         log::debug!(
             "fork_with_stages: child {child_id} ready (client={})",

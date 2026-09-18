@@ -151,6 +151,10 @@ impl ArtifactRegistry {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
+    fn unregister(&self, key: &str) {
+        self.inner.unregister(key);
+    }
+
     #[classmethod]
     fn from_registry_file(
         _cls: &Bound<'_, PyType>,

@@ -191,9 +191,7 @@ pub(crate) async fn run_parallel(
         });
 
         spawned += 1;
-        log::debug!(
-            "parallel group {group_name}: spawned child {child_name} on thread"
-        );
+        log::debug!("parallel group {group_name}: spawned child {child_name} on thread");
     }
 
     if spawned == 0 {
@@ -344,7 +342,10 @@ pub(crate) async fn run_parallel(
     );
 
     // --- Merge artifacts from successful children ---
-    log::debug!("parallel group {group_name}: merging artifacts from {} successful children", child_results.len() - failed_names.len());
+    log::debug!(
+        "parallel group {group_name}: merging artifacts from {} successful children",
+        child_results.len() - failed_names.len()
+    );
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
             if let Err(e) = merge_child_artifacts(gremlin, outcome) {
@@ -357,13 +358,19 @@ pub(crate) async fn run_parallel(
     }
 
     // --- Aggregate child costs ---
-    log::debug!("parallel group {group_name}: aggregating costs from {} children", child_results.len());
+    log::debug!(
+        "parallel group {group_name}: aggregating costs from {} children",
+        child_results.len()
+    );
     for outcome in &child_results {
         aggregate_child_costs(gremlin, outcome);
     }
 
     // --- Clean up child worktrees (best-effort) ---
-    log::debug!("parallel group {group_name}: cleaning up worktrees for {} spawned children", spawned_ids.len());
+    log::debug!(
+        "parallel group {group_name}: cleaning up worktrees for {} spawned children",
+        spawned_ids.len()
+    );
     //
     // Iterate over *all* spawned children — not just those that reported a
     // result — so worktrees created during `fork_with_stages` for cancelled

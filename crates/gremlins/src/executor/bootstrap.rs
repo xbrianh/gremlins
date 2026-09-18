@@ -64,13 +64,21 @@ pub async fn run_bootstrap(
         return Ok(());
     }
 
+    // Canonicalize: on macOS /var and /tmp are symlinks to /private/…,
+    // so the path the caller hands us may differ from the physical path
+    // the kernel reports to `pwd` when the child process starts.
+    let cwd = std::fs::canonicalize(cwd).map_err(|error| RunError::BootstrapFailed {
+        exit_code: 1,
+        stderr: format!("canonicalize cwd: {error}"),
+    })?;
+
     let mut env = env.clone();
     env.insert(
         "GREMLINS_BOOTSTRAP_CWD".to_string(),
         cwd.to_string_lossy().into_owned(),
     );
 
-    let result = run_shell_async(&cmds.join(" && "), Some(cwd), Some(&env), None)
+    let result = run_shell_async(&cmds.join(" && "), Some(&cwd), Some(&env), None)
         .await
         .map_err(|error| RunError::BootstrapFailed {
             exit_code: 1,

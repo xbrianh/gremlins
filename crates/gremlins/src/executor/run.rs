@@ -396,7 +396,7 @@ async fn run_exec(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Run
 
     if !prepared.cmds.is_empty() {
         log::debug!(
-           "exec stage '{}' (gremlin={}): running {} command(s): {:?}",
+            "exec stage '{}' (gremlin={}): running {} command(s): {:?}",
             prepared.name,
             gremlin.id.as_str(),
             prepared.cmds.len(),

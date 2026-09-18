@@ -400,7 +400,7 @@ stages:
                 "exit_code": 1,
                 "client": "openai:gpt-4o-mini",
                 "pipeline_args": ["--pipeline", str(old_pipeline)],
-                "pipeline_path": str(old_pipeline),
+                "pipeline_path": str(old_pipeline.resolve()),
             }
         ),
         encoding="utf-8",
