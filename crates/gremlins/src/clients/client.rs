@@ -325,6 +325,11 @@ impl Client {
     /// Cancel every in-flight process owned by the backend, if it has been
     /// built. A client that never ran anything has nothing to reap.
     pub fn reap_all(&self) {
+        log::debug!(
+            "Client::reap_all: provider={}, model={}",
+            self.provider,
+            self.model,
+        );
         let guard = self.inner.lock().expect("client backend mutex poisoned");
         if let Some(ref backend) = *guard {
             backend.reap_all();

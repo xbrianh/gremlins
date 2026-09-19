@@ -150,6 +150,9 @@ pub(crate) async fn run_parallel(
             // before starting real work. If the group has already been
             // cancelled, exit immediately.
             if cancel.load(Ordering::Acquire) {
+                log::debug!(
+                    "parallel group {group_name_owned}: child {child_name_for_thread} cancel flag set before run() — exiting"
+                );
                 let _ = tx.send((
                     child_name_for_thread,
                     child_id_for_thread,
@@ -159,11 +162,11 @@ pub(crate) async fn run_parallel(
             }
 
             log::debug!(
-                "parallel group {group_name_owned}: child {child_name_for_thread} starting run() on thread"
+                "parallel group {group_name_owned}: child {child_name_for_thread} (id={child_id_for_thread}) calling run()"
             );
             let outcome = rt.block_on(async { child_gremlin.run().await.map(|_| ()) });
             log::debug!(
-                "parallel group {group_name_owned}: child {child_name_for_thread} run() completed (outcome={})",
+                "parallel group {group_name_owned}: child {child_name_for_thread} (id={child_id_for_thread}) run() completed (outcome={})",
                 match &outcome {
                     Ok(()) => "Ok".to_string(),
                     Err(e) => format!("Err: {e}"),

@@ -354,6 +354,11 @@ impl Backend for OpenAiBackend {
 
     fn reap_all(&self) {
         if let Ok(guard) = self.cancels.lock() {
+            let count = guard.len();
+            log::debug!(
+                "OpenAiBackend::reap_all: cancelling {count} in-flight token(s) (model={})",
+                self.model,
+            );
             for token in guard.values() {
                 token.cancel();
             }

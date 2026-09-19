@@ -360,6 +360,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
     for _ in 0..max_turns {
         if cancel.is_cancelled() {
+            log::debug!("agent_loop: cancelled before turn (label={})", prefix);
             return Err(ClientError::Runtime {
                 message: "cancelled".into(),
             });
@@ -401,6 +402,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         loop {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
+                    log::debug!("agent_loop: cancelled mid-stream (label={})", prefix);
                     response.cancel();
                     return Err(ClientError::Runtime {
                         message: "cancelled".into(),

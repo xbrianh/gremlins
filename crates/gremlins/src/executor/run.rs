@@ -726,6 +726,12 @@ impl Gremlin {
     /// write the terminal state — the bookkeeping every exit path owes the
     /// operator, whether the run succeeded, bailed, or blew up.
     fn finish(&mut self, exit_code: i32) {
+        log::debug!(
+            "gremlin {}: finish() calling client.reap_all() (exit_code={exit_code}, provider={}, model={})",
+            self.id.as_str(),
+            self.client.provider(),
+            self.client.model(),
+        );
         self.client.reap_all();
         let mut total = self.client.total_cost_usd().unwrap_or(0.0);
         // Subprocess spend is only meaningful when it is a real, non-negative
