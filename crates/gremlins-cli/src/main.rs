@@ -54,6 +54,11 @@ enum Cmds {
         /// Gremlin id to resume.
         id: String,
     },
+    /// Follow a gremlin's log file with `less +F`.
+    Log {
+        /// Gremlin id whose log to follow.
+        id: String,
+    },
     /// `gremlins <id>` — print detailed status for one gremlin.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -68,6 +73,7 @@ async fn main() {
         Some(Cmds::Show { here }) => show(here),
         Some(Cmds::Stop { id }) => stop(&id),
         Some(Cmds::Resume { id }) => resume(&id).await,
+        Some(Cmds::Log { id }) => log_gremlin(&id),
         Some(Cmds::External(args)) => status_external(&args),
         None => {
             // No subcommand — print help and exit 0.
@@ -433,6 +439,42 @@ async fn resume(id: &str) -> Result<(), String> {
     gremlin.state.patch(&[], &fields);
 
     println!("{id}");
+    Ok(())
+}
+
+/// Follow a gremlin's log file interactively with `less +F`.
+///
+/// `less` takes over the terminal (foreground) so the user can scroll,
+/// search, and toggle follow mode.  stdin/stdout/stderr are inherited.
+fn log_gremlin(id: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    // Treat invalid ids the same as nonexistent — both are "unknown gremlin".
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if validate_gremlin_id(id).is_err() || !state_dir.is_dir() || !state_file.is_file() {
+        return Err(format!(
+            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+        ));
+    }
+
+    let log_path = state_dir.join("log");
+    if !log_path.is_file() {
+        return Err(format!(
+            "gremlin {id} has no log file yet — launch it and let it run first"
+        ));
+    }
+
+    let status = Command::new("less")
+        .arg("+F")
+        .arg(&log_path)
+        .status()
+        .map_err(|e| format!("failed to spawn less: {e}"))?;
+
+    if !status.success() {
+        return Err(format!("less exited with status {status}"));
+    }
+
     Ok(())
 }
 
