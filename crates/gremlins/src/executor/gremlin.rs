@@ -155,8 +155,7 @@ impl Gremlin {
     /// registered behind a state directory nobody can use. The checkout is
     /// branched from `HEAD`, and the commit it lands on is recorded as
     /// `worktree_base` in `state.json` and returned through
-    /// [`Gremlin::base_ref_sha`]; resolving a *named* base ref (which may need
-    /// a fetch, or a tag) is a launcher concern that feeds a later layer.
+    /// [`Gremlin::base_ref_sha`].
     ///
     /// The pipeline YAML is *not* read here: the handle carries the path and
     /// the `--client` override, and [`Gremlin::init_runtime`] loads them the
@@ -193,21 +192,14 @@ impl Gremlin {
             });
         }
 
-        // The launcher layer resolves the base commit before calling us; until
-        // it does, "whatever HEAD is" is the only honest ref. The fallback
-        // below records what that turned out to be.
-        let base_ref_sha = String::new();
+        // The checkout is branched from `HEAD`; the commit it lands on is the
+        // base recorded below.
         let mut worktree = worktree_dir.map(Path::to_path_buf);
         let mut created_worktree: Option<String> = None;
         if worktree.is_none() && !project_root.as_os_str().is_empty() {
-            let reference = if base_ref_sha.is_empty() {
-                "HEAD"
-            } else {
-                base_ref_sha.as_str()
-            };
             match git::setup_detached_worktree(
                 &project_root,
-                reference,
+                "HEAD",
                 fetch_worktree,
                 worktree_parent,
             ) {
@@ -223,16 +215,12 @@ impl Gremlin {
             }
         }
 
-        // The checkout is the source of truth: when the launcher did not hand
-        // us a SHA, the commit the worktree actually landed on is the base.
-        let base_ref_sha = if base_ref_sha.is_empty() {
-            worktree
-                .as_deref()
-                .map(|path| git::head_sha(Some(path)))
-                .unwrap_or_default()
-        } else {
-            base_ref_sha
-        };
+        // The checkout is the source of truth: the commit the worktree landed
+        // on is the base, or empty when there is no worktree.
+        let base_ref_sha = worktree
+            .as_deref()
+            .map(|path| git::head_sha(Some(path)))
+            .unwrap_or_default();
 
         let created = write_launch_state(
             gremlin_id,
