@@ -19,6 +19,7 @@ use crate::artifacts::registry::ArtifactRegistry;
 use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
+use crate::config;
 use crate::executor::bootstrap::run_pipeline_bootstrap;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::parallel::run_parallel;
@@ -201,18 +202,64 @@ async fn run_stage_scoped(
     }
 }
 
-/// The client a stage runs with: its own spec when it declared one, else the
-/// gremlin's. The pipeline default parses to the very client the gremlin
-/// already carries, so reuse that handle rather than building a second.
-fn resolve_client(stage: &RunnableStage, gremlin: &Gremlin) -> Result<Client, RunError> {
-    match stage.client() {
-        Some(spec) if spec.0 != gremlin.pipeline.default_client => {
-            Client::parse(&spec.0).map_err(|message| RunError::StageFailed {
-                stage: stage.name().to_string(),
-                message,
-            })
+/// Resolve the client spec string for a stage, consulting:
+/// 1. The stage's own `client:` field (always wins)
+/// 2. `default-client-by-stage` from global config (exact → longest prefix)
+/// 3. The pipeline's `default_client`
+fn resolve_client_spec(stage: &RunnableStage, gremlin: &Gremlin) -> String {
+    // 1. Explicit stage client always wins
+    if let Some(spec) = stage.client() {
+        return spec.0.clone();
+    }
+
+    let stage_name = stage.name();
+
+    // 2. Consult default-client-by-stage from global config
+    if let Some(cfg) = config::get_global() {
+        let (exact, prefix) = cfg.default_client_by_stage();
+
+        // Exact match
+        if let Some(client_spec) = exact.get(stage_name) {
+            return client_spec.clone();
         }
-        _ => Ok(gremlin.client.clone()),
+
+        // Longest prefix match
+        let mut best: Option<(&str, &str)> = None;
+        for (prefix_key, client_spec) in prefix {
+            if stage_name.starts_with(prefix_key.as_str()) {
+                match best {
+                    Some((prev_key, _prev_spec)) if prefix_key.len() > prev_key.len() => {
+                        best = Some((prefix_key, client_spec));
+                    }
+                    None => {
+                        best = Some((prefix_key, client_spec));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some((_prefix_key, client_spec)) = best {
+            return client_spec.to_string();
+        }
+    }
+
+    // 3. Fall back to pipeline default
+    gremlin.pipeline.default_client.clone()
+}
+
+/// The client a stage runs with: resolved via [`resolve_client_spec`], then
+/// parsed. When the resolved spec equals the pipeline default, the gremlin's
+/// already-constructed client handle is reused to avoid building a second
+/// backend for the same spec.
+fn resolve_client(stage: &RunnableStage, gremlin: &Gremlin) -> Result<Client, RunError> {
+    let spec = resolve_client_spec(stage, gremlin);
+    if spec == gremlin.pipeline.default_client {
+        Ok(gremlin.client.clone())
+    } else {
+        Client::parse(&spec).map_err(|message| RunError::StageFailed {
+            stage: stage.name().to_string(),
+            message,
+        })
     }
 }
 
