@@ -32,3 +32,10 @@ build:
 
 release:
 	cargo build --release
+
+# --- Install ---
+
+PREFIX ?= /usr/local
+
+install:
+	cargo install --path crates/gremlins-cli --root $(DESTDIR)$(PREFIX)

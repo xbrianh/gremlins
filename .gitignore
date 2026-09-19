@@ -1,4 +1,5 @@
 plans/*.md
+plans/completed/
 !plans/SINGLE_GREMLIN_PLAN_INSTRUCTIONS.md
 .at_venv
 .claude/
