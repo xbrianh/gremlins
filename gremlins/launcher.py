@@ -67,6 +67,8 @@ def write_initial_state(
     pipeline_path: str,
     stage_inputs: dict[str, Any],
     state_dir: pathlib.Path,
+    base_ref_name: str = "",
+    base_ref_sha: str = "",
 ) -> None:
     """Create and persist initial state data for a gremlin."""
     validate_gremlin_id(gremlin_id)
@@ -76,7 +78,7 @@ def write_initial_state(
         "project_root": project_root,
         "workdir": "",
         "setup_kind": "worktree-detached",
-        "worktree_base": "",
+        "worktree_base": base_ref_sha,
         "status": "running",
         "started_at": started_at,
         "description": description,
@@ -509,6 +511,8 @@ def launch(
             pipeline_path=inputs.pipeline_path,
             stage_inputs=inputs.stage_inputs,
             state_dir=state_dir,
+            base_ref_name=inputs.base_ref_name,
+            base_ref_sha=inputs.base_ref_sha,
         )
         artifact_dir = pathlib.Path(_scratch_root_fn(inputs.gremlin_id)) / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -642,7 +646,7 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
     stage = gremlin.state_data.stage
     if not stage or stage == "starting":
         stage = "plan"
-    if gremlin.pipeline_data.uses_loop_handoff() and stage not in (
+    if gremlin.uses_loop_handoff() and stage not in (
         "review-chain",
         "address-chain",
     ):

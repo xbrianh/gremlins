@@ -171,6 +171,8 @@ async def run_pipeline(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     _workdir = str(state_json.get("workdir") or "")
     worktree_dir = pathlib.Path(_workdir) if _workdir else None
+    base_ref = str(state_json.get("base_ref") or "")
+    base_ref_sha = str(state_json.get("worktree_base") or "")
     stage_inputs: dict[str, str] = {
         k: v
         for k, v in state_json.get("stage_inputs", {}).items()
@@ -247,6 +249,8 @@ async def run_pipeline(
             stage_inputs=stage_inputs,
             fetch_worktree=False,
             worktree_dir=worktree_dir,
+            base_ref=base_ref or None,
+            base_ref_sha=base_ref_sha or None,
         )
     except Exception as exc:
         die(str(exc))

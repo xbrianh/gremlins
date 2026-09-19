@@ -160,6 +160,9 @@ impl Gremlin {
     /// The pipeline YAML is *not* read here: the handle carries the path and
     /// the `--client` override, and [`Gremlin::init_runtime`] loads them the
     /// first time [`Gremlin::run`] is called.
+    ///
+    /// `base_ref_sha`, when non-empty, is the commit the worktree branches
+    /// from. Omitting it (or passing an empty string) falls back to`HEAD`.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         id: &str,
@@ -170,6 +173,8 @@ impl Gremlin {
         stage_inputs: &HashMap<String, String>,
         fetch_worktree: bool,
         worktree_dir: Option<&Path>,
+        base_ref: Option<&str>,
+        base_ref_sha: Option<&str>,
     ) -> Result<Gremlin, RunError> {
         let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
 
@@ -192,14 +197,16 @@ impl Gremlin {
             });
         }
 
-        // The checkout is branched from `HEAD`; the commit it lands on is the
-        // base recorded below.
+        // The checkout is branched from the provided base ref when given,
+        // otherwise from `HEAD`; the commit it lands on is the base recorded
+        // below.
         let mut worktree = worktree_dir.map(Path::to_path_buf);
         let mut created_worktree: Option<String> = None;
+        let branch_ref = base_ref_sha.filter(|sha| !sha.is_empty()).unwrap_or("HEAD");
         if worktree.is_none() && !project_root.as_os_str().is_empty() {
             match git::setup_detached_worktree(
                 &project_root,
-                "HEAD",
+                branch_ref,
                 fetch_worktree,
                 worktree_parent,
             ) {
@@ -234,6 +241,7 @@ impl Gremlin {
             resume_from,
             stage_inputs,
             base_ref_sha,
+            base_ref.unwrap_or(""),
         );
         match created {
             Ok(gremlin) => Ok(gremlin),
@@ -840,6 +848,7 @@ fn write_launch_state(
     resume_from: Option<&str>,
     stage_inputs: &HashMap<String, String>,
     base_ref_sha: String,
+    base_ref: &str,
 ) -> Result<Gremlin, RunError> {
     let workdir = worktree
         .as_ref()
@@ -875,6 +884,9 @@ fn write_launch_state(
         "worktree_base".to_string(),
         Value::String(base_ref_sha.clone()),
     );
+    if !base_ref.is_empty() {
+        initial.insert("base_ref".to_string(), Value::String(base_ref.to_string()));
+    }
     initial.insert("status".to_string(), Value::String("running".to_string()));
     if !initial.contains_key("started_at") {
         initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
@@ -948,7 +960,7 @@ fn write_launch_state(
         worktree_parent: worktree_parent.map(Path::to_path_buf),
         project_root: project_root.to_path_buf(),
         base_ref_sha,
-        base_ref: String::new(),
+        base_ref: base_ref.to_string(),
         resume_from: resume_from.map(String::from),
         state,
         env: HashMap::new(),
@@ -1530,6 +1542,8 @@ mod tests {
                 &HashMap::new(),
                 false,
                 None,
+                None,
+                None,
             )
             .unwrap();
 
@@ -1597,6 +1611,8 @@ mod tests {
                 &HashMap::new(),
                 false,
                 None,
+                None,
+                None,
             )
             .unwrap();
             let mut opened = Gremlin::from("gr-test").unwrap();
@@ -1636,6 +1652,8 @@ mod tests {
                 None,
                 &HashMap::new(),
                 false,
+                None,
+                None,
                 None,
             )
             .unwrap();
@@ -1684,6 +1702,8 @@ mod tests {
             &HashMap::new(),
             false,
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1718,6 +1738,8 @@ mod tests {
                 None,
                 &HashMap::new(),
                 false,
+                None,
+                None,
                 None,
             )
             .unwrap();
@@ -1777,6 +1799,8 @@ mod tests {
                 None,
                 &HashMap::new(),
                 false,
+                None,
+                None,
                 None,
             )
             .unwrap();

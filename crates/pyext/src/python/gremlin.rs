@@ -43,6 +43,8 @@ impl PyGremlin {
         stage_inputs = None,
         fetch_worktree = false,
         worktree_dir = None,
+        base_ref = None,
+        base_ref_sha = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn create(
@@ -55,6 +57,8 @@ impl PyGremlin {
         stage_inputs: Option<HashMap<String, String>>,
         fetch_worktree: bool,
         worktree_dir: Option<PathBuf>,
+        base_ref: Option<&str>,
+        base_ref_sha: Option<&str>,
     ) -> PyResult<Self> {
         let stage_inputs = stage_inputs.unwrap_or_default();
         let worktree_parent_ref = worktree_parent.as_deref();
@@ -69,6 +73,8 @@ impl PyGremlin {
             &stage_inputs,
             fetch_worktree,
             worktree_dir_ref,
+            base_ref,
+            base_ref_sha,
         )
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
@@ -196,6 +202,26 @@ impl PyGremlin {
                 land: None,
             };
             Py::new(py, p)
+        })
+    }
+
+    /// Whether this gremlin's pipeline uses the loop-handoff pattern.
+    ///
+    /// When the handle carries a stub pipeline (not yet initialized), loads
+    /// the pipeline from disk just enough to check — the caller needs the
+    /// metadata to make resume decisions.
+    fn uses_loop_handoff(&self) -> PyResult<bool> {
+        self.with(|g| {
+            if !g.pipeline.is_stub() {
+                return Ok(g.pipeline.has_loop_handoff());
+            }
+            let Some(pipeline_path) = &g.pipeline_path else {
+                return Ok(false);
+            };
+            match gremlins::schemas::pipeline::Pipeline::from_yaml(pipeline_path, None) {
+                Ok(p) => Ok(p.has_loop_handoff()),
+                Err(_) => Ok(false),
+            }
         })
     }
 

@@ -1710,6 +1710,8 @@ mod tests {
                     &HashMap::new(),
                     false,
                     None,
+                    None,
+                    None,
                 )
                 .map_err(|error| error.to_string())?;
                 let code = gremlin.run().await.map_err(|error| error.to_string())?;

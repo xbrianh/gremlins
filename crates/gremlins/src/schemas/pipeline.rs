@@ -76,6 +76,17 @@ impl Pipeline {
         self.name.is_empty() || self.name == UNLOADED_NAME
     }
 
+    /// Whether the first stage is a loop whose child has a `handoff` child.
+    pub fn has_loop_handoff(&self) -> bool {
+        let Some(first) = self.stages.first() else {
+            return false;
+        };
+        if first.stage_type() != "loop" {
+            return false;
+        }
+        first.body().iter().any(|s| s.name() == "handoff")
+    }
+
     /// Clone this pipeline, replacing its stage list with `stages`.
     ///
     /// Used by the parallel executor to give each child a pipeline that
