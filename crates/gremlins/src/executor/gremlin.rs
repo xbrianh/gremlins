@@ -620,9 +620,6 @@ impl Gremlin {
                 child.insert(name.to_string(), default);
             }
         }
-        for key in FORK_TRANSIENT {
-            child.remove(key);
-        }
 
         child.insert(
             "id".to_string(),
