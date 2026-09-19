@@ -1002,7 +1002,7 @@ def _land_with_stage(
         print("you are inside this gremlin's worktree — cd elsewhere before landing")
         return False
 
-    gremlin = PyGremlin.open(gremlin_id)
+    gremlin = PyGremlin.from_id(gremlin_id)
     gremlin.state = gremlin.build_state_with_cwd(cwd or "")
     _remove_worktree(wdir, state, cwd)
 

@@ -576,6 +576,12 @@ impl Gremlin {
     /// the terminal state is written either way so `status` and the `finished`
     /// marker always agree with what actually happened.
     pub async fn run(&mut self) -> Result<i32, RunError> {
+        // Loading the pipeline, building the registry, creating the client and
+        // resolving the environment are all deferred out of the constructors so
+        // that a handle nobody runs is cheap. This is the one place they happen
+        // — and the one place a missing pipeline becomes a hard error.
+        self.init_runtime()?;
+
         // A first start owes its checkout a bootstrap before any stage can use
         // it. The Python guard was `worktree_dir and not resume_from and
         // _has_bootstrap`; a run without a worktree has no dev environment to
@@ -760,6 +766,8 @@ mod tests {
             id: validate_gremlin_id("gr-test").unwrap(),
             state_dir,
             artifact_dir: artifact_dir.clone(),
+            pipeline_path: None,
+            client_override: None,
             pipeline: Pipeline {
                 name: "test".to_string(),
                 path: PathBuf::from("test.yaml"),
@@ -1660,9 +1668,9 @@ mod tests {
     // is held, and the lock exists precisely to keep the sandbox override from
     // being observed half-swapped by another test.
     #[allow(clippy::await_holding_lock)]
-    async fn launch_then_run_end_to_end() {
+    async fn create_then_run_end_to_end() {
         if !git_available() {
-            eprintln!("git unavailable; skipping launch_then_run_end_to_end");
+            eprintln!("git unavailable; skipping create_then_run_end_to_end");
             return;
         }
 
@@ -1693,7 +1701,7 @@ mod tests {
         let outcome: Result<(i32, Value), String> = if prepared {
             async {
                 let pipeline_path = repo.path().join(".gremlins").join("demo.yaml");
-                let mut gremlin = Gremlin::launch(
+                let mut gremlin = Gremlin::create(
                     "gr-e2e",
                     &pipeline_path,
                     None,

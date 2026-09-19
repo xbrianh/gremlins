@@ -6,11 +6,18 @@
 //! place where a gremlin's environment is assembled.
 //!
 //! Three constructors cover the lifecycles the Python executor had:
-//! [`Gremlin::launch`] starts a fresh run in its own detached worktree,
-//! [`Gremlin::open`] reconstructs a handle from a persisted state directory
-//! (for status checks and recovery), and [`Gremlin::fork`] spins off a child
-//! that inherits the parent's artifacts, environment, and — optionally — a
-//! fresh worktree at the parent's commit.
+//! [`Gremlin::create`] starts a fresh run in its own detached worktree,
+//! [`Gremlin::from`] reconstructs a handle from a persisted state directory
+//! (for status checks, cleanup, and recovery), and [`Gremlin::fork`] spins off
+//! a child that inherits the parent's artifacts, environment, and — optionally
+//! — a fresh worktree at the parent's commit.
+//!
+//! Construction is cheap on purpose. `create` and `from` populate only the
+//! path and identity fields; the pipeline YAML, the artifact registry, the
+//! client, and the resolved environment are deferred to
+//! [`Gremlin::init_runtime`], which [`Gremlin::run`] calls before it drives a
+//! single stage. A caller that only wants a handle — to read metadata, or to
+//! `clean` — never pays for the runtime.
 //!
 //! The environment rules are the subtle part and live in [`resolve_env`]: the
 //! eight `GREMLIN*` system variables are seeded into the base environment
@@ -114,6 +121,13 @@ pub struct Gremlin {
     pub id: GremlinId,
     pub state_dir: PathBuf,
     pub artifact_dir: PathBuf,
+    /// Where the pipeline YAML lives, resolved at construction time but not
+    /// read until [`Gremlin::init_runtime`]. `None` means no pipeline could be
+    /// located — a handle that reaches `init_runtime` without one is an error.
+    pub pipeline_path: Option<PathBuf>,
+    /// The CLI `--client` value this run was launched with, replayed when the
+    /// pipeline is finally loaded.
+    pub client_override: Option<String>,
     pub pipeline: Pipeline,
     pub registry: ArtifactRegistry,
     pub worktree: Option<PathBuf>,
@@ -143,8 +157,12 @@ impl Gremlin {
     /// `worktree_base` in `state.json` and returned through
     /// [`Gremlin::base_ref_sha`]; resolving a *named* base ref (which may need
     /// a fetch, or a tag) is a launcher concern that feeds a later layer.
+    ///
+    /// The pipeline YAML is *not* read here: the handle carries the path and
+    /// the `--client` override, and [`Gremlin::init_runtime`] loads them the
+    /// first time [`Gremlin::run`] is called.
     #[allow(clippy::too_many_arguments)]
-    pub fn launch(
+    pub fn create(
         id: &str,
         pipeline_path: &Path,
         client_override: Option<&str>,
@@ -164,20 +182,6 @@ impl Gremlin {
         let pipeline_path = pipeline_path
             .canonicalize()
             .unwrap_or_else(|_| pipeline_path.to_path_buf());
-        let pipeline = Pipeline::from_yaml(&pipeline_path, client_override)
-            .map_err(|error| RunError::Message(error.to_string()))?;
-
-        // An unusable client must not abort a launch: the state directory, the
-        // worktree and the artifacts all have to exist before any stage can
-        // run, and failing here would leave the operator with no run at all to
-        // debug. `cmd:true` is the harness's own no-op client — it is what
-        // `config::inject_sentinals` installs so a missing client never fails
-        // structural validation — so a bad spec degrades to a run that does
-        // nothing rather than one that never starts, while the pipeline's
-        // declared `default_client` stays on record in `state.json`.
-        let client = Client::parse(&pipeline.default_client).unwrap_or_else(|_| {
-            Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec")
-        });
 
         let project_root = project_root_for(&pipeline_path);
 
@@ -230,13 +234,12 @@ impl Gremlin {
             base_ref_sha
         };
 
-        let launched = finish_launch(
+        let created = write_launch_state(
             gremlin_id,
             &state_dir,
             &artifact_dir,
             &pipeline_path,
-            pipeline,
-            client,
+            client_override,
             &project_root,
             worktree,
             worktree_parent,
@@ -244,7 +247,7 @@ impl Gremlin {
             stage_inputs,
             base_ref_sha,
         );
-        match launched {
+        match created {
             Ok(gremlin) => Ok(gremlin),
             Err(error) => {
                 // The worktree is ours only once `setup_detached_worktree` gave
@@ -257,12 +260,20 @@ impl Gremlin {
         }
     }
 
-    /// Reconstruct a handle from a persisted state directory.
+    /// Reconstruct a handle from a persisted state directory, without touching
+    /// the pipeline, the client, or the environment.
     ///
-    /// `open` is deliberately lenient about a missing or unloadable pipeline —
+    /// This is the cheap read: it resolves the paths a caller needs to inspect
+    /// a run — its worktree, its project, its pipeline — and nothing more. A
+    /// caller that only wants to read metadata, or to `clean` the run up,
+    /// never pays for a YAML parse, a client build, or a bootstrap `source`.
+    ///
+    /// `from` is deliberately lenient about a missing or unloadable pipeline —
     /// status checks must still work on a run whose pipeline has since been
-    /// deleted — but strict about the state directory itself.
-    pub fn open(id: &str) -> Result<Gremlin, RunError> {
+    /// deleted — but strict about the state directory itself. The pipeline is
+    /// loaded later, by [`Gremlin::init_runtime`], which is also where a
+    /// missing pipeline becomes a hard error.
+    pub fn from(id: &str) -> Result<Gremlin, RunError> {
         let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
         let state_dir = config::state_root().join(gremlin_id.as_str());
         let state_file = state_dir.join("state.json");
@@ -281,7 +292,7 @@ impl Gremlin {
         }
 
         // `read_state_json` is permissive by design ({} for missing or
-        // unparseable); `open` needs the real reason, so an empty result is
+        // unparseable); `from` needs the real reason, so an empty result is
         // re-parsed here to say which it was.
         let raw = state::read_state_json(Some(&state_file));
         if raw.is_empty() {
@@ -303,62 +314,31 @@ impl Gremlin {
                 PathBuf::from(from_state)
             }
         };
-        let pipeline_path = str_field(&raw, "pipeline_path");
+        let recorded_path = str_field(&raw, "pipeline_path");
         let workdir = str_field(&raw, "workdir");
 
         // A hermetic `pipeline.yaml` next to the state pins the pipeline the
-        // run actually used; otherwise fall back to resolving the kind.
+        // run actually used; otherwise fall back to resolving the kind. Either
+        // way the path is only recorded here — `init_runtime` reads it.
         let hermetic = state_dir.join("pipeline.yaml");
-        let resolved: Option<PathBuf> = if hermetic.is_file() {
+        let pipeline_path = if hermetic.is_file() {
             Some(hermetic)
-        } else if kind.is_empty() {
-            None
-        } else {
+        } else if !kind.is_empty() {
             resolve_pipeline_in_project(&kind, &project_root)
-        };
-
-        let candidate = resolved
-            .clone()
-            .or_else(|| (!pipeline_path.is_empty()).then(|| PathBuf::from(&pipeline_path)))
-            .or_else(|| (!kind.is_empty()).then(|| PathBuf::from(&kind)));
-
-        // A missing pipeline must not fail a status check, so a load failure
-        // degrades to a stub carrying just the identity.
-        let pipeline = match candidate.as_deref() {
-            Some(path) => Pipeline::from_yaml(path, None)
-                .unwrap_or_else(|_| stub_pipeline(&kind, path.to_path_buf())),
-            None => stub_pipeline(&kind, PathBuf::from(".")),
-        };
-
-        let client = Client::parse(&pipeline.default_client)
-            .or_else(|_| Client::parse("cmd:true"))
-            .expect("'cmd:true' is always a valid client spec");
+        } else {
+            None
+        }
+        .or_else(|| (!recorded_path.is_empty()).then(|| PathBuf::from(&recorded_path)))
+        // Canonicalise so a caller comparing the handle's path to a resolved
+        // one (the way `pipeline_data.path` is read) sees the same string.
+        .map(|path| path.canonicalize().unwrap_or(path));
 
         let artifact_dir = config::scratch_root(Some(gremlin_id.as_str())).join("artifacts");
-        let registry = ArtifactRegistry::new(artifact_dir.clone());
         let state = StateData::new(Some(gremlin_id.as_str().to_string()));
 
         let worktree = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
         let base_ref_sha = state.read_str("worktree_base");
-        let base_ref = {
-            let recorded = state.read_str("base_ref");
-            if recorded.is_empty() {
-                pipeline.base_ref.clone()
-            } else {
-                recorded
-            }
-        };
-
-        let overlay_dir = state_dir.join(config::overlay_dirname());
-        let env = resolve_env(
-            bootstrap_script(&pipeline.bootstrap),
-            &artifact_dir,
-            &state_dir,
-            gremlin_id.as_str(),
-            &project_root,
-            worktree.as_deref(),
-            &overlay_dir,
-        )?;
+        let base_ref = state.read_str("base_ref");
 
         // `stage_inputs` is what bootstrap's `bind_artifact` resolves against;
         // an absent or null field is an empty map, exactly as the Python
@@ -375,12 +355,21 @@ impl Gremlin {
             })
             .unwrap_or_default();
 
+        // The stub keeps the resolved path so `pipeline_data.path` still names
+        // the pipeline the run used, even though its stages are not loaded.
+        let mut pipeline = Pipeline::stub();
+        if let Some(path) = &pipeline_path {
+            pipeline.path = path.clone();
+        }
+
         Ok(Gremlin {
             id: gremlin_id,
             state_dir,
-            artifact_dir,
+            artifact_dir: artifact_dir.clone(),
+            pipeline_path,
+            client_override: None,
             pipeline,
-            registry,
+            registry: ArtifactRegistry::new(artifact_dir),
             worktree,
             worktree_parent: None,
             project_root,
@@ -388,11 +377,102 @@ impl Gremlin {
             base_ref,
             resume_from: None,
             state,
-            env,
-            client,
+            env: HashMap::new(),
+            client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
             loop_stack: Vec::new(),
             stage_inputs,
         })
+    }
+
+    /// Load the pipeline, build the registry, create the client, and resolve the
+    /// environment — everything a handle needs before it can run a stage.
+    ///
+    /// Deferred out of the constructors so that a handle which is only read (or
+    /// only cleaned up) never pays for it. Idempotent: a run loop that is
+    /// re-entered, or a forked child whose parent already did the work, finds a
+    /// loaded pipeline and returns immediately.
+    ///
+    /// The stub pipeline is the "not initialized yet" marker, so every
+    /// fallible step runs into locals first and `self` is only mutated once
+    /// they have all succeeded. An initialization that fails partway leaves the
+    /// handle a stub, and a retry — `resume` re-entering the run loop after a
+    /// transient bootstrap failure — starts the whole sequence over instead of
+    /// finding a half-built runtime it believes is finished.
+    pub(crate) fn init_runtime(&mut self) -> Result<(), RunError> {
+        if !self.pipeline.is_stub() {
+            return Ok(());
+        }
+        let Some(pipeline_path) = self.pipeline_path.clone() else {
+            return Err(RunError::Message(format!(
+                "gremlin {}: no pipeline path to load",
+                self.id
+            )));
+        };
+
+        let pipeline = Pipeline::from_yaml(&pipeline_path, self.client_override.as_deref())
+            .map_err(|error| RunError::Message(error.to_string()))?;
+
+        // An unusable client must not abort a run: the state directory, the
+        // worktree and the artifacts all have to exist before any stage can
+        // run, and failing here would leave the operator with no run at all to
+        // debug. `cmd:true` is the harness's own no-op client — it is what
+        // `config::inject_sentinals` installs so a missing client never fails
+        // structural validation — so a bad spec degrades to a run that does
+        // nothing rather than one that never starts, while the pipeline's
+        // declared `default_client` stays on record in `state.json`.
+        let client = Client::parse(&pipeline.default_client).unwrap_or_else(|_| {
+            Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec")
+        });
+
+        let base_ref = if self.base_ref.is_empty() {
+            pipeline.base_ref.clone()
+        } else {
+            self.base_ref.clone()
+        };
+
+        let registry = ArtifactRegistry::new(self.artifact_dir.clone());
+        register_stage_inputs(&registry, &pipeline.bootstrap, &self.stage_inputs);
+        register_base_sha(
+            &registry,
+            self.worktree.as_deref().unwrap_or(&self.project_root),
+        );
+
+        let overlay_dir = self.state_dir.join(config::overlay_dirname());
+        let env = resolve_env(
+            bootstrap_script(&pipeline.bootstrap),
+            &self.artifact_dir,
+            &self.state_dir,
+            self.id.as_str(),
+            &self.project_root,
+            self.worktree.as_deref(),
+            &overlay_dir,
+        )?;
+
+        // Nothing below this line can fail, so this is the commit point.
+        let default_client = pipeline.default_client.clone();
+        self.pipeline = pipeline;
+        self.client = client;
+        self.base_ref = base_ref;
+        self.registry = registry;
+
+        // The Python launcher sources bootstrap.env before the worktree
+        // exists, so GREMLINS_WORKTREE_PATH (and any variable the script
+        // derives from it) is absent. resolve_env produces the correct map now
+        // that the worktree is real — write it back to the process so agent
+        // stages and their child processes inherit the correct PATH,
+        // VIRTUAL_ENV, etc.
+        for (key, value) in &env {
+            std::env::set_var(key, value);
+        }
+        self.env = env;
+
+        // The client label is only knowable once the pipeline is loaded; the
+        // initial write left it blank and this is the patch that fills it in.
+        let mut fields = Map::new();
+        fields.insert("client".to_string(), Value::String(default_client));
+        self.state.patch(&[], &fields);
+
+        Ok(())
     }
 
     /// Fork a child gremlin: copy artifacts, branch a worktree at the parent's
@@ -597,6 +677,10 @@ impl Gremlin {
             id: child_gremlin_id,
             state_dir: child_state_dir,
             artifact_dir: child_artifact_dir,
+            pipeline_path: child_pipeline_path
+                .map(Path::to_path_buf)
+                .or_else(|| self.pipeline_path.clone()),
+            client_override: self.client_override.clone(),
             pipeline,
             registry,
             worktree: child_worktree,
@@ -749,17 +833,22 @@ fn project_root_for(pipeline_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// The fallible remainder of [`Gremlin::launch`], after the worktree exists.
+/// The fallible remainder of [`Gremlin::create`], after the worktree exists.
 ///
-/// Split out so the caller can unregister the worktree if any of it fails.
+/// Writes the initial `state.json`, stages the overlay, and returns a handle
+/// whose runtime fields are stubs. Split out so the caller can unregister the
+/// worktree if any of it fails.
+///
+/// The `client` field is written blank: the label comes from the pipeline's
+/// `default_client`, which is only known once [`Gremlin::init_runtime`] has
+/// loaded the YAML, and that is the patch which fills it in.
 #[allow(clippy::too_many_arguments)]
-fn finish_launch(
+fn write_launch_state(
     gremlin_id: GremlinId,
     state_dir: &Path,
     artifact_dir: &Path,
     pipeline_path: &Path,
-    pipeline: Pipeline,
-    client: Client,
+    client_override: Option<&str>,
     project_root: &Path,
     worktree: Option<PathBuf>,
     worktree_parent: Option<&Path>,
@@ -814,10 +903,8 @@ fn finish_launch(
     if !initial.contains_key("pipeline_args") {
         initial.insert("pipeline_args".to_string(), Value::Array(Vec::new()));
     }
-    initial.insert(
-        "client".to_string(),
-        Value::String(pipeline.default_client.clone()),
-    );
+    // Left blank until `init_runtime` loads the pipeline and patches it.
+    initial.insert("client".to_string(), Value::String(String::new()));
     initial.insert(
         "pipeline_path".to_string(),
         Value::String(pipeline_path_str.clone()),
@@ -856,46 +943,31 @@ fn finish_launch(
 
     stage_overlay(project_root, state_dir);
 
-    let registry = ArtifactRegistry::new(artifact_dir.to_path_buf());
-    register_stage_inputs(&registry, &pipeline.bootstrap, stage_inputs);
-    register_base_sha(&registry, worktree.as_deref().unwrap_or(project_root));
+    // The stub is not empty: it carries the resolved pipeline path so that a
+    // pre-init handle reports the same `pipeline_data.path` as one built by
+    // [`Gremlin::from`]. `init_runtime` replaces the stub wholesale.
+    let pipeline = Pipeline {
+        path: pipeline_path.to_path_buf(),
+        ..Pipeline::stub()
+    };
 
-    let overlay_dir = state_dir.join(config::overlay_dirname());
-    let env = resolve_env(
-        bootstrap_script(&pipeline.bootstrap),
-        artifact_dir,
-        state_dir,
-        gremlin_id.as_str(),
-        project_root,
-        worktree.as_deref(),
-        &overlay_dir,
-    )?;
-
-    // The Python launcher sources bootstrap.env before the worktree exists,
-    // so GREMLINS_WORKTREE_PATH (and any variable the script derives from it)
-    // is absent.  resolve_env produces the correct map now that the worktree
-    // is real — write it back to the process so agent stages and their child
-    // processes inherit the correct PATH, VIRTUAL_ENV, etc.
-    for (key, value) in &env {
-        std::env::set_var(key, value);
-    }
-
-    let base_ref = pipeline.base_ref.clone();
     Ok(Gremlin {
         id: gremlin_id,
         state_dir: state_dir.to_path_buf(),
         artifact_dir: artifact_dir.to_path_buf(),
+        pipeline_path: Some(pipeline_path.to_path_buf()),
+        client_override: client_override.map(String::from),
         pipeline,
-        registry,
+        registry: ArtifactRegistry::new(artifact_dir.to_path_buf()),
         worktree,
         worktree_parent: worktree_parent.map(Path::to_path_buf),
         project_root: project_root.to_path_buf(),
         base_ref_sha,
-        base_ref,
+        base_ref: String::new(),
         resume_from: resume_from.map(String::from),
         state,
-        env,
-        client,
+        env: HashMap::new(),
+        client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
         loop_stack: Vec::new(),
         stage_inputs: stage_inputs.clone(),
     })
@@ -1014,24 +1086,6 @@ pub(crate) fn copy_tree(source: &Path, destination: &Path) -> Result<(), RunErro
 fn resolve_pipeline_in_project(kind: &str, project_root: &Path) -> Option<PathBuf> {
     let overlay = config::overlay_dir_without_env(project_root);
     discovery::resolve_pipeline_path_in(kind, Some(&overlay), project_root.to_path_buf()).ok()
-}
-
-/// A pipeline placeholder carrying only an identity, for a run whose pipeline
-/// can no longer be loaded.
-fn stub_pipeline(kind: &str, path: PathBuf) -> Pipeline {
-    Pipeline {
-        name: if kind.is_empty() {
-            "unknown".to_string()
-        } else {
-            kind.to_string()
-        },
-        path,
-        default_client: String::new(),
-        base_ref: String::new(),
-        bootstrap: Bootstrap::default(),
-        stages: Vec::new(),
-        land: None,
-    }
 }
 
 /// Read a string field, treating anything else as `""`.
@@ -1469,9 +1523,9 @@ mod tests {
     }
 
     #[test]
-    fn launch_creates_state_and_worktree() {
+    fn create_creates_state_and_worktree() {
         if !git_available() {
-            eprintln!("git is unavailable; skipping launch_creates_state_and_worktree");
+            eprintln!("git is unavailable; skipping create_creates_state_and_worktree");
             return;
         }
         with_sandbox(None, |sandbox| {
@@ -1482,7 +1536,7 @@ mod tests {
             }
             let pipeline_path = repo.path().join(".gremlins").join("demo.yaml");
 
-            let gremlin = Gremlin::launch(
+            let mut gremlin = Gremlin::create(
                 "gr-test",
                 &pipeline_path,
                 None,
@@ -1507,6 +1561,11 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .ends_with("demo.yaml"));
+            // Construction is cheap: the client label is blank until the run
+            // loads the pipeline, and nothing has been parsed yet.
+            assert_eq!(raw["client"], "");
+            assert!(gremlin.pipeline.is_stub());
+            assert!(gremlin.env.is_empty());
 
             // The checkout and the commit it was branched from are on record,
             // and the returned handle agrees with what was persisted.
@@ -1515,15 +1574,25 @@ mod tests {
             assert_eq!(base.len(), 40, "worktree_base should be a SHA: {base:?}");
             assert_eq!(base, gremlin.base_ref_sha);
 
+            // Lazy init is what fills in the runtime fields.
+            gremlin.init_runtime().unwrap();
+            assert_eq!(gremlin.pipeline.name, "demo");
             assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], "gr-test");
             assert!(gremlin.registry.artifact_dir.ends_with("artifacts"));
+            let raw = read_state(&state_file);
+            assert_eq!(raw["client"], "cmd:true");
+
+            // Idempotent: a second call is a no-op, not a re-parse.
+            let path_before = gremlin.pipeline.path.clone();
+            gremlin.init_runtime().unwrap();
+            assert_eq!(gremlin.pipeline.path, path_before);
         });
     }
 
     #[test]
-    fn launch_then_open_roundtrips() {
+    fn create_then_from_roundtrips() {
         if !git_available() {
-            eprintln!("git is unavailable; skipping launch_then_open_roundtrips");
+            eprintln!("git is unavailable; skipping create_then_from_roundtrips");
             return;
         }
         with_sandbox(None, |_sandbox| {
@@ -1534,7 +1603,7 @@ mod tests {
             }
             let pipeline_path = repo.path().join(".gremlins").join("demo.yaml");
 
-            let launched = Gremlin::launch(
+            let mut launched = Gremlin::create(
                 "gr-test",
                 &pipeline_path,
                 None,
@@ -1545,15 +1614,101 @@ mod tests {
                 None,
             )
             .unwrap();
-            let opened = Gremlin::open("gr-test").unwrap();
+            let mut opened = Gremlin::from("gr-test").unwrap();
 
             assert_eq!(opened.id, launched.id);
             assert_eq!(opened.state_dir, launched.state_dir);
             assert_eq!(opened.project_root, launched.project_root);
+            assert_eq!(opened.worktree, launched.worktree);
+            assert_eq!(opened.pipeline_path, launched.pipeline_path);
+
+            launched.init_runtime().unwrap();
+            opened.init_runtime().unwrap();
             assert_eq!(opened.pipeline.name, launched.pipeline.name);
             assert_eq!(opened.env["GREMLINS_GREMLIN_ID"], "gr-test");
-            assert_eq!(opened.worktree, launched.worktree);
         });
+    }
+
+    #[test]
+    fn from_then_clean_needs_no_run() {
+        if !git_available() {
+            eprintln!("git is unavailable; skipping from_then_clean_needs_no_run");
+            return;
+        }
+        with_sandbox(None, |sandbox| {
+            let repo = tempfile::tempdir().unwrap();
+            if !init_repo(repo.path()) {
+                eprintln!("could not prepare a git fixture; skipping");
+                return;
+            }
+            let pipeline_path = repo.path().join(".gremlins").join("demo.yaml");
+
+            let created = Gremlin::create(
+                "gr-test",
+                &pipeline_path,
+                None,
+                None,
+                None,
+                &HashMap::new(),
+                false,
+                None,
+            )
+            .unwrap();
+            let worktree = created.worktree.clone().unwrap();
+            drop(created);
+
+            // A handle reconstructed purely for cleanup: no `run`, so the
+            // pipeline was never loaded, and `clean` must not need it.
+            let handle = Gremlin::from("gr-test").unwrap();
+            assert!(handle.pipeline.is_stub());
+            handle.clean(true);
+
+            assert!(!sandbox.join("state").join("gr-test").exists());
+            assert!(!worktree.exists(), "worktree should be gone");
+            assert!(!sandbox.join("scratch").join("gr-test").exists());
+        });
+    }
+
+    #[tokio::test]
+    // The env guard holds a plain mutex across the run's awaits; safe because
+    // `#[tokio::test]` drives a current-thread runtime, so no other task can be
+    // scheduled on this thread while the lock is held.
+    #[allow(clippy::await_holding_lock)]
+    async fn from_then_run_triggers_lazy_init() {
+        if !git_available() {
+            eprintln!("git is unavailable; skipping from_then_run_triggers_lazy_init");
+            return;
+        }
+        let mut env = EnvGuard::lock();
+        let sandbox = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
+
+        let repo = tempfile::tempdir().unwrap();
+        if !init_repo(repo.path()) {
+            eprintln!("could not prepare a git fixture; skipping");
+            return;
+        }
+        let pipeline_path = repo.path().join(".gremlins").join("demo.yaml");
+
+        Gremlin::create(
+            "gr-test",
+            &pipeline_path,
+            None,
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+        )
+        .unwrap();
+
+        let mut handle = Gremlin::from("gr-test").unwrap();
+        assert!(handle.pipeline.is_stub());
+
+        // The resume path: reconstruct cheaply, then drive the run. The
+        // pipeline must have been loaded by the time `run` returns.
+        assert_eq!(handle.run().await.unwrap(), 0);
+        assert_eq!(handle.pipeline.name, "demo");
     }
 
     #[test]
@@ -1570,7 +1725,7 @@ mod tests {
             }
             let pipeline_path = repo.path().join(".gremlins").join("demo.yaml");
 
-            let parent = Gremlin::launch(
+            let parent = Gremlin::create(
                 "gr-test",
                 &pipeline_path,
                 None,
@@ -1629,7 +1784,7 @@ mod tests {
             }
             let pipeline_path = repo.path().join(".gremlins").join("demo.yaml");
 
-            let parent = Gremlin::launch(
+            let parent = Gremlin::create(
                 "gr-test",
                 &pipeline_path,
                 None,
@@ -1701,7 +1856,9 @@ mod tests {
             state_dir,
             registry: ArtifactRegistry::new(artifact_dir.clone()),
             artifact_dir,
-            pipeline: stub_pipeline("demo", PathBuf::from(".")),
+            pipeline_path: None,
+            client_override: None,
+            pipeline: Pipeline::stub(),
             worktree,
             worktree_parent: None,
             project_root,

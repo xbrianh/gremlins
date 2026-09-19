@@ -182,7 +182,7 @@ async def run_pipeline(
     stage_gremlins_overlay(str(_project_root), state_dir)
 
     # --- env isolation ---
-    # Must happen *before* PyGremlin.launch because the Rust Gremlin captures
+    # Must happen *before* PyGremlin.create because the Rust Gremlin captures
     # std::env::vars() at construction time inside resolve_env().
     _bootstrap_env = _read_bootstrap_env(pipeline_path)
 
@@ -233,12 +233,12 @@ async def run_pipeline(
     os.environ["GREMLINS_SCRATCH_DIR"] = str(pathlib.Path(scratch_root(gremlin_id)))
 
     # --- launch the native gremlin ---
-    # PyGremlin.launch does: worktree setup, state initialization, artifact
+    # PyGremlin.create does: worktree setup, state initialization, artifact
     # registration, env resolution (capturing the isolated os.environ above),
     # and overlay staging — everything the Python Gremlin.initialize_with_runtime
     # used to do plus the inline bootstrap block.
     try:
-        gremlin = PyGremlin.launch(
+        gremlin = PyGremlin.create(
             id=gremlin_id,
             pipeline_path=pipeline_path,
             client_override=args.client or None,

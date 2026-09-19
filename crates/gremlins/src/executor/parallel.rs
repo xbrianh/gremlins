@@ -366,20 +366,11 @@ pub(crate) async fn run_parallel(
         aggregate_child_costs(gremlin, outcome);
     }
 
-    // --- Clean up child worktrees (best-effort) ---
-    log::debug!(
-        "parallel group {group_name}: cleaning up worktrees for {} spawned children",
-        spawned_ids.len()
-    );
-    //
-    // Iterate over *all* spawned children — not just those that reported a
-    // result — so worktrees created during `fork_with_stages` for cancelled
-    // or otherwise missing tasks are still cleaned up.
-    for (child_name, child_id) in &spawned_ids {
-        cleanup_child_worktree(gremlin, child_name, child_id);
-    }
-
     // --- Mark children done ---
+    //
+    // This writes the *parent's* state, so it must run before the cleanup below
+    // starts removing directories; keeping the order this way means no step can
+    // ever consult a child's state directory after it is gone.
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
             gremlin.state.mark_done(group_name, &outcome.child_name);
@@ -389,6 +380,28 @@ pub(crate) async fn run_parallel(
     // If all children succeeded, clear the done tracking.
     if group_error.is_none() {
         gremlin.state.clear_done(group_name);
+    }
+
+    // --- Clean up child worktrees (best-effort) ---
+    log::debug!(
+        "parallel group {group_name}: cleaning up worktrees for {} spawned children",
+        spawned_ids.len()
+    );
+    //
+    // Iterate over *all* spawned children — not just those that reported a
+    // result — so worktrees created during `fork_with_stages` for cancelled
+    // or otherwise missing tasks are still cleaned up.
+    //
+    // On success the child is spent: `clean(true)` drops its worktree, its
+    // scratch directory and its state directory, and the parent has already
+    // merged everything worth keeping. On failure the state directory is the
+    // only record of what went wrong, so only the worktree is removed.
+    for (child_name, child_id) in &spawned_ids {
+        if group_error.is_none() {
+            cleanup_child_fully(child_name, child_id);
+        } else {
+            cleanup_child_worktree(gremlin, child_name, child_id);
+        }
     }
 
     match group_error {
@@ -466,6 +479,21 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
     if let Some(cost) = child_state.get("subprocess_cost_usd") {
         if let Some(n) = cost.as_f64() {
             gremlin.state.add_subprocess_cost(n);
+        }
+    }
+}
+
+/// Remove everything a successfully-completed child owns.
+///
+/// Reconstructs a cheap handle with [`Gremlin::from`] — which reads paths only
+/// and never loads a pipeline — and hands it to [`Gremlin::clean`]. Failure is
+/// expected when the child's state directory is already gone; it is logged and
+/// swallowed, because a group that succeeded must not fail on cleanup.
+fn cleanup_child_fully(child_name: &str, child_id: &str) {
+    match Gremlin::from(child_id) {
+        Ok(child) => child.clean(true),
+        Err(error) => {
+            log::debug!("parallel group: child {child_name} left nothing to clean ({error})")
         }
     }
 }
@@ -560,6 +588,8 @@ mod tests {
             id: validate_gremlin_id("gr-test").unwrap(),
             state_dir,
             artifact_dir: artifact_dir.clone(),
+            pipeline_path: None,
+            client_override: None,
             pipeline: Pipeline {
                 name: "test".to_string(),
                 path: PathBuf::from("test.yaml"),

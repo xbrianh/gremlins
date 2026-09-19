@@ -17,6 +17,11 @@ use crate::schemas::pipeline::Pipeline;
 /// can take ownership (the Rust [`Gremlin::run`] consumes `self`).  Once
 /// `run()` has been called the inner [`Option`] is `None` and property
 /// getters return defaults.
+///
+/// Both constructors are cheap: `create` and `from_id` populate paths and
+/// identity only, and defer the pipeline, client, registry and environment to
+/// the first `run()` call. Getters that expose pipeline metadata therefore
+/// report defaults on a handle that has not been run yet.
 #[pyclass(name = "Gremlin", module = "_gremlins_core")]
 pub struct PyGremlin {
     inner: Mutex<Option<Gremlin>>,
@@ -40,7 +45,7 @@ impl PyGremlin {
         worktree_dir = None,
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn launch(
+    fn create(
         _cls: &Bound<'_, PyType>,
         id: &str,
         pipeline_path: PathBuf,
@@ -55,7 +60,7 @@ impl PyGremlin {
         let worktree_parent_ref = worktree_parent.as_deref();
         let worktree_dir_ref = worktree_dir.as_deref();
 
-        let gremlin = Gremlin::launch(
+        let gremlin = Gremlin::create(
             id,
             &pipeline_path,
             client_override,
@@ -72,11 +77,14 @@ impl PyGremlin {
         })
     }
 
-    /// Reconstruct a handle from a persisted state directory.
+    /// Reconstruct a cheap handle from a persisted state directory.
+    ///
+    /// Reads paths and identity only — the pipeline, client and environment are
+    /// loaded lazily by `run()`.
     #[classmethod]
     #[pyo3(signature = (id))]
-    fn open(_cls: &Bound<'_, PyType>, id: &str) -> PyResult<Self> {
-        let gremlin = Gremlin::open(id).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    fn from_id(_cls: &Bound<'_, PyType>, id: &str) -> PyResult<Self> {
+        let gremlin = Gremlin::from(id).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyGremlin {
             inner: Mutex::new(Some(gremlin)),
         })

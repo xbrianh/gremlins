@@ -48,7 +48,34 @@ pub struct Pipeline {
     pub land: Option<RunnableStage>,
 }
 
+/// The name a not-yet-loaded pipeline carries. [`Gremlin::init_runtime`]
+/// treats it as "nothing loaded yet", so it must never be a real pipeline's
+/// name — `from_yaml` derives that from the YAML file stem.
+pub const UNLOADED_NAME: &str = "unknown";
+
 impl Pipeline {
+    /// A placeholder carrying no identity: the value a [`Gremlin`] holds until
+    /// [`Gremlin::init_runtime`] reads the real YAML.
+    ///
+    /// [`Gremlin`]: crate::executor::gremlin::Gremlin
+    /// [`Gremlin::init_runtime`]: crate::executor::gremlin::Gremlin::init_runtime
+    pub fn stub() -> Pipeline {
+        Pipeline {
+            name: UNLOADED_NAME.to_string(),
+            path: PathBuf::from("."),
+            default_client: String::new(),
+            base_ref: String::new(),
+            bootstrap: Bootstrap::default(),
+            stages: Vec::new(),
+            land: None,
+        }
+    }
+
+    /// Whether this pipeline is the [`Pipeline::stub`] rather than a loaded one.
+    pub fn is_stub(&self) -> bool {
+        self.name.is_empty() || self.name == UNLOADED_NAME
+    }
+
     /// Clone this pipeline, replacing its stage list with `stages`.
     ///
     /// Used by the parallel executor to give each child a pipeline that

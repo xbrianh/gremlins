@@ -595,6 +595,8 @@ mod tests {
             id: validate_gremlin_id("gr-test").unwrap(),
             state_dir,
             artifact_dir: artifact_dir.clone(),
+            pipeline_path: None,
+            client_override: None,
             pipeline: Pipeline {
                 name: "test".to_string(),
                 path: PathBuf::from("test.yaml"),

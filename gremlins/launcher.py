@@ -474,7 +474,7 @@ def launch(
 ) -> tuple[str, subprocess.Popen[bytes]]:
     """Set up state dir, spawn the pipeline detached, return (gremlin_id, process).
 
-    Worktree setup is deferred to the child process via PyGremlin.launch().
+    Worktree setup is deferred to the child process via PyGremlin.create().
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     stage_inputs may contain a 'pr' key to trigger a detached-from-ref checkout.
@@ -635,7 +635,7 @@ def _spawn_resume(
 
 
 def resume(gremlin_id: str, *, graft: str | None = None) -> None:
-    gremlin = PyGremlin.open(gremlin_id)
+    gremlin = PyGremlin.from_id(gremlin_id)
     _check_resume_preconditions(gremlin, graft)
     _pr = gremlin.project_root or _project_root_fn()
 
