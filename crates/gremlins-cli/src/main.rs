@@ -10,6 +10,7 @@ use gremlins::core::discovery;
 use gremlins::executor::gremlin::{validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
+use gremlins::schemas::expand;
 use gremlins::schemas::pipeline::Pipeline;
 use serde_json::Value;
 
@@ -638,7 +639,7 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     // Resolve the definition to a pipeline path.
     let project_root = config::project_root();
-    let pipeline_path = discovery::resolve_pipeline_path(definition, project_root)
+    let pipeline_path = discovery::resolve_pipeline_path(definition, project_root.clone())
         .map_err(|e| format!("pipeline not found: {e}"))?;
 
     // Load the pipeline just enough to validate --key args against
@@ -694,11 +695,15 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
     )
     .map_err(|e| format!("failed to create gremlin: {e}"))?;
 
-    // Snapshot the resolved pipeline YAML into the state directory so the run
-    // is hermetic — later stages and resumptions read this copy, not the
-    // original which may have moved or changed.
+    // Snapshot the fully expanded pipeline YAML into the state directory so
+    // the run is hermetic — all prompts, stage-definitions, and recipes are
+    // inlined, making the snapshot independent of the original project.
     let hermetic = gremlin.state_dir.join("pipeline.yaml");
-    fs::copy(&pipeline_path, &hermetic).map_err(|e| format!("failed to snapshot pipeline: {e}"))?;
+    let expanded = expand::parse_pipeline_file(&pipeline_path, &project_root)
+        .map_err(|e| format!("failed to expand pipeline: {e}"))?;
+    let yaml_str = serde_yaml::to_string(&expanded)
+        .map_err(|e| format!("failed to serialize pipeline: {e}"))?;
+    fs::write(&hermetic, yaml_str).map_err(|e| format!("failed to snapshot pipeline: {e}"))?;
 
     // Create an empty log file that the child will append to.
     let log_path = gremlin.state_dir.join("log");

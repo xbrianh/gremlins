@@ -648,6 +648,10 @@ fn _expand(
         serde_yaml::Value::String("stages".to_string()),
         serde_yaml::Value::Sequence(expanded_stages),
     );
+    result.insert(
+        serde_yaml::Value::String("__gremlins_expanded__".to_string()),
+        serde_yaml::Value::Bool(true),
+    );
 
     Ok(serde_yaml::Value::Mapping(result))
 }
