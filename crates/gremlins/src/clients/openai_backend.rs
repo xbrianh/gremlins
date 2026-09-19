@@ -59,7 +59,7 @@ pub struct OpenAiBackend {
     tool_filter: Option<Vec<String>>,
     client_params: HashMap<String, String>,
     last_ctx: Mutex<Option<RunContext>>,
-    cancels: Mutex<HashMap<u64, Arc<CancelToken>>>,
+    cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
     next_id: AtomicU64,
 }
 
@@ -100,11 +100,24 @@ impl OpenAiBackend {
     }
 
     async fn attempt(&self, prompt: &str, ctx: &RunContext) -> Result<CompletedRun, ClientError> {
+        let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let cancel = CancelToken::new();
-        self.cancels.lock().unwrap().insert(id, cancel.clone());
+        self.cancels
+            .lock()
+            .unwrap()
+            .entry(gremlin_id.clone())
+            .or_default()
+            .insert(id, cancel.clone());
         let result = self.attempt_inner(prompt, ctx, cancel).await;
-        self.cancels.lock().unwrap().remove(&id);
+        if let Ok(mut guard) = self.cancels.lock() {
+            if let Some(inner) = guard.get_mut(&gremlin_id) {
+                inner.remove(&id);
+                if inner.is_empty() {
+                    guard.remove(&gremlin_id);
+                }
+            }
+        }
         result
     }
 
@@ -352,14 +365,19 @@ impl Backend for OpenAiBackend {
         self.run(params).await
     }
 
-    fn reap_all(&self) {
-        if let Ok(guard) = self.cancels.lock() {
-            let count = guard.len();
+    fn reap_all(&self, gremlin_id: &str) {
+        if let Ok(mut guard) = self.cancels.lock() {
+            let tokens: Vec<_> = guard
+                .remove(gremlin_id)
+                .into_iter()
+                .flat_map(|m| m.into_values())
+                .collect();
+            let count = tokens.len();
             log::debug!(
-                "OpenAiBackend::reap_all: cancelling {count} in-flight token(s) (model={})",
+                "OpenAiBackend::reap_all: cancelling {count} in-flight token(s) for gremlin_id={gremlin_id} (model={})",
                 self.model,
             );
-            for token in guard.values() {
+            for token in &tokens {
                 token.cancel();
             }
         }
@@ -484,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn reap_all_cancels_every_token() {
+    fn reap_all_cancels_only_own_tokens() {
         let client = openai::Client::builder()
             .api_key(rig_core::client::BearerAuth::from("sk-test"))
             .base_url("https://api.openai.com/v1")
@@ -500,11 +518,36 @@ mod tests {
         );
         let a = CancelToken::new();
         let b = CancelToken::new();
-        backend.cancels.lock().unwrap().insert(1, a.clone());
-        backend.cancels.lock().unwrap().insert(2, b.clone());
-        backend.reap_all();
+        let sibling = CancelToken::new();
+        backend
+            .cancels
+            .lock()
+            .unwrap()
+            .entry("gr-test".to_string())
+            .or_default()
+            .insert(1, a.clone());
+        backend
+            .cancels
+            .lock()
+            .unwrap()
+            .entry("gr-test".to_string())
+            .or_default()
+            .insert(2, b.clone());
+        backend
+            .cancels
+            .lock()
+            .unwrap()
+            .entry("gr-sibling".to_string())
+            .or_default()
+            .insert(3, sibling.clone());
+        backend.reap_all("gr-test");
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());
+        // The gremlin entry is dropped when empty.
+        assert!(backend.cancels.lock().unwrap().get("gr-test").is_none());
+        // Sibling tokens are untouched.
+        assert!(!sibling.is_cancelled());
+        assert!(backend.cancels.lock().unwrap().get("gr-sibling").is_some());
     }
 
     #[test]

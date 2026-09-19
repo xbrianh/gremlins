@@ -25,7 +25,7 @@ pub struct CmdBackend {
     command: Vec<String>,
     stream_json: bool,
     footer_re: Option<Regex>,
-    pids: Mutex<Vec<u32>>,
+    pids: Mutex<HashMap<String, Vec<u32>>>,
     /// Per-task context for resume
     ctx: Mutex<Option<CmdContext>>,
 }
@@ -45,6 +45,7 @@ struct CmdContext {
     prefix: String,
     last_session_id: Option<String>,
     artifact_dir: Option<PathBuf>,
+    gremlin_id: String,
 }
 
 impl CmdBackend {
@@ -70,20 +71,25 @@ impl CmdBackend {
             command: args,
             stream_json,
             footer_re,
-            pids: Mutex::new(Vec::new()),
+            pids: Mutex::new(HashMap::new()),
             ctx: Mutex::new(None),
         })
     }
 
-    fn track_pid(&self, pid: u32) {
+    fn track_pid(&self, gremlin_id: &str, pid: u32) {
         if let Ok(mut pids) = self.pids.lock() {
-            pids.push(pid);
+            pids.entry(gremlin_id.to_string()).or_default().push(pid);
         }
     }
 
-    fn untrack_pid(&self, pid: u32) {
+    fn untrack_pid(&self, gremlin_id: &str, pid: u32) {
         if let Ok(mut pids) = self.pids.lock() {
-            pids.retain(|p| *p != pid);
+            if let Some(vec) = pids.get_mut(gremlin_id) {
+                vec.retain(|p| *p != pid);
+                if vec.is_empty() {
+                    pids.remove(gremlin_id);
+                }
+            }
         }
     }
 
@@ -335,6 +341,7 @@ impl CmdBackend {
         &self,
         prompt: &str,
         session_id: Option<&str>,
+        gremlin_id: &str,
     ) -> Result<CompletedRun, ClientError> {
         let (model, cwd, extra_env, prefix, raw_path, capture_events, idle_timeout, artifact_dir) = {
             let ctx_guard = self.ctx.lock().unwrap();
@@ -359,7 +366,7 @@ impl CmdBackend {
             .await?;
         let pid = child.id();
         if let Some(pid) = pid {
-            self.track_pid(pid);
+            self.track_pid(gremlin_id, pid);
         }
 
         let result = if self.stream_json {
@@ -385,7 +392,7 @@ impl CmdBackend {
             })?;
 
             if let Some(pid) = pid {
-                self.untrack_pid(pid);
+                self.untrack_pid(gremlin_id, pid);
             }
 
             if timed_out {
@@ -425,7 +432,7 @@ impl CmdBackend {
             })?;
 
             if let Some(pid) = pid {
-                self.untrack_pid(pid);
+                self.untrack_pid(gremlin_id, pid);
             }
 
             if timed_out {
@@ -469,6 +476,7 @@ impl Backend for CmdBackend {
             format!("[{}] ", params.label)
         };
 
+        let gremlin_id = params.gremlin_id.clone().unwrap_or_default();
         {
             let mut ctx = self.ctx.lock().unwrap();
             *ctx = Some(CmdContext {
@@ -485,10 +493,11 @@ impl Backend for CmdBackend {
                 prefix: prefix.clone(),
                 last_session_id: None,
                 artifact_dir: params.artifact_dir.clone(),
+                gremlin_id: gremlin_id.clone(),
             });
         }
 
-        let result = self.attempt(&effective_prompt, None).await;
+        let result = self.attempt(&effective_prompt, None, &gremlin_id).await;
 
         match result {
             Ok(r) => {
@@ -510,7 +519,7 @@ impl Backend for CmdBackend {
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        let (prompt, on_timeout_prompt, max_retries, prefix, last_session_id) = {
+        let (prompt, on_timeout_prompt, max_retries, prefix, last_session_id, gremlin_id) = {
             let ctx = self.ctx.lock().unwrap();
             let ctx = ctx.as_ref().ok_or_else(|| ClientError::Runtime {
                 message: "resume() called before run()".into(),
@@ -521,6 +530,7 @@ impl Backend for CmdBackend {
                 ctx.max_retries,
                 ctx.prefix.clone(),
                 ctx.last_session_id.clone(),
+                ctx.gremlin_id.clone(),
             )
         };
 
@@ -559,7 +569,8 @@ impl Backend for CmdBackend {
                     active_prompt.clone()
                 };
                 let sid = last_session_id.clone();
-                async move { self.attempt(&p, sid.as_deref()).await }
+                let gid = gremlin_id.clone();
+                async move { self.attempt(&p, sid.as_deref(), &gid).await }
             },
         )
         .await;
@@ -584,10 +595,10 @@ impl Backend for CmdBackend {
         }
     }
 
-    fn reap_all(&self) {
+    fn reap_all(&self, gremlin_id: &str) {
         let pids: Vec<u32> = {
             let mut pids = self.pids.lock().unwrap();
-            std::mem::take(&mut *pids)
+            pids.remove(gremlin_id).unwrap_or_default()
         };
         #[cfg(unix)]
         for &pid in &pids {

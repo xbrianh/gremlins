@@ -332,6 +332,7 @@ async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Ru
             .map(PathBuf::from)
             .collect(),
         system_prompt: Some(prepared.system_prompt()),
+        gremlin_id: Some(gremlin.id.to_string()),
     };
 
     log::debug!(
@@ -732,7 +733,7 @@ impl Gremlin {
             self.client.provider(),
             self.client.model(),
         );
-        self.client.reap_all();
+        self.client.reap_all(self.id.as_str());
         let mut total = self.client.total_cost_usd().unwrap_or(0.0);
         // Subprocess spend is only meaningful when it is a real, non-negative
         // number; a blank or junk field must not poison the total.

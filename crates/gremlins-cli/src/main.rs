@@ -79,11 +79,9 @@ async fn main() {
     // _run redirects stderr to the log file, so per-stage DEBUG logs end up
     // captured in the gremlin's log.
     let level = std::env::var("GREMLINS_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(&level),
-    )
-    .format_timestamp_millis()
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&level))
+        .format_timestamp_millis()
+        .init();
 
     let cli = Cli::parse();
     let result = match cli.command {

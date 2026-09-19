@@ -20,6 +20,7 @@ pub struct RunParams {
     pub extra_env: Option<HashMap<String, String>>,
     pub expected_artifact_paths: Vec<PathBuf>,
     pub system_prompt: Option<String>,
+    pub gremlin_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -47,7 +48,7 @@ pub trait Backend: Send + Sync {
 
     async fn resume(&self) -> Result<CompletedRun, ClientError>;
 
-    fn reap_all(&self);
+    fn reap_all(&self, gremlin_id: &str);
 
     fn total_cost_usd(&self) -> Option<f64>;
 }

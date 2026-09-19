@@ -1151,6 +1151,7 @@ mod tests {
                 extra_env: None,
                 expected_artifact_paths: vec![],
                 system_prompt: None,
+                gremlin_id: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
