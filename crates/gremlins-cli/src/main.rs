@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use clap::{Parser, Subcommand};
 use gremlins::config;
 use gremlins::core::discovery;
+use gremlins::core::git;
 use gremlins::executor::gremlin::{validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
@@ -287,7 +288,17 @@ fn stop(id: &str) -> Result<(), String> {
         .unwrap_or(0);
 
     if pid_raw == 0 {
-        // PID is null or absent — the gremlin has already stopped on its own.
+        // A null PID is normal for a parallel child (fork_child seeds
+        // pid: null) — it has no OS process to signal.  Reject the stop
+        // so the operator stops the parent instead.
+        let parent_id = gremlin.state.read_str("parent_id");
+        if !parent_id.is_empty() {
+            return Err(format!(
+                "gremlin {id} is a parallel child — stop its parent {parent_id} instead"
+            ));
+        }
+        // PID is null or absent in a top-level gremlin — it has already
+        // stopped on its own.
         println!("gremlin {id} is already stopped");
         gremlin.state.write_terminal_state(-1);
         return Ok(());
@@ -302,7 +313,14 @@ fn stop(id: &str) -> Result<(), String> {
         if ret != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::ESRCH) {
-                // ESRCH: the process is already gone — treat as already stopped.
+                // ESRCH: the process is already gone — treat the same as
+                // the pid_raw == 0 case above.
+                let parent_id = gremlin.state.read_str("parent_id");
+                if !parent_id.is_empty() {
+                    return Err(format!(
+                        "gremlin {id} is a parallel child — stop its parent {parent_id} instead"
+                    ));
+                }
                 println!("gremlin {id} has already exited");
                 gremlin.state.write_terminal_state(-1);
                 return Ok(());
@@ -411,6 +429,26 @@ async fn resume(id: &str) -> Result<(), String> {
         let _ = std::fs::remove_file(&finished);
     }
 
+    // Patch state to "running" *before* spawning the child.  When the child
+    // finishes quickly it writes terminal fields (status=done, ended_at,
+    // exit_code), and a parent patch after that would overwrite them with
+    // stale values.  Publishing first means the child's terminal write is
+    // the final word.
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "status".to_string(),
+        serde_json::Value::String("running".to_string()),
+    );
+    fields.insert("ended_at".to_string(), serde_json::Value::Null);
+    fields.insert("exit_code".to_string(), serde_json::Value::Null);
+    let current_attempt = gremlin.state.read_str("attempt");
+    let new_attempt = format!("{current_attempt}-resume-{}", state::token_hex(2));
+    fields.insert(
+        "attempt".to_string(),
+        serde_json::Value::String(new_attempt),
+    );
+    gremlin.state.patch(&[], &fields);
+
     // Spawn the child process: stdin is /dev/null, stdout and stderr go to
     // the gremlin's log file in append mode.
     let log_path = state_dir.join("log");
@@ -437,24 +475,6 @@ async fn resume(id: &str) -> Result<(), String> {
         .stderr(Stdio::from(log_file))
         .spawn()
         .map_err(|e| format!("failed to spawn gremlin: {e}"))?;
-
-    // Only patch state after the child is successfully spawned, so a
-    // failure to open the log or spawn leaves the gremlin in its prior
-    // state rather than permanently marked as running.
-    let mut fields = serde_json::Map::new();
-    fields.insert(
-        "status".to_string(),
-        serde_json::Value::String("running".to_string()),
-    );
-    fields.insert("ended_at".to_string(), serde_json::Value::Null);
-    fields.insert("exit_code".to_string(), serde_json::Value::Null);
-    let current_attempt = gremlin.state.read_str("attempt");
-    let new_attempt = format!("{current_attempt}-resume-{}", state::token_hex(2));
-    fields.insert(
-        "attempt".to_string(),
-        serde_json::Value::String(new_attempt),
-    );
-    gremlin.state.patch(&[], &fields);
 
     println!("{id}");
     Ok(())
@@ -686,7 +706,20 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         .unwrap_or("gremlin");
 
     // Generate a gremlin id, re-rolling if the state directory already exists.
-    let gremlin_id = generate_id(definition_name);
+    let gremlin_id = generate_id(definition_name)?;
+
+    // Resolve the pipeline's base_ref so the worktree branches from the
+    // configured branch/tag rather than always from HEAD.
+    let base_ref = pipeline.base_ref.clone();
+    let base_ref_sha = if base_ref.is_empty() || base_ref == "HEAD" {
+        String::new()
+    } else {
+        git::resolve_base_ref(&base_ref, Some(&project_root))
+            .map(|(_name, sha)| sha)
+            .map_err(|e| format!("failed to resolve base_ref {base_ref:?}: {e}"))?
+    };
+    let base_ref_opt = if base_ref.is_empty() { None } else { Some(base_ref.as_str()) };
+    let base_ref_sha_opt = if base_ref_sha.is_empty() { None } else { Some(base_ref_sha.as_str()) };
 
     // Create the gremlin: state dir, worktree, initial state.json.
     let gremlin = Gremlin::create(
@@ -698,8 +731,8 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         &stage_inputs,
         false,
         None,
-        None,
-        None,
+        base_ref_opt,
+        base_ref_sha_opt,
     )
     .map_err(|e| format!("failed to create gremlin: {e}"))?;
 
@@ -785,7 +818,7 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
 /// The directory is atomically reserved via `create_dir` so concurrent
 /// launches cannot land on the same id.  If creation fails because the
 /// directory already exists, the loop re-rolls.
-fn generate_id(name: &str) -> String {
+fn generate_id(name: &str) -> Result<String, String> {
     let state_root = config::state_root();
     loop {
         let hex = state::token_hex(2); // 4 hex chars
@@ -794,9 +827,9 @@ fn generate_id(name: &str) -> String {
             continue;
         }
         match std::fs::create_dir(state_root.join(&id)) {
-            Ok(()) => return id,
+            Ok(()) => return Ok(id),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => continue,
+            Err(e) => return Err(format!("failed to create state dir: {e}")),
         }
     }
 }
@@ -839,10 +872,18 @@ async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> 
 
     // Run every stage to completion.  The library's run loop handles
     // terminal-state bookkeeping regardless of outcome.
-    let exit_code = gremlin
-        .run()
-        .await
-        .map_err(|e| format!("gremlin {id}: {e}"))?;
+    let exit_code = match gremlin.run().await {
+        Ok(ec) => ec,
+        Err(e) => {
+            // A failure before the stage loop (bootstrap, pipeline loading)
+            // returns through `run()` without calling `finish`, leaving
+            // `state.json` as "running" with no terminal marker.  Write
+            // terminal state here so the run does not appear permanently
+            // live.
+            gremlin.state.write_terminal_state(1);
+            return Err(format!("gremlin {id}: {e}"));
+        }
+    };
     if exit_code != 0 {
         std::process::exit(exit_code);
     }

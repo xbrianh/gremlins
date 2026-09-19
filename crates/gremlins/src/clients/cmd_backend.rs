@@ -26,8 +26,12 @@ pub struct CmdBackend {
     stream_json: bool,
     footer_re: Option<Regex>,
     pids: Mutex<HashMap<String, Vec<u32>>>,
-    /// Per-task context for resume
-    ctx: Mutex<Option<CmdContext>>,
+    /// Per-gremlin retry context, keyed by gremlin_id so parallel children
+    /// don't overwrite each other's prompt/session when a timeout occurs.
+    ctx: Mutex<HashMap<String, CmdContext>>,
+    /// The gremlin_id most recently passed to `run`, used by `resume`
+    /// to look up the right context.
+    last_gremlin_id: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +76,8 @@ impl CmdBackend {
             stream_json,
             footer_re,
             pids: Mutex::new(HashMap::new()),
-            ctx: Mutex::new(None),
+            ctx: Mutex::new(HashMap::new()),
+            last_gremlin_id: Mutex::new(None),
         })
     }
 
@@ -345,8 +350,8 @@ impl CmdBackend {
     ) -> Result<CompletedRun, ClientError> {
         let (model, cwd, extra_env, prefix, raw_path, capture_events, idle_timeout, artifact_dir) = {
             let ctx_guard = self.ctx.lock().unwrap();
-            let ctx = ctx_guard.as_ref().ok_or_else(|| ClientError::Runtime {
-                message: "attempt() called before run()".into(),
+            let ctx = ctx_guard.get(gremlin_id).ok_or_else(|| ClientError::Runtime {
+                message: format!("attempt() called before run() for gremlin {gremlin_id}"),
             })?;
             (
                 ctx.model.clone(),
@@ -381,7 +386,7 @@ impl CmdBackend {
 
             if let Some(ref sid) = sid {
                 if let Ok(mut ctx) = self.ctx.lock() {
-                    if let Some(ref mut c) = *ctx {
+                    if let Some(c) = ctx.get_mut(gremlin_id) {
                         c.last_session_id = Some(sid.clone());
                     }
                 }
@@ -479,7 +484,7 @@ impl Backend for CmdBackend {
         let gremlin_id = params.gremlin_id.clone().unwrap_or_default();
         {
             let mut ctx = self.ctx.lock().unwrap();
-            *ctx = Some(CmdContext {
+            ctx.insert(gremlin_id.clone(), CmdContext {
                 prompt: effective_prompt.clone(),
                 label: params.label.clone(),
                 model: params.model.clone(),
@@ -495,6 +500,7 @@ impl Backend for CmdBackend {
                 artifact_dir: params.artifact_dir.clone(),
                 gremlin_id: gremlin_id.clone(),
             });
+            *self.last_gremlin_id.lock().unwrap() = Some(gremlin_id.clone());
         }
 
         let result = self.attempt(&effective_prompt, None, &gremlin_id).await;
@@ -520,9 +526,13 @@ impl Backend for CmdBackend {
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
         let (prompt, on_timeout_prompt, max_retries, prefix, last_session_id, gremlin_id) = {
-            let ctx = self.ctx.lock().unwrap();
-            let ctx = ctx.as_ref().ok_or_else(|| ClientError::Runtime {
+            let gid = self.last_gremlin_id.lock().unwrap();
+            let gid = gid.as_ref().ok_or_else(|| ClientError::Runtime {
                 message: "resume() called before run()".into(),
+            })?;
+            let ctx = self.ctx.lock().unwrap();
+            let ctx = ctx.get(gid).ok_or_else(|| ClientError::Runtime {
+                message: format!("resume(): no context for gremlin {gid}"),
             })?;
             (
                 ctx.prompt.clone(),
@@ -579,8 +589,12 @@ impl Backend for CmdBackend {
             Ok(r) => {
                 if r.exit_code != 0 {
                     let label = {
+                        let gid = self.last_gremlin_id.lock().unwrap();
+                        let gid_opt = gid.as_ref();
                         let ctx = self.ctx.lock().unwrap();
-                        ctx.as_ref().map_or("?".to_string(), |c| c.label.clone())
+                        gid_opt
+                            .and_then(|gid| ctx.get(gid.as_str()))
+                            .map_or("?".to_string(), |c| c.label.clone())
                     };
                     return Err(ClientError::Runtime {
                         message: format!(

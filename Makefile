@@ -1,6 +1,6 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc) --output-sync=line
 
-.PHONY: test check fmt fmt-check clippy build release
+.PHONY: test check fmt fmt-check clippy build release autoformat
 
 # --- Test ---
 
@@ -24,6 +24,11 @@ fmt-check:
 
 clippy:
 	cargo clippy -q --all-targets -- -D warnings
+
+# --- Autoformat ---
+
+autoformat: fmt
+	cargo clippy --fix --all-targets --allow-dirty
 
 # --- Build ---
 

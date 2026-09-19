@@ -198,7 +198,7 @@ async fn run_stage_scoped(
         RunnableStage::Loop { .. } => run_loop(stage, gremlin, enclosing_client).await,
         RunnableStage::Parallel { .. } => {
             log::debug!("dispatching stage '{}' to run_parallel", stage.name());
-            run_parallel(stage, gremlin).await
+            run_parallel(stage, gremlin, enclosing_client).await
         }
     }
 }
