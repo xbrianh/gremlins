@@ -34,6 +34,9 @@ enum Cmds {
     Run {
         /// Gremlin id to resume or start fresh.
         id: String,
+        /// Stage to resume from (internal use).
+        #[arg(long, hide = true)]
+        resume_from: Option<String>,
     },
     /// List gremlins from the state root as a plain-column table.
     Show {
@@ -46,6 +49,11 @@ enum Cmds {
         /// Gremlin id to stop.
         id: String,
     },
+    /// Resume a stopped or bailed gremlin from its last recorded stage.
+    Resume {
+        /// Gremlin id to resume.
+        id: String,
+    },
     /// `gremlins <id>` — print detailed status for one gremlin.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -56,9 +64,10 @@ async fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Cmds::Launch { definition, args }) => launch(&definition, &args).await,
-        Some(Cmds::Run { id }) => run_gremlin(&id).await,
+        Some(Cmds::Run { id, resume_from }) => run_gremlin(&id, resume_from.as_deref()).await,
         Some(Cmds::Show { here }) => show(here),
         Some(Cmds::Stop { id }) => stop(&id),
+        Some(Cmds::Resume { id }) => resume(&id).await,
         Some(Cmds::External(args)) => status_external(&args),
         None => {
             // No subcommand — print help and exit 0.
@@ -316,6 +325,117 @@ fn stop(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// resume
+// ---------------------------------------------------------------------------
+
+/// Resume a stopped or bailed gremlin from its last recorded stage.
+///
+/// Validates the id, confirms the state directory exists, checks that the
+/// gremlin is resumable (not running, not done), patches the state to
+/// `"running"`, bumps the attempt suffix, and spawns `_run --resume-from`
+/// as a detached child.
+async fn resume(id: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        return Err(format!(
+            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+        ));
+    }
+
+    let gremlin = Gremlin::from(id).map_err(|e| format!("gremlin {id}: {e}"))?;
+
+    let status = gremlin.state.read_str("status");
+
+    // A running gremlin must not be resumed — two processes driving the same
+    // state directory would corrupt it.
+    if status == "running" {
+        return Err(format!(
+            "gremlin {id} is already running — use `gremlins stop {id}` first"
+        ));
+    }
+
+    // A done gremlin has no stages left to run.
+    if status == "done" {
+        return Err(format!("gremlin {id} is already done — nothing to resume"));
+    }
+
+    // Only stopped gremlins or those carrying a bail record are resumable.
+    let has_bail = gremlin.state.read_bail_info().is_some();
+    if status != "stopped" && !has_bail {
+        return Err(format!(
+            "gremlin {id} cannot be resumed — status is {status:?} with no bail record"
+        ));
+    }
+
+    // Read the last recorded stage — this is the resume point.
+    let stage = gremlin.state.read_str("stage");
+    if stage.is_empty() || stage == "starting" {
+        return Err(format!("gremlin {id} has no recorded stage to resume from"));
+    }
+
+    // Remove the finished marker if present.
+    let finished = state_dir.join("finished");
+    if finished.is_file() {
+        let _ = std::fs::remove_file(&finished);
+    }
+
+    // Spawn the child process: stdin is /dev/null, stdout and stderr go to
+    // the gremlin's log file in append mode.
+    let log_path = state_dir.join("log");
+    let log_file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&log_path)
+        .map_err(|e| format!("failed to open log: {e}"))?;
+
+    let stdout_file = log_file
+        .try_clone()
+        .map_err(|e| format!("failed to clone log handle: {e}"))?;
+
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("cannot find own binary: {e}"))?;
+
+    Command::new(current_exe)
+        .arg("_run")
+        .arg(id)
+        .arg("--resume-from")
+        .arg(&stage)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .map_err(|e| format!("failed to spawn gremlin: {e}"))?;
+
+    // Only patch state after the child is successfully spawned, so a
+    // failure to open the log or spawn leaves the gremlin in its prior
+    // state rather than permanently marked as running.
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "status".to_string(),
+        serde_json::Value::String("running".to_string()),
+    );
+    fields.insert("ended_at".to_string(), serde_json::Value::Null);
+    fields.insert("exit_code".to_string(), serde_json::Value::Null);
+    let current_attempt = gremlin.state.read_str("attempt");
+    let new_attempt = format!("{current_attempt}-resume-{}", state::token_hex(2));
+    fields.insert(
+        "attempt".to_string(),
+        serde_json::Value::String(new_attempt),
+    );
+    gremlin.state.patch(&[], &fields);
+
+    println!("{id}");
+    Ok(())
+}
+
 /// Read a state field for display, treating null/absent as empty.
 fn field_display(state: &StateData, field: &str) -> String {
     value_display(state.read_field(field).as_ref())
@@ -568,7 +688,7 @@ fn generate_id(name: &str) -> String {
 // _run
 // ---------------------------------------------------------------------------
 
-async fn run_gremlin(id: &str) -> Result<(), String> {
+async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     // Reconstruct the handle from the persisted state directory.
@@ -580,6 +700,11 @@ async fn run_gremlin(id: &str) -> Result<(), String> {
             format!("gremlin {id}: {msg}")
         }
     })?;
+
+    // Set the resume point when the caller provided one.
+    if let Some(stage) = resume_from {
+        gremlin.resume_from = Some(stage.to_string());
+    }
 
     // Write our PID — the launcher wrote its own, but we are the process
     // that actually runs the pipeline.
