@@ -240,42 +240,6 @@ impl RunnableStage {
                 .collect(),
         }
     }
-
-    /// Give every stage without a client of its own the effective client of its
-    /// nearest enclosing stage — the pipeline default at the top. An explicit
-    /// `client:` always wins, and a composite's explicit client is inherited by
-    /// its children.
-    pub fn fill_client(&mut self, default: &ClientSpec) {
-        let effective = {
-            let client = self.client_slot();
-            if client.is_none() {
-                *client = Some(default.clone());
-            }
-            client.clone().expect("client just filled")
-        };
-        for child in self.body_mut() {
-            child.fill_client(&effective);
-        }
-    }
-
-    fn client_slot(&mut self) -> &mut Option<ClientSpec> {
-        match self {
-            RunnableStage::Agent { client, .. }
-            | RunnableStage::Exec { client, .. }
-            | RunnableStage::Loop { client, .. }
-            | RunnableStage::Sequence { client, .. }
-            | RunnableStage::Parallel { client, .. } => client,
-        }
-    }
-
-    fn body_mut(&mut self) -> &mut [RunnableStage] {
-        match self {
-            RunnableStage::Agent { .. } | RunnableStage::Exec { .. } => &mut [],
-            RunnableStage::Loop { body, .. }
-            | RunnableStage::Sequence { body, .. }
-            | RunnableStage::Parallel { body, .. } => body,
-        }
-    }
 }
 
 fn parse_agent(mapping: &Mapping, name: &str) -> Result<RunnableStage, StageError> {
@@ -734,67 +698,6 @@ mod tests {
             err.to_string().contains("'client' must be a string"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn fill_client_reaches_nested_bodies_and_respects_explicit_clients() {
-        let mut stages = parse_all(
-            r#"
-- parallel:
-    - type: exec
-      options:
-        cmds: ["true"]
-    - type: exec
-      client: "explicit:model"
-      options:
-        cmds: ["true"]
-"#,
-        )
-        .unwrap();
-
-        stages[0].fill_client(&ClientSpec("default:model".into()));
-
-        assert_eq!(
-            stages[0].client(),
-            Some(&ClientSpec("default:model".into()))
-        );
-        assert_eq!(
-            stages[0].body()[0].client(),
-            Some(&ClientSpec("default:model".into()))
-        );
-        assert_eq!(
-            stages[0].body()[1].client(),
-            Some(&ClientSpec("explicit:model".into()))
-        );
-    }
-
-    #[test]
-    fn fill_client_inherits_the_enclosing_composites_client() {
-        let mut stages = parse_all(
-            r#"
-- type: loop
-  client: "outer:model"
-  body:
-    - type: exec
-      options:
-        cmds: ["true"]
-    - type: sequence
-      body:
-        - type: exec
-          options:
-            cmds: ["true"]
-"#,
-        )
-        .unwrap();
-
-        stages[0].fill_client(&ClientSpec("default:model".into()));
-
-        let outer = ClientSpec("outer:model".into());
-        assert_eq!(stages[0].client(), Some(&outer));
-        assert_eq!(stages[0].body()[0].client(), Some(&outer));
-        assert_eq!(stages[0].body()[1].client(), Some(&outer));
-        // A grandchild inherits the enclosing composite's client too.
-        assert_eq!(stages[0].body()[1].body()[0].client(), Some(&outer));
     }
 
     #[test]

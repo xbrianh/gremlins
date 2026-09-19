@@ -42,8 +42,8 @@ pub(crate) async fn run_parallel(
         max_concurrent,
         cancel_on_error,
         error_policy,
+        client,
         body,
-        ..
     } = stage
     else {
         unreachable!("run_parallel is only called for parallel stages")
@@ -116,6 +116,14 @@ pub(crate) async fn run_parallel(
             &child_name,
             child_stages,
         )?;
+
+        // If the parallel group has an explicit client, it becomes the
+        // default for every child — the child's own explicit `client:`
+        // still wins via `resolve_client_spec` step 1, and
+        // `default-client-by-stage` still takes effect.
+        if let Some(c) = client {
+            child_gremlin.pipeline.default_client = c.0.clone();
+        }
 
         log::debug!(
             "parallel group {group_name}: child {child_name} forked (state_dir={}, artifact_dir={})",
@@ -927,5 +935,29 @@ mod tests {
         let result = run_parallel(&stage, &mut gremlin).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         // Cost aggregation is best-effort; the test just verifies no panic.
+    }
+
+    // --- Client inheritance ---
+
+    #[tokio::test]
+    async fn parallel_with_explicit_client_succeeds() {
+        // Smoke test: a parallel with an explicit `client:` propagates it
+        // to child pipelines so resolve_client_spec's step-4 fallback
+        // picks it up. An exec child doesn't call resolve_client, so this
+        // just proves the new code path doesn't crash.
+        let yaml = r#"
+- name: group
+  client: "cmd:true"
+  parallel:
+    - name: a
+      type: exec
+      options:
+        cmds: ["true"]
+"#;
+        let stages = parse_stages(yaml);
+        let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
+        let stage = stages[0].clone();
+        let result = run_parallel(&stage, &mut gremlin).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 }
