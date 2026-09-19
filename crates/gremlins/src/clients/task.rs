@@ -598,8 +598,30 @@ mod tests {
         /// fd 2 is process-wide, so capturing tests take turns.
         static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 
+        /// Minimal logger that writes to stderr via eprintln! so the fd-2
+        /// redirect in [`capture_stderr`] captures log output.
+        struct TestLogger;
+
+        impl log::Log for TestLogger {
+            fn enabled(&self, _metadata: &log::Metadata) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record) {
+                if self.enabled(record.metadata()) {
+                    eprintln!("{} {} {}", record.level(), record.target(), record.args());
+                }
+            }
+            fn flush(&self) {
+                let _ = std::io::stderr().flush();
+            }
+        }
+
         fn capture_stderr(job: impl FnOnce() + Send + 'static) -> Vec<String> {
             let _serialized = CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            // Install a minimal logger that writes to stderr via eprintln! so
+            // the fd-2 redirect in this function captures log output.
+            let _ = log::set_logger(&TestLogger);
+            log::set_max_level(log::LevelFilter::Info);
             let path = std::env::temp_dir().join(format!(
                 "gremlins-sub-log-{}-{}",
                 std::process::id(),

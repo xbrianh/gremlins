@@ -13,7 +13,6 @@ use tokio::process::{Child, Command};
 use super::backend::{Backend, ClientError, RunParams};
 use super::protocol::CompletedRun;
 use super::retry::{validate_max_retries, with_retry, STREAM_IDLE_BACKOFF};
-use super::stream;
 use super::stream_json::{self, StreamState};
 
 fn footer_re() -> &'static Regex {
@@ -350,9 +349,11 @@ impl CmdBackend {
     ) -> Result<CompletedRun, ClientError> {
         let (model, cwd, extra_env, prefix, raw_path, capture_events, idle_timeout, artifact_dir) = {
             let ctx_guard = self.ctx.lock().unwrap();
-            let ctx = ctx_guard.get(gremlin_id).ok_or_else(|| ClientError::Runtime {
-                message: format!("attempt() called before run() for gremlin {gremlin_id}"),
-            })?;
+            let ctx = ctx_guard
+                .get(gremlin_id)
+                .ok_or_else(|| ClientError::Runtime {
+                    message: format!("attempt() called before run() for gremlin {gremlin_id}"),
+                })?;
             (
                 ctx.model.clone(),
                 ctx.cwd.clone(),
@@ -484,22 +485,25 @@ impl Backend for CmdBackend {
         let gremlin_id = params.gremlin_id.clone().unwrap_or_default();
         {
             let mut ctx = self.ctx.lock().unwrap();
-            ctx.insert(gremlin_id.clone(), CmdContext {
-                prompt: effective_prompt.clone(),
-                label: params.label.clone(),
-                model: params.model.clone(),
-                raw_path: params.raw_path.clone(),
-                capture_events: params.capture_events,
-                on_timeout_prompt: params.on_timeout_prompt.clone(),
-                max_retries: params.max_retries,
-                cwd: params.cwd.clone(),
-                idle_timeout,
-                extra_env: params.extra_env.clone(),
-                prefix: prefix.clone(),
-                last_session_id: None,
-                artifact_dir: params.artifact_dir.clone(),
-                gremlin_id: gremlin_id.clone(),
-            });
+            ctx.insert(
+                gremlin_id.clone(),
+                CmdContext {
+                    prompt: effective_prompt.clone(),
+                    label: params.label.clone(),
+                    model: params.model.clone(),
+                    raw_path: params.raw_path.clone(),
+                    capture_events: params.capture_events,
+                    on_timeout_prompt: params.on_timeout_prompt.clone(),
+                    max_retries: params.max_retries,
+                    cwd: params.cwd.clone(),
+                    idle_timeout,
+                    extra_env: params.extra_env.clone(),
+                    prefix: prefix.clone(),
+                    last_session_id: None,
+                    artifact_dir: params.artifact_dir.clone(),
+                    gremlin_id: gremlin_id.clone(),
+                },
+            );
             *self.last_gremlin_id.lock().unwrap() = Some(gremlin_id.clone());
         }
 
@@ -562,12 +566,8 @@ impl Backend for CmdBackend {
                     ClientError::ApiServerError { .. } => "api server error",
                     _ => "error",
                 };
-                eprintln!(
-                    "{} {}{}, resuming in {}s ({}/{})...",
-                    stream::ts_internal(),
-                    prefix,
-                    cause,
-                    wait,
+                log::warn!(
+                    "{prefix}{cause}, resuming in {wait}s ({}/{})...",
                     attempt + 1,
                     max_retries
                 );

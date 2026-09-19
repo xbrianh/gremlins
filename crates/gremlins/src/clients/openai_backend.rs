@@ -10,7 +10,6 @@ use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, 
 use super::backend::{Backend, ClientError, RunParams};
 use super::protocol::CompletedRun;
 use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
-use super::stream;
 use super::task::TaskModelSelector;
 
 /// The completion model type shared by every OpenAI-compatible backend.
@@ -337,10 +336,8 @@ impl Backend for OpenAiBackend {
                     ClientError::ApiServerError { .. } => "transient-error",
                     _ => "error",
                 };
-                eprintln!(
-                    "{} {}stream {cause}, retrying in {wait}s ({}/{})...",
-                    stream::ts_internal(),
-                    prefix,
+                log::warn!(
+                    "{prefix}stream {cause}, retrying in {wait}s ({}/{})...",
                     attempt + 1,
                     params.max_retries
                 );

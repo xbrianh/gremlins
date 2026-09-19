@@ -11,7 +11,6 @@ use super::backend::{Backend, ClientError, RunParams};
 use super::openai_backend::{build_extra_params, run_with_agent_loop, task_model_selector};
 use super::protocol::CompletedRun;
 use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
-use super::stream;
 
 /// Provider name this backend answers to, used to match `task-clients` specs.
 const PROVIDER_NAME: &str = "openrouter";
@@ -214,10 +213,8 @@ impl Backend for OpenRouterBackend {
                     ClientError::ApiServerError { .. } => "transient-error",
                     _ => "error",
                 };
-                eprintln!(
-                    "{} {}stream {cause}, retrying in {wait}s ({}/{})...",
-                    stream::ts_internal(),
-                    prefix,
+                log::warn!(
+                    "{prefix}stream {cause}, retrying in {wait}s ({}/{})...",
                     attempt + 1,
                     params.max_retries
                 );

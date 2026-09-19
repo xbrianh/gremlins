@@ -121,8 +121,8 @@ pub(crate) async fn run_parallel(
         // Resolve the effective client for this parallel group:
         // 1. The group's own `client:` always wins.
         // 2. Otherwise, the enclosing client from the parent sequence/loop.
-        let enclosing_spec = enclosing_client
-            .map(|c| crate::stages::composite::ClientSpec(c.to_string()));
+        let enclosing_spec =
+            enclosing_client.map(|c| crate::stages::composite::ClientSpec(c.to_string()));
         let effective_client = client.as_ref().or(enclosing_spec.as_ref());
         if let Some(c) = &effective_client {
             // The pipeline default is what `resolve_client_spec` step 4

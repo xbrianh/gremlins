@@ -718,8 +718,16 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
             .map(|(_name, sha)| sha)
             .map_err(|e| format!("failed to resolve base_ref {base_ref:?}: {e}"))?
     };
-    let base_ref_opt = if base_ref.is_empty() { None } else { Some(base_ref.as_str()) };
-    let base_ref_sha_opt = if base_ref_sha.is_empty() { None } else { Some(base_ref_sha.as_str()) };
+    let base_ref_opt = if base_ref.is_empty() {
+        None
+    } else {
+        Some(base_ref.as_str())
+    };
+    let base_ref_sha_opt = if base_ref_sha.is_empty() {
+        None
+    } else {
+        Some(base_ref_sha.as_str())
+    };
 
     // Create the gremlin: state dir, worktree, initial state.json.
     let gremlin = Gremlin::create(
