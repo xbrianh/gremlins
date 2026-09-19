@@ -59,6 +59,14 @@ enum Cmds {
         /// Gremlin id whose log to follow.
         id: String,
     },
+    /// Remove a gremlin's filesystem assets.
+    Clean {
+        /// Gremlin id to clean.
+        id: String,
+        /// Preserve the state directory (with a `closed` marker).
+        #[arg(long)]
+        keep: bool,
+    },
     /// `gremlins <id>` — print detailed status for one gremlin.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -74,6 +82,7 @@ async fn main() {
         Some(Cmds::Stop { id }) => stop(&id),
         Some(Cmds::Resume { id }) => resume(&id).await,
         Some(Cmds::Log { id }) => log_gremlin(&id),
+        Some(Cmds::Clean { id, keep }) => clean(&id, keep),
         Some(Cmds::External(args)) => status_external(&args),
         None => {
             // No subcommand — print help and exit 0.
@@ -475,6 +484,59 @@ fn log_gremlin(id: &str) -> Result<(), String> {
         return Err(format!("less exited with status {status}"));
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// clean
+// ---------------------------------------------------------------------------
+
+/// Remove a gremlin's filesystem assets.
+///
+/// By default the worktree, scratch directory, and state directory are all
+/// removed.  With `--keep` the state directory is preserved (with a `closed`
+/// marker) so fleet viewers can still see the run record.
+///
+/// A running gremlin is rejected — stop it first.  Nonexistent gremlins
+/// produce an error.  Already-cleaned gremlins (state directory gone due to
+/// a concurrent clean) are not an error: print a message and exit 0.
+fn clean(id: &str, keep: bool) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        return Err(format!(
+            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+        ));
+    }
+
+    let gremlin = match Gremlin::from(id) {
+        Ok(g) => g,
+        Err(e) => {
+            // If the state directory disappeared between our check and
+            // reconstruction, another process already cleaned it.
+            if !state_dir.is_dir() || !state_file.is_file() {
+                println!("gremlin {id} is already cleaned");
+                return Ok(());
+            }
+            return Err(format!("gremlin {id}: {e}"));
+        }
+    };
+
+    let status = gremlin.state.read_str("status");
+    if status == "running" {
+        return Err(format!(
+            "gremlin {id} is running — use `gremlins stop {id}` first"
+        ));
+    }
+
+    gremlin.clean(!keep);
+    println!("gremlin {id} cleaned");
     Ok(())
 }
 
