@@ -41,6 +41,11 @@ enum Cmds {
         #[arg(long)]
         here: bool,
     },
+    /// Stop a running gremlin.
+    Stop {
+        /// Gremlin id to stop.
+        id: String,
+    },
     /// `gremlins <id>` — print detailed status for one gremlin.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -53,6 +58,7 @@ async fn main() {
         Some(Cmds::Launch { definition, args }) => launch(&definition, &args).await,
         Some(Cmds::Run { id }) => run_gremlin(&id).await,
         Some(Cmds::Show { here }) => show(here),
+        Some(Cmds::Stop { id }) => stop(&id),
         Some(Cmds::External(args)) => status_external(&args),
         None => {
             // No subcommand — print help and exit 0.
@@ -198,6 +204,115 @@ fn status(id: &str) -> Result<(), String> {
         field_display(&gremlin.state, "attempt")
     );
     println!("kind:          {}", field_display(&gremlin.state, "kind"));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// stop
+// ---------------------------------------------------------------------------
+
+/// Stop a running gremlin.
+///
+/// Sends SIGTERM to the process recorded in `pid`, waits a short grace period,
+/// then SIGKILL if it is still alive. After the process is confirmed gone,
+/// patches `status` to `"stopped"`, sets `ended_at` and `exit_code`, and touches
+/// the `finished` marker. Idempotent: a gremlin whose status is already
+/// `done` or `stopped` is reported and exits 0 without signalling.
+fn stop(id: &str) -> Result<(), String> {
+    #[cfg(not(unix))]
+    {
+        return Err("stop is not implemented on this platform".to_string());
+    }
+
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        return Err(format!(
+            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+        ));
+    }
+
+    let gremlin = Gremlin::from(id).map_err(|e| format!("gremlin {id}: {e}"))?;
+
+    let status = gremlin.state.read_str("status");
+    if status == "done" || status == "stopped" {
+        println!("gremlin {id} is already {status}");
+        return Ok(());
+    }
+
+    let pid_raw = gremlin
+        .state
+        .read_field("pid")
+        .and_then(|v| v.as_i64())
+        .filter(|&n| n > 0 && n <= libc::pid_t::MAX as i64)
+        .unwrap_or(0);
+
+    if pid_raw == 0 {
+        // PID is null or absent — the gremlin has already stopped on its own.
+        println!("gremlin {id} is already stopped");
+        gremlin.state.write_terminal_state(-1);
+        return Ok(());
+    }
+
+    let pid = pid_raw as libc::pid_t;
+
+    // Send SIGTERM.
+    let mut exit_code = -15i32;
+    unsafe {
+        let ret = libc::kill(pid, libc::SIGTERM);
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                // ESRCH: the process is already gone — treat as already stopped.
+                println!("gremlin {id} has already exited");
+                gremlin.state.write_terminal_state(-1);
+                return Ok(());
+            }
+            return Err(format!("failed to signal gremlin {id}: {err}"));
+        }
+    }
+
+    // Grace period for SIGTERM.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    unsafe {
+        // kill(pid, 0) is the standard existence check — fails with ESRCH
+        // if the process is gone, succeeds if it still exists.
+        if libc::kill(pid, 0) == 0 {
+            let ret = libc::kill(pid, libc::SIGKILL);
+            if ret != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(format!("failed to kill gremlin {id}: {err}"));
+                }
+                // ESRCH after SIGKILL: process died between the liveness
+                // check and the signal — that's fine, SIGTERM did the job.
+            } else {
+                exit_code = -9;
+                // Poll until the process exits (bounded).
+                for _ in 0..10 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if libc::kill(pid, 0) != 0 {
+                        break;
+                    }
+                }
+                if libc::kill(pid, 0) == 0 {
+                    return Err(format!(
+                        "gremlin {id}: process {pid} did not exit after SIGKILL"
+                    ));
+                }
+            }
+        }
+    }
+
+    gremlin.state.write_terminal_state(exit_code);
+    println!("gremlin {id} stopped");
     Ok(())
 }
 
