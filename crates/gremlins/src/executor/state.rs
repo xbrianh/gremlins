@@ -1,4 +1,9 @@
 //! state.json I/O, flock-guarded updates, and StateData.
+//!
+//! Every `state.json` mutation goes through [`write_state`] or [`locked_update`],
+//! both of which hold the flock. Reads ([`read_str`], [`read_field`], [`get_field`],
+//! [`done_for`], [`read_bail_info`]) are lock-free snapshot reads, safe because
+//! every mutation is rename-atomic.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -137,6 +142,7 @@ pub fn read_state_json(sf: Option<&Path>) -> Map<String, Value> {
 
 pub fn write_state(state_dir: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
     let sf = state_dir.join("state.json");
+    let _lock = acquire_lock(&sf)?;
     let tmp = state_dir.join(format!(
         "state.json.{}.{}.tmp",
         std::process::id(),
@@ -215,7 +221,6 @@ fn attempt_of(data: &Map<String, Value>) -> String {
 pub struct StateData {
     pub gremlin_id: Option<String>,
     pub state_file: Option<PathBuf>,
-    cache: std::cell::RefCell<Option<Map<String, Value>>>,
 }
 
 impl StateData {
@@ -224,7 +229,6 @@ impl StateData {
         StateData {
             gremlin_id,
             state_file,
-            cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -234,22 +238,10 @@ impl StateData {
             .or_else(|| resolve_state_file(self.gremlin_id.as_deref()))
     }
 
-    /// Parsed state.json, read from disk on first use. Every writer must invalidate.
-    fn loaded(&self) -> std::cell::Ref<'_, Map<String, Value>> {
-        if self.cache.borrow().is_none() {
-            let data = read_state_json(self.sf().as_deref());
-            *self.cache.borrow_mut() = Some(data);
-        }
-        std::cell::Ref::map(self.cache.borrow(), |c| c.as_ref().unwrap())
-    }
-
-    pub fn invalidate(&self) {
-        *self.cache.borrow_mut() = None;
-    }
-
     pub fn get_field(&self, name: &str) -> Option<Value> {
         let default = default_for(name)?;
-        Some(self.loaded().get(name).cloned().unwrap_or(default))
+        let data = read_state_json(self.sf().as_deref());
+        Some(data.get(name).cloned().unwrap_or(default))
     }
 
     /// Present, non-null value — `None` when absent or null.
@@ -258,14 +250,14 @@ impl StateData {
         if !sf.exists() {
             return None;
         }
-        match self.loaded().get(field) {
+        let data = read_state_json(Some(&sf));
+        match data.get(field) {
             None | Some(Value::Null) => None,
             Some(v) => Some(v.clone()),
         }
     }
 
-    /// Fresh read, deliberately uncached: another process may have patched state.json
-    /// since our cache was filled. Falsy values read as `""`, matching Python's
+    /// Lock-free snapshot read. Falsy values read as `""`, matching Python's
     /// `json.loads(...).get(field) or ""`.
     pub fn read_str(&self, field: &str) -> String {
         let Some(sf) = self.sf() else {
@@ -296,7 +288,6 @@ impl StateData {
         out.insert("id".into(), Value::String(gid));
         write_state(state_dir, &out)?;
         self.state_file = Some(state_dir.join("state.json"));
-        self.invalidate();
         Ok(())
     }
 
@@ -315,7 +306,6 @@ impl StateData {
                 data.insert(k, v);
             }
         });
-        self.invalidate();
     }
 
     pub fn set_stage(&self, stage: &str, sub_stage: Option<&Value>, parent_stage: &str) {
@@ -382,7 +372,6 @@ impl StateData {
             }
             data.insert("token_usage".into(), Value::Object(total));
         });
-        self.invalidate();
     }
 
     /// Bail records are untyped — any JSON object passes, non-objects read as `None`.
@@ -441,7 +430,6 @@ impl StateData {
                 data.insert("parallel_worktrees".into(), Value::Object(groups));
             }
         });
-        self.invalidate();
     }
 
     pub fn done_for(&self, path: &str) -> HashSet<String> {
@@ -489,7 +477,6 @@ impl StateData {
             dc.insert(path, Value::Array(existing));
             data.insert("done_children".into(), Value::Object(dc));
         });
-        self.invalidate();
     }
 
     pub fn clear_done(&self, path: &str) {
@@ -513,7 +500,6 @@ impl StateData {
                 data.insert("done_children".into(), Value::Object(dc));
             }
         });
-        self.invalidate();
     }
 
     pub fn add_subprocess_cost(&self, amount: f64) {
@@ -531,7 +517,6 @@ impl StateData {
                 .unwrap_or(0.0);
             data.insert("subprocess_cost_usd".into(), Value::from(current + amount));
         });
-        self.invalidate();
     }
 
     pub fn patch_parallel_attempt(&self, child_key: &str, attempt: &str) {
@@ -549,7 +534,6 @@ impl StateData {
             pa.insert(child_key, Value::String(attempt));
             data.insert("parallel_attempts".into(), Value::Object(pa));
         });
-        self.invalidate();
     }
 
     /// Read `parallel_worktrees[group_name]` as `(base_head, {child_key: path})`.
@@ -593,46 +577,6 @@ impl StateData {
         self.patch(&["parallel_attempts".to_string()], &Map::new());
     }
 
-    /// Write `bail_<attempt>.json` for a parallel child.
-    ///
-    /// The attempt is resolved through `parallel_attempts[child_key]`, falling
-    /// back to the top-level `attempt`. An existing bail file is never
-    /// clobbered, so the first child to bail wins.
-    pub fn write_parallel_bail(&self, child_key: &str, reason: &str) {
-        let Some(sf) = self.sf() else { return };
-        if !sf.exists() {
-            return;
-        }
-        let data = read_state_json(Some(&sf));
-        let attempt = data
-            .get("parallel_attempts")
-            .and_then(|v| v.as_object())
-            .and_then(|o| o.get(child_key))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .or_else(|| {
-                data.get("attempt")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-            });
-        let Some(attempt) = attempt else { return };
-        let Some(state_dir) = sf.parent() else { return };
-        let bail_path = state_dir.join(format!("bail_{attempt}.json"));
-        let payload = serde_json::json!({
-            "class": "other",
-            "detail": reason,
-            "ts": now_iso(),
-        });
-        write_bail_atomically(state_dir, &bail_path, &attempt, &payload);
-    }
-
-    /// `(state_dir, parallel_attempts)` used to scan for per-child bail files.
-    pub fn read_bail_scan_inputs(&self) -> (Option<PathBuf>, HashMap<String, String>) {
-        crate::stages::parallel_bail::read_bail_scan_inputs(self.sf().as_deref())
-    }
-
     pub fn write_terminal_state(&self, exit_code: i32) {
         if self.gremlin_id.as_deref().unwrap_or("").is_empty() {
             return;
@@ -649,7 +593,6 @@ impl StateData {
         fields.insert("ended_at".into(), Value::String(now_stamp()));
         fields.insert("exit_code".into(), Value::from(exit_code));
         self.patch(&[], &fields);
-        self.invalidate();
     }
 }
 
@@ -709,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_field_sees_own_writes() {
+    fn field_reads_after_disk_write() {
         let dir = tempfile::tempdir().unwrap();
         let sf = seed(dir.path(), "gr-test");
         let d = data_with(&sf);
@@ -1065,42 +1008,19 @@ mod tests {
     }
 
     #[test]
-    fn write_parallel_bail_uses_child_attempt() {
+    fn write_state_acquires_lock() {
         let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.patch_parallel_attempt("a", "attempt-a");
-        d.write_parallel_bail("a", "boom");
-        let bail = dir.path().join("bail_attempt-a.json");
-        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&bail).unwrap()).unwrap();
-        assert_eq!(raw["class"], "other");
-        assert_eq!(raw["detail"], "boom");
+        let mut data = Map::new();
+        data.insert("id".into(), Value::String("g1".into()));
+        write_state(dir.path(), &data).unwrap();
+        assert!(dir.path().join("state.json.lock").exists());
     }
 
     #[test]
-    fn write_parallel_bail_falls_back_to_top_level_attempt() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.patch(&[], &{
-            let mut m = Map::new();
-            m.insert("attempt".into(), Value::String("top-attempt".into()));
-            m
-        });
-        d.write_parallel_bail("a", "boom");
-        assert!(dir.path().join("bail_top-attempt.json").exists());
-    }
-
-    #[test]
-    fn write_parallel_bail_does_not_clobber() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.patch_parallel_attempt("a", "attempt-a");
-        d.write_parallel_bail("a", "first");
-        d.write_parallel_bail("a", "second");
-        let bail = dir.path().join("bail_attempt-a.json");
-        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&bail).unwrap()).unwrap();
-        assert_eq!(raw["detail"], "first");
+    fn state_data_is_send_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<StateData>();
+        assert_sync::<StateData>();
     }
 }

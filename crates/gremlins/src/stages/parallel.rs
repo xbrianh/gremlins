@@ -1,4 +1,4 @@
-//! Validation for parallel groups: name shape, concurrency, and bail policy.
+//! Validation for parallel groups: name shape, concurrency, and error policy.
 //!
 //! This module is deliberately free of PyO3: it owns only the pure parsing and
 //! validation that the Python module used to perform, so `cargo test -p
@@ -11,28 +11,28 @@ use serde_json::Value;
 
 use crate::stages::composite::{get_client_from_dict, ClientSpec, StageAttrs};
 
-/// How a group decides to bail once individual children have bailed.
+/// How a group decides to fail once individual children have errored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BailPolicy {
-    /// Bail as soon as any child bails.
+pub enum ErrorPolicy {
+    /// Fail as soon as any child errors.
     Any,
-    /// Bail only when every child bails.
+    /// Fail only when every child errors.
     All,
 }
 
-impl BailPolicy {
+impl ErrorPolicy {
     fn parse(raw: &str) -> Option<Self> {
         match raw {
-            "any" => Some(BailPolicy::Any),
-            "all" => Some(BailPolicy::All),
+            "any" => Some(ErrorPolicy::Any),
+            "all" => Some(ErrorPolicy::All),
             _ => None,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            BailPolicy::Any => "any",
-            BailPolicy::All => "all",
+            ErrorPolicy::Any => "any",
+            ErrorPolicy::All => "all",
         }
     }
 }
@@ -52,8 +52,8 @@ pub fn is_valid_child_id(name: &str) -> bool {
 pub struct ParallelGroup {
     pub attrs: StageAttrs,
     pub max_concurrent: Option<u32>,
-    pub cancel_on_bail: bool,
-    pub bail_policy: BailPolicy,
+    pub cancel_on_error: bool,
+    pub error_policy: ErrorPolicy,
     /// Raw child dicts — the pyext shim calls `parse_stages()` on these.
     pub body: Vec<Value>,
     /// Raw client string, if present — the pyext shim creates a Client from it.
@@ -109,19 +109,19 @@ impl ParallelGroup {
             }
         };
 
-        let cancel_on_bail = match d.get("cancel_on_bail") {
+        let cancel_on_error = match d.get("cancel_on_error") {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,
             Some(_) => {
                 return Err(format!(
-                    "parallel group {name:?}: 'cancel_on_bail' must be a boolean"
+                    "parallel group {name:?}: 'cancel_on_error' must be a boolean"
                 ))
             }
         };
 
-        // `str(d.get("bail_policy") or "any")` — any falsy value falls back to "any".
+        // `str(d.get("error_policy") or "any")` — any falsy value falls back to "any".
         // Python's falsy set is: None, False, 0, 0.0, "", [], {}.
-        let raw_policy = match d.get("bail_policy") {
+        let raw_policy = match d.get("error_policy") {
             None | Some(Value::Null) => "any".to_string(),
             Some(Value::Bool(false)) => "any".to_string(),
             Some(Value::Number(n)) if n.as_f64() == Some(0.0) => "any".to_string(),
@@ -131,8 +131,8 @@ impl ParallelGroup {
             Some(Value::String(s)) => s.clone(),
             Some(v) => v.to_string(),
         };
-        let bail_policy = BailPolicy::parse(&raw_policy).ok_or_else(|| {
-            format!("parallel group {name:?}: 'bail_policy' must be 'any' or 'all'")
+        let error_policy = ErrorPolicy::parse(&raw_policy).ok_or_else(|| {
+            format!("parallel group {name:?}: 'error_policy' must be 'any' or 'all'")
         })?;
 
         if !name.is_empty() && !is_valid_child_id(&name) {
@@ -151,8 +151,8 @@ impl ParallelGroup {
         Ok(ParallelGroup {
             attrs,
             max_concurrent,
-            cancel_on_bail,
-            bail_policy,
+            cancel_on_error,
+            error_policy,
             body,
             client,
         })
@@ -207,8 +207,8 @@ mod tests {
         assert_eq!(group.attrs.stage_type, "parallel");
         assert_eq!(group.body.len(), 2);
         assert_eq!(group.max_concurrent, None);
-        assert!(!group.cancel_on_bail);
-        assert_eq!(group.bail_policy, BailPolicy::Any);
+        assert!(!group.cancel_on_error);
+        assert_eq!(group.error_policy, ErrorPolicy::Any);
     }
 
     #[test]
@@ -217,13 +217,13 @@ mod tests {
             ("name", json!("reviews")),
             ("parallel", children()),
             ("max_concurrent", json!(3)),
-            ("cancel_on_bail", json!(true)),
-            ("bail_policy", json!("all")),
+            ("cancel_on_error", json!(true)),
+            ("error_policy", json!("all")),
         ]);
         let group = ParallelGroup::with_dict(&d, 0).unwrap();
         assert_eq!(group.max_concurrent, Some(3));
-        assert!(group.cancel_on_bail);
-        assert_eq!(group.bail_policy, BailPolicy::All);
+        assert!(group.cancel_on_error);
+        assert_eq!(group.error_policy, ErrorPolicy::All);
     }
 
     #[test]
@@ -277,30 +277,30 @@ mod tests {
     }
 
     #[test]
-    fn with_dict_rejects_non_bool_cancel_on_bail() {
+    fn with_dict_rejects_non_bool_cancel_on_error() {
         let d = dict(&[
             ("name", json!("g")),
             ("parallel", children()),
-            ("cancel_on_bail", json!("yes")),
+            ("cancel_on_error", json!("yes")),
         ]);
         let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
-        assert!(err.contains("'cancel_on_bail' must be a boolean"));
+        assert!(err.contains("'cancel_on_error' must be a boolean"));
     }
 
     #[test]
-    fn with_dict_rejects_unknown_bail_policy() {
+    fn with_dict_rejects_unknown_error_policy() {
         let d = dict(&[
             ("name", json!("g")),
             ("parallel", children()),
-            ("bail_policy", json!("sometimes")),
+            ("error_policy", json!("sometimes")),
         ]);
         let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
-        assert!(err.contains("'bail_policy' must be 'any' or 'all'"));
+        assert!(err.contains("'error_policy' must be 'any' or 'all'"));
     }
 
     #[test]
-    fn with_dict_treats_falsy_bail_policy_as_any() {
-        // Python's `d.get("bail_policy") or "any"` maps every falsy value to "any".
+    fn with_dict_treats_falsy_error_policy_as_any() {
+        // Python's `d.get("error_policy") or "any"` maps every falsy value to "any".
         for raw in [
             json!(false),
             json!(0),
@@ -312,11 +312,11 @@ mod tests {
             let d = dict(&[
                 ("name", json!("g")),
                 ("parallel", children()),
-                ("bail_policy", raw.clone()),
+                ("error_policy", raw.clone()),
             ]);
             let group = ParallelGroup::with_dict(&d, 0)
-                .unwrap_or_else(|e| panic!("bail_policy={raw} should default to any: {e}"));
-            assert_eq!(group.bail_policy, BailPolicy::Any, "bail_policy={raw}");
+                .unwrap_or_else(|e| panic!("error_policy={raw} should default to any: {e}"));
+            assert_eq!(group.error_policy, ErrorPolicy::Any, "error_policy={raw}");
         }
     }
 
@@ -360,8 +360,8 @@ mod tests {
     }
 
     #[test]
-    fn bail_policy_round_trips() {
-        assert_eq!(BailPolicy::Any.as_str(), "any");
-        assert_eq!(BailPolicy::All.as_str(), "all");
+    fn error_policy_round_trips() {
+        assert_eq!(ErrorPolicy::Any.as_str(), "any");
+        assert_eq!(ErrorPolicy::All.as_str(), "all");
     }
 }

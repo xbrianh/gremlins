@@ -8,7 +8,7 @@ use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_shell_async, ProcError, ProcResult};
 use crate::stages::base;
-use crate::stages::constants::BAIL_KEY;
+use crate::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
 
 #[derive(Debug, Clone)]
 pub struct Exec {
@@ -16,6 +16,78 @@ pub struct Exec {
     pub options: HashMap<String, serde_json::Value>,
     pub interpolation_map: HashMap<String, String>,
     pub bind_map: HashMap<String, String>,
+}
+
+impl Exec {
+    /// Parse an `Exec` from a stage mapping.
+    ///
+    /// Mirrors `PyExec::with_dict`: the `in`/`out` rejection, the same mapping
+    /// shapes, and the framework-key collision check — without the `model`
+    /// exemption an agent gets, since an exec has no model. The `client` key is
+    /// not read here; the client spec belongs to the stage-tree node.
+    pub fn from_dict(d: &HashMap<String, serde_json::Value>) -> Result<Exec, String> {
+        let name = d
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        if d.contains_key("in") || d.contains_key("out") {
+            return Err(format!(
+                "stage {name:?}: 'in'/'out' keys are no longer supported; \
+                 use 'interpolation'/'bind' with URI values"
+            ));
+        }
+
+        let interpolation_map = string_mapping(d, "interpolation", &name)?;
+        let bind_map = string_mapping(d, "bind", &name)?;
+
+        let options = match d.get("options") {
+            None => HashMap::new(),
+            Some(serde_json::Value::Object(options)) => options
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            Some(_) => {
+                return Err(format!(
+                    "stage {name:?}: 'options' must be a mapping of string keys to JSON-serializable values"
+                ))
+            }
+        };
+
+        for key in options.keys() {
+            if FRAMEWORK_KEYS.contains(key.as_str()) {
+                return Err(format!(
+                    "stage {name:?}: option key {key:?} collides with framework substitution variable"
+                ));
+            }
+        }
+
+        Ok(Exec {
+            name,
+            options,
+            interpolation_map,
+            bind_map,
+        })
+    }
+}
+
+/// Read a string-to-string mapping field: absent is empty, and a present value
+/// must be a mapping whose entries are all strings.
+fn string_mapping(
+    d: &HashMap<String, serde_json::Value>,
+    field: &str,
+    name: &str,
+) -> Result<HashMap<String, String>, String> {
+    match d.get(field) {
+        None => Ok(HashMap::new()),
+        Some(serde_json::Value::Object(entries)) => entries
+            .iter()
+            .map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+            .collect::<Option<HashMap<String, String>>>()
+            .ok_or_else(|| format!("stage {name:?}: '{field}' must be a mapping")),
+        Some(_) => Err(format!("stage {name:?}: '{field}' must be a mapping")),
+    }
 }
 
 #[derive(Error, Debug)]
@@ -80,16 +152,23 @@ pub struct ExecPrepared {
     pub artifact_dir: PathBuf,
     pub state_dir: PathBuf,
     pub timeout: Option<f64>,
+    /// The environment the commands run under.
+    ///
+    /// The native executor supplies a fully-resolved env (the gremlin's
+    /// system variables plus anything its bootstrap script sourced); the
+    /// pyext path leaves it empty and the commands inherit the process
+    /// environment instead.
+    pub env: HashMap<String, String>,
     pub(crate) loop_iter: String,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
-/// Requires `&mut ArtifactRegistry` (for interpolation lookups). Returns a
+/// Requires `&ArtifactRegistry` (for interpolation lookups). Returns a
 /// fully-prepared struct that can be passed to `run_shell` and `commit_exec`
 /// without further registry mutation.
 pub fn prepare_exec(
     exec: &Exec,
-    artifacts: &mut ArtifactRegistry,
+    artifacts: &ArtifactRegistry,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<ExecPrepared, ExecError> {
@@ -174,6 +253,7 @@ pub fn prepare_exec(
         artifact_dir: PathBuf::new(),
         state_dir: PathBuf::new(),
         timeout,
+        env: HashMap::new(),
         loop_iter: loop_iter.to_string(),
     })
 }
@@ -188,7 +268,12 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
     }
 
     let joined = prepared.cmds.join(" && ");
-    let mut env: HashMap<String, String> = std::env::vars().collect();
+    // A prepared env is authoritative when present; otherwise inherit ours.
+    let mut env: HashMap<String, String> = if prepared.env.is_empty() {
+        std::env::vars().collect()
+    } else {
+        prepared.env.clone()
+    };
     env.insert(
         "GREMLINS_ARTIFACT_DIR".to_string(),
         prepared.artifact_dir.to_string_lossy().to_string(),
@@ -257,10 +342,7 @@ pub fn process_shell_result(
 
 /// Phase 3: commit produced artifacts into the registry.
 /// Non-optional artifacts that are absent abort the stage, except bail URIs.
-pub fn commit_exec(
-    prepared: &ExecPrepared,
-    artifacts: &mut ArtifactRegistry,
-) -> Result<(), ExecError> {
+pub fn commit_exec(prepared: &ExecPrepared, artifacts: &ArtifactRegistry) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
         if Path::new(path).exists() {
@@ -336,7 +418,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         // A sibling already committed this URI.
         let uri = Uri::parse("artifact://out.txt").unwrap();
@@ -351,7 +433,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
-        let prepared = prepare_exec(&optional_exec, &mut registry, "", &fw).unwrap();
+        let prepared = prepare_exec(&optional_exec, &registry, "", &fw).unwrap();
         assert_eq!(prepared.bind_uris[0].0, "out");
         assert!(prepared.bind_uris[0].2);
 
@@ -362,7 +444,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
-        let err = prepare_exec(&non_optional_exec, &mut registry, "", &fw)
+        let err = prepare_exec(&non_optional_exec, &registry, "", &fw)
             .err()
             .expect("expected duplicate-producer error");
         assert!(matches!(err, ExecError::Generic { .. }));
@@ -373,7 +455,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         // Registered but its file is gone: a skip_if_exists producer must be
         // able to run (and commit) again.
@@ -387,9 +469,9 @@ mod tests {
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([("plan".to_string(), "artifact://plan.md".to_string())]),
         };
-        let prepared = prepare_exec(&exec, &mut registry, "", &HashMap::new()).unwrap();
+        let prepared = prepare_exec(&exec, &registry, "", &HashMap::new()).unwrap();
         fs::write(&prepared.bind_paths["plan"], "# new plan").unwrap();
-        commit_exec(&prepared, &mut registry).unwrap();
+        commit_exec(&prepared, &registry).unwrap();
         assert_eq!(
             registry.content("artifact://plan.md", None).unwrap(),
             "# new plan",
@@ -401,7 +483,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -410,8 +492,8 @@ mod tests {
             bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &mut registry, "", &fw).unwrap();
-        let err = commit_exec(&prepared, &mut registry).unwrap_err();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).unwrap();
+        let err = commit_exec(&prepared, &registry).unwrap_err();
         assert!(matches!(err, ExecError::MissingArtifact { .. }));
         assert!(!registry.is_registered("artifact://out.txt"));
     }
@@ -421,7 +503,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -430,8 +512,8 @@ mod tests {
             bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &mut registry, "", &fw).unwrap();
-        commit_exec(&prepared, &mut registry).unwrap();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).unwrap();
+        commit_exec(&prepared, &registry).unwrap();
         assert!(!registry.is_registered("artifact://out.txt"));
     }
 
@@ -440,7 +522,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let mut registry = ArtifactRegistry::new(artifact_dir);
+        let registry = ArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -449,9 +531,9 @@ mod tests {
             bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &mut registry, "", &fw).unwrap();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).unwrap();
         fs::write(&prepared.bind_paths["out"], "data").unwrap();
-        commit_exec(&prepared, &mut registry).unwrap();
+        commit_exec(&prepared, &registry).unwrap();
         assert!(registry.is_registered("artifact://out.txt"));
     }
 
@@ -508,5 +590,106 @@ mod tests {
     fn test_is_bail_uri_no_match() {
         assert!(!is_bail_uri("artifact://stuff", ""));
         assert!(!is_bail_uri("artifact://stuff", "loop~1"));
+    }
+
+    // ---- from_dict tests ----
+
+    fn exec_dict(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn from_dict_parses_options_and_maps() {
+        let d = exec_dict(&[
+            ("name", serde_json::json!("run")),
+            ("options", serde_json::json!({"cmds": ["echo hi"]})),
+            (
+                "interpolation",
+                serde_json::json!({"a": "content(\"artifact://a\")"}),
+            ),
+            ("bind", serde_json::json!({"b": "artifact://b"})),
+        ]);
+        let exec = Exec::from_dict(&d).unwrap();
+        assert_eq!(exec.name, "run");
+        assert_eq!(
+            exec.options.get("cmds").unwrap(),
+            &serde_json::json!(["echo hi"])
+        );
+        assert_eq!(
+            exec.interpolation_map.get("a").unwrap(),
+            "content(\"artifact://a\")"
+        );
+        assert_eq!(exec.bind_map.get("b").unwrap(), "artifact://b");
+    }
+
+    #[test]
+    fn from_dict_defaults_are_empty() {
+        let exec = Exec::from_dict(&exec_dict(&[])).unwrap();
+        assert_eq!(exec.name, "");
+        assert!(exec.options.is_empty());
+        assert!(exec.interpolation_map.is_empty());
+        assert!(exec.bind_map.is_empty());
+    }
+
+    #[test]
+    fn from_dict_rejects_in_and_out() {
+        for key in ["in", "out"] {
+            let d = exec_dict(&[
+                ("name", serde_json::json!("s")),
+                (key, serde_json::json!({})),
+            ]);
+            let err = Exec::from_dict(&d).unwrap_err();
+            assert!(
+                err.contains("'in'/'out' keys are no longer supported"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_dict_rejects_non_mapping_bind() {
+        let d = exec_dict(&[
+            ("name", serde_json::json!("s")),
+            ("bind", serde_json::json!("not a mapping")),
+        ]);
+        let err = Exec::from_dict(&d).unwrap_err();
+        assert!(err.contains("'bind' must be a mapping"), "{err}");
+    }
+
+    #[test]
+    fn from_dict_rejects_null_options() {
+        let d = exec_dict(&[
+            ("name", serde_json::json!("s")),
+            ("options", serde_json::Value::Null),
+        ]);
+        assert!(Exec::from_dict(&d).is_err());
+    }
+
+    #[test]
+    fn from_dict_rejects_every_framework_option_key_including_model() {
+        // Unlike an agent, an exec rejects `model` too.
+        for key in ["name", "model", "cwd", "base_ref"] {
+            let d = exec_dict(&[
+                ("name", serde_json::json!("s")),
+                ("options", serde_json::json!({ key: "x" })),
+            ]);
+            let err = Exec::from_dict(&d).unwrap_err();
+            assert!(
+                err.contains("collides with framework substitution variable"),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_dict_rejects_non_object_options() {
+        let d = exec_dict(&[
+            ("name", serde_json::json!("s")),
+            ("options", serde_json::json!([1, 2, 3])),
+        ]);
+        assert!(Exec::from_dict(&d).is_err());
     }
 }

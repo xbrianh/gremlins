@@ -992,7 +992,10 @@ def _land_with_stage(
     land_stage: Any,
 ) -> bool:
     """Run the pipeline's land: stage as the merge step, with shared teardown."""
-    from gremlins.executor.gremlin import Gremlin
+    from _gremlins_core import Gremlin as PyGremlin
+    from _gremlins_core.clients import Client as _Client
+    from _gremlins_core.executor import StateData as _StateData
+    from _gremlins_core.executor import build_state as _build_state
 
     project_root = _resolve_landing_cwd(state)
     cwd = project_root if project_root and os.path.isdir(project_root) else None
@@ -1002,8 +1005,20 @@ def _land_with_stage(
         print("you are inside this gremlin's worktree — cd elsewhere before landing")
         return False
 
-    gremlin = Gremlin.open(gremlin_id)
-    gremlin.state = gremlin.build_state_with_cwd(cwd or "")
+    gremlin = PyGremlin.from_id(gremlin_id)
+    client_str = str(state.get("client") or "")
+    client = _Client.parse(client_str) if client_str else _Client.parse("cmd:true")
+    worktree = pathlib.Path(workdir) if workdir and os.path.isdir(workdir) else None
+    state_data = _StateData(gremlin_id)
+    gremlin_state = _build_state(
+        data=state_data,
+        client=client,
+        artifact_dir=pathlib.Path(_scratch_root_fn(gremlin_id)) / "artifacts",
+        cwd=cwd or "",
+        worktree=worktree,
+        base_ref=state.get("base_ref") or "",
+    )
+    gremlin.state = gremlin_state
     _remove_worktree(wdir, state, cwd)
 
     logger.info("_land_with_stage: cwd=%s land_stage=%s", cwd or ".", land_stage.name)

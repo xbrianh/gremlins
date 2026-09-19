@@ -1,14 +1,18 @@
-//! Scanning per-child bail files and applying a group's bail policy.
+//! Reading and writing per-child bail shards, and applying a group's error
+//! policy to the collected bails.
 //!
-//! Ported from `gremlins/utils/parallel_bail.py`. Pure file I/O and JSON
-//! parsing, so it lives in the PyO3-free crate and is unit-testable on its own.
+//! This is subprocess-runtime machinery: a child that bails writes
+//! `bail_<attempt>.json` into the state directory, and the group's fan-in
+//! aggregates those shards through [`decide`]. The in-process `gremlins`
+//! executor has no bail files, so the module lives here beside the runtime that
+//! needs it. Pure file I/O and JSON parsing, so it is unit-testable on its own.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use gremlins::executor::state::{now_iso, read_state_json, token_hex};
+use gremlins::stages::parallel::ErrorPolicy;
 use serde_json::Value;
-
-use crate::stages::parallel::BailPolicy;
 
 /// One child that wrote a bail file, with the parsed payload.
 ///
@@ -16,18 +20,21 @@ use crate::stages::parallel::BailPolicy;
 /// (e.g. `{"class": 1}`) still parses instead of silently degrading to the
 /// `{"class": "other"}` fallback.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub struct BailedChild {
     pub key: String,
     pub bail: HashMap<String, Value>,
 }
 
-/// The outcome of applying a bail policy to the collected bails.
+/// The outcome of applying an error policy to the collected bails.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[allow(dead_code)]
 pub struct BailDecision {
     pub should_bail: bool,
     pub first_bail: HashMap<String, Value>,
 }
 
+#[allow(dead_code)]
 impl BailDecision {
     /// The bail class to record, mirroring Python's `first_bail.get("class") or "other"`.
     pub fn bail_class(&self) -> String {
@@ -43,6 +50,7 @@ impl BailDecision {
 /// Read a bail field as a string, applying Python's `value or default` semantics:
 /// a missing, null, or otherwise falsy value falls back to `default`, while a
 /// truthy non-string value is stringified.
+#[allow(dead_code)]
 fn field_or(bail: &HashMap<String, Value>, key: &str, default: &str) -> String {
     match bail.get(key) {
         None | Some(Value::Null) => default.to_string(),
@@ -62,6 +70,7 @@ fn field_or(bail: &HashMap<String, Value>, key: &str, default: &str) -> String {
 /// A child with no recorded attempt, or no bail file on disk, is skipped. A
 /// bail file that fails to parse contributes `{"class": "other"}`, matching the
 /// Python helper's fallback.
+#[allow(dead_code)]
 pub fn collect_bails(
     state_dir: &Path,
     child_keys: &[String],
@@ -97,10 +106,11 @@ pub fn collect_bails(
 ///
 /// `Any` bails when at least one child bailed; `All` bails only when every
 /// child bailed. `first_bail` is the first collected bail, or empty.
-pub fn decide(bailed: &[BailedChild], total: usize, policy: BailPolicy) -> BailDecision {
+#[allow(dead_code)]
+pub fn decide(bailed: &[BailedChild], total: usize, policy: ErrorPolicy) -> BailDecision {
     let should_bail = match policy {
-        BailPolicy::Any => !bailed.is_empty(),
-        BailPolicy::All => !bailed.is_empty() && bailed.len() == total,
+        ErrorPolicy::Any => !bailed.is_empty(),
+        ErrorPolicy::All => !bailed.is_empty() && bailed.len() == total,
     };
     BailDecision {
         should_bail,
@@ -108,7 +118,64 @@ pub fn decide(bailed: &[BailedChild], total: usize, policy: BailPolicy) -> BailD
     }
 }
 
+/// Write `bail_<attempt>.json` for a parallel child.
+///
+/// The attempt is resolved through `parallel_attempts[child_key]`, falling back
+/// to the top-level `attempt`. An existing bail file is never clobbered, so the
+/// first child to bail wins.
+#[allow(dead_code)]
+pub fn write_parallel_bail(state_file: Option<&Path>, child_key: &str, reason: &str) {
+    let Some(sf) = state_file else { return };
+    if !sf.exists() {
+        return;
+    }
+    let data = read_state_json(Some(sf));
+    let attempt = data
+        .get("parallel_attempts")
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get(child_key))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            data.get("attempt")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        });
+    let Some(attempt) = attempt else { return };
+    let Some(state_dir) = sf.parent() else { return };
+    let bail_path = state_dir.join(format!("bail_{attempt}.json"));
+    let payload = serde_json::json!({
+        "class": "other",
+        "detail": reason,
+        "ts": now_iso(),
+    });
+    write_bail_atomically(state_dir, &bail_path, &attempt, &payload);
+}
+
+/// Write `payload` to `bail_path` with first-writer-wins semantics.
+///
+/// The destination is created with no-replace semantics via a hard link from a
+/// uniquely named temporary file, so two concurrent writers can never clobber
+/// each other's payload: the loser's link fails with `AlreadyExists` and its
+/// temporary file is removed. This replaces the racy `exists()`-then-`rename`
+/// check-then-act sequence.
+#[allow(dead_code)]
+fn write_bail_atomically(state_dir: &Path, bail_path: &Path, attempt: &str, payload: &Value) {
+    let tmp = state_dir.join(format!(".bail_{attempt}_{}.tmp", token_hex(4)));
+    if std::fs::write(&tmp, payload.to_string()).is_err() {
+        return;
+    }
+    // `hard_link` fails if the destination already exists, giving us an atomic
+    // create-if-absent without a separate existence check. Either way the
+    // temporary file is no longer needed.
+    let _ = std::fs::hard_link(&tmp, bail_path);
+    let _ = std::fs::remove_file(&tmp);
+}
+
 /// The state directory and per-child attempt map used to scan for bails.
+#[allow(dead_code)]
 pub fn read_bail_scan_inputs(
     state_file: Option<&Path>,
 ) -> (Option<PathBuf>, HashMap<String, String>) {
@@ -201,8 +268,8 @@ mod tests {
             key: "a".into(),
             bail: HashMap::new(),
         }];
-        assert!(decide(&bailed, 2, BailPolicy::Any).should_bail);
-        assert!(!decide(&bailed, 2, BailPolicy::All).should_bail);
+        assert!(decide(&bailed, 2, ErrorPolicy::Any).should_bail);
+        assert!(!decide(&bailed, 2, ErrorPolicy::All).should_bail);
     }
 
     #[test]
@@ -217,8 +284,8 @@ mod tests {
                 bail: HashMap::new(),
             },
         ];
-        assert!(decide(&bailed, 2, BailPolicy::All).should_bail);
-        assert!(!decide(&[], 2, BailPolicy::Any).should_bail);
+        assert!(decide(&bailed, 2, ErrorPolicy::All).should_bail);
+        assert!(!decide(&[], 2, ErrorPolicy::Any).should_bail);
     }
 
     #[test]
@@ -229,8 +296,8 @@ mod tests {
             key: "a".into(),
             bail: bail.clone(),
         }];
-        assert_eq!(decide(&bailed, 1, BailPolicy::Any).first_bail, bail);
-        assert!(decide(&[], 1, BailPolicy::Any).first_bail.is_empty());
+        assert_eq!(decide(&bailed, 1, ErrorPolicy::Any).first_bail, bail);
+        assert!(decide(&[], 1, ErrorPolicy::Any).first_bail.is_empty());
     }
 
     #[test]
@@ -262,5 +329,51 @@ mod tests {
         let (dir, attempts) = read_bail_scan_inputs(Some(Path::new("/nonexistent/state.json")));
         assert!(dir.is_none());
         assert!(attempts.is_empty());
+    }
+
+    #[test]
+    fn write_parallel_bail_uses_child_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sf = tmp.path().join("state.json");
+        std::fs::write(&sf, r#"{"id":"g","parallel_attempts":{"a":"attempt-a"}}"#).unwrap();
+        write_parallel_bail(Some(&sf), "a", "boom");
+        let bail = tmp.path().join("bail_attempt-a.json");
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&bail).unwrap()).unwrap();
+        assert_eq!(raw["class"], "other");
+        assert_eq!(raw["detail"], "boom");
+    }
+
+    #[test]
+    fn write_parallel_bail_falls_back_to_top_level_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sf = tmp.path().join("state.json");
+        std::fs::write(&sf, r#"{"id":"g","attempt":"top-attempt"}"#).unwrap();
+        write_parallel_bail(Some(&sf), "a", "boom");
+        assert!(tmp.path().join("bail_top-attempt.json").exists());
+    }
+
+    #[test]
+    fn write_parallel_bail_does_not_clobber() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sf = tmp.path().join("state.json");
+        std::fs::write(&sf, r#"{"id":"g","parallel_attempts":{"a":"attempt-a"}}"#).unwrap();
+        write_parallel_bail(Some(&sf), "a", "first");
+        write_parallel_bail(Some(&sf), "a", "second");
+        let bail = tmp.path().join("bail_attempt-a.json");
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&bail).unwrap()).unwrap();
+        assert_eq!(raw["detail"], "first");
+    }
+
+    #[test]
+    fn write_parallel_bail_no_attempt_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sf = tmp.path().join("state.json");
+        std::fs::write(&sf, r#"{"id":"g"}"#).unwrap();
+        write_parallel_bail(Some(&sf), "a", "boom");
+        assert!(std::fs::read_dir(tmp.path()).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("bail_")));
     }
 }

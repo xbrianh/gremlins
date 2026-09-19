@@ -284,7 +284,7 @@ deterministic-vs-agentic line intact:
   into the top-level bail slot, so children cannot see each other's bails.
   `check_bail` called with a `child_key` reads only that child's shard.
 - **`<group>-fanin`** (deterministic). Reads `parallel_bails`, applies the
-  block's `bail_policy`, promotes a bail to the top-level `bail_class` if
+  block's `error_policy`, promotes a bail to the top-level `bail_class` if
   warranted, raises `Bail` if needed, clears `parallel_bails`, and tears
   down all per-child worktrees with `git worktree remove --force` +
   `git worktree prune`. Fan-in is also responsible for cleanup on crash —
@@ -309,12 +309,12 @@ all sequential stages) preserves existing top-level bail semantics.
 
 **Per-block knobs** (declared on the parallel block in the pipeline YAML):
 
-- `cancel_on_bail: false` (default). All children run to completion even if
+- `cancel_on_error: false` (default). All children run to completion even if
   one bails. Right for review lenses where each lens is independent.
   Set to `true` for parallel implementers where a structural bail by one
   child makes the others irrelevant — on first bail a cancel flag is set
   and children that have not yet started are skipped.
-- `bail_policy: any` (default). Any bailing child causes the group to bail
+- `error_policy: any` (default). Any bailing child causes the group to bail
   after fan-in. Set to `all` to require every child to bail before the
   group bails. The top-level `bail_class` is populated from the first
   bailing child's shard.

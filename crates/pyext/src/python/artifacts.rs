@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use gremlins::artifacts::registry as rust_registry;
 use gremlins::artifacts::resolve as rust_resolve;
@@ -66,7 +65,7 @@ impl Uri {
 
 #[pyclass(name = "ArtifactRegistry", module = "_gremlins_core.artifacts")]
 pub(crate) struct ArtifactRegistry {
-    pub(crate) inner: Mutex<rust_registry::ArtifactRegistry>,
+    pub(crate) inner: rust_registry::ArtifactRegistry,
 }
 
 #[pymethods]
@@ -74,20 +73,18 @@ impl ArtifactRegistry {
     #[new]
     pub(crate) fn new(artifact_dir: PathBuf) -> Self {
         ArtifactRegistry {
-            inner: Mutex::new(rust_registry::ArtifactRegistry::new(artifact_dir)),
+            inner: rust_registry::ArtifactRegistry::new(artifact_dir),
         }
     }
 
     fn path_for_uri(&self, uri: &Uri) -> PyResult<String> {
         self.inner
-            .lock()
-            .unwrap()
             .path_for_uri(&uri.inner)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn commit(&self, key: &str, path: &str) -> PyResult<()> {
-        match self.inner.lock().unwrap().commit(key, path) {
+        match self.inner.commit(key, path) {
             Ok(()) => Ok(()),
             Err(e) => {
                 if let Some(dup) = e.downcast_ref::<rust_registry::DuplicateArtifact>() {
@@ -103,53 +100,42 @@ impl ArtifactRegistry {
 
     fn write_into_registry(&self, uri: &Uri, content: &str) -> PyResult<String> {
         self.inner
-            .lock()
-            .unwrap()
             .write_into_registry(&uri.inner, content)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn copy_into_registry(&self, uri: &Uri, source: PathBuf) -> PyResult<String> {
         self.inner
-            .lock()
-            .unwrap()
             .copy_into_registry(&uri.inner, &source)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn data_uri(&self, key: &str) -> PyResult<String> {
         self.inner
-            .lock()
-            .unwrap()
             .data_uri(key)
-            .map(|s| s.to_string())
             .map_err(|e| MissingArtifact::new_err(e.to_string()))
     }
 
     #[pyo3(signature = (uri_str, json_path = None))]
     fn content(&self, uri_str: &str, json_path: Option<&str>) -> PyResult<String> {
-        self.inner
-            .lock()
-            .unwrap()
-            .content(uri_str, json_path)
-            .map_err(|e| {
-                if e.downcast_ref::<rust_registry::MissingArtifact>().is_some() {
-                    return MissingArtifact::new_err(format!("artifact not bound: {:?}", uri_str));
-                }
-                pyo3::exceptions::PyValueError::new_err(e.to_string())
-            })
+        self.inner.content(uri_str, json_path).map_err(|e| {
+            if e.downcast_ref::<rust_registry::MissingArtifact>().is_some() {
+                return MissingArtifact::new_err(format!("artifact not bound: {:?}", uri_str));
+            }
+            pyo3::exceptions::PyValueError::new_err(e.to_string())
+        })
     }
 
     fn is_registered(&self, key: &str) -> bool {
-        self.inner.lock().unwrap().is_registered(key)
+        self.inner.is_registered(key)
     }
 
     fn is_live(&self, key: &str) -> bool {
-        self.inner.lock().unwrap().is_live(key)
+        self.inner.is_live(key)
     }
 
     fn keys(&self) -> Vec<String> {
-        self.inner.lock().unwrap().keys().cloned().collect()
+        self.inner.keys()
     }
 
     #[pyo3(signature = (other, key_map = None, copy_files = false, keys = None))]
@@ -160,12 +146,13 @@ impl ArtifactRegistry {
         copy_files: bool,
         keys: Option<HashSet<String>>,
     ) -> PyResult<()> {
-        let other_borrowed = other.inner.lock().unwrap();
         self.inner
-            .lock()
-            .unwrap()
-            .merge_from(&other_borrowed, key_map.as_ref(), copy_files, keys.as_ref())
+            .merge_from(&other.inner, key_map.as_ref(), copy_files, keys.as_ref())
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    fn unregister(&self, key: &str) {
+        self.inner.unregister(key);
     }
 
     #[classmethod]
@@ -175,15 +162,13 @@ impl ArtifactRegistry {
         artifact_dir: PathBuf,
     ) -> PyResult<Self> {
         rust_registry::ArtifactRegistry::from_registry_file(&path, artifact_dir)
-            .map(|r| ArtifactRegistry {
-                inner: Mutex::new(r),
-            })
+            .map(|r| ArtifactRegistry { inner: r })
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     #[getter]
     fn get_registry_path(&self) -> PathBuf {
-        self.inner.lock().unwrap().registry_path.clone()
+        self.inner.registry_path.clone()
     }
 }
 
@@ -196,17 +181,15 @@ fn resolve_interpolation_map(
     interpolation_map: HashMap<String, String>,
     loop_iter: &str,
 ) -> PyResult<HashMap<String, String>> {
-    let inner = artifacts.inner.lock().unwrap();
-    rust_resolve::resolve_interpolation_map(&inner, &interpolation_map, loop_iter).map_err(|e| {
-        match &e {
+    rust_resolve::resolve_interpolation_map(&artifacts.inner, &interpolation_map, loop_iter)
+        .map_err(|e| match &e {
             rust_resolve::ResolveError::MissingArtifact(key) => {
                 MissingArtifact::new_err(format!("artifact not bound: {:?}", key))
             }
             rust_resolve::ResolveError::Other(src) => {
                 pyo3::exceptions::PyValueError::new_err(src.to_string())
             }
-        }
-    })
+        })
 }
 
 // --- Module registration ---

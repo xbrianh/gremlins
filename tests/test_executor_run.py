@@ -4,26 +4,15 @@ import pathlib
 import signal
 import subprocess
 import sys
-import types
 from unittest.mock import patch
 
 import pytest
 
-from gremlins.executor.run import (
+from gremlins.spawn.pipeline import (
     _HANDLED_SIGS,
     _install_signal_handlers,
     _prepend_overlay_bin_to_path,
 )
-from tests.fake_client import FakeClient
-
-
-class _TrackingClient(FakeClient):
-    def __init__(self):
-        super().__init__()
-        self.reap_calls = 0
-
-    def reap_all(self):
-        self.reap_calls += 1
 
 
 @pytest.fixture(autouse=True)
@@ -35,57 +24,38 @@ def _restore_signals():
 
 
 @pytest.mark.parametrize("sig", _HANDLED_SIGS)
-def test_signal_handler_reaps_and_redelivers(sig):
-    client = _TrackingClient()
-    with patch("gremlins.executor.run.atexit.register"):
-        gremlin = types.SimpleNamespace(state=None)
-        _install_signal_handlers([client], gremlin)
+def test_signal_handler_redelivers(sig):
+    """Signal handler flushes logs and re-raises the signal."""
+    with patch("gremlins.spawn.pipeline.atexit.register"):
+        gremlin = object()  # PyGremlin stub — handler only needs it to exist
+        _install_signal_handlers(gremlin)
     handler = signal.getsignal(sig)
 
     killed: list[tuple[int, int]] = []
     with patch.object(os, "kill", side_effect=lambda pid, s: killed.append((pid, s))):
         handler(sig, None)
 
-    assert client.reap_calls == 1
     assert killed == [(os.getpid(), sig)]
     # handler should have reset to SIG_DFL so the next delivery is default
     assert signal.getsignal(sig) is signal.SIG_DFL
 
 
-def test_atexit_log_logs_when_stage_set(caplog):
+def test_atexit_log_always_logs(caplog):
+    """atexit handler logs unconditionally — no stage/attempt check needed."""
     registered: list = []
-    with patch("gremlins.executor.run.atexit.register", side_effect=registered.append):
-        gremlin = types.SimpleNamespace(state=None)
-        _install_signal_handlers([], gremlin)
+    with patch(
+        "gremlins.spawn.pipeline.atexit.register", side_effect=registered.append
+    ):
+        gremlin = object()
+        _install_signal_handlers(gremlin)
 
     assert len(registered) == 1
     atexit_fn = registered[0]
 
-    with patch(
-        "gremlins.executor.run._load_stage_attempt",
-        return_value=("my-stage", "attempt-1"),
-    ):
-        with caplog.at_level("WARNING"):
-            atexit_fn()
+    with caplog.at_level("WARNING"):
+        atexit_fn()
 
     assert "exiting via atexit" in caplog.text
-    assert "my-stage" in caplog.text
-    assert "attempt-1" in caplog.text
-
-
-def test_atexit_log_silent_on_clean_exit(caplog):
-    registered: list = []
-    with patch("gremlins.executor.run.atexit.register", side_effect=registered.append):
-        gremlin = types.SimpleNamespace(state=None)
-        _install_signal_handlers([], gremlin)
-
-    atexit_fn = registered[0]
-
-    with patch("gremlins.executor.run._load_stage_attempt", return_value=("", "")):
-        with caplog.at_level("WARNING"):
-            atexit_fn()
-
-    assert "exiting via atexit" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

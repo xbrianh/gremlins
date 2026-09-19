@@ -8,6 +8,7 @@ use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::clients::protocol::CompletedRun;
 use crate::stages::base;
+use crate::stages::constants::FRAMEWORK_KEYS;
 
 // ---------------------------------------------------------------------------
 // Agent struct
@@ -20,6 +21,97 @@ pub struct Agent {
     pub options: HashMap<String, serde_json::Value>,
     pub interpolation_map: HashMap<String, String>,
     pub bind_map: HashMap<String, String>,
+}
+
+impl Agent {
+    /// Parse an `Agent` from a stage mapping.
+    ///
+    /// Mirrors `PyAgent::with_dict` field for field — the `in`/`out`
+    /// rejection, the framework-key collision check (`model` excepted, since an
+    /// agent may target one), and the requirement that `prompt` be a list of
+    /// strings. The `client` key is deliberately not read here: the client spec
+    /// is a pipeline concern and lives on the stage-tree node.
+    pub fn from_dict(d: &HashMap<String, serde_json::Value>) -> Result<Agent, String> {
+        let name = d
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        if d.contains_key("in") || d.contains_key("out") {
+            return Err(format!(
+                "stage {name:?}: 'in'/'out' keys are no longer supported; \
+                 use 'interpolation'/'bind' with URI values"
+            ));
+        }
+
+        let interpolation_map = string_mapping(d, "interpolation", &name)?;
+        let bind_map = string_mapping(d, "bind", &name)?;
+
+        let options = match d.get("options") {
+            None => HashMap::new(),
+            Some(serde_json::Value::Object(options)) => options
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            Some(_) => {
+                return Err(format!(
+                    "stage {name:?}: 'options' must be a mapping of string keys to JSON-serializable values"
+                ))
+            }
+        };
+
+        for key in options.keys() {
+            if FRAMEWORK_KEYS.contains(key.as_str()) && key != "model" {
+                return Err(format!(
+                    "stage {name:?}: option key {key:?} collides with framework substitution variable"
+                ));
+            }
+        }
+
+        let prompts = match d.get("prompt") {
+            None => Vec::new(),
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .map(|item| {
+                    item.as_str().map(String::from).ok_or_else(|| {
+                        format!("stage {name:?}: 'prompt' must be a list of strings")
+                    })
+                })
+                .collect::<Result<Vec<String>, String>>()?,
+            Some(_) => {
+                return Err(format!(
+                    "stage {name:?}: 'prompt' must be a list of strings"
+                ))
+            }
+        };
+
+        Ok(Agent {
+            name,
+            prompts,
+            options,
+            interpolation_map,
+            bind_map,
+        })
+    }
+}
+
+/// Read a string-to-string mapping field: absent is empty, and a present value
+/// must be a mapping whose entries are all strings.
+fn string_mapping(
+    d: &HashMap<String, serde_json::Value>,
+    field: &str,
+    name: &str,
+) -> Result<HashMap<String, String>, String> {
+    match d.get(field) {
+        None => Ok(HashMap::new()),
+        Some(serde_json::Value::Object(entries)) => entries
+            .iter()
+            .map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+            .collect::<Option<HashMap<String, String>>>()
+            .ok_or_else(|| format!("stage {name:?}: '{field}' must be a mapping")),
+        Some(_) => Err(format!("stage {name:?}: '{field}' must be a mapping")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +167,7 @@ impl From<ResolveError> for AgentError {
 
 pub fn prepare_agent(
     agent: &Agent,
-    artifacts: &mut ArtifactRegistry,
+    artifacts: &ArtifactRegistry,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<AgentPrepared, AgentError> {
@@ -165,7 +257,7 @@ pub fn prepare_agent(
 /// binds may be absent.
 pub fn commit_agent(
     prepared: &AgentPrepared,
-    artifacts: &mut ArtifactRegistry,
+    artifacts: &ArtifactRegistry,
 ) -> Result<(), AgentError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
@@ -474,7 +566,7 @@ mod tests {
         ArtifactRegistry::new(artifact_dir)
     }
 
-    fn register_file(reg: &mut ArtifactRegistry, name: &str, content: &str) -> String {
+    fn register_file(reg: &ArtifactRegistry, name: &str, content: &str) -> String {
         let uri = Uri::parse(&format!("artifact://{name}")).unwrap();
         reg.write_into_registry(&uri, content).unwrap()
     }
@@ -489,8 +581,8 @@ mod tests {
     fn test_prepare_basic_prompt_substitution() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
-        register_file(&mut reg, "world", "world-value");
+        let reg = make_registry(ad);
+        register_file(&reg, "world", "world-value");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["Hello {var}".to_string()],
@@ -502,7 +594,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert!(prepared.prompt.contains("world-value"));
     }
 
@@ -510,8 +602,8 @@ mod tests {
     fn test_prepare_framework_subs_win() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
-        register_file(&mut reg, "interp-src", "from-interp");
+        let reg = make_registry(ad);
+        register_file(&reg, "interp-src", "from-interp");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["Hello {name}".to_string()],
@@ -523,7 +615,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert!(prepared.prompt.contains("from-fw"));
         assert!(!prepared.prompt.contains("from-interp"));
     }
@@ -532,8 +624,8 @@ mod tests {
     fn test_prepare_bind_shadows_interpolation() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad.clone());
-        register_file(&mut reg, "interp-val", "interp-val");
+        let reg = make_registry(ad.clone());
+        register_file(&reg, "interp-val", "interp-val");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{key}".to_string()],
@@ -545,7 +637,7 @@ mod tests {
             bind_map: HashMap::from([("key".to_string(), "file://session/out.md".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         // bind_paths should contain the registered path, not "interp-val"
         assert!(prepared.bind_paths.contains_key("key"));
         let path = &prepared.bind_paths["key"];
@@ -559,7 +651,7 @@ mod tests {
     fn test_prepare_missing_interpolation_key_errors() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{missing}".to_string()],
@@ -568,7 +660,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let err = prepare_agent(&agent, &mut reg, "", &fw).unwrap_err();
+        let err = prepare_agent(&agent, &reg, "", &fw).unwrap_err();
         assert!(matches!(err, AgentError::Resolve { .. }));
     }
 
@@ -576,7 +668,7 @@ mod tests {
     fn test_prepare_loop_iter_in_bind_uri() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{out}".to_string()],
@@ -588,7 +680,7 @@ mod tests {
             )]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "my-agent~3", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "my-agent~3", &fw).unwrap();
         assert_eq!(prepared.bind_uris[0].1, "artifact://my-agent~3/out.txt");
     }
 
@@ -596,7 +688,7 @@ mod tests {
     fn test_prepare_loop_iter_in_interpolation_value() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad.clone());
+        let reg = make_registry(ad.clone());
         // Pre-register the artifact that content() will look up
         let plan_uri = Uri::parse("artifact://my-agent~2/plan.md").unwrap();
         reg.write_into_registry(&plan_uri, "# Plan").unwrap();
@@ -612,7 +704,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "my-agent~2", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "my-agent~2", &fw).unwrap();
         assert!(prepared.prompt.contains("Plan: # Plan"));
     }
 
@@ -620,7 +712,7 @@ mod tests {
     fn test_prepare_optional_bind_key() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{result}".to_string()],
@@ -629,7 +721,7 @@ mod tests {
             bind_map: HashMap::from([("result?".to_string(), "file://session/out.md".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert_eq!(prepared.bind_uris[0].0, "result");
         assert!(prepared.bind_uris[0].2); // optional
     }
@@ -638,8 +730,8 @@ mod tests {
     fn test_prepare_model_substituted() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
-        register_file(&mut reg, "openai", "openai");
+        let reg = make_registry(ad);
+        register_file(&reg, "openai", "openai");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -654,7 +746,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert_eq!(prepared.model, Some("openai:{variant}".to_string()));
     }
 
@@ -662,7 +754,7 @@ mod tests {
     fn test_prepare_model_none_when_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -671,7 +763,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert!(prepared.model.is_none());
     }
 
@@ -679,7 +771,7 @@ mod tests {
     fn test_prepare_workspace_preamble_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -688,7 +780,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let mut prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         prepared.cwd = String::new();
         prepared.worktree = None;
         let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
@@ -701,7 +793,7 @@ mod tests {
     fn test_prepare_workspace_preamble_present() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -710,7 +802,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let mut prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         prepared.cwd = "/work".to_string();
         prepared.worktree = Some("/work".to_string());
         let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
@@ -723,7 +815,7 @@ mod tests {
     fn test_prepare_workspace_preamble_different_worktree() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -732,7 +824,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let mut prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         prepared.cwd = "/tmp/run".to_string();
         prepared.worktree = Some("/repo".to_string());
         let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
@@ -745,7 +837,7 @@ mod tests {
     fn test_prepare_name_substitution_in_bind_key() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{my-agent}".to_string()],
@@ -757,7 +849,7 @@ mod tests {
             )]),
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert_eq!(prepared.bind_uris[0].0, "my-agent");
         assert!(prepared.bind_uris[0].1.contains("my-agent.md"));
     }
@@ -766,7 +858,7 @@ mod tests {
     fn test_prepare_prompts_joined() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec![
@@ -779,7 +871,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert_eq!(prepared.prompt, "Line 1\n\nLine 2\n\nLine 3");
     }
 
@@ -787,8 +879,8 @@ mod tests {
     fn test_prepare_hyphen_normalization_in_prompt() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
-        register_file(&mut reg, "value", "value");
+        let reg = make_registry(ad);
+        register_file(&reg, "value", "value");
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{child-plan}".to_string()],
@@ -800,7 +892,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert!(prepared.prompt.contains("value"));
     }
 
@@ -808,7 +900,7 @@ mod tests {
     fn test_prepare_options_string_filtering() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let mut opts: HashMap<String, serde_json::Value> = HashMap::new();
         opts.insert(
             "string_k".to_string(),
@@ -823,7 +915,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         // {string_k} is substituted; {num_k} is not a string option and remains
         assert!(prepared.prompt.contains("v {num_k}"));
     }
@@ -832,7 +924,7 @@ mod tests {
     fn test_prepare_multi_bind_verification_flag() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{a} {b} {c}".to_string()],
@@ -845,7 +937,7 @@ mod tests {
             ]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert_eq!(prepared.bind_uris.len(), 3);
         assert_eq!(prepared.expected_artifact_paths.len(), 3);
     }
@@ -854,7 +946,7 @@ mod tests {
     fn test_prepare_no_interpolation_map_runs_prompt_unchanged() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let mut reg = make_registry(ad);
+        let reg = make_registry(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["Static prompt".to_string()],
@@ -863,7 +955,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &mut reg, "", &fw).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
         assert!(prepared.prompt.ends_with("Static prompt"));
     }
 
@@ -926,7 +1018,7 @@ mod tests {
     #[test]
     fn test_prepare_agent_allows_recovering_from_stale_binding() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let reg = make_registry(ensure_artifact_dir(&tmp));
 
         // Registered but its file is gone: a skip_if_exists producer must be
         // able to run (and commit) again.
@@ -935,9 +1027,9 @@ mod tests {
         std::fs::remove_file(&stale).unwrap();
 
         let agent = agent_with_bind("plan", "artifact://plan.md");
-        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new()).unwrap();
         std::fs::write(&prepared.bind_paths["plan"], "# new plan").unwrap();
-        commit_agent(&prepared, &mut reg).unwrap();
+        commit_agent(&prepared, &reg).unwrap();
         assert_eq!(
             reg.content("artifact://plan.md", None).unwrap(),
             "# new plan",
@@ -947,10 +1039,10 @@ mod tests {
     #[test]
     fn test_commit_agent_rejects_missing_non_optional() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
-        let err = commit_agent(&prepared, &mut reg).unwrap_err();
+        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new()).unwrap();
+        let err = commit_agent(&prepared, &reg).unwrap_err();
         assert!(matches!(err, AgentError::MissingArtifact { .. }));
         assert!(!reg.is_registered("artifact://out.md"));
     }
@@ -958,28 +1050,28 @@ mod tests {
     #[test]
     fn test_commit_agent_rejects_empty_file() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new()).unwrap();
         std::fs::write(&prepared.bind_paths["out"], "").unwrap();
-        assert!(commit_agent(&prepared, &mut reg).is_err());
+        assert!(commit_agent(&prepared, &reg).is_err());
         assert!(!reg.is_registered("artifact://out.md"));
     }
 
     #[test]
     fn test_commit_agent_allows_missing_optional() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out?", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
-        commit_agent(&prepared, &mut reg).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new()).unwrap();
+        commit_agent(&prepared, &reg).unwrap();
         assert!(!reg.is_registered("artifact://out.md"));
     }
 
     #[test]
     fn test_commit_agent_multi_output_missing_non_optional_errors() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -990,11 +1082,11 @@ mod tests {
                 ("b".to_string(), "artifact://b.md".to_string()),
             ]),
         };
-        let mut prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        let mut prepared = prepare_agent(&agent, &reg, "", &HashMap::new()).unwrap();
         // Pin iteration order so the missing bind is evaluated last.
         prepared.bind_uris.sort_by(|x, y| x.0.cmp(&y.0));
         std::fs::write(&prepared.bind_paths["a"], "content").unwrap();
-        let err = commit_agent(&prepared, &mut reg).unwrap_err();
+        let err = commit_agent(&prepared, &reg).unwrap_err();
         assert!(matches!(err, AgentError::MissingArtifact { key, .. } if key == "b"));
         // The file that was written is still committed.
         assert!(reg.is_registered("artifact://a.md"));
@@ -1004,7 +1096,7 @@ mod tests {
     #[test]
     fn test_commit_agent_multi_output_missing_optional_ok() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -1015,9 +1107,9 @@ mod tests {
                 ("b?".to_string(), "artifact://b.md".to_string()),
             ]),
         };
-        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new()).unwrap();
         std::fs::write(&prepared.bind_paths["a"], "content").unwrap();
-        commit_agent(&prepared, &mut reg).unwrap();
+        commit_agent(&prepared, &reg).unwrap();
         assert!(reg.is_registered("artifact://a.md"));
         assert!(!reg.is_registered("artifact://b.md"));
     }
@@ -1025,11 +1117,132 @@ mod tests {
     #[test]
     fn test_commit_agent_registers_produced_file() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut reg = make_registry(ensure_artifact_dir(&tmp));
+        let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &mut reg, "", &HashMap::new()).unwrap();
+        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new()).unwrap();
         std::fs::write(&prepared.bind_paths["out"], "content").unwrap();
-        commit_agent(&prepared, &mut reg).unwrap();
+        commit_agent(&prepared, &reg).unwrap();
         assert!(reg.is_registered("artifact://out.md"));
+    }
+
+    // ---- from_dict tests ----
+
+    fn agent_dict(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn from_dict_parses_prompt_and_maps() {
+        let d = agent_dict(&[
+            ("name", serde_json::json!("plan")),
+            ("prompt", serde_json::json!(["first", "second"])),
+            ("interpolation", serde_json::json!({"a": "artifact://a"})),
+            ("bind", serde_json::json!({"b": "artifact://b"})),
+            ("options", serde_json::json!({"model": "openai:gpt-5"})),
+        ]);
+        let agent = Agent::from_dict(&d).unwrap();
+        assert_eq!(agent.name, "plan");
+        assert_eq!(
+            agent.prompts,
+            vec!["first".to_string(), "second".to_string()]
+        );
+        assert_eq!(agent.interpolation_map.get("a").unwrap(), "artifact://a");
+        assert_eq!(agent.bind_map.get("b").unwrap(), "artifact://b");
+        assert_eq!(
+            agent.options.get("model").unwrap(),
+            &serde_json::json!("openai:gpt-5")
+        );
+    }
+
+    #[test]
+    fn from_dict_defaults_are_empty() {
+        let agent = Agent::from_dict(&agent_dict(&[])).unwrap();
+        assert_eq!(agent.name, "");
+        assert!(agent.prompts.is_empty());
+        assert!(agent.options.is_empty());
+        assert!(agent.interpolation_map.is_empty());
+        assert!(agent.bind_map.is_empty());
+    }
+
+    #[test]
+    fn from_dict_rejects_in_and_out() {
+        for key in ["in", "out"] {
+            let d = agent_dict(&[
+                ("name", serde_json::json!("s")),
+                (key, serde_json::json!({})),
+            ]);
+            let err = Agent::from_dict(&d).unwrap_err();
+            assert!(
+                err.contains("'in'/'out' keys are no longer supported"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_dict_rejects_non_mapping_interpolation() {
+        let d = agent_dict(&[
+            ("name", serde_json::json!("s")),
+            ("interpolation", serde_json::json!(["not", "a", "mapping"])),
+        ]);
+        let err = Agent::from_dict(&d).unwrap_err();
+        assert!(err.contains("'interpolation' must be a mapping"), "{err}");
+    }
+
+    #[test]
+    fn from_dict_rejects_null_interpolation() {
+        let d = agent_dict(&[
+            ("name", serde_json::json!("s")),
+            ("interpolation", serde_json::Value::Null),
+        ]);
+        assert!(Agent::from_dict(&d).is_err());
+    }
+
+    #[test]
+    fn from_dict_rejects_non_string_bind_value() {
+        let d = agent_dict(&[
+            ("name", serde_json::json!("s")),
+            ("bind", serde_json::json!({"a": 42})),
+        ]);
+        let err = Agent::from_dict(&d).unwrap_err();
+        assert!(err.contains("'bind' must be a mapping"), "{err}");
+    }
+
+    #[test]
+    fn from_dict_rejects_framework_option_key_but_allows_model() {
+        let bad = agent_dict(&[
+            ("name", serde_json::json!("s")),
+            ("options", serde_json::json!({"cwd": "/tmp"})),
+        ]);
+        let err = Agent::from_dict(&bad).unwrap_err();
+        assert!(
+            err.contains("collides with framework substitution variable"),
+            "{err}"
+        );
+
+        let ok = agent_dict(&[
+            ("name", serde_json::json!("s")),
+            ("options", serde_json::json!({"model": "openai:gpt-5"})),
+        ]);
+        assert!(Agent::from_dict(&ok).is_ok());
+    }
+
+    #[test]
+    fn from_dict_rejects_non_string_prompt_item() {
+        let d = agent_dict(&[
+            ("name", serde_json::json!("s")),
+            ("prompt", serde_json::json!(["ok", 7])),
+        ]);
+        let err = Agent::from_dict(&d).unwrap_err();
+        assert!(err.contains("'prompt' must be a list of strings"), "{err}");
+    }
+
+    #[test]
+    fn from_dict_rejects_missing_type_shape() {
+        let d = agent_dict(&[("prompt", serde_json::json!("not a list"))]);
+        assert!(Agent::from_dict(&d).is_err());
     }
 }

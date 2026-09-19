@@ -142,7 +142,7 @@ def test_run_pipeline_rejects_invalid_gremlin_id(tmp_path, monkeypatch, bad_id):
 
 
 def test_run_pipeline_valid_id_proceeds(tmp_path, monkeypatch):
-    monkeypatch.setattr("gremlins.executor.run.run_pipeline", lambda *a, **kw: 0)
+    monkeypatch.setattr("gremlins.spawn.pipeline.run_pipeline", lambda *a, **kw: 0)
     monkeypatch.setattr(
         "_gremlins_core.executor.StateData.write_terminal_state",
         lambda self, exit_code: None,
@@ -163,7 +163,7 @@ def test_run_pipeline_forwards_gremlin_id_to_orchestrator(
         StateData(gremlin_id).set_stage("implement")
         return 0
 
-    monkeypatch.setattr("gremlins.executor.run.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("gremlins.spawn.pipeline.run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(
         "_gremlins_core.executor.StateData.write_terminal_state",
         lambda self, exit_code: None,

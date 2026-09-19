@@ -7,3 +7,6 @@ pub mod core;
 pub mod executor;
 pub mod schemas;
 pub mod stages;
+
+#[cfg(test)]
+mod test_support;

@@ -53,7 +53,6 @@ release: ## Build and install the native extension in release mode
 	maturin develop --release
 
 check: lint format typecheck rust-fmt-check rust-clippy
-	@grep -r 'from gremlins.executor.state' gremlins/ --include='*.py' | grep -v 'gremlins/executor/' && echo 'ERROR: state.py leak' && exit 1 || true
 
 # --- Shell tests (bats) ---
 

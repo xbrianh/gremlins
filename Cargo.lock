@@ -547,6 +547,7 @@ dependencies = [
  "futures",
  "glob",
  "http",
+ "indexmap",
  "libc",
  "log",
  "phf",
@@ -576,6 +577,7 @@ dependencies = [
  "rig-core",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "tokio",
 ]
 

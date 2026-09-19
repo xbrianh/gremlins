@@ -1,125 +1,11 @@
-"""Tests for active_children state tracking in container stages and fleet rendering."""
+"""Tests for active_children rendering in fleet row and JSON output."""
 
 from __future__ import annotations
 
-import asyncio
-import json
-import pathlib
 from typing import Any
-
-import pytest
-from _gremlins_core.artifacts import Uri
-from _gremlins_core.executor import State, StateData, build_state
-from _gremlins_core.stages import Done, Outcome, ParallelStage, Sequence, StageAttrs
-from _gremlins_core.stages import Loop as LoopStage
-from conftest import MockGremlin
 
 from gremlins.fleet.render import build_row
 from gremlins.fleet.views import _gremlin_to_json  # type: ignore[reportPrivateUsage]
-from tests.fake_client import FakeClient
-
-
-def _stateful(tmp_path: pathlib.Path, gid: str = "test-id") -> MockGremlin:
-    sf = tmp_path / "state.json"
-    sf.write_text(json.dumps({"id": gid}), encoding="utf-8")
-    data = StateData(gremlin_id=gid)
-    data.state_file = sf
-    state = build_state(
-        data=data,
-        client=FakeClient(),
-        artifact_dir=tmp_path,
-    )
-    return MockGremlin(state=state)
-
-
-def _read_state(tmp_path: pathlib.Path) -> dict[str, Any]:
-    return json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-
-
-# ---------------------------------------------------------------------------
-# Sequence
-# ---------------------------------------------------------------------------
-
-
-def test_sequence_active_children_cleared_after_run(tmp_path: pathlib.Path) -> None:
-    gremlin = _stateful(tmp_path)
-
-    class _Spy(StageAttrs):
-        captured: list[str] | None = None
-
-        async def run(self, gremlin: Any) -> Outcome:
-            _Spy.captured = _read_state(tmp_path).get("active_children")
-            return Done()
-
-    seq = Sequence("seq", body=[_Spy("child-a")])
-    asyncio.run(seq.run(gremlin))
-
-    assert _Spy.captured == ["child-a"]
-    assert "active_children" not in _read_state(tmp_path)
-
-
-def test_sequence_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> None:
-    gremlin = _stateful(tmp_path)
-
-    class _Boom(StageAttrs):
-        async def run(self, gremlin: Any) -> Outcome:
-            raise RuntimeError("boom")
-
-    seq = Sequence("seq", body=[_Boom("child-a")])
-    with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(seq.run(gremlin))
-
-    assert "active_children" not in _read_state(tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# Loop
-# ---------------------------------------------------------------------------
-
-
-def test_loop_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
-    gremlin = _stateful(tmp_path)
-    captured: list[list[str] | None] = []
-
-    class _Spy(StageAttrs):
-        async def run(self, gremlin: Any) -> Outcome:
-            captured.append(_read_state(tmp_path).get("active_children"))
-
-            gremlin.state.artifacts.write_into_registry(
-                Uri.parse("artifact://done.txt"), "registered"
-            )
-            return Done()
-
-    # Set stop_when_exists so the loop doesn't exhaust
-    loop = LoopStage(
-        "lp",
-        body=[_Spy("body-stage")],
-        max_iterations=1,
-        stop_when_exists="artifact://done.txt",
-    )
-    asyncio.run(loop.run(gremlin))
-
-    assert captured == [["body-stage"]]
-    assert "active_children" not in _read_state(tmp_path)
-
-
-def test_loop_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> None:
-    gremlin = _stateful(tmp_path)
-
-    class _Boom(StageAttrs):
-        async def run(self, gremlin: Any) -> Outcome:
-            raise RuntimeError("boom")
-
-    loop = LoopStage("lp", body=[_Boom("body-stage")], max_iterations=1)
-    with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(loop.run(gremlin))
-
-    assert "active_children" not in _read_state(tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# Render: build_row
-# ---------------------------------------------------------------------------
 
 
 def _row(state: dict[str, Any]) -> Any:
@@ -161,11 +47,6 @@ def test_build_row_no_active_children_field() -> None:
     assert row.stage == "parallel"
 
 
-# ---------------------------------------------------------------------------
-# JSON output: _gremlin_to_json
-# ---------------------------------------------------------------------------
-
-
 def test_gremlin_to_json_includes_active_children() -> None:
     state: dict[str, Any] = {
         "stage": "parallel",
@@ -180,75 +61,3 @@ def test_gremlin_to_json_active_children_empty_when_absent() -> None:
     state: dict[str, Any] = {"stage": "parallel"}
     result = _gremlin_to_json("gr-abc123", "/tmp/fake-wdir", state, "running")
     assert result["active_children"] == []
-
-
-# ---------------------------------------------------------------------------
-# Parallel
-# ---------------------------------------------------------------------------
-
-
-def _parallel_execute_stage(
-    parent_state: State,
-    child_fns: list[tuple[str, Any]],
-    tmp_path: pathlib.Path,
-) -> Any:
-    child_runners = [
-        (
-            k,
-            build_state(
-                data=StateData(),
-                client=FakeClient(),
-                artifact_dir=tmp_path,
-                child_key=k,
-            ),
-            fn,
-        )
-        for k, fn in child_fns
-    ]
-    stages = ParallelStage("grp", []).build_runtime_stages(
-        child_runners, parent_state=parent_state, project_root_path=pathlib.Path.cwd()
-    )
-    return stages[1][1]  # execute stage
-
-
-def test_parallel_active_children_set_and_cleared(tmp_path: pathlib.Path) -> None:
-    sf = tmp_path / "state.json"
-    sf.write_text(json.dumps({"id": "test-id"}), encoding="utf-8")
-    parent_data = StateData(gremlin_id="test-id")
-    parent_data.state_file = sf
-    parent_state = build_state(
-        data=parent_data,
-        client=FakeClient(),
-        artifact_dir=sf.parent,
-    )
-    captured: list[list[str] | None] = []
-
-    async def child_fn() -> None:
-        captured.append(_read_state(tmp_path).get("active_children"))
-
-    execute = _parallel_execute_stage(parent_state, [("child-a", child_fn)], tmp_path)
-    asyncio.run(execute())
-
-    assert captured == [["child-a"]]
-    assert "active_children" not in _read_state(tmp_path)
-
-
-def test_parallel_active_children_cleared_on_exception(tmp_path: pathlib.Path) -> None:
-    sf = tmp_path / "state.json"
-    sf.write_text(json.dumps({"id": "test-id"}), encoding="utf-8")
-    parent_data = StateData(gremlin_id="test-id")
-    parent_data.state_file = sf
-    parent_state = build_state(
-        data=parent_data,
-        client=FakeClient(),
-        artifact_dir=sf.parent,
-    )
-
-    async def boom() -> None:
-        raise RuntimeError("boom")
-
-    execute = _parallel_execute_stage(parent_state, [("child-a", boom)], tmp_path)
-    with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(execute())
-
-    assert "active_children" not in _read_state(tmp_path)

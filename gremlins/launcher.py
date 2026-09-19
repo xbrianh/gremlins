@@ -14,27 +14,31 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 from typing import Any, cast
 
+from _gremlins_core import Gremlin as PyGremlin
 from _gremlins_core.artifacts import ArtifactRegistry, Uri
 from _gremlins_core.config import project_root as _project_root_fn
 from _gremlins_core.config import scratch_root as _scratch_root_fn
 from _gremlins_core.config import state_root as _state_root_fn
 from _gremlins_core.discovery import list_pipelines, resolve_pipeline_path
+from _gremlins_core.executor import write_state
 from _gremlins_core.schemas import Pipeline as _PipelineData
 from _gremlins_core.schemas import validate_source_values
 from _gremlins_core.utils import git as _git_mod
 
-from gremlins.executor.gremlin import Gremlin, validate_gremlin_id, write_initial_state
 from gremlins.utils import proc
 from gremlins.utils.spawn_logged_process import (
     spawn_logged_process as _spawn_logged_process,
 )
 from gremlins.utils.text import slugify
+
+_GREMLIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class GremlinAlreadyRunning(RuntimeError):
@@ -43,6 +47,54 @@ class GremlinAlreadyRunning(RuntimeError):
 
 class GremlinStateDirExists(RuntimeError):
     pass
+
+
+def validate_gremlin_id(gremlin_id: str) -> None:
+    """Raise ValueError if gremlin_id is not a safe, non-path-traversing identifier."""
+    if ".." in gremlin_id or not _GREMLIN_ID_RE.match(gremlin_id):
+        raise ValueError(f"gremlin_id contains illegal characters: {gremlin_id!r}")
+
+
+def write_initial_state(
+    gremlin_id: str,
+    kind: str,
+    project_root: str,
+    started_at: str,
+    description: str,
+    parent_id: str,
+    pipeline_args: list[str],
+    client_label: str,
+    pipeline_path: str,
+    stage_inputs: dict[str, Any],
+    state_dir: pathlib.Path,
+    base_ref_name: str = "",
+    base_ref_sha: str = "",
+) -> None:
+    """Create and persist initial state data for a gremlin."""
+    validate_gremlin_id(gremlin_id)
+    state_dict = {
+        "id": gremlin_id,
+        "kind": kind,
+        "project_root": project_root,
+        "workdir": "",
+        "setup_kind": "worktree-detached",
+        "worktree_base": base_ref_sha,
+        "status": "running",
+        "started_at": started_at,
+        "description": description,
+        "parent_id": parent_id,
+        "pipeline_args": pipeline_args,
+        "client": client_label,
+        "pipeline_path": pipeline_path,
+        "stage": "starting",
+        "pid": None,
+        "stage_inputs": stage_inputs,
+        "attempt": "",
+        "group_name": "",
+        "child_key": "",
+        "exit_code": None,
+    }
+    write_state(state_dir, state_dict)
 
 
 def _state_root() -> pathlib.Path:
@@ -424,7 +476,7 @@ def launch(
 ) -> tuple[str, subprocess.Popen[bytes]]:
     """Set up state dir, spawn the pipeline detached, return (gremlin_id, process).
 
-    Worktree setup is deferred to the child process via Gremlin.initialize_with_runtime().
+    Worktree setup is deferred to the child process via PyGremlin.create().
     Synchronous through spawn; does not wait for the pipeline to finish.
     Raises ValueError on bad arguments, RuntimeError on infrastructure failure.
     stage_inputs may contain a 'pr' key to trigger a detached-from-ref checkout.
@@ -459,6 +511,8 @@ def launch(
             pipeline_path=inputs.pipeline_path,
             stage_inputs=inputs.stage_inputs,
             state_dir=state_dir,
+            base_ref_name=inputs.base_ref_name,
+            base_ref_sha=inputs.base_ref_sha,
         )
         artifact_dir = pathlib.Path(_scratch_root_fn(inputs.gremlin_id)) / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -477,12 +531,12 @@ def launch(
         raise
 
     (state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    Gremlin.patch_state_for(inputs.gremlin_id, pid=p.pid)
+    PyGremlin.patch_state_for(inputs.gremlin_id, pid=p.pid)
 
     return inputs.gremlin_id, p
 
 
-def _check_resume_preconditions(gremlin: Gremlin, graft: str | None) -> None:
+def _check_resume_preconditions(gremlin: PyGremlin, graft: str | None) -> None:
     state_data = gremlin.state_data
     status = state_data.status
     old_pid = state_data.pid
@@ -529,7 +583,7 @@ def _patch_state_for_resume(
 
     now_iso = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    Gremlin.patch_state_for(
+    PyGremlin.patch_state_for(
         gremlin_id,
         _delete=(
             "exit_code",
@@ -585,14 +639,14 @@ def _spawn_resume(
 
 
 def resume(gremlin_id: str, *, graft: str | None = None) -> None:
-    gremlin = Gremlin.open(gremlin_id)
+    gremlin = PyGremlin.from_id(gremlin_id)
     _check_resume_preconditions(gremlin, graft)
     _pr = gremlin.project_root or _project_root_fn()
 
     stage = gremlin.state_data.stage
     if not stage or stage == "starting":
         stage = "plan"
-    if gremlin.pipeline_data.uses_loop_handoff() and stage not in (
+    if gremlin.uses_loop_handoff() and stage not in (
         "review-chain",
         "address-chain",
     ):
@@ -622,4 +676,4 @@ def resume(gremlin_id: str, *, graft: str | None = None) -> None:
         _pr,
     )
     (gremlin.state_dir / "pid").write_text(str(p.pid), encoding="utf-8")
-    Gremlin.patch_state_for(gremlin_id, pid=p.pid)
+    PyGremlin.patch_state_for(gremlin_id, pid=p.pid)

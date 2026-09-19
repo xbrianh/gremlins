@@ -18,18 +18,12 @@ gremlins/                    Python package — see gremlins/AGENTS.md
   errors.py                  die(msg) helper
   paths.py                   Single source of truth for filesystem locations (state dir, worktree, etc.)
   logging_setup.py           configure_logging — UTC timestamp formatter, stdout, GREMLINS_LOG_LEVEL
-  protocols.py               GremlinProtocol, StageProtocol — shared protocols to avoid circular imports
   cli/                       Subcommand entry points — one file per subcommand group
   clients/                   Client classes + provider impls — see gremlins/clients/AGENTS.md
   stages/                    Stage classes: agent, exec, loop, composite, parallel, sequence — see gremlins/stages/AGENTS.md
   pipeline/                  YAML loader, discovery, preprocessor, bootstrap
   pipelines/                 Bundled YAML pipelines (gh, gh-terse, local, boss, pr-extend)
   prompts/                   Bundled prompt templates
-  executor/                  Run-time orchestrator — see gremlins/executor/AGENTS.md
-    state.py                 State class: execution context + state.json I/O
-    run.py                   run_pipeline: unified pipeline entry point
-    gremlin.py               Gremlin: constructs, initializes, and runs a pipeline
-    parallel_state.py        Per-shard state bookkeeping for parallel stages
   fleet/                     Fleet manager — see gremlins/fleet/AGENTS.md
   artifacts/                 Artifact registry + URI model — see gremlins/artifacts/AGENTS.md
   spawn/                     Internal spawn boundaries (pipeline + child subprocess entry points)
@@ -96,7 +90,7 @@ These values are persisted to `state.json` and read by other writers (the fleet 
 | Add a new pipeline | YAMLs in `gremlins/pipelines/` (bundled) or `.gremlins/` (project) |
 | Trace a CLI subcommand | `gremlins/cli/` |
 | Understand fleet operations | `gremlins/fleet/AGENTS.md` |
-| Understand the executor | `gremlins/executor/AGENTS.md` |
+| Understand the executor | `gremlins/spawn/pipeline.py` (run_pipeline entry point) |
 | Understand artifact registry + URIs | `gremlins/artifacts/AGENTS.md` |
 | Investigate a state-dir layout | `gremlins/paths.py` resolves dirs; `_gremlins_core.executor` manages state.json. Per-gremlin layout under `platformdirs.user_state_dir("gremlins")/<gremlin_id>/` |
 | Find the design backlog | `plans/` (rough notes, not authoritative) |

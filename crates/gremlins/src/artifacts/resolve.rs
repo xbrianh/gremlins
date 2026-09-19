@@ -73,8 +73,8 @@ pub fn resolve_interpolation_map(
         }
         match artifacts.data_uri(&key) {
             Ok(val) => {
-                result.insert(var.clone(), val.to_string());
                 log::debug!("resolve: {var:?} = {key:?} -> {} bytes", val.len());
+                result.insert(var.clone(), val);
             }
             Err(_) if default.is_some() => {
                 result.insert(var.clone(), default.unwrap_or("").to_string());
@@ -103,7 +103,7 @@ mod tests {
         (tmp, reg)
     }
 
-    fn register_file(reg: &mut ArtifactRegistry, name: &str, content: &str) -> String {
+    fn register_file(reg: &ArtifactRegistry, name: &str, content: &str) -> String {
         let uri = crate::artifacts::uri::Uri::parse(&format!("artifact://{name}")).unwrap();
         reg.write_into_registry(&uri, content).unwrap()
     }
@@ -117,8 +117,8 @@ mod tests {
 
     #[test]
     fn test_resolve_bound_key() {
-        let (_tmp, mut reg) = setup_registry();
-        let path = register_file(&mut reg, "mykey", "myval");
+        let (_tmp, reg) = setup_registry();
+        let path = register_file(&reg, "mykey", "myval");
 
         let mut map = HashMap::new();
         map.insert("var".to_string(), "artifact://mykey".to_string());
@@ -151,8 +151,8 @@ mod tests {
 
     #[test]
     fn test_resolve_content_with_json_path() {
-        let (_tmp, mut reg) = setup_registry();
-        register_file(&mut reg, "data.json", r#"{"x":{"y":"z"}}"#);
+        let (_tmp, reg) = setup_registry();
+        register_file(&reg, "data.json", r#"{"x":{"y":"z"}}"#);
         let mut map = HashMap::new();
         map.insert(
             "var".to_string(),
@@ -164,9 +164,9 @@ mod tests {
 
     #[test]
     fn test_resolve_loop_iter_substitution() {
-        let (_tmp, mut reg) = setup_registry();
-        register_file(&mut reg, "key_0", "val0");
-        let path_1 = register_file(&mut reg, "key_1", "val1");
+        let (_tmp, reg) = setup_registry();
+        register_file(&reg, "key_0", "val0");
+        let path_1 = register_file(&reg, "key_1", "val1");
 
         let mut map = HashMap::new();
         map.insert("var".to_string(), "artifact://key_{loop_iter}".to_string());

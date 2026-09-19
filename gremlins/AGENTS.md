@@ -8,10 +8,9 @@ review / address pipelines, the fleet manager
 ## Module layout
 
 - `cli/` — subcommand entry points. `__init__.py` is the top-level dispatch; one file per subcommand group: `launch.py`, `resume.py`, `fleet.py`. Bare invocation prints fleet status.
-- `spawn/pipeline.py` — `python -m gremlins.spawn.pipeline <gremlin_id> <pipeline_path> [args...]`. Spawned by the launcher; wraps `executor.run.run_pipeline` and writes terminal state on exit.
+- `spawn/pipeline.py` — `python -m gremlins.spawn.pipeline <gremlin_id> <pipeline_path> [args...]`. Spawned by the launcher; contains `run_pipeline`, signal handlers, env isolation, and writes terminal state on exit.
 - `spawn/child.py` — `python -m gremlins.spawn.child <spec_path>`. Spawned by the parallel runner to run a single stage in a fresh process (lands with #690).
 - `runner.py` — `run_stages` sequencer (with `resume_from`) + SIGINT/SIGTERM handlers that reap model subprocess children.
-- `state.py` — session-dir resolution, `set_stage` / `write_bail_file` / `patch_state`.
 - `utils/git.py` — `setup_workdir` / `stage_gremlins_overlay` (overlay staging around a worktree). The git operations themselves live in the native `_gremlins_core.utils.git` module.
 - `fleet/` — fleet manager package: status listing + `stop` / `land` / `close` / `rm` / `log` ops. See [`fleet/AGENTS.md`](fleet/AGENTS.md) for the per-module breakdown.
 - `clients/protocol.py` — `CompletedRun` dataclass.
@@ -20,8 +19,6 @@ review / address pipelines, the fleet manager
 - `pipelines/` — bundled YAML pipeline files (`local.yaml`, `gh.yaml`); lookup target for `resolve_pipeline_path`.
 - `stages/composite.py` — `StageAttrs` (common stage attributes) + `get_client_from_dict` + `child_state` for composite stages.
 - `stages/` — per-stage bodies: `plan`, `review_code`, `github_address_pull_request_reviews`, `verify`, `github_wait_copilot`, `github_wait_ci`, `handoff`.
-- `executor/run.py` — `run_main`. Drives the local pipeline.
-- `executor/pipeline.py` — `StageRunner`. Sequences stages for a pipeline run.
 - `prompts/` — externalized prompt templates (plan, implement, review lenses, etc).
 
 ## Conventions
@@ -79,7 +76,7 @@ stages:
 
 | Subcommand | Module |
 |---|---|
-| `launch local` / `launch gh` / `launch boss` | `cli.launch.launch_main` → `executor.run.run_pipeline` |
+| `launch local` / `launch gh` / `launch boss` | `cli.launch.launch_main` → `spawn.pipeline.run_pipeline` |
 | `resume` | `cli.resume.resume_main` |
 | `launch` | `cli.launch.launch_main` |
 | `stop` / `land` / `rm` / `close` / `log` | `cli.fleet.*_main` |
