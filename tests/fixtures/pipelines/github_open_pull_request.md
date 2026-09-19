@@ -1,1 +1,0 @@
-../prompts/github_open_pull_request.md
