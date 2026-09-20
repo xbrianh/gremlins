@@ -22,11 +22,13 @@ bootstrap:
     fi
 
 land:
+  interpolation:
+    message: artifact://commit_message.txt
   options:
     cmds:
       - WORKTREE_HEAD=$(git -C "$GREMLINS_WORKTREE_PATH" rev-parse HEAD)
       - git merge --squash "$WORKTREE_HEAD"
-      - 'git diff --cached --quiet || git commit -m "land: squash worktree changes"'
+      - 'git diff --cached --quiet || git commit -F "{message}"'
 
 stage-definitions:
   check-and-fix:
@@ -96,3 +98,12 @@ stages:
     bind:
       address_summary: "artifact://address-summary.md"
   - { type: check-and-fix }
+  - name: commit-message
+    type: agent
+    prompt: [commit_message.md]
+    interpolation:
+      plan: content("artifact://plan.md")
+      diff: content("artifact://diff.txt")
+      address_summary: content("artifact://address-summary.md")
+    bind:
+      commit_message: "artifact://commit_message.txt"
