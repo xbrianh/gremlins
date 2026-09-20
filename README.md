@@ -1,6 +1,6 @@
 # gremlins
 
-Background coding-agent pipelines that plan, implement, review, and land work
+Background coding-agent gremlin definitions that plan, implement, review, and land work
 end-to-end. Given a goal or GitHub issue, a gremlin runs the full
 plan → implement → review-code → address-code cycle unattended, writing
 artifacts to the per-user state directory resolved by
@@ -28,7 +28,7 @@ The workflow: you discuss the work with the assistant, it captures discrete unit
 When you run `gremlins launch`, the launcher captures the current working
 directory's repo root via `git rev-parse --show-toplevel` and stores it as
 `project_root` in the gremlin's `state.json`. That value pins the worktree
-base, child process cwd, and pipeline discovery for that gremlin's lifetime.
+base, child process cwd, and definition discovery for that gremlin's lifetime.
 
 **To work on a different repo: `cd` there, then `gremlins launch`.** There is
 no `--project-root` flag; the cwd at launch time is the contract.
@@ -36,7 +36,7 @@ no `--project-root` flag; the cwd at launch time is the contract.
 **Fleet view** (`gremlins`) shows gremlins from all repos by default.
 Pass `--here` to filter to the current repo's `project_root`.
 
-**Pipeline discovery** walks from the launching cwd, so `.gremlins/pipelines/`
+**Definition discovery** walks from the launching cwd, so `.gremlins/`
 overrides in each repo apply to gremlins launched from that repo.
 
 **Queue caveat**: there is one global queue and the runner's cwd is frozen at
@@ -98,7 +98,7 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 
 | Subcommand | Purpose |
 |---|---|
-| `launch <name>` | Launch a background gremlin by pipeline name (`gremlins launch --list` to see available) |
+| `launch <name>` | Launch a background gremlin by definition name (`gremlins launch --list` to see available) |
 | `resume` | Re-spawn an existing gremlin from its recorded stage |
 | `stop` | Send SIGTERM to a running gremlin and wait for it to exit |
 | `land` | Land a finished gremlin onto the current branch, then clean up |
@@ -128,7 +128,7 @@ the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
 
 #### Universal flags
 
-These flags are accepted by every pipeline:
+These flags are accepted by every gremlin definition:
 
 | Flag | Description |
 |---|---|
@@ -138,36 +138,36 @@ These flags are accepted by every pipeline:
 | `--print-id` | Print the gremlin ID to stdout after launch |
 | `--print-id-only` | Print only the gremlin id on stdout; suppress the launch banner |
 | `--wait` | Block until the spawned gremlin exits; return its exit code |
-| `--base-ref <ref>` | Git ref to branch the worktree from; defaults to the pipeline's `base_ref` (which defaults to `"current"`) |
-| `--client <spec>` | `provider:model` string overriding the pipeline's `default_client` |
+| `--base-ref <ref>` | Git ref to branch the worktree from; defaults to the definition's `base_ref` (which defaults to `"current"`) |
+| `--client <spec>` | `provider:model` string overriding the definition's `default_client` |
 | `--telemetry` / `-v` | Enable per-turn telemetry (TTFT, token counts, cache hit ratio) in the gremlin log |
 
-#### Per-pipeline flags
+#### Per-definition flags
 
-Additional flags are generated from the pipeline's `bootstrap.source` block.
+Additional flags are generated from the definition's `bootstrap.source` block.
 Each source key becomes a `--<key>` flag (required unless `optional: true`).
-For example, the `gh` pipeline declares `plan` and `instructions` sources, so
+For example, the `gh` definition declares `plan` and `instructions` sources, so
 `gremlins launch gh --help` shows `--plan` and `--instructions`. Run
-`gremlins launch <name> --help` to see the full list for a given pipeline.
+`gremlins launch <name> --help` to see the full list for a given definition.
 
-## Pipeline configuration
+## Definition configuration
 
 Gremlins runs a sequence of stages defined in a YAML file. The bundled
-pipelines work out of the box; a project-local YAML can override any of them.
+definitions work out of the box; a project-local YAML can override any of them.
 
 ### Discovery order
 
-`--pipeline <name|path>` resolves as follows:
+`--definition <name|path>` resolves as follows:
 
 1. A value with a `.yaml` suffix or more than one path component is loaded
    directly as a filesystem path.
-2. Otherwise `./.gremlins/pipelines/<name>.yaml` is checked first
+2. Otherwise `./.gremlins/<name>.yaml` is checked first
    (project-local override).
-3. Then `gremlins/pipelines/<name>.yaml` (bundled) is checked.
+3. Then `gremlins/definitions/<name>.yaml` (bundled) is checked.
 
-The pipeline name is the first non-flag argument to `gremlins launch`. Run `gremlins launch --list` to see all available pipeline names.
+The definition name is the first non-flag argument to `gremlins launch`. Run `gremlins launch --list` to see all available definition names.
 
-### Selecting a pipeline
+### Selecting a definition
 
 ```sh
 gremlins launch local   # bundled local.yaml
@@ -239,7 +239,7 @@ stages:
 | `name` | Unique stage identifier; used for `resume` targeting |
 | `type` | Stage type — a primitive (`agent`, `exec`, `loop`, `parallel`, `sequence`), a bundled recipe (`gremlins:plan`, `gremlins:implement`, etc.), or a `stage-definitions` key |
 | `client` | `provider:model` string; overrides `default_client` for this stage |
-| `prompt` | Path or list of paths. `gremlins:NAME` resolves from the bundled package prompts; a bare `NAME` resolves from the pipeline's `prompt_dir`. |
+| `prompt` | Path or list of paths. `gremlins:NAME` resolves from the bundled package prompts; a bare `NAME` resolves from the definition's `prompt_dir`. |
 | `options` | Free-form dict passed to the stage |
 | `skip_if_exists` | Artifact key; if this artifact is verified to exist, skip the stage |
 | `interpolation` | Map of variable names to registry key lookups: URI strings, `content("URI")` expressions, and optional `?default` fallbacks (see [Artifact binding](#artifact-binding)) |
@@ -251,7 +251,7 @@ stages:
 | `cancel_on_error` | If true, cancel outstanding parallel children when one bails (default: false) |
 | `error_policy` | `"any"` (default) or `"all"` — when to halt the parallel group on child bail |
 
-**Client precedence:** CLI `--client` beats per-stage `client:`; per-stage `client:` beats pipeline `default_client:`.
+**Client precedence:** CLI `--client` beats per-stage `client:`; per-stage `client:` beats definition `default_client:`.
 
 **Parallel-group form:**
 
@@ -275,7 +275,7 @@ stages:
 
 ### Client specifiers
 
-Clients are specified as `provider:model` inline strings, either at the pipeline level (`default_client:`) or per stage (`client:`).
+Clients are specified as `provider:model` inline strings, either at the definition level (`default_client:`) or per stage (`client:`).
 
 ```yaml
 default_client: xai:grok-4     # all stages default to this
@@ -287,7 +287,7 @@ stages:
     client: openai:gpt-4o      # this stage uses openai instead
 ```
 
-Providers: `openai`, `xai`, `openrouter`, `cmd`. The CLI `--client provider:model` flag overrides the pipeline-level `default_client:` but yields to per-stage `client:` settings.
+Providers: `openai`, `xai`, `openrouter`, `cmd`. The CLI `--client provider:model` flag overrides the definition-level `default_client:` but yields to per-stage `client:` settings.
 
 ### `prompt:` field
 
@@ -301,9 +301,9 @@ Each entry is one of:
 - `gremlins:NAME` — resolved from the bundled prompts shipped with the
   package. Use this for prompts owned by gremlins (`code_style.md`,
   `plan_gh.md`, etc.).
-- bare `NAME` — resolved from the pipeline's top-level `prompt_dir:`
+- bare `NAME` — resolved from the definition's top-level `prompt_dir:`
   (relative to the YAML file; defaults to the YAML's own directory). Use
-  this for prompts you author and check in alongside your pipeline.
+  this for prompts you author and check in alongside your definition.
 
 Lists are joined with `\n\n` before being passed to the stage. There is
 no search fallback between the two — the prefix is the contract, so a
@@ -311,7 +311,7 @@ custom YAML reads as self-describing about which prompts come from the
 package vs which must be provided locally.
 
 By convention, project-local prompts live in `./.gremlins/prompts/` (a peer
-of `./.gremlins/pipelines/`, not nested under it) and pipelines set
+of `./.gremlins/`, not nested under it) and definitions set
 `prompt_dir: ../prompts`.
 
 ### `options:` field
@@ -327,11 +327,11 @@ options:
   max_iterations: 3                  # fix-loop retries (default: 3)
 ```
 
-**`agent`** — supports `options.model` to override the pipeline-default model for that stage (used by the `handoff` recipe's `model: haiku`).
+**`agent`** — supports `options.model` to override the definition-default model for that stage (used by the `handoff` recipe's `model: haiku`).
 
 ### Stage types: primitives
 
-Five primitive stage types are built into the engine (`gremlins/pipeline/loader.py`):
+Five primitive stage types are built into the engine (`gremlins/definition/loader.py`):
 
 | Type | Description |
 |---|---|
@@ -395,7 +395,7 @@ bootstrap:
 
 The `gremlins:bind_artifact` DSL resolves a source value (GitHub issue ref, filepath, or inline text) and binds it as an artifact in the registry. GitHub issue refs (`#N` or `owner/repo#N`) are downloaded via `gh issue view`.
 
-> **Note:** Per-worktree bootstrap commands now live exclusively in the pipeline's `bootstrap.cmds`. The old `.gremlins/bootstrap.yaml` overlay file is no longer read — move any entries there into the `bootstrap.cmds` block of your pipeline YAML.
+> **Note:** Per-worktree bootstrap commands now live exclusively in the definition's `bootstrap.cmds`. The old `.gremlins/bootstrap.yaml` overlay file is no longer read — move any entries there into the `bootstrap.cmds` block of your gremlin definition YAML.
 
 ### Land block
 
@@ -410,7 +410,7 @@ land:
       - gh pr merge --squash --delete-branch "{PR_URL}"
 ```
 
-When a pipeline declares `land:`, `gremlins land` runs this stage instead of the built-in merge logic. The stage runs in the project root (not the worktree). Land commands receive the same `GREMLINS_*` runtime environment variables that stages and bootstrap commands get (`GREMLINS_WORKTREE_PATH`, `GREMLINS_GREMLIN_ID`, `GREMLINS_PROJECT_ROOT`, etc.).
+When a definition declares `land:`, `gremlins land` runs this stage instead of the built-in merge logic. The stage runs in the project root (not the worktree). Land commands receive the same `GREMLINS_*` runtime environment variables that stages and bootstrap commands get (`GREMLINS_WORKTREE_PATH`, `GREMLINS_GREMLIN_ID`, `GREMLINS_PROJECT_ROOT`, etc.).
 
 ### Parallel groups
 
@@ -440,7 +440,7 @@ stages:
 2. **Concurrent execution** — all children run simultaneously (up to `max_concurrent`)
 3. **Fan-in** — all children finish or one bails; siblings continue running until group completion
 
-If any child fails (raises `Bail`), the pipeline halts after the group finishes —
+If any child fails (raises `Bail`), the definition halts after the group finishes —
 siblings are not cancelled mid-run by default. This can be changed with `cancel_on_error: true`
 to cancel outstanding tasks immediately. The bail is evaluated via `error_policy` (default: `any`,
 meaning one failed child halts the group; set `error_policy: all` to halt only when all children bail).
@@ -460,8 +460,8 @@ children that haven't landed.
 
 ### Worked example: project-local override
 
-Create `.gremlins/pipelines/local.yaml` to override the bundled `local`
-pipeline. This example adds a `verify` stage before `review-code` and
+Create `.gremlins/local.yaml` to override the bundled `local`
+definition. This example adds a `verify` stage before `review-code` and
 overrides the client for the address stage:
 
 ```yaml
@@ -503,7 +503,7 @@ stages:
 
 ### Stage definitions
 
-YAML `stage-definitions:` lets you name and reuse stage patterns within a pipeline:
+YAML `stage-definitions:` lets you name and reuse stage patterns within a definition:
 
 ```yaml
 stage-definitions:
@@ -533,7 +533,7 @@ and `bind` keys can be safely overridden; to vary `prompt` or `options`, use anc
 ### Artifact binding
 
 Stages can bind artifacts via `interpolation:` and `bind:` maps. These define what data
-flows between stages in the pipeline:
+flows between stages in the definition:
 
 ```yaml
 stages:
@@ -583,21 +583,21 @@ stages:
   - { name: push, type: github-push-to-pr-branch }
 ```
 
-`gremlins:NAME` resolves the recipe from the bundled package (`gremlins/recipes/stages/NAME.yaml`). A bare path resolves relative to the pipeline file.
+`gremlins:NAME` resolves the recipe from the bundled package (`gremlins/recipes/stages/NAME.yaml`). A bare path resolves relative to the definition file.
 
-### Bundled pipelines
+### Bundled definitions
 
-The canonical reference pipelines:
+The canonical reference definitions:
 
-- [`gremlins/pipelines/local.yaml`](gremlins/pipelines/local.yaml) — `gremlins launch local`
-- [`gremlins/pipelines/gh.yaml`](gremlins/pipelines/gh.yaml) — `gremlins launch gh`
-- [`gremlins/pipelines/gh-terse.yaml`](gremlins/pipelines/gh-terse.yaml) — `gremlins launch gh-terse`
-- [`gremlins/pipelines/pr-extend.yaml`](gremlins/pipelines/pr-extend.yaml) — `gremlins launch pr-extend`
-- [`gremlins/pipelines/boss.yaml`](gremlins/pipelines/boss.yaml) — `gremlins launch boss`
+- [`gremlins/definitions/local.yaml`](gremlins/definitions/local.yaml) — `gremlins launch local`
+- [`gremlins/definitions/gh.yaml`](gremlins/definitions/gh.yaml) — `gremlins launch gh`
+- [`gremlins/definitions/gh-terse.yaml`](gremlins/definitions/gh-terse.yaml) — `gremlins launch gh-terse`
+- [`gremlins/definitions/pr-extend.yaml`](gremlins/definitions/pr-extend.yaml) — `gremlins launch pr-extend`
+- [`gremlins/definitions/boss.yaml`](gremlins/definitions/boss.yaml) — `gremlins launch boss`
 
 ## Error handling and recovery
 
-Gremlins can fail or get stuck during execution. Understanding how to recover is essential for running long-running pipelines.
+Gremlins can fail or get stuck during execution. Understanding how to recover is essential for running long-running definitions.
 
 ### Bail semantics
 
@@ -609,7 +609,7 @@ By convention, agent-based stages emit a `BAIL: <class>: <detail>` marker at the
 - `secrets` — credentials or sensitive data detected in the code
 - `other` — stage-specific or unknown failure condition
 
-The bail detail is written to a per-attempt `bail_<attempt>.json` file in the gremlin's state directory and is visible in the fleet view. When a stage bails, the entire pipeline halts — subsequent stages do not run, but the gremlin's state is preserved for recovery.
+The bail detail is written to a per-attempt `bail_<attempt>.json` file in the gremlin's state directory and is visible in the fleet view. When a stage bails, the entire definition halts — subsequent stages do not run, but the gremlin's state is preserved for recovery.
 
 ### Recovering from gremlin failures
 
@@ -639,7 +639,7 @@ When a child in a parallel group bails:
 - `gremlins resume <parent-id>--<group-name>--<child-key>` resumes only that child (use the full child ID from fleet view)
 
 If the cause was a transient failure affecting multiple children, `skip` the entire
-group and re-launch the pipeline to restart all children.
+group and re-launch the definition to restart all children.
 
 ### Boss-chain recovery
 
@@ -650,7 +650,7 @@ the boss halts if a child bails. At this point:
 - Once the child lands or is abandoned, resume the boss (`gremlins resume <boss-id>`)
 
 The boss resumes from its child-spawn stage and proceeds with the next iteration
-(re-planning, re-implementing, or wrapping up, depending on the pipeline).
+(re-planning, re-implementing, or wrapping up, depending on the definition).
 
 ## Environment variables
 
@@ -701,7 +701,7 @@ literal values.
 
 These are primarily for testing but can be used to redirect gremlins I/O.
 The harness itself sets `GREMLINS_PROJECT_ROOT` and `GREMLINS_OVERLAY_DIR`
-for every stage and bootstrap command, so pipeline authors can also rely on
+for every stage and bootstrap command, so definition authors can also rely on
 them at runtime — the override path is for testing and redirection, not the
 only way they exist.
 
@@ -709,7 +709,7 @@ only way they exist.
 |---|---|
 | `GREMLINS_SANDBOX_ROOT` | Re-bases `state_root()`, `work_root()`, and `user_config_root()` under a single directory. When set, all gremlin state and worktrees live under this path. |
 | `GREMLINS_PROJECT_ROOT` | Overrides the project root directory (normally the cwd at launch time). |
-| `GREMLINS_OVERLAY_DIR` | Overrides the `.gremlins` config directory for pipeline/prompt discovery. |
+| `GREMLINS_OVERLAY_DIR` | Overrides the `.gremlins` config directory for definition/prompt discovery. |
 
 ### Internal (set by gremlins itself)
 
@@ -793,10 +793,10 @@ Add `.gremlins/env` to your `~/.gitignore_global` or project `.gitignore`.
 
 ### Loader API
 
-- `gremlins/pipeline/__init__.py::Pipeline.from_yaml(path)` — loads and expands a pipeline YAML file, validates duplicate producers, fills stage clients.
-- `gremlins/pipeline/loader.py` — `STAGE_TYPES` (primitive type → class map), `parse_stages`, `parse_stage`, `fill_names`, `check_duplicate_producers`.
-- `gremlins/pipeline/discovery.py` — `resolve_pipeline_path`, `resolve_pipeline_name`, `list_pipelines`.
-- `gremlins/pipeline/preprocess.py` — `expand_pipeline` (include/prompt/recipe/stage-definition expansion).
+- `gremlins/definition/__init__.py::GremlinDefinition.from_yaml(path)` — loads and expands a gremlin definition YAML file, validates duplicate producers, fills stage clients.
+- `gremlins/definition/loader.py` — `STAGE_TYPES` (primitive type → class map), `parse_stages`, `parse_stage`, `fill_names`, `check_duplicate_producers`.
+- `gremlins/definition/discovery.py` — `resolve_definition_path`, `resolve_definition_name`, `list_definitions`.
+- `gremlins/definition/preprocess.py` — `expand_definition` (include/prompt/recipe/stage-definition expansion).
 
 ## Internals docs
 
@@ -804,5 +804,5 @@ Add `.gremlins/env` to your `~/.gitignore_global` or project `.gitignore`.
   testability seam, byte-stable strings
 - [`gremlins/clients/AGENTS.md`](gremlins/clients/AGENTS.md) — client backend internals
 - [`gremlins/fleet/AGENTS.md`](gremlins/fleet/AGENTS.md) — fleet manager internals
-- [`gremlins/pipelines/AGENTS.md`](gremlins/pipelines/AGENTS.md) — pipeline configuration internals
+- [`gremlins/definitions/AGENTS.md`](gremlins/definitions/AGENTS.md) — definition configuration internals
 - [`gremlins/stages/AGENTS.md`](gremlins/stages/AGENTS.md) — stage internals

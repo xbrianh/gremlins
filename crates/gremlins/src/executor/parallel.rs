@@ -8,8 +8,8 @@
 //! costs into the parent.
 //!
 //! Children run as forked gremlins via [`Gremlin::fork_with_stages`], which
-//! accepts a `Vec<RunnableStage>` instead of a child pipeline path — the child
-//! pipeline inherits parent metadata but runs only the given stages.
+//! accepts a `Vec<RunnableStage>` instead of a child definition path — the child
+//! definition inherits parent metadata but runs only the given stages.
 //!
 //! Each child runs on a dedicated [`std::thread`] worker thread (spawned via
 //! [`std::thread::spawn`]) with its own single-threaded tokio runtime.
@@ -125,12 +125,12 @@ pub(crate) async fn run_parallel(
             enclosing_client.map(|c| crate::stages::composite::ClientSpec(c.to_string()));
         let effective_client = client.as_ref().or(enclosing_spec.as_ref());
         if let Some(c) = &effective_client {
-            // The pipeline default is what `resolve_client_spec` step 4
+            // The definition default is what `resolve_client_spec` step 4
             // falls back to.
-            child_gremlin.pipeline.default_client = c.0.clone();
+            child_gremlin.definition.default_client = c.0.clone();
             // Also set the client handle directly on the child, so
             // `resolve_client`'s early return (when the spec equals the
-            // pipeline default) picks up the right backend.
+            // definition default) picks up the right backend.
             child_gremlin.client = crate::clients::client::Client::parse(&c.0)
                 .unwrap_or_else(|_| child_gremlin.client.clone());
         }
@@ -510,7 +510,7 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
 /// Remove everything a successfully-completed child owns.
 ///
 /// Reconstructs a cheap handle with [`Gremlin::from`] — which reads paths only
-/// and never loads a pipeline — and hands it to [`Gremlin::clean`]. Failure is
+/// and never loads a definition — and hands it to [`Gremlin::clean`]. Failure is
 /// expected when the child's state directory is already gone; it is logged and
 /// swallowed, because a group that succeeded must not fail on cleanup.
 fn cleanup_child_fully(child_name: &str, child_id: &str) {
@@ -575,7 +575,7 @@ mod tests {
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::schemas::pipeline::Pipeline;
+    use crate::schemas::gremlin_definition::GremlinDefinition;
     use crate::stages::composite::StageAttrs;
     use crate::stages::parallel::ErrorPolicy;
     use std::collections::HashMap;
@@ -612,9 +612,9 @@ mod tests {
             id: validate_gremlin_id("gr-test").unwrap(),
             state_dir,
             artifact_dir: artifact_dir.clone(),
-            pipeline_path: None,
+            definition_path: None,
             client_override: None,
-            pipeline: Pipeline {
+            definition: GremlinDefinition {
                 name: "test".to_string(),
                 path: PathBuf::from("test.yaml"),
                 default_client: default_client.to_string(),
@@ -955,7 +955,7 @@ mod tests {
     #[tokio::test]
     async fn parallel_with_explicit_client_succeeds() {
         // Smoke test: a parallel with an explicit `client:` propagates it
-        // to child pipelines so resolve_client_spec's step-4 fallback
+        // to child definitions so resolve_client_spec's step-4 fallback
         // picks it up. An exec child doesn't call resolve_client, so this
         // just proves the new code path doesn't crash.
         let yaml = r#"

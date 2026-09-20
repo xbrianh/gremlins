@@ -1,6 +1,6 @@
 # Status file is only written when Copilot posts a non-PENDING review.
 # The loop polls until that happens (or max_iterations exhausted).
-# Only use in pipeline positions where HEAD does not move between poll iterations.
+# Only use in definition positions where HEAD does not move between poll iterations.
 
 stages:
   - { type: github-discover-repo }

@@ -466,7 +466,7 @@ impl Backend for CmdBackend {
         validate_max_retries(params.max_retries)
             .map_err(|m| ClientError::Runtime { message: m })?;
 
-        // Concatenation of harness system prompt and pipeline user content —
+        // Concatenation of harness system prompt and definition user content —
         // this is the single string bound for the child process's stdin.
         let effective_prompt = match &params.system_prompt {
             Some(sys) => format!("{}\n\n{}", sys, params.prompt),

@@ -1,13 +1,13 @@
 //! Client specifiers and lazy backend construction.
 //!
-//! A pipeline names its model as a single string — `provider:model`, with an
+//! A definition names its model as a single string — `provider:model`, with an
 //! optional trailing `:key=value,...` parameter list. This module owns that
 //! grammar ([`parse_spec`]), the set of providers the harness can actually
 //! construct ([`is_known_provider`]), and [`Client`], which turns a spec into a
 //! live [`Backend`] on first use.
 //!
 //! Backends are built lazily and memoised behind [`Client::get_or_build_backend`]
-//! so that parsing a pipeline never requires credentials: whichever process
+//! so that parsing a definition never requires credentials: whichever process
 //! eventually runs a stage is the one that pays for resolving the API key.
 
 use std::collections::HashMap;
@@ -59,7 +59,7 @@ pub fn is_known_provider(provider: &str) -> bool {
 
 /// The regex matching a trailing `:k=v,k=v` parameter list.
 ///
-/// Compiled once: spec parsing happens for every stage in every pipeline load,
+/// Compiled once: spec parsing happens for every stage in every definition load,
 /// and the pattern never changes.
 fn params_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();

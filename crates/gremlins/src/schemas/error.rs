@@ -14,8 +14,8 @@ pub enum SchemaError {
     #[error("prompt file not found: {path}")]
     PromptFileNotFound { path: String },
 
-    #[error("pipeline {name:?} not found; available: {available}")]
-    PipelineNotFound { name: String, available: String },
+    #[error("gremlin definition {name:?} not found; available: {available}")]
+    DefinitionNotFound { name: String, available: String },
 
     #[error("prompt file is empty: {path}")]
     PromptFileEmpty { path: String },
@@ -44,11 +44,11 @@ pub enum SchemaError {
     #[error("stage {stage}: artifact {uri:?} is consumed via interpolation but never produced by any prior stage's bind, bootstrap bind_artifact, cli_out, or implicit artifact (base_sha, base_ref)")]
     UnresolvedArtifactConsumer { stage: String, uri: String },
 
-    #[error("pipeline is missing 'default_client' — every pipeline must declare one")]
+    #[error("gremlin definition is missing 'default_client' — every definition must declare one")]
     MissingDefaultClient,
 
-    #[error("pipeline file not found: {path}")]
-    PipelineFileNotFound { path: String },
+    #[error("gremlin definition file not found: {path}")]
+    DefinitionFileNotFound { path: String },
 
     #[error("YAML parse error in {label}: {msg}")]
     YamlParse { label: String, msg: String },
