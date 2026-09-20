@@ -32,7 +32,7 @@ own prompt files — not the harness's.
 
 A gremlin is a sequence of **stages** executed by a thin orchestrator. The
 sequence is described in a YAML gremlin definition (`gremlins/definitions/local.yaml`,
-`gh.yaml`, optionally a project-scoped override at `.gremlins/definitions/`).
+`gh.yaml`, optionally a project-scoped override at `.gremlins/`).
 
 A typical definition looks like this:
 

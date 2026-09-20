@@ -232,10 +232,7 @@ fn status(id: &str) -> Result<(), String> {
     println!("id:            {}", gremlin.id);
     println!("status:        {}", field_display(&gremlin.state, "status"));
     println!("stage:         {}", field_display(&gremlin.state, "stage"));
-    println!(
-        "definition:      {}",
-        definition_display_name(&gremlin.state)
-    );
+    println!("definition:    {}", definition_display_name(&gremlin.state));
     println!("project_root:  {}", gremlin.project_root.display());
     println!(
         "workdir:       {}",

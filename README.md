@@ -36,7 +36,7 @@ no `--project-root` flag; the cwd at launch time is the contract.
 **Fleet view** (`gremlins`) shows gremlins from all repos by default.
 Pass `--here` to filter to the current repo's `project_root`.
 
-**Definition discovery** walks from the launching cwd, so `.gremlins/definitions/`
+**Definition discovery** walks from the launching cwd, so `.gremlins/`
 overrides in each repo apply to gremlins launched from that repo.
 
 **Queue caveat**: there is one global queue and the runner's cwd is frozen at
@@ -161,7 +161,7 @@ definitions work out of the box; a project-local YAML can override any of them.
 
 1. A value with a `.yaml` suffix or more than one path component is loaded
    directly as a filesystem path.
-2. Otherwise `./.gremlins/definitions/<name>.yaml` is checked first
+2. Otherwise `./.gremlins/<name>.yaml` is checked first
    (project-local override).
 3. Then `gremlins/definitions/<name>.yaml` (bundled) is checked.
 
@@ -311,7 +311,7 @@ custom YAML reads as self-describing about which prompts come from the
 package vs which must be provided locally.
 
 By convention, project-local prompts live in `./.gremlins/prompts/` (a peer
-of `./.gremlins/definitions/`, not nested under it) and definitions set
+of `./.gremlins/`, not nested under it) and definitions set
 `prompt_dir: ../prompts`.
 
 ### `options:` field
@@ -460,7 +460,7 @@ children that haven't landed.
 
 ### Worked example: project-local override
 
-Create `.gremlins/definitions/local.yaml` to override the bundled `local`
+Create `.gremlins/local.yaml` to override the bundled `local`
 definition. This example adds a `verify` stage before `review-code` and
 overrides the client for the address stage:
 
