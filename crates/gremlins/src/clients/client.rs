@@ -145,32 +145,46 @@ fn http_client_pool() -> &'static Mutex<HashMap<(String, String), ReqwestClient>
     POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Return the last `n` characters of `s`, or the whole string if it's shorter.
+///
+/// This is character-aware: it will never split a multi-byte UTF-8 sequence.
+fn last_n_chars(s: &str, n: usize) -> &str {
+    let char_count = s.chars().count();
+    if char_count <= n {
+        s
+    } else {
+        let skip = char_count - n;
+        s.char_indices()
+            .nth(skip)
+            .map(|(idx, _)| &s[idx..])
+            .unwrap_or(s)
+    }
+}
+
 /// Build the rig OpenAI-compatible client shared by openai, xai and openrouter.
 ///
 /// HTTP clients are pooled by `(base_url, api_key)` so that every backend
-/// targeting the same provider endpoint shares one connection pool.
+/// targeting the same provider endpoint shares one connection pool.  The pool
+/// lock is held across construction so that concurrent callers cannot race to
+/// build duplicate clients.
 fn build_openai_client(api_key: &str, base_url: &str) -> Result<openai::CompletionsClient, String> {
     let cache_key = (base_url.to_string(), api_key.to_string());
 
     let http_client = {
-        let pool = http_client_pool()
+        let mut pool = http_client_pool()
             .lock()
             .expect("http client pool poisoned");
         if let Some(client) = pool.get(&cache_key) {
             log::debug!(
                 "HTTP client cache hit for {base_url} (key ...{})",
-                &api_key[api_key.len().saturating_sub(4)..]
+                last_n_chars(api_key, 4)
             );
             client.clone()
         } else {
-            drop(pool);
             log::info!("Creating new HTTP client for provider at {base_url}");
             let client = ReqwestClient::builder()
                 .build()
                 .map_err(|e| e.to_string())?;
-            let mut pool = http_client_pool()
-                .lock()
-                .expect("http client pool poisoned");
             pool.insert(cache_key, client.clone());
             client
         }
@@ -323,14 +337,16 @@ impl Client {
     pub fn get_or_build_backend(&self) -> Result<Arc<dyn Backend>, String> {
         let spec = self.to_string();
 
-        {
-            let pool = backend_pool().lock().expect("backend pool poisoned");
-            if let Some(backend) = pool.get(&spec) {
-                log::debug!("Backend cache hit for spec {spec}");
-                return Ok(backend.clone());
-            }
+        let mut pool = backend_pool().lock().expect("backend pool poisoned");
+        if let Some(backend) = pool.get(&spec) {
+            log::debug!("Backend cache hit for spec {spec}");
+            return Ok(backend.clone());
         }
 
+        // Build while holding the lock so concurrent callers for the same spec
+        // cannot race to construct duplicate backends.  build_backend() is
+        // synchronous (no .await), so the lock is never held across an async
+        // yield point.
         let backend = self.build_backend()?;
 
         let base_url = match self.provider.as_str() {
@@ -346,16 +362,7 @@ impl Client {
             self.model,
         );
 
-        {
-            let mut pool = backend_pool().lock().expect("backend pool poisoned");
-            // Another thread may have raced us; prefer the existing entry.
-            if let Some(existing) = pool.get(&spec) {
-                log::debug!("Backend cache hit for spec {spec} (race, using existing)");
-                return Ok(existing.clone());
-            }
-            pool.insert(spec, backend.clone());
-        }
-
+        pool.insert(spec, backend.clone());
         Ok(backend)
     }
 
