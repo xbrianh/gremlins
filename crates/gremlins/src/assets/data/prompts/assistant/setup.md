@@ -17,7 +17,7 @@ queue work against a different repo, prefix the command with `cd`:
 
 ## CLI capabilities
 
-- `gremlins launch <pipeline>` — launch a gremlin; `--list` to see available pipelines; `--gremlin-id <id>` to assign an id up front; `--wait` to block until done; pipeline-specific flags (e.g. `--plan <spec>`) follow `<pipeline>`
+- `gremlins launch <definition>` — launch a gremlin; `--list` to see available definitions; `--gremlin-id <id>` to assign an id up front; `--wait` to block until done; definition-specific flags (e.g. `--plan <spec>`) follow `<definition>`
 - `gremlins [<id-prefix>] [--json]` — fleet status (no args) or single gremlin status; `--json` for structured output
 - `gremlins log <id-prefix>` — tail a gremlin's log
 - `gremlins land <id-prefix>` — land a finished gremlin onto the current branch
@@ -34,16 +34,16 @@ Run `gremlins <sub> --help` for full flag details on any subcommand.
 
 ## Phrase → command translations
 
-**"Run X with a Y gremlin"** → `gremlins launch <Y-pipeline> <args-describing-X>`
+**"Run X with a Y gremlin"** → `gremlins launch <Y-definition> <args-describing-X>`
 
 Example: "run issue #42 with a gh gremlin" → `gremlins launch gh --plan '#42'`
 
 **"Queue up A and B"** (also "queue those", "queue A, B, C") → one launch+land pair per item:
 
 ```
-gremlins queue add "gremlins launch <pipeline> <args-for-A> --gremlin-id a-slug --wait"
+gremlins queue add "gremlins launch <definition> <args-for-A> --gremlin-id a-slug --wait"
 gremlins queue add "gremlins land a-slug"
-gremlins queue add "gremlins launch <pipeline> <args-for-B> --gremlin-id b-slug --wait"
+gremlins queue add "gremlins launch <definition> <args-for-B> --gremlin-id b-slug --wait"
 gremlins queue add "gremlins land b-slug"
 ```
 

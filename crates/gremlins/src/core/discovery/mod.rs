@@ -8,13 +8,13 @@ fn project_overlay_dir(project_root: &std::path::Path) -> PathBuf {
     crate::config::project_overlay_dir(project_root)
 }
 
-fn project_pipeline_dirs(project_root: &std::path::Path) -> Vec<PathBuf> {
-    project_pipeline_dirs_in(project_overlay_dir(project_root), project_root)
+fn project_definition_dirs(project_root: &std::path::Path) -> Vec<PathBuf> {
+    project_definition_dirs_in(project_overlay_dir(project_root), project_root)
 }
 
-/// Pipelines live in `overlay`, and — for a project that does not use one —
+/// Gremlin definitions live in `overlay`, and — for a project that does not use one —
 /// directly in `.gremlins/` under `project_root`.
-fn project_pipeline_dirs_in(overlay: PathBuf, project_root: &std::path::Path) -> Vec<PathBuf> {
+fn project_definition_dirs_in(overlay: PathBuf, project_root: &std::path::Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     for d in &[overlay, project_root.join(crate::config::OVERLAY_DIRNAME)] {
@@ -26,11 +26,11 @@ fn project_pipeline_dirs_in(overlay: PathBuf, project_root: &std::path::Path) ->
     dirs
 }
 
-pub fn list_pipelines(project_root: PathBuf) -> Vec<(String, PathBuf)> {
+pub fn list_definitions(project_root: PathBuf) -> Vec<(String, PathBuf)> {
     let mut results: Vec<(String, PathBuf)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for local_dir in project_pipeline_dirs(&project_root) {
+    for local_dir in project_definition_dirs(&project_root) {
         if !local_dir.exists() {
             continue;
         }
@@ -56,19 +56,22 @@ pub fn list_pipelines(project_root: PathBuf) -> Vec<(String, PathBuf)> {
     results
 }
 
-pub fn resolve_pipeline_name(name: &str, project_root: PathBuf) -> Result<PathBuf, DiscoveryError> {
-    resolve_pipeline_name_in(name, None, project_root)
+pub fn resolve_definition_name(
+    name: &str,
+    project_root: PathBuf,
+) -> Result<PathBuf, DiscoveryError> {
+    resolve_definition_name_in(name, None, project_root)
 }
 
-/// [`resolve_pipeline_name`], with `overlay` chosen by an `explicit` override
+/// [`resolve_definition_name`], with `overlay` chosen by an `explicit` override
 /// rather than read from the process environment.
-pub fn resolve_pipeline_name_in(
+pub fn resolve_definition_name_in(
     name: &str,
     explicit_overlay: Option<&std::path::Path>,
     project_root: PathBuf,
 ) -> Result<PathBuf, DiscoveryError> {
     let overlay = crate::config::overlay_dir_preferring(explicit_overlay, &project_root);
-    for d in project_pipeline_dirs_in(overlay.clone(), &project_root) {
+    for d in project_definition_dirs_in(overlay.clone(), &project_root) {
         let candidate = d.join(format!("{}.yaml", name));
         if candidate.exists() {
             return Ok(candidate.canonicalize().unwrap_or(candidate));
@@ -83,7 +86,7 @@ pub fn resolve_pipeline_name_in(
     }
 
     let mut names: Vec<String> = Vec::new();
-    for d in project_pipeline_dirs_in(overlay, &project_root) {
+    for d in project_definition_dirs_in(overlay, &project_root) {
         if d.exists() {
             if let Ok(entries) = std::fs::read_dir(&d) {
                 let mut stems: Vec<String> = entries
@@ -117,16 +120,16 @@ pub fn resolve_pipeline_name_in(
     })
 }
 
-pub fn resolve_pipeline_path(
+pub fn resolve_definition_path(
     name_or_path: &str,
     base_dir: PathBuf,
 ) -> Result<PathBuf, DiscoveryError> {
-    resolve_pipeline_path_in(name_or_path, None, base_dir)
+    resolve_definition_path_in(name_or_path, None, base_dir)
 }
 
-/// [`resolve_pipeline_path`], with `overlay` chosen by an `explicit` override
+/// [`resolve_definition_path`], with `overlay` chosen by an `explicit` override
 /// rather than read from the process environment.
-pub fn resolve_pipeline_path_in(
+pub fn resolve_definition_path_in(
     name_or_path: &str,
     explicit_overlay: Option<&std::path::Path>,
     base_dir: PathBuf,
@@ -144,8 +147,8 @@ pub fn resolve_pipeline_path_in(
     }
 
     let overlay = crate::config::overlay_dir_preferring(explicit_overlay, &base_dir);
-    let pipeline_dirs = project_pipeline_dirs_in(overlay.clone(), &base_dir);
-    for d in &pipeline_dirs {
+    let definition_dirs = project_definition_dirs_in(overlay.clone(), &base_dir);
+    for d in &definition_dirs {
         let project_scoped = d.join(format!("{}.yaml", name_or_path));
         if project_scoped.exists() {
             return Ok(project_scoped.canonicalize().unwrap_or(project_scoped));
@@ -159,7 +162,7 @@ pub fn resolve_pipeline_path_in(
         return Ok(candidate.canonicalize().unwrap_or(candidate));
     }
 
-    let dirs: Vec<String> = pipeline_dirs
+    let dirs: Vec<String> = definition_dirs
         .iter()
         .chain(std::iter::once(&stages_dir))
         .map(|d| d.display().to_string())
@@ -191,43 +194,43 @@ mod tests {
     }
 
     #[test]
-    fn test_list_pipelines_empty() {
+    fn test_list_definitions_empty() {
         let (_env, project) = setup_dirs();
-        let result = list_pipelines(project.path().to_path_buf());
+        let result = list_definitions(project.path().to_path_buf());
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_list_pipelines_project_only() {
+    fn test_list_definitions_project_only() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::write(overlay.join("foo.yaml"), "stages: []").unwrap();
         fs::write(overlay.join("bar.yaml"), "stages: []").unwrap();
 
-        let result = list_pipelines(project.path().to_path_buf());
+        let result = list_definitions(project.path().to_path_buf());
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].0, "bar");
         assert_eq!(result[1].0, "foo");
     }
 
     #[test]
-    fn test_list_pipelines_dedup() {
+    fn test_list_definitions_dedup() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
         fs::write(overlay.join("dup.yaml"), "stages: []").unwrap();
-        let result = list_pipelines(project.path().to_path_buf());
+        let result = list_definitions(project.path().to_path_buf());
         assert_eq!(result.iter().filter(|(n, _)| n == "dup").count(), 1);
     }
 
     #[test]
-    fn test_list_pipelines_project_wins_over_bundled() {
+    fn test_list_definitions_project_wins_over_bundled() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
         fs::write(overlay.join("boss.yaml"), "stages: [a]").unwrap();
 
-        let result = list_pipelines(project.path().to_path_buf());
+        let result = list_definitions(project.path().to_path_buf());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "boss");
         assert!(result[0]
@@ -236,27 +239,27 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_pipeline_name_found_overlay() {
+    fn test_resolve_definition_name_found_overlay() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
         fs::write(overlay.join("test.yaml"), "stages: []").unwrap();
 
-        let result = resolve_pipeline_name("test", project.path().to_path_buf()).unwrap();
+        let result = resolve_definition_name("test", project.path().to_path_buf()).unwrap();
         assert!(result.ends_with("test.yaml"));
     }
 
     #[test]
-    fn test_resolve_pipeline_name_not_found() {
+    fn test_resolve_definition_name_not_found() {
         let (_env, project) = setup_dirs();
-        let err = resolve_pipeline_name("nope", project.path().to_path_buf()).unwrap_err();
+        let err = resolve_definition_name("nope", project.path().to_path_buf()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("nope"));
         assert!(msg.contains("not found"));
     }
 
     #[test]
-    fn test_resolve_pipeline_path_yaml_extension() {
+    fn test_resolve_definition_path_yaml_extension() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
@@ -264,36 +267,36 @@ mod tests {
         fs::write(&p, "stages: []").unwrap();
 
         let result =
-            resolve_pipeline_path(p.to_str().unwrap(), project.path().to_path_buf()).unwrap();
+            resolve_definition_path(p.to_str().unwrap(), project.path().to_path_buf()).unwrap();
         assert!(result.ends_with("explicit.yaml"));
     }
 
     #[test]
-    fn test_resolve_pipeline_path_bare_name() {
+    fn test_resolve_definition_path_bare_name() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
         fs::write(overlay.join("bare.yaml"), "stages: []").unwrap();
 
-        let result = resolve_pipeline_path("bare", project.path().to_path_buf()).unwrap();
+        let result = resolve_definition_path("bare", project.path().to_path_buf()).unwrap();
         assert!(result.ends_with("bare.yaml"));
     }
 
     #[test]
-    fn test_resolve_pipeline_path_missing() {
+    fn test_resolve_definition_path_missing() {
         let (_env, project) = setup_dirs();
-        let err = resolve_pipeline_path("nope.yaml", project.path().to_path_buf()).unwrap_err();
+        let err = resolve_definition_path("nope.yaml", project.path().to_path_buf()).unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
     #[test]
-    fn test_resolve_pipeline_name_from_stages_dir() {
+    fn test_resolve_definition_name_from_stages_dir() {
         let (_env, project) = setup_dirs();
         let stages = project.path().join(".gremlins").join("stages");
         fs::create_dir_all(&stages).unwrap();
         fs::write(stages.join("foo.yaml"), "stages: []").unwrap();
 
-        let result = resolve_pipeline_name("foo", project.path().to_path_buf()).unwrap();
+        let result = resolve_definition_name("foo", project.path().to_path_buf()).unwrap();
         assert!(result.ends_with("foo.yaml"));
         assert!(result.to_str().unwrap().contains("stages"));
     }
@@ -313,8 +316,9 @@ mod tests {
         // A running gremlin's export points at its own overlay; the caller
         // that names one explicitly must still be believed.
         env.set("GREMLINS_OVERLAY_DIR", project_overlay.as_path());
-        let found = resolve_pipeline_path_in("demo", Some(&explicit), project.path().to_path_buf())
-            .unwrap();
+        let found =
+            resolve_definition_path_in("demo", Some(&explicit), project.path().to_path_buf())
+                .unwrap();
         assert!(
             found.starts_with(explicit.canonicalize().unwrap()),
             "{found:?}"
@@ -322,17 +326,17 @@ mod tests {
     }
 
     #[test]
-    fn test_list_pipelines_excludes_stages() {
+    fn test_list_definitions_excludes_stages() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
-        fs::write(overlay.join("pipeline.yaml"), "stages: []").unwrap();
+        fs::write(overlay.join("definition.yaml"), "stages: []").unwrap();
         let stages = overlay.join("stages");
         fs::create_dir_all(&stages).unwrap();
         fs::write(stages.join("foo.yaml"), "stages: []").unwrap();
 
-        let result = list_pipelines(project.path().to_path_buf());
+        let result = list_definitions(project.path().to_path_buf());
         let names: Vec<&str> = result.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(names.contains(&"pipeline"));
+        assert!(names.contains(&"definition"));
         assert!(!names.contains(&"foo"));
     }
 }

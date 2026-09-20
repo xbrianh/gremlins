@@ -511,7 +511,7 @@ pub fn resolve_project_overlay_dir(
 /// The overlay dir for `project_root`, with `explicit` honoured before
 /// `GREMLINS_OVERLAY_DIR`.
 ///
-/// A caller that knows which overlay it means — `status` resolving a pipeline
+/// A caller that knows which overlay it means — `status` resolving a definition
 /// inside the project its state file names — passes it as `explicit`, so the
 /// process-wide export a running gremlin carries cannot redirect the lookup.
 /// Reading the choice rather than clearing the variable for the duration of a

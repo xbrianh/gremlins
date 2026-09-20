@@ -9,15 +9,15 @@ use crate::schemas::resolve::BuiltinResolver;
 
 pub const GREMLINS_PREFIX: &str = "gremlins:";
 
-/// Trait for resolving pipeline names to file paths.
+/// Trait for resolving gremlin definition names to file paths.
 /// The pyext layer provides a Python-callback implementation.
-pub trait PipelineResolver {
+pub trait DefinitionResolver {
     fn resolve(&self, name: &str, project_root: &std::path::Path) -> Result<PathBuf, SchemaError>;
 }
 
 pub(crate) fn load_yaml_file(path: &Path) -> Result<serde_yaml::Value, SchemaError> {
     let text = std::fs::read_to_string(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => SchemaError::PipelineFileNotFound {
+        std::io::ErrorKind::NotFound => SchemaError::DefinitionFileNotFound {
             path: path.display().to_string(),
         },
         _ => SchemaError::Generic(format!("could not read {}: {}", path.display(), e)),
@@ -523,14 +523,14 @@ fn collect_stage_text(stage: &serde_yaml::Value, out: &mut String) {
     }
 }
 
-/// Parse a pipeline YAML file from disk, expanding includes, stage-definitions,
+/// Parse a gremlin definition YAML file from disk, expanding includes, stage-definitions,
 /// and prompts. Returns the fully expanded YAML tree.
-pub fn parse_pipeline_file(
+pub fn parse_definition_file(
     yaml_path: &Path,
     project_root: &Path,
 ) -> Result<serde_yaml::Value, SchemaError> {
     let resolver = BuiltinResolver;
-    let expanded = expand_pipeline(yaml_path, Some(project_root), &resolver)?;
+    let expanded = expand_definition(yaml_path, Some(project_root), &resolver)?;
 
     // Validate bind: and interpolation: keys are referenced
     if let Err(errors) = validate_stage_keys(&expanded) {
@@ -541,10 +541,10 @@ pub fn parse_pipeline_file(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn expand_pipeline(
+pub fn expand_definition(
     yaml_path: &Path,
     project_root: Option<&Path>,
-    resolver: &dyn PipelineResolver,
+    resolver: &dyn DefinitionResolver,
 ) -> Result<serde_yaml::Value, SchemaError> {
     let project_root = project_root.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         let parent = yaml_path.parent().unwrap_or(yaml_path);
@@ -567,7 +567,7 @@ fn _expand(
     yaml_path: &Path,
     project_root: &PathBuf,
     chain: &[PathBuf],
-    resolver: &dyn PipelineResolver,
+    resolver: &dyn DefinitionResolver,
 ) -> Result<serde_yaml::Value, SchemaError> {
     let resolved = yaml_path
         .canonicalize()
@@ -665,7 +665,7 @@ fn _expand_entry(
     named_prompts: &HashMap<String, Vec<String>>,
     stage_defs: &HashMap<String, serde_yaml::Value>,
     seen_defs: &HashSet<String>,
-    resolver: &dyn PipelineResolver,
+    resolver: &dyn DefinitionResolver,
 ) -> Result<Vec<serde_yaml::Value>, SchemaError> {
     let mapping = match entry.as_mapping() {
         Some(m) => m,
@@ -778,9 +778,9 @@ fn _expand_entry(
                 resolver,
             );
         }
-        // Try resolving as pipeline name
-        let pipeline_result = resolver.resolve(stage_type, project_root);
-        match pipeline_result {
+        // Try resolving as gremlin definition name
+        let definition_result = resolver.resolve(stage_type, project_root);
+        match definition_result {
             Ok(included_path) => {
                 if !chain.contains(&included_path) {
                     let included = _expand(&included_path, project_root, chain, resolver)?;
@@ -791,8 +791,8 @@ fn _expand_entry(
                     return Ok(stages);
                 }
             }
-            Err(SchemaError::PipelineNotFound { .. }) => {
-                // Not a pipeline — try stage definition directories.
+            Err(SchemaError::DefinitionNotFound { .. }) => {
+                // Not a gremlin definition — try stage definition directories.
                 if let Some(recipe) = load_stage_def_from_dirs(stage_type, Some(project_root))? {
                     let mut direct_defs = stage_defs.clone();
                     direct_defs.insert(stage_type.to_string(), recipe);
@@ -917,7 +917,7 @@ fn _expand_stage_def(
     chain: &[PathBuf],
     named_prompts: &HashMap<String, Vec<String>>,
     seen_defs: &HashSet<String>,
-    resolver: &dyn PipelineResolver,
+    resolver: &dyn DefinitionResolver,
 ) -> Result<Vec<serde_yaml::Value>, SchemaError> {
     if seen_defs.contains(def_name) {
         return Err(SchemaError::Generic(format!(

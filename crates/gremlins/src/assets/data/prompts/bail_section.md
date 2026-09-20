@@ -1,4 +1,4 @@
-## Bail markers (running under a gremlin pipeline)
+## Bail markers (running under a gremlin)
 
 If you cannot safely complete your task, end your final message with a single line in this exact format and nothing after it — do not make speculative changes when bailing:
 

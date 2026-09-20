@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 use gremlins::config;
 
-/// Spawn a detached child process that runs the gremlin pipeline.
+/// Spawn a detached child process that runs the gremlin definition.
 ///
 /// The child re-invokes the current binary with the `spawn` subcommand.
 /// stdin is /dev/null; stdout and stderr are appended to the gremlin's log.

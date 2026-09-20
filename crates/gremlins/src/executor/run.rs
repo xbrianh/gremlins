@@ -1,6 +1,6 @@
 //! The sequential stage run loop.
 //!
-//! One gremlin, one stage at a time: [`Gremlin::run`] walks the pipeline's
+//! One gremlin, one stage at a time: [`Gremlin::run`] walks the definition's
 //! stages in declaration order and drives each through [`run_stage`], while the
 //! scoped dispatcher below carries the two pieces of bookkeeping the Python
 //! executor kept around every stage — the artifact guard (`skip_if_exists`)
@@ -20,7 +20,7 @@ use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
 use crate::config;
-use crate::executor::bootstrap::run_pipeline_bootstrap;
+use crate::executor::bootstrap::run_definition_bootstrap;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::parallel::run_parallel;
 use crate::executor::state;
@@ -207,7 +207,7 @@ async fn run_stage_scoped(
 /// 1. The stage's own `client:` field (always wins)
 /// 2. The enclosing composite's explicit `client:` (new — the `fill_client` replacement)
 /// 3. `default-client-by-stage` from global config (exact → longest prefix)
-/// 4. The pipeline's `default_client`
+/// 4. The definition's `default_client`
 fn resolve_client_spec(
     stage: &RunnableStage,
     gremlin: &Gremlin,
@@ -254,12 +254,12 @@ fn resolve_client_spec(
         }
     }
 
-    // 4. Fall back to pipeline default
-    gremlin.pipeline.default_client.clone()
+    // 4. Fall back to definition default
+    gremlin.definition.default_client.clone()
 }
 
 /// The client a stage runs with: resolved via [`resolve_client_spec`], then
-/// parsed. When the resolved spec equals the pipeline default, the gremlin's
+/// parsed. When the resolved spec equals the definition default, the gremlin's
 /// already-constructed client handle is reused to avoid building a second
 /// backend for the same spec.
 fn resolve_client(
@@ -268,7 +268,7 @@ fn resolve_client(
     enclosing_client: Option<&str>,
 ) -> Result<Client, RunError> {
     let spec = resolve_client_spec(stage, gremlin, enclosing_client);
-    if spec == gremlin.pipeline.default_client {
+    if spec == gremlin.definition.default_client {
         Ok(gremlin.client.clone())
     } else {
         Client::parse(&spec).map_err(|message| RunError::StageFailed {
@@ -616,7 +616,7 @@ async fn run_loop(
             }
             // A bail — scoped to this iteration or written for the run as a
             // whole — ends the body at once: the children after it would only
-            // run against a pipeline that has already stopped.
+            // run against a definition that has already stopped.
             if is_bail_set(&gremlin.registry, &loop_iter)
                 || gremlin.state.read_bail_info().is_some()
             {
@@ -663,15 +663,15 @@ async fn run_loop(
 impl Gremlin {
     /// Drive every stage from `resume_from` to the end, returning the exit code.
     ///
-    /// Mirrors the Python `run_pipeline` walk: a bail records `bail_<attempt>.json`
+    /// Mirrors the Python `run_definition` walk: a bail records `bail_<attempt>.json`
     /// and yields exit code 1, any other failure is recorded and propagated, and
     /// the terminal state is written either way so `status` and the `finished`
     /// marker always agree with what actually happened.
     pub async fn run(&mut self) -> Result<i32, RunError> {
-        // Loading the pipeline, building the registry, creating the client and
+        // Loading the definition, building the registry, creating the client and
         // resolving the environment are all deferred out of the constructors so
         // that a handle nobody runs is cheap. This is the one place they happen
-        // — and the one place a missing pipeline becomes a hard error.
+        // — and the one place a missing definition becomes a hard error.
         self.init_runtime()?;
 
         // A first start owes its checkout a bootstrap before any stage can use
@@ -679,13 +679,13 @@ impl Gremlin {
         // _has_bootstrap`; a run without a worktree has no dev environment to
         // prepare, and a resumed run's was prepared by the attempt that made
         // the worktree.
-        let bootstrap = &self.pipeline.bootstrap;
+        let bootstrap = &self.definition.bootstrap;
         let has_bootstrap = !bootstrap.cmds.is_empty()
             || !bootstrap.launch_cmds.is_empty()
             || !bootstrap.cli_out.is_empty();
         let first_start = self.worktree.is_some() && self.resume_from.is_none();
         if first_start && has_bootstrap {
-            if let Err(error) = run_pipeline_bootstrap(self).await {
+            if let Err(error) = run_definition_bootstrap(self).await {
                 log::error!("bootstrap failed");
                 self.state.write_bail_file(
                     "other",
@@ -696,9 +696,9 @@ impl Gremlin {
             }
         }
 
-        // Cloning the stage list keeps `self.pipeline` out of the loop's borrow,
+        // Cloning the stage list keeps `self.definition` out of the loop's borrow,
         // which `&mut self` would otherwise hold for its whole duration.
-        let stages = self.pipeline.stages.clone();
+        let stages = self.definition.stages.clone();
         let start = match self.resume_from.as_deref() {
             Some(name) => stages
                 .iter()
@@ -827,7 +827,7 @@ mod tests {
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::schemas::pipeline::Pipeline;
+    use crate::schemas::gremlin_definition::GremlinDefinition;
     use crate::stages::composite::StageAttrs;
     use crate::test_support::EnvGuard;
 
@@ -864,9 +864,9 @@ mod tests {
             id: validate_gremlin_id("gr-test").unwrap(),
             state_dir,
             artifact_dir: artifact_dir.clone(),
-            pipeline_path: None,
+            definition_path: None,
             client_override: None,
-            pipeline: Pipeline {
+            definition: GremlinDefinition {
                 name: "test".to_string(),
                 path: PathBuf::from("test.yaml"),
                 default_client: default_client.to_string(),
@@ -990,7 +990,7 @@ mod tests {
             .write_into_registry(&Uri::parse("artifact://done.md").unwrap(), "done")
             .unwrap();
 
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
         assert!(run_stage(&stage, &mut gremlin).await.is_ok());
     }
 
@@ -1011,7 +1011,7 @@ mod tests {
             .write_into_registry(&Uri::parse("artifact://done.md").unwrap(), "done")
             .unwrap();
 
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
         // `cmd:false` would fail the stage if the guard did not skip it.
         assert!(run_stage(&stage, &mut gremlin).await.is_ok());
     }
@@ -1029,7 +1029,7 @@ mod tests {
   prompt: ["hi"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
@@ -1055,7 +1055,7 @@ mod tests {
         // The agent would have written this; a plain shell client cannot.
         std::fs::write(gremlin.artifact_dir.join("writer.md"), "content").unwrap();
 
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
         run_stage(&stage, &mut gremlin).await.unwrap();
         assert!(gremlin.registry.is_registered("artifact://writer.md"));
     }
@@ -1071,7 +1071,7 @@ mod tests {
   prompt: ["hi"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::Bail { .. }) => {}
@@ -1090,7 +1090,7 @@ mod tests {
     cmds: ["true"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
         assert!(run_stage(&stage, &mut gremlin).await.is_ok());
     }
 
@@ -1103,7 +1103,7 @@ mod tests {
     cmds: ["gremlins-nonexistent-cmd-xyz"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "broken"),
@@ -1122,7 +1122,7 @@ mod tests {
     cmds: ["echo reason > {bail}; exit 1"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         run_stage(&stage, &mut gremlin).await.unwrap();
         assert!(gremlin.registry.is_registered(BAIL_KEY));
@@ -1150,7 +1150,7 @@ mod tests {
         cmds: ["echo two > two.marker"]
 "#;
         let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         run_stage(&stage, &mut gremlin).await.unwrap();
         assert!(tmp.path().join("one.marker").exists());
@@ -1177,7 +1177,7 @@ mod tests {
         let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
         gremlin.state.mark_done("seq", "one");
 
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
         run_stage(&stage, &mut gremlin).await.unwrap();
         assert!(!tmp.path().join("one.marker").exists());
         assert!(tmp.path().join("two.marker").exists());
@@ -1195,7 +1195,7 @@ mod tests {
         cmds: ["gremlins-nonexistent-cmd-xyz"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "broken"),
@@ -1221,7 +1221,7 @@ mod tests {
             .registry
             .write_into_registry(&Uri::parse("artifact://seq/bail").unwrap(), "boom")
             .unwrap();
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
@@ -1248,7 +1248,7 @@ mod tests {
         cmds: ["touch never.marker"]
 "#;
         let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "stopped"),
@@ -1278,7 +1278,7 @@ mod tests {
             .write_into_registry(&Uri::parse("artifact://done").unwrap(), "yes")
             .unwrap();
 
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
         assert!(run_stage(&stage, &mut gremlin).await.is_ok());
         // The frame is popped on the stop path too.
         assert!(gremlin.loop_stack.is_empty());
@@ -1297,7 +1297,7 @@ mod tests {
         cmds: ["true"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::Bail { reason }) => {
@@ -1323,7 +1323,7 @@ mod tests {
         cmds: ["echo boom > {bail}; exit 1"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         // The child's non-zero exit is tolerated because it bound a bail URI;
         // the loop is what turns the written artifact into the run's bail.
@@ -1353,7 +1353,7 @@ mod tests {
         cmds: ["touch after.marker"]
 "#;
         let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::Bail { .. }) => {}
@@ -1380,7 +1380,7 @@ mod tests {
             cmds: ["echo boom > {bail}; exit 1"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
@@ -1409,7 +1409,7 @@ mod tests {
             cmds: ["echo boom > {bail}; exit 1"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
@@ -1462,7 +1462,7 @@ mod tests {
         cmds: ["true"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        let stage = gremlin.pipeline.stages[0].clone();
+        let stage = gremlin.definition.stages[0].clone();
 
         let result = run_stage(&stage, &mut gremlin).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
@@ -1632,7 +1632,7 @@ mod tests {
         let worktree = tmp.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
-        gremlin.pipeline.bootstrap = Bootstrap {
+        gremlin.definition.bootstrap = Bootstrap {
             cmds: vec!["exit 5".to_string()],
             ..Default::default()
         };
@@ -1669,7 +1669,7 @@ mod tests {
         let worktree = tmp.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
-        gremlin.pipeline.bootstrap = Bootstrap {
+        gremlin.definition.bootstrap = Bootstrap {
             cmds: vec!["echo prepared > marker.txt".to_string()],
             ..Default::default()
         };
@@ -1694,7 +1694,7 @@ mod tests {
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
         gremlin.resume_from = Some("only".to_string());
-        gremlin.pipeline.bootstrap = Bootstrap {
+        gremlin.definition.bootstrap = Bootstrap {
             cmds: vec!["touch bootstrap.marker".to_string()],
             ..Default::default()
         };
@@ -1728,7 +1728,7 @@ mod tests {
     }
 
     /// A repository with one commit and the given `.gremlins/demo.yaml`.
-    fn init_repo(root: &StdPath, pipeline_yaml: &str) -> bool {
+    fn init_repo(root: &StdPath, definition_yaml: &str) -> bool {
         if !git(root, &["init", "-q"]).status.success() {
             return false;
         }
@@ -1736,7 +1736,7 @@ mod tests {
         if std::fs::create_dir_all(&overlay).is_err() {
             return false;
         }
-        if std::fs::write(overlay.join("demo.yaml"), pipeline_yaml).is_err() {
+        if std::fs::write(overlay.join("demo.yaml"), definition_yaml).is_err() {
             return false;
         }
         if !git(root, &["add", "."]).status.success() {
@@ -1798,10 +1798,10 @@ mod tests {
         // cannot leave the sandbox override behind for another test.
         let outcome: Result<(i32, Value), String> = if prepared {
             async {
-                let pipeline_path = repo.path().join(".gremlins").join("demo.yaml");
+                let definition_path = repo.path().join(".gremlins").join("demo.yaml");
                 let mut gremlin = Gremlin::create(
                     "gr-e2e",
-                    &pipeline_path,
+                    &definition_path,
                     None,
                     None,
                     None,

@@ -1,10 +1,10 @@
 //! YAML file I/O and the bundled-prompt accessors layered on top of it.
 //!
-//! Pipelines, gremlin state, and the persisting side of the launcher all move
+//! Definitions, gremlin state, and the persisting side of the launcher all move
 //! YAML around; this module is the single place that knows how. Two invariants
 //! are enforced here and nowhere else:
 //!
-//! * a *pipeline-ish* file the caller loads is a mapping — a top-level list or
+//! * a *definition-ish* file the caller loads is a mapping — a top-level list or
 //!   scalar is a mistake, not a document, so [`load_yaml_file`] rejects it with
 //!   a named error rather than handing back a value the callers would then
 //!   have to re-check; and
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn load_reads_a_mapping() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("pipeline.yaml");
+        let path = dir.path().join("definition.yaml");
         fs::write(&path, "stages: []\n").unwrap();
 
         let value = load_yaml_file(&path).unwrap();
