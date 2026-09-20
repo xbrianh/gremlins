@@ -160,6 +160,10 @@ pub struct ExecPrepared {
     /// environment instead.
     pub env: HashMap<String, String>,
     pub(crate) loop_iter: String,
+    /// Substitution env vars (`GREMLINS_<KEY> → value`) populated by
+    /// `prepare_exec` for the exec command templates. Merged into the
+    /// child shell's environment in `run_shell`.
+    pub(crate) substitution_env: HashMap<String, String>,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
@@ -236,9 +240,25 @@ pub fn prepare_exec(
         })
         .unwrap_or_default();
 
+    // Substitute {key} tokens with $GREMLINS_<KEY> env-var references.
+    // All commands share one env map so the same key always maps to the
+    // same env var name.
+    let mut substitution_env: HashMap<String, String> = HashMap::new();
+    let mut key_to_env: HashMap<String, String> = HashMap::new();
+    let mut used_names: HashMap<String, u32> = HashMap::new();
     let cmds: Vec<String> = raw_cmds
         .iter()
-        .map(|c| base::substitute_vars(c, &str_opts, &subst_vars, framework_subs))
+        .map(|c| {
+            base::substitute_vars_to_env(
+                c,
+                &str_opts,
+                &subst_vars,
+                framework_subs,
+                &mut substitution_env,
+                &mut key_to_env,
+                &mut used_names,
+            )
+        })
         .collect();
 
     let timeout: Option<f64> = exec.options.get("timeout").and_then(|v| v.as_f64());
@@ -255,6 +275,7 @@ pub fn prepare_exec(
         timeout,
         env: HashMap::new(),
         loop_iter: loop_iter.to_string(),
+        substitution_env,
     })
 }
 
@@ -278,6 +299,11 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         "GREMLINS_ARTIFACT_DIR".to_string(),
         prepared.artifact_dir.to_string_lossy().to_string(),
     );
+    // Merge substitution env vars (GREMLINS_<KEY> → value) into the child
+    // shell's environment so {key} tokens resolve verbatim.
+    for (k, v) in &prepared.substitution_env {
+        env.insert(k.clone(), v.clone());
+    }
 
     let result =
         run_shell_async(&joined, Some(&prepared.cwd), Some(&env), prepared.timeout).await?;
@@ -691,5 +717,44 @@ mod tests {
             ("options", serde_json::json!([1, 2, 3])),
         ]);
         assert!(Exec::from_dict(&d).is_err());
+    }
+
+    // --- run_shell integration: injection payloads are not executed ---
+
+    #[tokio::test]
+    async fn test_run_shell_injection_payload_not_executed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+
+        // A payload with backticks and $() that would execute if the value
+        // were interpolated literally into the shell command.
+        let injection = "`echo pwned > /tmp/gremlins_injection_test_marker`; $(touch /tmp/gremlins_injection_test_marker2)";
+        let mut substitution_env = HashMap::new();
+        substitution_env.insert("GREMLINS_PR_TITLE".to_string(), injection.to_string());
+
+        let prepared = ExecPrepared {
+            name: "injection-test".to_string(),
+            interpolation_map: HashMap::new(),
+            bind_paths: HashMap::new(),
+            bind_uris: Vec::new(),
+            cmds: vec!["printf '%s' \"${GREMLINS_PR_TITLE}\"".to_string()],
+            cwd: tmp.path().to_path_buf(),
+            artifact_dir: artifact_dir.clone(),
+            state_dir: state_dir.clone(),
+            timeout: Some(5.0),
+            env: HashMap::new(),
+            loop_iter: String::new(),
+            substitution_env,
+        };
+
+        let result = run_shell(&prepared).await.unwrap();
+        // The output must contain the literal payload — not execute it.
+        assert_eq!(result.output, injection);
+        // Neither marker file must exist.
+        assert!(!Path::new("/tmp/gremlins_injection_test_marker").exists());
+        assert!(!Path::new("/tmp/gremlins_injection_test_marker2").exists());
     }
 }
