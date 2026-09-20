@@ -50,6 +50,11 @@ enum Cmds {
         #[arg(long)]
         here: bool,
     },
+    /// Print the full runtime state of one gremlin as pretty-printed JSON.
+    Info {
+        /// Gremlin id to inspect.
+        id: String,
+    },
     /// Stop a running gremlin.
     Stop {
         /// Gremlin id to stop.
@@ -103,6 +108,7 @@ async fn main() {
         Some(Cmds::Launch { definition, args }) => launch(&definition, &args).await,
         Some(Cmds::Run { id, resume_from }) => run_gremlin(&id, resume_from.as_deref()).await,
         Some(Cmds::Show { here }) => show(here),
+        Some(Cmds::Info { id }) => info(&id),
         Some(Cmds::Stop { id }) => stop(&id),
         Some(Cmds::Resume { id }) => resume(&id).await,
         Some(Cmds::Log { id }) => log_gremlin(&id),
@@ -254,6 +260,73 @@ fn status(id: &str) -> Result<(), String> {
         field_display(&gremlin.state, "attempt")
     );
     println!("kind:          {}", field_display(&gremlin.state, "kind"));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// info
+// ---------------------------------------------------------------------------
+
+/// Print the full runtime state of one gremlin as pretty-printed JSON.
+///
+/// Uses `Gremlin::from` — the cheap constructor — so the pipeline is never
+/// parsed and no client is built.  The log path is reported even if the log
+/// file has not been created yet.
+fn info(id: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        return Err(format!(
+            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+        ));
+    }
+
+    let gremlin = Gremlin::from(id).map_err(|e| format!("gremlin {id}: {e}"))?;
+
+    let workdir = gremlin
+        .worktree
+        .as_deref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+
+    let payload = serde_json::json!({
+        "id": gremlin.id.as_str(),
+        "status": gremlin.state.read_str("status"),
+        "stage": gremlin.state.read_str("stage"),
+        "pipeline": pipeline_display_name(&gremlin.state),
+        "project_root": gremlin.project_root.display().to_string(),
+        "workdir": workdir,
+        "state_dir": gremlin.state_dir.display().to_string(),
+        "artifact_dir": gremlin.artifact_dir.display().to_string(),
+        "scratch_dir": config::scratch_root(Some(id)).display().to_string(),
+        "log_file": gremlin.state_dir.join("log").display().to_string(),
+        "started_at": gremlin.state.read_str("started_at"),
+        "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
+        "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
+        "pid": gremlin.state.read_field("pid").unwrap_or(Value::Null),
+        "client": gremlin.state.read_str("client"),
+        "attempt": gremlin.state.read_str("attempt"),
+        "kind": gremlin.state.read_str("kind"),
+        "base_ref": gremlin.base_ref,
+        "worktree_base": gremlin.base_ref_sha,
+        "bail_info": gremlin
+            .state
+            .read_bail_info()
+            .map(Value::Object)
+            .unwrap_or(Value::Null),
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&payload)
+            .map_err(|e| format!("failed to serialize gremlin state: {e}"))?
+    );
     Ok(())
 }
 
