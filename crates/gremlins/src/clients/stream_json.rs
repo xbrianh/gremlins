@@ -60,7 +60,7 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                     prefix,
                     model,
                     cwd,
-                    trunc("default", 50)
+                    "default"
                 );
             }
         }
