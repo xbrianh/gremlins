@@ -46,7 +46,7 @@ pub(crate) struct StreamState {
 
 /// Emit a stream-json event to stderr in the standard format.
 pub(crate) fn emit_event(prefix: &str, evt: &Value) {
-    use crate::clients::stream;
+    use crate::clients::log_util::trunc;
 
     let evt_type = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -55,7 +55,13 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
             if evt.get("subtype").and_then(|v| v.as_str()) == Some("init") {
                 let model = evt.get("model").and_then(|v| v.as_str()).unwrap_or("?");
                 let cwd = evt.get("cwd").and_then(|v| v.as_str()).unwrap_or("?");
-                stream::emit_init(prefix, model, cwd, None);
+                log::info!(
+                    "{}init model={} cwd={} reasoning_effort={}",
+                    prefix,
+                    model,
+                    cwd,
+                    "default"
+                );
             }
         }
         "assistant" => {
@@ -68,16 +74,16 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                     match c.get("type").and_then(|v| v.as_str()) {
                         Some("text") => {
                             let text = c.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                            stream::emit_text(prefix, text);
+                            log::info!("{}text: {}", prefix, trunc(text, 200));
                         }
                         Some("thinking") => {
                             let thinking = c.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
-                            stream::emit_think(prefix, thinking);
+                            log::info!("{}think: {}", prefix, trunc(thinking, 200));
                         }
                         Some("tool_use") => {
                             let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                             let arg = tool_arg(c);
-                            stream::emit_tool(prefix, name, &arg);
+                            log::info!("{}tool: {} {}", prefix, name, trunc(&arg, 200));
                         }
                         _ => {}
                     }
@@ -94,7 +100,11 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                     if c.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
                         let is_error = c.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
                         let body = tool_result_body(c.get("content").unwrap_or(&Value::Null));
-                        stream::emit_result(prefix, &body, is_error);
+                        if is_error {
+                            log::warn!("{}result ERROR: {}", prefix, trunc(&body, 200));
+                        } else {
+                            log::info!("{}result: {}", prefix, trunc(&body, 200));
+                        }
                     }
                 }
             }
@@ -114,7 +124,6 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
         }
         _ => {}
     }
-    crate::clients::stream::flush();
 }
 
 fn tool_arg(c: &Value) -> String {

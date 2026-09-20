@@ -15,8 +15,8 @@ use rig_core::OneOrMany;
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
+use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
-use super::stream;
 use super::tools::{self, ToolContext};
 
 pub(crate) type ErrorClassifier = fn(CompletionError) -> ClientError;
@@ -123,8 +123,13 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         .and_then(|v| v.get("reasoning"))
         .and_then(|r| r.get("effort"))
         .and_then(|e| e.as_str());
-    stream::emit_init(&prefix, &model_name, &cwd_display, reasoning_effort);
-    stream::flush();
+    log::info!(
+        "{}init model={} cwd={} reasoning_effort={}",
+        prefix,
+        model_name,
+        cwd_display,
+        trunc(reasoning_effort.unwrap_or("default"), 50)
+    );
 
     if cwd.is_none() {
         log::warn!("{prefix}warning: no cwd set for worktree enforcement");
@@ -441,21 +446,16 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         if timed_out || stream_error.is_some() {
             log::debug!(
-                target: "_gremlins_core.clients.agent_loop",
                 "stream ended: timed_out={timed_out} stream_error={stream_error:?} turn={turn_num}",
             );
             break;
         }
         if !ended && tool_calls.is_empty() && text.is_empty() {
-            log::debug!(
-                target: "_gremlins_core.clients.agent_loop",
-                "stream ended: not-ended empty-turn turn={turn_num}",
-            );
+            log::debug!("stream ended: not-ended empty-turn turn={turn_num}",);
             break;
         }
 
         log::debug!(
-            target: "_gremlins_core.clients.agent_loop",
             "turn complete: turn={turn_num} text_len={} reasoning_len={} tool_calls={} ended={ended}",
             text.len(),
             reasoning.len(),
@@ -463,10 +463,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
         );
 
         if !reasoning.is_empty() {
-            stream::emit_think(prefix, &reasoning);
+            log::info!("{prefix}think: {}", trunc(&reasoning, 200));
         }
         if !text.is_empty() {
-            stream::emit_text(prefix, &text);
+            log::info!("{prefix}text: {}", trunc(&text, 200));
         }
         if !nested {
             if !text.is_empty() {
@@ -480,7 +480,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             final_text = text.clone();
         }
 
-        stream::emit_turn_metrics(
+        emit_turn_metrics(
             prefix,
             turn_num,
             first_token,
@@ -589,9 +589,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     total_reasoning_tokens,
                 );
                 if !nested {
-                    stream::flush();
                     emit_final(prefix, turns, "");
-                    stream::emit_summary(
+                    emit_summary(
                         prefix,
                         turn_num,
                         loop_start,
@@ -616,17 +615,13 @@ async fn run_agent_loop_core<M: CompletionModel>(
         if tool_calls.is_empty() {
             // Reasoning-only turn — the model is thinking. Just loop.
             if text.is_empty() && !reasoning.is_empty() {
-                log::debug!(
-                    target: "_gremlins_core.clients.agent_loop",
-                    "reasoning-only turn: turn={turn_num} — continuing",
-                );
+                log::debug!("reasoning-only turn: turn={turn_num} — continuing",);
                 history.push(next_prompt);
                 next_prompt = Message::user("Continue.");
                 continue;
             }
 
             log::warn!(
-                target: "_gremlins_core.clients.agent_loop",
                 "empty turn: turn={turn_num} text_empty={} reasoning_empty={} budget={completion_nudge_budget}",
                 text.is_empty(),
                 reasoning.is_empty(),
@@ -638,7 +633,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 if !missing.is_empty() {
                     reminder_budget -= 1;
                     log::info!(
-                        target: "_gremlins_core.clients.agent_loop",
                         "reminder: {} missing artifact(s) — nudging agent (remaining_budget={})",
                         missing.len(),
                         reminder_budget,
@@ -662,7 +656,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
             if !text.is_empty() && completion_nudge_budget > 0 {
                 completion_nudge_budget -= 1;
                 log::info!(
-                    target: "_gremlins_core.clients.agent_loop",
                     "empty turn — nudging agent (remaining_budget={})",
                     completion_nudge_budget,
                 );
@@ -685,7 +678,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
             }
             // Exhausted — give up.
             log::warn!(
-                target: "_gremlins_core.clients.agent_loop",
                 "empty-turn exhausted: turn={turn_num} text_empty={} reasoning_empty={} budget={completion_nudge_budget}",
                 text.is_empty(),
                 reasoning.is_empty(),
@@ -699,9 +691,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 total_reasoning_tokens,
             );
             if !nested {
-                stream::flush();
                 emit_final(prefix, turns, " (exhausted)");
-                stream::emit_summary(
+                emit_summary(
                     prefix,
                     turn_num,
                     loop_start,
@@ -724,7 +715,11 @@ async fn run_agent_loop_core<M: CompletionModel>(
         for tc in &tool_calls {
             let args_json =
                 serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".into());
-            stream::emit_tool(prefix, &tc.function.name, &key_arg(&tc.function.arguments));
+            log::info!(
+                "{prefix}tool: {} {}",
+                tc.function.name,
+                trunc(&key_arg(&tc.function.arguments), 200)
+            );
             if !nested {
                 let tool_evt = tool_use_event(&tc.id, &tc.function.name, &tc.function.arguments);
                 write_raw(raw, &tool_evt);
@@ -767,7 +762,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         let mut result_msgs = Vec::new();
         let mut ledger = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
-            stream::emit_result(prefix, &output, false);
+            log::info!("{prefix}result: {}", trunc(&output, 200));
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
                 write_raw(raw, &result_evt);
@@ -783,7 +778,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
             ));
         }
         turns += tool_calls.len();
-        stream::flush();
         // Every tool result lands in history so the results stay adjacent to the
         // assistant tool_calls message; the ledger becomes the next turn's prompt,
         // trailing the complete result block instead of splitting it.
@@ -799,9 +793,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
         } else {
             ""
         };
-        stream::flush();
         emit_final(prefix, turns, suffix);
-        stream::emit_summary(
+        emit_summary(
             prefix,
             turn_num,
             loop_start,
@@ -983,6 +976,134 @@ pub(crate) fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value
             let _ = f.flush();
         }
     }
+}
+
+/// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.
+#[allow(clippy::too_many_arguments)]
+fn emit_turn_metrics(
+    prefix: &str,
+    turn: usize,
+    first_token: Option<Instant>,
+    last_token: Option<Instant>,
+    turn_start: Instant,
+    reasoning: &str,
+    text: &str,
+    tool_calls: &[ToolCall],
+    usage: Option<&Usage>,
+) {
+    if !crate::config::telemetry_enabled() {
+        return;
+    }
+
+    let ttft = first_token
+        .map(|ft| ft.duration_since(turn_start))
+        .map(|d| format!("{:.1}s", d.as_secs_f64()))
+        .unwrap_or_else(|| "-".into());
+
+    let gen_time = match (first_token, last_token) {
+        (Some(ft), Some(lt)) => {
+            let d = lt.duration_since(ft);
+            format!("{:.1}s", d.as_secs_f64())
+        }
+        _ => "-".into(),
+    };
+
+    let prompt = usage.map(|u| u.input_tokens).unwrap_or(0);
+    let completion = usage.map(|u| u.output_tokens).unwrap_or(0);
+    let cached = usage.map(|u| u.cached_input_tokens).unwrap_or(0);
+    let reasoning_tok = usage.map(|u| u.reasoning_tokens).unwrap_or(0);
+
+    let cache_pct = if prompt > 0 {
+        format!("{:.0}%", (cached as f64 / (prompt as f64).max(1.0)) * 100.0)
+    } else {
+        "-".into()
+    };
+
+    // Byte lengths (not char counts) — a cheap proxy for output volume.
+    let reasoning_bytes = reasoning.len();
+    let text_bytes = text.len();
+    let total_bytes = reasoning_bytes + text_bytes;
+    let reasoning_byte_ratio = if total_bytes > 0 {
+        format!(
+            "{:.0}%",
+            (reasoning_bytes as f64 / total_bytes as f64) * 100.0
+        )
+    } else {
+        "-".into()
+    };
+
+    log::debug!(
+        "{}metrics: turn={} ttft={} gen={} tools={} prompt={} completion={} cached={}({}) reasoning_tok={} reasoning_byte_ratio={}",
+        prefix,
+        turn,
+        ttft,
+        gen_time,
+        tool_calls.len(),
+        prompt,
+        completion,
+        cached,
+        cache_pct,
+        reasoning_tok,
+        reasoning_byte_ratio,
+    );
+}
+
+/// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
+#[allow(clippy::too_many_arguments)]
+fn emit_summary(
+    prefix: &str,
+    turns: usize,
+    loop_start: Instant,
+    total_prompt: u64,
+    total_completion: u64,
+    total_cached: u64,
+    total_cache_creation: u64,
+    total_reasoning: u64,
+) {
+    let wall = loop_start.elapsed();
+    let token_total = total_prompt + total_completion;
+
+    let prompt_avg = if turns > 0 {
+        total_prompt / turns as u64
+    } else {
+        0
+    };
+    let completion_avg = if turns > 0 {
+        total_completion / turns as u64
+    } else {
+        0
+    };
+    let cached_avg = if total_prompt > 0 {
+        format!(
+            "{:.0}%",
+            (total_cached as f64 / total_prompt as f64) * 100.0
+        )
+    } else {
+        "-".into()
+    };
+    // Reasoning tokens are a subset of completion/output tokens, so report the
+    // ratio against completion — "how much of the model's output was reasoning".
+    let reasoning_pct = if total_completion > 0 {
+        format!(
+            "{:.0}%",
+            (total_reasoning as f64 / total_completion as f64) * 100.0
+        )
+    } else {
+        "-".into()
+    };
+
+    log::info!(
+        "{}summary: turns={} wall={:.1}s token_total={} prompt_avg={} completion_avg={} cached_avg={} cache_creation={} reasoning_pct={}",
+        prefix,
+        turns,
+        wall.as_secs_f64(),
+        token_total,
+        prompt_avg,
+        completion_avg,
+        cached_avg,
+        total_cache_creation,
+        reasoning_pct,
+    );
 }
 
 pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
