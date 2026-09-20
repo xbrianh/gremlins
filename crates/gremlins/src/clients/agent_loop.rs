@@ -15,8 +15,8 @@ use rig_core::OneOrMany;
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
-use super::protocol::{CompletedRun, UsageStats};
 use super::log_util::trunc;
+use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
 
 pub(crate) type ErrorClassifier = fn(CompletionError) -> ClientError;
@@ -451,9 +451,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             break;
         }
         if !ended && tool_calls.is_empty() && text.is_empty() {
-            log::debug!(
-                "stream ended: not-ended empty-turn turn={turn_num}",
-            );
+            log::debug!("stream ended: not-ended empty-turn turn={turn_num}",);
             break;
         }
 
@@ -617,9 +615,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         if tool_calls.is_empty() {
             // Reasoning-only turn — the model is thinking. Just loop.
             if text.is_empty() && !reasoning.is_empty() {
-                log::debug!(
-                    "reasoning-only turn: turn={turn_num} — continuing",
-                );
+                log::debug!("reasoning-only turn: turn={turn_num} — continuing",);
                 history.push(next_prompt);
                 next_prompt = Message::user("Continue.");
                 continue;
@@ -719,7 +715,11 @@ async fn run_agent_loop_core<M: CompletionModel>(
         for tc in &tool_calls {
             let args_json =
                 serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".into());
-            log::info!("{prefix}tool: {} {}", tc.function.name, trunc(&key_arg(&tc.function.arguments), 200));
+            log::info!(
+                "{prefix}tool: {} {}",
+                tc.function.name,
+                trunc(&key_arg(&tc.function.arguments), 200)
+            );
             if !nested {
                 let tool_evt = tool_use_event(&tc.id, &tc.function.name, &tc.function.arguments);
                 write_raw(raw, &tool_evt);
