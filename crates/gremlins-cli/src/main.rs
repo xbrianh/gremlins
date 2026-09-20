@@ -630,6 +630,15 @@ async fn land(id: &str) -> Result<(), String> {
 
     // Read project_root and workdir from state.json for system_env.
     let raw = state::read_state_json(Some(&state_file));
+
+    // A running gremlin must not be landed — its worktree is still being
+    // mutated by the agent process.
+    if raw.get("status").and_then(Value::as_str) == Some("running") {
+        return Err(format!(
+            "gremlin {id} is running — use `gremlins stop {id}` first"
+        ));
+    }
+
     let project_root = {
         let from_state = raw
             .get("project_root")
