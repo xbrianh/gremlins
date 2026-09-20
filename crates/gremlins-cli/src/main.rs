@@ -97,14 +97,6 @@ enum Cmds {
 
 #[tokio::main]
 async fn main() {
-    // Wire up logging: respect GREMLINS_LOG_LEVEL (default: INFO).
-    // _run redirects stderr to the log file, so per-stage DEBUG logs end up
-    // captured in the gremlin's log.
-    let level = std::env::var("GREMLINS_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&level))
-        .format_timestamp_millis()
-        .init();
-
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Cmds::Launch { definition, args }) => launch(&definition, &args).await,
@@ -1060,6 +1052,14 @@ fn generate_id(name: &str) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> {
+    // Wire up logging: respect GREMLINS_LOG_LEVEL (default: INFO).
+    // _run redirects stderr to the log file, so per-stage DEBUG logs end up
+    // captured in the gremlin's log.
+    let level = std::env::var("GREMLINS_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&level))
+        .format_timestamp_millis()
+        .init();
+
     config::init_global().map_err(|e| e.to_string())?;
 
     // Reconstruct the handle from the persisted state directory.
