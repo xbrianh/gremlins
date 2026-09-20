@@ -149,14 +149,13 @@ fn http_client_pool() -> &'static Mutex<HashMap<(String, String), ReqwestClient>
 ///
 /// HTTP clients are pooled by `(base_url, api_key)` so that every backend
 /// targeting the same provider endpoint shares one connection pool.
-fn build_openai_client(
-    api_key: &str,
-    base_url: &str,
-) -> Result<openai::CompletionsClient, String> {
+fn build_openai_client(api_key: &str, base_url: &str) -> Result<openai::CompletionsClient, String> {
     let cache_key = (base_url.to_string(), api_key.to_string());
 
     let http_client = {
-        let pool = http_client_pool().lock().expect("http client pool poisoned");
+        let pool = http_client_pool()
+            .lock()
+            .expect("http client pool poisoned");
         if let Some(client) = pool.get(&cache_key) {
             log::debug!(
                 "HTTP client cache hit for {base_url} (key ...{})",
@@ -169,7 +168,9 @@ fn build_openai_client(
             let client = ReqwestClient::builder()
                 .build()
                 .map_err(|e| e.to_string())?;
-            let mut pool = http_client_pool().lock().expect("http client pool poisoned");
+            let mut pool = http_client_pool()
+                .lock()
+                .expect("http client pool poisoned");
             pool.insert(cache_key, client.clone());
             client
         }
