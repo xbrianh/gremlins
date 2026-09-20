@@ -45,7 +45,7 @@ enum Cmds {
         resume_from: Option<String>,
     },
     /// List gremlins from the state root as a plain-column table.
-    Show {
+    Ls {
         /// Only list gremlins whose `project_root` is the current directory.
         #[arg(long)]
         here: bool,
@@ -107,7 +107,7 @@ async fn main() {
     let result = match cli.command {
         Some(Cmds::Launch { definition, args }) => launch(&definition, &args).await,
         Some(Cmds::Run { id, resume_from }) => run_gremlin(&id, resume_from.as_deref()).await,
-        Some(Cmds::Show { here }) => show(here),
+        Some(Cmds::Ls { here }) => ls(here),
         Some(Cmds::Info { id }) => info(&id),
         Some(Cmds::Stop { id }) => stop(&id),
         Some(Cmds::Resume { id }) => resume(&id).await,
@@ -130,7 +130,7 @@ async fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// show & status
+// ls & status
 // ---------------------------------------------------------------------------
 
 /// List gremlins whose state directories contain a `state.json`.
@@ -138,7 +138,7 @@ async fn main() {
 /// Closed gremlins (those with a `closed` marker next to the state file) are
 /// skipped without comment: they were cleaned with `remove_state_dir=false` and
 /// no longer represent live runs.
-fn show(here: bool) -> Result<(), String> {
+fn ls(here: bool) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     let cwd = std::env::current_dir()
@@ -215,12 +215,12 @@ fn status(id: &str) -> Result<(), String> {
 
     // Distinguish a missing id from a malformed one without parsing
     // `Gremlin::from`'s error text: absence of the state directory/file is
-    // the only case that gets the `gremlins show` suggestion.
+    // the only case that gets the `gremlins ls` suggestion.
     let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
         ));
     }
 
@@ -357,7 +357,7 @@ fn stop(id: &str) -> Result<(), String> {
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
         ));
     }
 
@@ -478,7 +478,7 @@ async fn resume(id: &str) -> Result<(), String> {
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
         ));
     }
 
@@ -582,7 +582,7 @@ fn log_gremlin(id: &str) -> Result<(), String> {
     let state_file = state_dir.join("state.json");
     if validate_gremlin_id(id).is_err() || !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
         ));
     }
 
@@ -626,7 +626,7 @@ fn rm(id: &str) -> Result<(), String> {
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
         ));
     }
 
@@ -677,7 +677,7 @@ fn clean(id: &str, keep: bool) -> Result<(), String> {
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
         ));
     }
 
@@ -722,7 +722,7 @@ async fn land(id: &str) -> Result<(), String> {
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
         ));
     }
 
@@ -1109,7 +1109,7 @@ async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> 
     let mut gremlin = Gremlin::from(id).map_err(|e| {
         let msg = e.to_string();
         if msg.contains("no state at") || msg.contains("gremlin_id contains illegal") {
-            format!("unknown gremlin {id:?} — use `gremlins show` to list gremlins")
+            format!("unknown gremlin {id:?} — use `gremlins ls` to list gremlins")
         } else {
             format!("gremlin {id}: {msg}")
         }
