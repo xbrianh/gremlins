@@ -410,7 +410,7 @@ land:
       - gh pr merge --squash --delete-branch "{PR_URL}"
 ```
 
-When a pipeline declares `land:`, `gremlins land` runs this stage instead of the built-in merge logic. The stage runs in the project root (not the worktree).
+When a pipeline declares `land:`, `gremlins land` runs this stage instead of the built-in merge logic. The stage runs in the project root (not the worktree). Land commands receive the same `GREMLINS_*` runtime environment variables that stages and bootstrap commands get (`GREMLINS_WORKTREE_PATH`, `GREMLINS_GREMLIN_ID`, `GREMLINS_PROJECT_ROOT`, etc.).
 
 ### Parallel groups
 

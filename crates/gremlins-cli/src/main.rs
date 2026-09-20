@@ -10,7 +10,7 @@ use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
-use gremlins::executor::gremlin::{validate_gremlin_id, Gremlin};
+use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
 use gremlins::schemas::expand;
@@ -628,9 +628,26 @@ async fn land(id: &str) -> Result<(), String> {
         }
     };
 
+    // Read project_root and workdir from state.json for system_env.
+    let raw = state::read_state_json(Some(&state_file));
+    let project_root = {
+        let from_state = raw
+            .get("project_root")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if from_state.is_empty() {
+            config::project_root()
+        } else {
+            PathBuf::from(from_state)
+        }
+    };
+    let workdir = raw.get("workdir").and_then(Value::as_str).unwrap_or("");
+    let worktree = (!workdir.is_empty()).then(|| PathBuf::from(workdir));
+    let overlay_dir = config::project_overlay_dir(&project_root);
+
     // Build a read-only artifact registry from the artifact directory.
     let artifact_dir = config::scratch_root(Some(id)).join("artifacts");
-    let registry = ArtifactRegistry::new(artifact_dir);
+    let registry = ArtifactRegistry::new(artifact_dir.clone());
 
     // Resolve interpolation references.
     let prepared = prepare_exec(exec, &registry, "", &HashMap::new())
@@ -644,7 +661,16 @@ async fn land(id: &str) -> Result<(), String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("failed to get current directory: {e}"))?;
 
-    let result = run_shell_async(&joined, Some(&cwd), None, prepared.timeout)
+    let env = system_env(
+        &artifact_dir,
+        &state_dir,
+        id,
+        &project_root,
+        worktree.as_deref(),
+        &overlay_dir,
+    );
+
+    let result = run_shell_async(&joined, Some(&cwd), Some(&env), prepared.timeout)
         .await
         .map_err(|e| format!("gremlin {id}: land: {e}"))?;
 
