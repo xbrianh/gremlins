@@ -2,7 +2,7 @@
 # Check Copilot review status (one-shot).
 # Usage: gh_wait_copilot <pr_number> <repo>
 #
-# The retry loop is handled by the outer loop stage in the pipeline YAML;
+# The retry loop is handled by the outer loop stage in the definition YAML;
 # this script does a single check and outputs the review state or nothing.
 # Outputs the final review state (APPROVED, CHANGES_REQUESTED, etc.) to stdout.
 # Exit 0 on completion or if no non-PENDING review found yet.

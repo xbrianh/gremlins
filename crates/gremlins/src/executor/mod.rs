@@ -3,7 +3,7 @@
 //! [`state`] owns `state.json` I/O and [`state::StateData`]; [`gremlin`] owns
 //! the [`gremlin::Gremlin`] handle — id validation, environment resolution,
 //! and the `launch`/`open`/`fork` constructors the run loop builds on; [`run`]
-//! owns the sequential run loop that walks a pipeline's stages and drives each
+//! owns the sequential run loop that walks a definition's stages and drives each
 //! one through its guard, scope, and bail bookkeeping.
 
 use thiserror::Error;
@@ -27,7 +27,7 @@ pub mod state;
 /// lower layers' errors unchanged.
 #[derive(Debug, Error)]
 pub enum RunError {
-    /// The pipeline asked to bail; the reason is the operator-facing message.
+    /// The definition asked to bail; the reason is the operator-facing message.
     #[error("{reason}")]
     Bail { reason: String },
 
@@ -44,7 +44,7 @@ pub enum RunError {
     Git { message: String },
 
     /// A failure with no more specific home: a bad gremlin id, an unloadable
-    /// pipeline, or a state directory that is missing or malformed.
+    /// definition, or a state directory that is missing or malformed.
     #[error("{0}")]
     Message(String),
 

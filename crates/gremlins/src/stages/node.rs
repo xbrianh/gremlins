@@ -1,6 +1,6 @@
 //! The typed stage tree.
 //!
-//! An expanded pipeline YAML is a list of mappings: a `type` (or a bare
+//! An expanded definition YAML is a list of mappings: a `type` (or a bare
 //! `parallel:` block), a name that may be absent, and optionally a body of
 //! child stages. [`RunnableStage::parse_stages`] turns that list into a
 //! [`RunnableStage`] tree — names filled first so every stage has a stable
@@ -39,7 +39,7 @@ pub enum StageError {
     Schema(#[from] SchemaError),
 }
 
-/// A parse failure is, at the pipeline level, a schema failure.
+/// A parse failure is, at the definition level, a schema failure.
 impl From<StageError> for SchemaError {
     fn from(err: StageError) -> Self {
         match err {

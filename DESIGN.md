@@ -11,30 +11,30 @@ without re-deriving the trade-offs each time.
 
 ### The workflow language is unopinionated
 
-Gremlins is an agentic *workflow language*, not a workflow. The pipeline YAML
+Gremlins is an agentic *workflow language*, not a workflow. The gremlin definition YAML
 is the program; the harness is only its runtime. The runtime supplies
 mechanics — stage sequencing, resumption, worktrees, artifact plumbing, bail
 bookkeeping, client construction — and keeps injected opinion to a minimum.
-A stage's model sees the prompts the pipeline author declared, the artifacts
-the pipeline passed through, and a thin harness system prompt that carries
+A stage's model sees the prompts the definition author declared, the artifacts
+the definition passed through, and a thin harness system prompt that carries
 essential tool/directory framing. Any major behavioral opinion (what to
-re-check, how to communicate, when to bail) still belongs in the pipeline's
+re-check, how to communicate, when to bail) still belongs in the definition's
 own prompt files — not the harness's.
 
 > **Exception — current state:** The harness system prompt currently includes
 > some opinionated guidance (e.g. delegation instructions). This is not ideal
 > for a workflow language, but pragmatic for now. In the future, model-specific
-> guidance will need to live in the harness system prompt; per-pipeline
-> behavioral norms should move back into pipeline prompt files as the boundary
+> guidance will need to live in the harness system prompt; per-definition
+> behavioral norms should move back into definition prompt files as the boundary
 > firms up.
 
 ## 1. The shape of a gremlin
 
 A gremlin is a sequence of **stages** executed by a thin orchestrator. The
-sequence is described in a YAML pipeline (`gremlins/pipelines/local.yaml`,
-`gh.yaml`, optionally a project-scoped override at `.gremlins/pipelines/`).
+sequence is described in a YAML gremlin definition (`gremlins/definitions/local.yaml`,
+`gh.yaml`, optionally a project-scoped override at `.gremlins/definitions/`).
 
-A typical pipeline looks like this:
+A typical definition looks like this:
 
     plan → implement → review-code → address-code → verify → github-open-pull-request → ...
 
@@ -44,7 +44,7 @@ Each stage is one of two kinds:
   `gh`, manage worktrees, parse JSON, wait on CI. They do not invoke a model.
   Examples: `verify`, `request-copilot`, `github-wait-copilot`, `github-wait-ci`.
 - **Agentic stages** invoke `claude -p` via an injected `ClaudeClient`. They
-  receive a prompt assembled from pipeline-declared prompt files, run to
+  receive a prompt assembled from definition-declared prompt files, run to
   completion, and produce an artifact on disk (a markdown file, a commit, a
   PR comment). Examples: `plan`, `implement`, `review-code`, `address-code`,
   `github-review-pull-request`, `github-address-pull-request-reviews`. Most agentic stages invoke the model exactly
@@ -64,7 +64,7 @@ allow agency and where we refuse to.
 
 **Use deterministic code for:**
 
-- The sequence itself. The pipeline YAML is the contract; stages do not get
+- The sequence itself. The definition YAML is the contract; stages do not get
   to decide what runs next. This is what makes resumption,
   rescue-after-bail, and chained-boss workflows tractable — the operator
   always knows what stage a gremlin is in, and what comes after, by reading
@@ -97,15 +97,15 @@ allow agency and where we refuse to.
 
 The dividing line is consistent: **the model produces content; deterministic
 code moves it around.** A stage that needed a model to decide *whether to run*
-would be a sign the pipeline was modeled wrong.
+would be a sign the definition was modeled wrong.
 
-### 2.1 Why a YAML pipeline rather than an agent loop
+### 2.1 Why a YAML definition rather than an agent loop
 
 We could build this as a single long-lived agent that reads tools, makes
 decisions, and produces a PR — and we considered it. We don't, for three
 reasons:
 
-1. **Resumability.** A pipeline with named stages and a `state.json` cursor
+1. **Resumability.** A definition with named stages and a `state.json` cursor
    can be resumed from any stage by an operator or a rescue script. A
    single agent loop has no equivalent — its "stage" is whatever its scratchpad
    says it is.
@@ -118,7 +118,7 @@ reasons:
    agent loop's cost is a function of how long it stays interested,
    which is not a property we want to discover in production.
 
-The pipeline is the deterministic skeleton; agency is intentionally confined
+The definition is the deterministic skeleton; agency is intentionally confined
 to one stage at a time.
 
 ### 2.2 Self-healing stages
@@ -133,8 +133,8 @@ shape implied above. The justification is that the artifact these stages
 produce is *the green check itself*: the loop's exit condition is a
 deterministic re-run, the number of fix attempts isn't known up front, and
 from the outside the stage still either produces its artifact or bails.
-Splitting the loop across pipeline stages would require either loop
-semantics in the pipeline YAML (a much larger change) or unrolled stages
+Splitting the loop across definition stages would require either loop
+semantics in the definition YAML (a much larger change) or unrolled stages
 that decide whether to skip — which §2 explicitly forbids.
 
 The cost of this exception:
@@ -156,7 +156,7 @@ we don't expect a third.
 
 ### 2.3 Bail as a control-flow channel
 
-A stage can halt the pipeline by raising a `Bail` exception or by calling
+A stage can halt the definition by raising a `Bail` exception or by calling
 `state.emit_bail`, which writes a `bail_class` (and optional `bail_detail`)
 to `state.json`.
 
@@ -165,7 +165,7 @@ The two routes serve different jobs:
 - **`Bail` exception** is raised when a structured bail condition is detected.
   A `Bail` exception includes the `bail_class` (one of
   `reviewer_requested_changes`, `security`, `secrets`, `other`). The exception
-  propagates up and halts the pipeline.
+  propagates up and halts the definition.
 - **`emit_bail`** records a *structured*, *persistent* halt reason
   in `state.json`. Both `bail_class` and `bail_detail` (a one-line human note)
   live in `state.json` after the process exits.
@@ -176,7 +176,7 @@ hooks — exactly the cross-process consumers §2 says we serve with
 byte-stable strings rather than prose. A stage that only raises tells a
 human; a stage that calls `emit_bail` first also tells a *script*.
 
-`emit_bail` does not itself halt the pipeline. It writes the marker and
+`emit_bail` does not itself halt the definition. It writes the marker and
 returns; the caller raises immediately afterward (either explicitly or by
 allowing a `Bail` exception to propagate), or an in-stage agent
 invokes `python -m gremlins.bail` and the stage's normal exit-code
@@ -228,8 +228,8 @@ This is a deliberate constraint, not an oversight:
 
 A stage's prompt is the concatenation of:
 
-1. Prompt files declared in the pipeline YAML (`prompts/code_style.md`,
-   `prompts/implement_local.md`, etc.). These are pinned per-pipeline.
+1. Prompt files declared in the definition YAML (`prompts/code_style.md`,
+   `prompts/implement_local.md`, etc.). These are pinned per-definition.
 2. The artifacts produced by upstream stages, read from disk and embedded
    into the prompt by the stage body.
 3. The minimum task framing the stage needs to do its job.
@@ -238,12 +238,12 @@ A reviewer does not see the planner's prompt. The implementer does not see
 the reviewer's lens. Each stage is given its own job in its own words, and
 upstream output crosses the boundary as data, not as context.
 
-Beyond the pipeline's own prompts and artifacts, the harness injects a thin
+Beyond the definition's own prompts and artifacts, the harness injects a thin
 system prompt carrying tool definitions, directory layout, and — currently —
 some opinionated guidance (e.g. delegation policy). This is a compromise: the
 ideal is zero harness opinion, but pragmatic model steering is needed today.
 Over time model-specific guidance will stay in the system prompt while
-pipeline-appropriate norms move back into pipeline files.
+definition-appropriate norms move back into definition files.
 
 ### 3.3 The worktree is the workspace
 
@@ -269,7 +269,7 @@ bail without inheriting any of the child's confusion.
 
 ### 3.5 Parallel stages
 
-A `type: parallel` block in a pipeline YAML runs N children concurrently.
+A `type: parallel` block in a definition YAML runs N children concurrently.
 At runtime the block materialises as **three stages**, keeping §2's
 deterministic-vs-agentic line intact:
 
@@ -307,7 +307,7 @@ parallel wrapper:
 Both fixes are backward-compatible: `child_key=None` (the default, used by
 all sequential stages) preserves existing top-level bail semantics.
 
-**Per-block knobs** (declared on the parallel block in the pipeline YAML):
+**Per-block knobs** (declared on the parallel block in the definition YAML):
 
 - `cancel_on_error: false` (default). All children run to completion even if
   one bails. Right for review lenses where each lens is independent.
@@ -350,7 +350,7 @@ that shape — they are sequences of related changes that have to land in
 order, where each step's plan depends on what the previous step actually
 did. The **boss gremlin** is the pattern for those.
 
-A boss is itself a long-running process, but it is not a stage pipeline
+A boss is itself a long-running process, but it is not a stage definition
 in the §1 sense. It runs a loop:
 
     1. Decide what the next child should do (handoff agent).
@@ -364,9 +364,9 @@ The boss's own state lives in `boss_state.json`, separate from any child's
 doesn't run them in-process; it spawns them through the same launcher an
 operator would, with their own worktrees, their own logs, their own
 lifecycles. From a child's perspective there is no boss; it just has a
-plan and runs the pipeline.
+plan and runs the definition.
 
-Boss resumption is keyed off `boss_state.json`, not the pipeline stage
+Boss resumption is keyed off `boss_state.json`, not the definition stage
 vocabulary. The shared launcher resume path still tracks `state.json.stage`
 for fleet status, but it does not pass `--resume-from` when re-spawning a
 boss. If a caller does provide `--resume-from`, `boss_main` logs that the
@@ -428,9 +428,9 @@ re-handoffs and spawns a near-duplicate child. This is a deliberate
 design choice: ambiguity at the chain level is surfaced to the operator
 rather than papered over by another model call.
 
-### 4.4 Why a boss isn't just a longer pipeline
+### 4.4 Why a boss isn't just a longer definition
 
-We could express boss workflows as a single longer YAML pipeline with
+We could express boss workflows as a single longer YAML definition with
 many `plan → implement → review-code → ...` repetitions. We don't,
 because:
 
@@ -438,21 +438,21 @@ because:
   feature is done, not at a step count we picked yesterday.
 - Each step's plan is a function of the previous step's diff. That's an
   agentic decision (the handoff agent), and putting it inside a stage
-  pipeline would mean a stage that decides whether the next stage runs
+  definition would mean a stage that decides whether the next stage runs
   — which §2 forbids.
 - Children need to be independently rescuable, landable, and abandonable
   by an operator. That works because each child is a separately
-  launched gremlin with its own state file. A flattened pipeline would
+  launched gremlin with its own state file. A flattened definition would
   collapse them into one process and lose the granularity.
 
 The boss is the right abstraction precisely because it stays out of the
-child's pipeline and confines its own agency to one decision per step.
+child's definition and confines its own agency to one decision per step.
 
-### 4.5 PR stacking in looped pipelines
+### 4.5 PR stacking in looped definitions
 
-When a pipeline contains a `loop` stage and that loop body includes an
+When a definition contains a `loop` stage and that loop body includes an
 `github-open-pull-request` stage, every PR after the first is automatically based on
-the previous PR's branch. No per-pipeline configuration is required.
+the previous PR's branch. No per-definition configuration is required.
 
 **The mechanism.** `GitHubOpenPullRequest.run` resolves the PR base ref with this
 fallback chain:
@@ -469,7 +469,7 @@ is empty before appending a PR artifact, so every `pr` artifact in the list
 has a non-empty `branch` field. `last_pr_branch` therefore always returns a
 real branch name, never an empty string that would fall through to `main`.
 
-**What this means in practice.** A boss pipeline (or any looped gh pipeline)
+**What this means in practice.** A boss definition (or any looped gh definition)
 produces a stack of PRs by default. PR #1 targets `main` (or
 `base_ref_name` from state). PR #2 targets PR #1's branch. PR #3 targets
 PR #2's branch, and so on. The artifact list is the authoritative record.
@@ -481,7 +481,7 @@ single run — each gets its own `gremlin_id` and an empty artifact list, so
 `last_pr_branch` returns nothing and the PR targets `main` (or whatever
 `base_ref_name` is in that gremlin's state).
 
-Within a looped pipeline you can also set `base_ref` under the
+Within a looped definition you can also set `base_ref` under the
 `github-open-pull-request` stage's `options:` to control the first-iteration base and
 the fallback when the artifact list is empty, but this does not suppress
 stacking once prior PR artifacts exist.
@@ -492,7 +492,7 @@ Per-gremlin cost is dominated by two things:
 
 - **Token volume per stage.** Driven by prompt size + how much the agent
   reads from the worktree. Bounded by §3 — small prompts, scoped agents.
-- **Number of stages × per-stage volume.** Bounded by the pipeline YAML.
+- **Number of stages × per-stage volume.** Bounded by the definition YAML.
 
 We measure cost per run via `CompletedRun.cost_usd`, summed across stages
 into `SubprocessClaudeClient.total_cost_usd`. That number is the unit we
@@ -500,12 +500,12 @@ optimize against.
 
 The cost knobs we *do* use:
 
-- **Model selection per stage.** The pipeline's `clients` block lets a
+- **Model selection per stage.** The definition's `clients` block lets a
   stage pick a smaller model. We default everything to Sonnet and would
   drop individual stages to Haiku only with a measured reason.
 - **Prompt size discipline.** Prompt files are reviewed for length the same
   way code is. A bloated lens file is a regression.
-- **Pipeline length.** Adding a stage is adding a fixed cost to every
+- **Definition length.** Adding a stage is adding a fixed cost to every
   gremlin forever. We resist it.
 
 The cost knobs we have *considered and are not using today*:
@@ -549,8 +549,8 @@ this design.
    becomes less clean, prompts stop being as bounded, and individual
    stages are less independently testable.
 
-5. **It did not compose with the whole pipeline.** Sessions are linear.
-   Some of our pipelines are not. Parallel `review-code` stages and any
+5. **It did not compose with the whole definition.** Sessions are linear.
+   Some of our definitions are not. Parallel `review-code` stages and any
    future fan-out stages still need a cold-start path, because one
    session cannot be resumed into multiple concurrent children.
 

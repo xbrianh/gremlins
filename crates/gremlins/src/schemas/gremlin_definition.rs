@@ -1,8 +1,8 @@
-//! The native `Pipeline` — an expanded pipeline YAML resolved to typed data.
+//! The native `GremlinDefinition` — an expanded gremlin definition YAML resolved to typed data.
 //!
-//! [`Pipeline::from_yaml`] mirrors `pyext::schemas::Pipeline::from_yaml` step
+//! [`GremlinDefinition::from_yaml`] mirrors `pyext::schemas::GremlinDefinition::from_yaml` step
 //! for step: canonicalise and locate the file, walk up to the `.gremlins`
-//! project root, expand the YAML, then resolve the pipeline identity (`name`,
+//! project root, expand the YAML, then resolve the definition identity (`name`,
 //! `default_client`, `base_ref`, `bootstrap`), the typed stage tree, the
 //! optional `land` stage, and the producer/consumer validators that guard
 //! artifact wiring.
@@ -24,16 +24,16 @@ use crate::schemas::loader::{self, StageNode};
 use crate::stages::node::RunnableStage;
 
 /// The message emitted when no layer supplied a default client.
-const MISSING_DEFAULT_CLIENT: &str = "pipeline is missing 'default_client' — set a \
-     'default_client' in the pipeline YAML, pass --client on the command line, or set \
+const MISSING_DEFAULT_CLIENT: &str = "gremlin definition is missing 'default_client' — set a \
+     'default_client' in the definition YAML, pass --client on the command line, or set \
      'default-client' in config.json";
 
-/// A pipeline resolved from an expanded YAML file.
+/// A gremlin definition resolved from an expanded YAML file.
 #[derive(Debug, Clone)]
-pub struct Pipeline {
-    /// The pipeline's identity: the YAML file stem.
+pub struct GremlinDefinition {
+    /// The definition's identity: the YAML file stem.
     pub name: String,
-    /// Where the pipeline was loaded from, canonicalised where possible.
+    /// Where the definition was loaded from, canonicalised where possible.
     pub path: PathBuf,
     /// Every stage runs with this client unless it declares its own.
     pub default_client: String,
@@ -47,19 +47,19 @@ pub struct Pipeline {
     pub land: Option<RunnableStage>,
 }
 
-/// The name a not-yet-loaded pipeline carries. [`Gremlin::init_runtime`]
-/// treats it as "nothing loaded yet", so it must never be a real pipeline's
+/// The name a not-yet-loaded definition carries. [`Gremlin::init_runtime`]
+/// treats it as "nothing loaded yet", so it must never be a real definition's
 /// name — `from_yaml` derives that from the YAML file stem.
 pub const UNLOADED_NAME: &str = "unknown";
 
-impl Pipeline {
+impl GremlinDefinition {
     /// A placeholder carrying no identity: the value a [`Gremlin`] holds until
     /// [`Gremlin::init_runtime`] reads the real YAML.
     ///
     /// [`Gremlin`]: crate::executor::gremlin::Gremlin
     /// [`Gremlin::init_runtime`]: crate::executor::gremlin::Gremlin::init_runtime
-    pub fn stub() -> Pipeline {
-        Pipeline {
+    pub fn stub() -> GremlinDefinition {
+        GremlinDefinition {
             name: UNLOADED_NAME.to_string(),
             path: PathBuf::from("."),
             default_client: String::new(),
@@ -70,7 +70,7 @@ impl Pipeline {
         }
     }
 
-    /// Whether this pipeline is the [`Pipeline::stub`] rather than a loaded one.
+    /// Whether this definition is the [`GremlinDefinition::stub`] rather than a loaded one.
     pub fn is_stub(&self) -> bool {
         self.name.is_empty() || self.name == UNLOADED_NAME
     }
@@ -86,35 +86,35 @@ impl Pipeline {
         first.body().iter().any(|s| s.name() == "handoff")
     }
 
-    /// Clone this pipeline, replacing its stage list with `stages`.
+    /// Clone this definition, replacing its stage list with `stages`.
     ///
-    /// Used by the parallel executor to give each child a pipeline that
+    /// Used by the parallel executor to give each child a definition that
     /// contains only the child's own stage(s), while inheriting every other
     /// field (name, path, default_client, base_ref, bootstrap, land) from
     /// the parent.
     pub fn clone_with_stages(&self, stages: Vec<RunnableStage>) -> Self {
-        Pipeline {
+        GremlinDefinition {
             stages,
             ..self.clone()
         }
     }
 
-    /// Load and resolve a pipeline. `default_client_override` is the CLI
+    /// Load and resolve a gremlin definition. `default_client_override` is the CLI
     /// `--client` value; it is consulted only when the YAML declares none.
     pub fn from_yaml(
         path: impl AsRef<Path>,
         default_client_override: Option<&str>,
-    ) -> Result<Pipeline, SchemaError> {
+    ) -> Result<GremlinDefinition, SchemaError> {
         let path = path.as_ref();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !path.exists() {
-            return Err(SchemaError::PipelineFileNotFound {
+            return Err(SchemaError::DefinitionFileNotFound {
                 path: path.display().to_string(),
             });
         }
 
         let project_root = project_root_for(&path);
-        let expanded = expand::parse_pipeline_file(&path, &project_root)?;
+        let expanded = expand::parse_definition_file(&path, &project_root)?;
         let root = expanded
             .as_mapping()
             .ok_or_else(|| SchemaError::YamlNotMapping {
@@ -136,7 +136,7 @@ impl Pipeline {
 
         if root.contains_key("inputs") {
             return Err(SchemaError::Generic(
-                "'inputs' is not a valid pipeline key; declare CLI arguments under bootstrap.source"
+                "'inputs' is not a valid definition key; declare CLI arguments under bootstrap.source"
                     .to_string(),
             ));
         }
@@ -156,7 +156,7 @@ impl Pipeline {
 
         let default_client = resolve_default_client(yaml_default_client, default_client_override)?;
 
-        Ok(Pipeline {
+        Ok(GremlinDefinition {
             name,
             path,
             default_client,
@@ -169,7 +169,7 @@ impl Pipeline {
 }
 
 /// The project root: the parent of the nearest ancestor `.gremlins` directory,
-/// falling back to the pipeline's own directory.
+/// falling back to the definition's own directory.
 fn project_root_for(path: &Path) -> PathBuf {
     let mut current = path.parent();
     while let Some(directory) = current {
@@ -331,23 +331,23 @@ stages:
     }
 
     #[test]
-    fn resolves_pipeline_identity_and_stage_tree() {
+    fn resolves_definition_identity_and_stage_tree() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", WITH_CLIENT);
 
-        let pipeline = Pipeline::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
 
-        assert_eq!(pipeline.name, "demo");
-        assert!(pipeline.path.is_absolute());
-        assert_eq!(pipeline.default_client, "xai:grok-4");
-        assert_eq!(pipeline.base_ref, "current");
-        assert!(pipeline.land.is_none());
-        assert!(pipeline.bootstrap.launch_cmds.is_empty());
+        assert_eq!(definition.name, "demo");
+        assert!(definition.path.is_absolute());
+        assert_eq!(definition.default_client, "xai:grok-4");
+        assert_eq!(definition.base_ref, "current");
+        assert!(definition.land.is_none());
+        assert!(definition.bootstrap.launch_cmds.is_empty());
 
-        let names: Vec<&str> = pipeline.stages.iter().map(RunnableStage::name).collect();
+        let names: Vec<&str> = definition.stages.iter().map(RunnableStage::name).collect();
         assert_eq!(names, vec!["plan", "run"]);
-        assert_eq!(pipeline.stages[0].stage_type(), "agent");
-        assert_eq!(pipeline.stages[1].stage_type(), "exec");
+        assert_eq!(definition.stages[0].stage_type(), "agent");
+        assert_eq!(definition.stages[1].stage_type(), "exec");
     }
 
     #[test]
@@ -355,12 +355,12 @@ stages:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", WITH_CLIENT);
 
-        let pipeline = Pipeline::from_yaml(&path, None).unwrap();
-        // Stages without an explicit `client:` carry None — the pipeline
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        // Stages without an explicit `client:` carry None — the definition
         // default_client is resolved at runtime by the executor.
-        assert_eq!(pipeline.stages[0].client(), None);
-        assert_eq!(pipeline.stages[1].client(), None);
-        assert_eq!(pipeline.default_client, "xai:grok-4");
+        assert_eq!(definition.stages[0].client(), None);
+        assert_eq!(definition.stages[1].client(), None);
+        assert_eq!(definition.default_client, "xai:grok-4");
     }
 
     #[test]
@@ -390,14 +390,14 @@ stages:
 "#,
         );
 
-        let pipeline = Pipeline::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
         assert_eq!(
-            pipeline.stages[0].client(),
+            definition.stages[0].client(),
             Some(&ClientSpec("local:model".into()))
         );
         // Stage without explicit client carries None — resolved at runtime.
-        assert_eq!(pipeline.stages[1].client(), None);
-        assert_eq!(pipeline.default_client, "xai:grok-4");
+        assert_eq!(definition.stages[1].client(), None);
+        assert_eq!(definition.default_client, "xai:grok-4");
     }
 
     #[test]
@@ -405,8 +405,8 @@ stages:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", WITH_CLIENT);
 
-        let pipeline = Pipeline::from_yaml(&path, Some("cli:model")).unwrap();
-        assert_eq!(pipeline.default_client, "xai:grok-4");
+        let definition = GremlinDefinition::from_yaml(&path, Some("cli:model")).unwrap();
+        assert_eq!(definition.default_client, "xai:grok-4");
     }
 
     #[test]
@@ -414,16 +414,16 @@ stages:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", WITHOUT_CLIENT);
 
-        let pipeline = Pipeline::from_yaml(&path, Some("cli:model")).unwrap();
-        assert_eq!(pipeline.default_client, "cli:model");
+        let definition = GremlinDefinition::from_yaml(&path, Some("cli:model")).unwrap();
+        assert_eq!(definition.default_client, "cli:model");
         // Stages without explicit client carry None — resolved at runtime.
-        assert_eq!(pipeline.stages[0].client(), None);
+        assert_eq!(definition.stages[0].client(), None);
     }
 
-    /// A pipeline whose client has to come from the sandbox's config, plus
+    /// A definition whose client has to come from the sandbox's config, plus
     /// the sandbox that supplies (or withholds) it and the project directory
-    /// the pipeline file lives in.
-    fn pipeline_needing_a_client(
+    /// the definition file lives in.
+    fn definition_needing_a_client(
         config_json: Option<&str>,
     ) -> (Sandbox, tempfile::TempDir, PathBuf) {
         let sandbox = Sandbox::with_config(config_json);
@@ -435,15 +435,15 @@ stages:
     #[test]
     fn config_supplies_the_client_when_nothing_else_does() {
         let (_sandbox, _project, path) =
-            pipeline_needing_a_client(Some(r#"{"default-client": "cfg:model"}"#));
-        let pipeline = Pipeline::from_yaml(&path, None).unwrap();
-        assert_eq!(pipeline.default_client, "cfg:model");
+            definition_needing_a_client(Some(r#"{"default-client": "cfg:model"}"#));
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        assert_eq!(definition.default_client, "cfg:model");
     }
 
     #[test]
     fn a_client_is_required_from_somewhere() {
-        let (_sandbox, _project, path) = pipeline_needing_a_client(None);
-        let err = Pipeline::from_yaml(&path, None).unwrap_err();
+        let (_sandbox, _project, path) = definition_needing_a_client(None);
+        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
         assert!(
             err.to_string().contains("missing 'default_client'"),
             "{err}"
@@ -481,11 +481,11 @@ stages:
 "#,
         );
 
-        let pipeline = Pipeline::from_yaml(&path, None).unwrap();
-        assert_eq!(pipeline.base_ref, "main");
-        assert_eq!(pipeline.bootstrap.launch_cmds.len(), 1);
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        assert_eq!(definition.base_ref, "main");
+        assert_eq!(definition.bootstrap.launch_cmds.len(), 1);
 
-        let land = pipeline.land.expect("land stage");
+        let land = definition.land.expect("land stage");
         assert_eq!(land.name(), "land");
         assert_eq!(land.stage_type(), "exec");
     }
@@ -495,7 +495,7 @@ stages:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", "default_client: ''\nstages: []\n");
 
-        let err = Pipeline::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
         assert!(
             err.to_string()
                 .contains("default_client must be a non-empty string"),
@@ -512,7 +512,7 @@ stages:
             "default_client: 'xai:grok-4'\nbase_ref: '   '\nstages: []\n",
         );
 
-        let err = Pipeline::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
         assert!(
             err.to_string()
                 .contains("base_ref must be a non-empty string"),
@@ -523,8 +523,8 @@ stages:
     #[test]
     fn missing_file_is_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let err = Pipeline::from_yaml(dir.path().join("absent.yaml"), None).unwrap_err();
-        assert!(err.to_string().contains("pipeline file not found"), "{err}");
+        let err = GremlinDefinition::from_yaml(dir.path().join("absent.yaml"), None).unwrap_err();
+        assert!(err.to_string().contains("definition file not found"), "{err}");
     }
 
     #[test]
@@ -552,7 +552,7 @@ stages:
 "#,
         );
 
-        let err = Pipeline::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
         assert!(
             err.to_string().contains("duplicate artifact producer"),
             "{err}"
@@ -579,7 +579,7 @@ stages:
 "#,
         );
 
-        let err = Pipeline::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
         assert!(
             err.to_string().contains("artifact://never-produced.md"),
             "{err}"
@@ -603,8 +603,8 @@ land:
 "#,
         );
 
-        let pipeline = Pipeline::from_yaml(&path, None).unwrap();
-        assert_eq!(pipeline.land.as_ref().unwrap().name(), "land");
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        assert_eq!(definition.land.as_ref().unwrap().name(), "land");
     }
 
     #[test]
@@ -623,10 +623,10 @@ land:
 "#,
         );
 
-        let pipeline = Pipeline::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
         // Land without explicit client carries None — resolved at runtime.
-        assert_eq!(pipeline.land.as_ref().unwrap().client(), None);
-        assert_eq!(pipeline.default_client, "xai:grok-4");
+        assert_eq!(definition.land.as_ref().unwrap().client(), None);
+        assert_eq!(definition.default_client, "xai:grok-4");
     }
 
     #[test]
@@ -646,17 +646,17 @@ land:
 "#,
         );
 
-        let pipeline = Pipeline::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
         assert_eq!(
-            pipeline.land.as_ref().unwrap().client(),
+            definition.land.as_ref().unwrap().client(),
             Some(&ClientSpec("local:model".into()))
         );
     }
 
     #[test]
     fn a_blank_override_never_becomes_the_client() {
-        let (_sandbox, _project, path) = pipeline_needing_a_client(None);
-        let err = Pipeline::from_yaml(&path, Some("   ")).unwrap_err();
+        let (_sandbox, _project, path) = definition_needing_a_client(None);
+        let err = GremlinDefinition::from_yaml(&path, Some("   ")).unwrap_err();
         assert!(
             err.to_string().contains("missing 'default_client'"),
             "{err}"
@@ -666,9 +666,9 @@ land:
     #[test]
     fn a_blank_override_falls_through_to_config() {
         let (_sandbox, _project, path) =
-            pipeline_needing_a_client(Some(r#"{"default-client": "cfg:model"}"#));
-        let pipeline = Pipeline::from_yaml(&path, Some("")).unwrap();
-        assert_eq!(pipeline.default_client, "cfg:model");
+            definition_needing_a_client(Some(r#"{"default-client": "cfg:model"}"#));
+        let definition = GremlinDefinition::from_yaml(&path, Some("")).unwrap();
+        assert_eq!(definition.default_client, "cfg:model");
     }
 
     #[test]
@@ -676,7 +676,7 @@ land:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", "default_client: '   '\nstages: []\n");
 
-        let err = Pipeline::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
         assert!(
             err.to_string()
                 .contains("default_client must be a non-empty string"),
@@ -705,7 +705,7 @@ stages:
 "#,
         );
 
-        let err = Pipeline::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
         // The unnamed nested stage is auto-named `exec` before validation.
         assert!(err.to_string().contains("stage exec:"), "{err}");
     }

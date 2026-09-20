@@ -3,12 +3,12 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DiscoveryError {
-    #[error("pipeline {name:?} not found; available: {available}")]
+    #[error("gremlin definition {name:?} not found; available: {available}")]
     Name { name: String, available: String },
 
-    #[error("pipeline file not found: {path}")]
+    #[error("gremlin definition file not found: {path}")]
     File { path: PathBuf },
 
-    #[error("pipeline {name:?} not found in {dirs}")]
+    #[error("gremlin definition {name:?} not found in {dirs}")]
     Path { name: String, dirs: String },
 }

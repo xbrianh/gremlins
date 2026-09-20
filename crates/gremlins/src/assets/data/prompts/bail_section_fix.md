@@ -1,4 +1,4 @@
-## Bail markers (running under a gremlin pipeline)
+## Bail markers (running under a gremlin)
 
 If you cannot fix the failure — for example, the check reports a violation you legitimately cannot resolve — end your final message with this line and nothing after it:
 

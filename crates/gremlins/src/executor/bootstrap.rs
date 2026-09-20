@@ -1,9 +1,9 @@
 //! Worktree bootstrap: the shell commands and `gremlins:` DSL that run before
-//! a pipeline's stages.
+//! a definition's stages.
 //!
 //! Every first-start launch has to prepare its checkout — a virtualenv, a
 //! dependency sync, an artifact bound from a CLI flag — before any stage can
-//! use it. [`run_pipeline_bootstrap`] is that preparation, in the order the
+//! use it. [`run_definition_bootstrap`] is that preparation, in the order the
 //! Python executor ran it:
 //!
 //! 1. `bootstrap.cmds` — per-worktree setup, run in the worktree.
@@ -279,7 +279,7 @@ fn bind_artifact(source_key: &str, uri_str: &str, gremlin: &mut Gremlin) -> Resu
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline bootstrap
+// Definition bootstrap
 // ---------------------------------------------------------------------------
 
 /// Run a gremlin's bootstrap, in order, against its own worktree.
@@ -287,10 +287,10 @@ fn bind_artifact(source_key: &str, uri_str: &str, gremlin: &mut Gremlin) -> Resu
 /// Every piece of state it needs — the worktree, the resolved environment, the
 /// stage inputs, the registry — already lives on `gremlin`, so the caller is a
 /// single guard and a single call.
-pub async fn run_pipeline_bootstrap(gremlin: &mut Gremlin) -> Result<(), RunError> {
+pub async fn run_definition_bootstrap(gremlin: &mut Gremlin) -> Result<(), RunError> {
     // Snapshot the bootstrap block: the DSL step borrows `gremlin` mutably for
-    // its registry, so the commands cannot stay borrowed from the pipeline.
-    let bootstrap = gremlin.pipeline.bootstrap.clone();
+    // its registry, so the commands cannot stay borrowed from the definition.
+    let bootstrap = gremlin.definition.bootstrap.clone();
     let cwd = gremlin.cwd();
     let env = gremlin.env.clone();
 
@@ -397,7 +397,7 @@ mod tests {
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::schemas::pipeline::Pipeline;
+    use crate::schemas::gremlin_definition::GremlinDefinition;
 
     // --- DSL parsing ---
 
@@ -564,10 +564,10 @@ mod tests {
         .unwrap();
     }
 
-    // --- pipeline bootstrap ---
+    // --- definition bootstrap ---
 
     /// A gremlin with a worktree and a seeded state directory: everything
-    /// `run_pipeline_bootstrap` touches.
+    /// `run_definition_bootstrap` touches.
     fn test_gremlin(
         bootstrap: Bootstrap,
         stage_inputs: HashMap<String, String>,
@@ -595,9 +595,9 @@ mod tests {
             id: validate_gremlin_id("gr-test").unwrap(),
             state_dir,
             artifact_dir: artifact_dir.clone(),
-            pipeline_path: None,
+            definition_path: None,
             client_override: None,
-            pipeline: Pipeline {
+            definition: GremlinDefinition {
                 name: "test".to_string(),
                 path: PathBuf::from("test.yaml"),
                 default_client: "cmd:true".to_string(),
@@ -630,7 +630,7 @@ mod tests {
         };
         let (tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
-        run_pipeline_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin).await.unwrap();
 
         assert!(tmp.path().join("worktree").join("marker.txt").is_file());
     }
@@ -648,7 +648,7 @@ mod tests {
         let inputs = HashMap::from([("plan".to_string(), source.to_string_lossy().into_owned())]);
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, inputs);
 
-        run_pipeline_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin).await.unwrap();
 
         assert!(gremlin.registry.is_live("artifact://plan.md"));
         assert_eq!(
@@ -669,7 +669,7 @@ mod tests {
         let inputs = HashMap::from([("note".to_string(), "hello".to_string())]);
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, inputs);
 
-        run_pipeline_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin).await.unwrap();
 
         assert_eq!(
             gremlin
@@ -688,7 +688,7 @@ mod tests {
         };
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
-        run_pipeline_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin).await.unwrap();
 
         assert!(!gremlin.registry.is_live("artifact://plan.md"));
     }
@@ -701,7 +701,7 @@ mod tests {
         };
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
-        let error = run_pipeline_bootstrap(&mut gremlin).await.unwrap_err();
+        let error = run_definition_bootstrap(&mut gremlin).await.unwrap_err();
         assert!(error.to_string().contains("unknown gremlins: command"));
     }
 
@@ -714,7 +714,7 @@ mod tests {
         let inputs = HashMap::from([("greeting".to_string(), "hi".to_string())]);
         let (tmp, mut gremlin) = test_gremlin(bootstrap, inputs);
 
-        run_pipeline_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin).await.unwrap();
 
         let written =
             std::fs::read_to_string(tmp.path().join("worktree").join("greeting.txt")).unwrap();
@@ -735,7 +735,7 @@ mod tests {
         let path = gremlin.registry.path_for_uri(&uri).unwrap();
         std::fs::write(&path, "123").unwrap();
 
-        run_pipeline_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin).await.unwrap();
 
         assert!(gremlin.registry.is_live("artifact://pr.txt"));
     }
@@ -748,7 +748,7 @@ mod tests {
         };
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
-        let error = run_pipeline_bootstrap(&mut gremlin).await.unwrap_err();
+        let error = run_definition_bootstrap(&mut gremlin).await.unwrap_err();
         assert!(matches!(
             error,
             RunError::BootstrapFailed { exit_code: 3, .. }
@@ -758,6 +758,6 @@ mod tests {
     #[tokio::test]
     async fn an_empty_bootstrap_does_nothing() {
         let (_tmp, mut gremlin) = test_gremlin(Bootstrap::default(), HashMap::new());
-        assert!(run_pipeline_bootstrap(&mut gremlin).await.is_ok());
+        assert!(run_definition_bootstrap(&mut gremlin).await.is_ok());
     }
 }

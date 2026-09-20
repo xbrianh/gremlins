@@ -14,7 +14,7 @@ use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
 use gremlins::schemas::expand;
-use gremlins::schemas::pipeline::Pipeline;
+use gremlins::schemas::gremlin_definition::GremlinDefinition;
 use gremlins::stages::exec::prepare_exec;
 use gremlins::stages::node::RunnableStage;
 use serde_json::{Map, Value};
@@ -22,7 +22,7 @@ use serde_json::{Map, Value};
 mod spawn;
 
 #[derive(Parser)]
-#[command(name = "gremlins", about = "AI-backed gremlin pipeline runner")]
+#[command(name = "gremlins", about = "AI-backed gremlin definition runner")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Cmds>,
@@ -30,9 +30,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmds {
-    /// Start a pipeline as a detached background gremlin.
+    /// Start a definition as a detached background gremlin.
     Launch {
-        /// Pipeline definition: a bare name (resolved under .gremlins/) or a path.
+        /// Gremlin definition: a bare name (resolved under .gremlins/) or a path.
         definition: String,
         /// Free-form --key value pairs passed to bootstrap sources.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -85,7 +85,7 @@ enum Cmds {
         /// Gremlin id to remove.
         id: String,
     },
-    /// Run the pipeline's land block in the current working directory.
+    /// Run the definition's land block in the current working directory.
     Land {
         /// Gremlin id whose land block to run.
         id: String,
@@ -139,7 +139,7 @@ fn ls(here: bool) -> Result<(), String> {
         .map(|path| path.canonicalize().unwrap_or(path))
         .unwrap_or_else(|_| PathBuf::from("."));
 
-    let headers = ["ID", "STATUS", "STAGE", "PIPELINE", "PROJECT", "LAUNCH"];
+    let headers = ["ID", "STATUS", "STAGE", "DEFINITION", "PROJECT", "LAUNCH"];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     for (id, state_json_path) in state::list_state_dirs() {
@@ -188,7 +188,7 @@ fn ls(here: bool) -> Result<(), String> {
             id,
             map_field_display(&state_map, "status"),
             map_field_display(&state_map, "stage"),
-            pipeline_display_name(&data),
+            definition_display_name(&data),
             project.to_string(),
             launch,
         ]);
@@ -232,7 +232,7 @@ fn status(id: &str) -> Result<(), String> {
     println!("id:            {}", gremlin.id);
     println!("status:        {}", field_display(&gremlin.state, "status"));
     println!("stage:         {}", field_display(&gremlin.state, "stage"));
-    println!("pipeline:      {}", pipeline_display_name(&gremlin.state));
+    println!("definition:      {}", definition_display_name(&gremlin.state));
     println!("project_root:  {}", gremlin.project_root.display());
     println!(
         "workdir:       {}",
@@ -272,7 +272,7 @@ fn status(id: &str) -> Result<(), String> {
 
 /// Print the full runtime state of one gremlin as pretty-printed JSON.
 ///
-/// Uses `Gremlin::from` — the cheap constructor — so the pipeline is never
+/// Uses `Gremlin::from` — the cheap constructor — so the definition is never
 /// parsed and no client is built.  The log path is reported even if the log
 /// file has not been created yet.
 fn info(id: &str) -> Result<(), String> {
@@ -302,7 +302,7 @@ fn info(id: &str) -> Result<(), String> {
         "id": gremlin.id.as_str(),
         "status": gremlin.state.read_str("status"),
         "stage": gremlin.state.read_str("stage"),
-        "pipeline": pipeline_display_name(&gremlin.state),
+        "definition": definition_display_name(&gremlin.state),
         "project_root": gremlin.project_root.display().to_string(),
         "workdir": workdir,
         "state_dir": gremlin.state_dir.display().to_string(),
@@ -688,7 +688,7 @@ fn clean(id: &str, keep: bool) -> Result<(), String> {
 // land
 // ---------------------------------------------------------------------------
 
-/// Run the pipeline's `land` block in the current working directory.
+/// Run the definition's `land` block in the current working directory.
 async fn land(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
@@ -704,21 +704,21 @@ async fn land(id: &str) -> Result<(), String> {
         ));
     }
 
-    // Load the pipeline from the hermetic snapshot.
-    let pipeline_path = state_dir.join("pipeline.yaml");
-    if !pipeline_path.is_file() {
+    // Load the definition from the hermetic snapshot.
+    let definition_path = state_dir.join("definition.yaml");
+    if !definition_path.is_file() {
         return Err(format!(
-            "gremlin {id}: pipeline snapshot not found at {}",
-            pipeline_path.display()
+            "gremlin {id}: definition snapshot not found at {}",
+            definition_path.display()
         ));
     }
-    let pipeline = Pipeline::from_yaml(&pipeline_path, None)
-        .map_err(|e| format!("gremlin {id}: failed to load pipeline: {e}"))?;
+    let definition = GremlinDefinition::from_yaml(&definition_path, None)
+        .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
 
-    let land_stage = match &pipeline.land {
+    let land_stage = match &definition.land {
         Some(stage) => stage,
         None => {
-            return Err(format!("gremlin {id}: pipeline has no land block"));
+            return Err(format!("gremlin {id}: definition has no land block"));
         }
     };
 
@@ -832,14 +832,14 @@ fn read_state_object(path: &Path) -> Option<serde_json::Map<String, Value>> {
     }
 }
 
-/// The pipeline column: the persisted `pipeline_path` file stem when recorded,
+/// The definition column: the persisted `definition_path` file stem when recorded,
 /// else the `kind` recorded in state.json.
 ///
-/// The hermetic snapshot is always copied to `state_dir/pipeline.yaml`, so its
-/// own stem would collapse every row to "pipeline". The recorded
-/// `pipeline_path` is the original definition path and preserves the real name.
-fn pipeline_display_name(state: &StateData) -> String {
-    let recorded = field_display(state, "pipeline_path");
+/// The hermetic snapshot is always copied to `state_dir/definition.yaml`, so its
+/// own stem would collapse every row to "definition". The recorded
+/// `definition_path` is the original definition path and preserves the real name.
+fn definition_display_name(state: &StateData) -> String {
+    let recorded = field_display(state, "definition_path");
     if let Some(stem) = Path::new(&recorded)
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -900,24 +900,24 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
     // Bootstrap the global config so path resolvers work.
     config::init_global().map_err(|e| e.to_string())?;
 
-    // Resolve the definition to a pipeline path.
+    // Resolve the definition to a definition path.
     let project_root = config::project_root();
-    let pipeline_path = discovery::resolve_pipeline_path(definition, project_root.clone())
-        .map_err(|e| format!("pipeline not found: {e}"))?;
+    let definition_path = discovery::resolve_definition_path(definition, project_root.clone())
+        .map_err(|e| format!("definition not found: {e}"))?;
 
-    // Load the pipeline just enough to validate --key args against
+    // Load the definition just enough to validate --key args against
     // bootstrap.source.
-    let pipeline =
-        Pipeline::from_yaml(&pipeline_path, None).map_err(|e| format!("invalid pipeline: {e}"))?;
+    let definition =
+        GremlinDefinition::from_yaml(&definition_path, None).map_err(|e| format!("invalid definition: {e}"))?;
 
-    match &pipeline.bootstrap.source {
+    match &definition.bootstrap.source {
         Some(source) => {
             // Reject any --key that is not a declared source.
             let declared: Vec<String> = source.all_sources();
             for key in stage_inputs.keys() {
                 if !declared.iter().any(|d| d == key) {
                     return Err(format!(
-                        "unknown input {key:?} — pipeline declares sources: {}",
+                        "unknown input {key:?} — definition declares sources: {}",
                         declared.join(", ")
                     ));
                 }
@@ -928,14 +928,14 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         None => {
             if !stage_inputs.is_empty() {
                 return Err(
-                    "pipeline declares no bootstrap.source — no --key args allowed".to_string(),
+                    "definition declares no bootstrap.source — no --key args allowed".to_string(),
                 );
             }
         }
     }
 
     // The definition name is the YAML file stem.
-    let definition_name = pipeline_path
+    let definition_name = definition_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("gremlin");
@@ -943,9 +943,9 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
     // Generate a gremlin id, re-rolling if the state directory already exists.
     let gremlin_id = generate_id(definition_name)?;
 
-    // Resolve the pipeline's base_ref so the worktree branches from the
+    // Resolve the definition's base_ref so the worktree branches from the
     // configured branch/tag rather than always from HEAD.
-    let base_ref = pipeline.base_ref.clone();
+    let base_ref = definition.base_ref.clone();
     let base_ref_sha = if base_ref.is_empty() || base_ref == "HEAD" {
         String::new()
     } else {
@@ -967,7 +967,7 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
     // Create the gremlin: state dir, worktree, initial state.json.
     let gremlin = Gremlin::create(
         &gremlin_id,
-        &pipeline_path,
+        &definition_path,
         None,
         None,
         None,
@@ -995,15 +995,15 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         gremlin.state.patch(&[], &outer);
     }
 
-    // Snapshot the fully expanded pipeline YAML into the state directory so
+    // Snapshot the fully expanded definition YAML into the state directory so
     // the run is hermetic — all prompts, stage-definitions, and recipes are
     // inlined, making the snapshot independent of the original project.
-    let hermetic = gremlin.state_dir.join("pipeline.yaml");
-    let expanded = expand::parse_pipeline_file(&pipeline_path, &project_root)
-        .map_err(|e| format!("failed to expand pipeline: {e}"))?;
+    let hermetic = gremlin.state_dir.join("definition.yaml");
+    let expanded = expand::parse_definition_file(&definition_path, &project_root)
+        .map_err(|e| format!("failed to expand definition: {e}"))?;
     let yaml_str = serde_yaml::to_string(&expanded)
-        .map_err(|e| format!("failed to serialize pipeline: {e}"))?;
-    fs::write(&hermetic, yaml_str).map_err(|e| format!("failed to snapshot pipeline: {e}"))?;
+        .map_err(|e| format!("failed to serialize definition: {e}"))?;
+    fs::write(&hermetic, yaml_str).map_err(|e| format!("failed to snapshot definition: {e}"))?;
 
     // Create an empty log file that the child will append to.
     let log_path = gremlin.state_dir.join("log");
@@ -1134,7 +1134,7 @@ async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> 
     }
 
     // Write our PID — the launcher wrote its own, but we are the process
-    // that actually runs the pipeline.
+    // that actually runs the definition.
     let mut fields = serde_json::Map::new();
     fields.insert(
         "pid".to_string(),
@@ -1143,7 +1143,7 @@ async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> 
     gremlin.state.patch(&[], &fields);
 
     // Put ourselves in our own process group so `stop` can signal the
-    // entire group and reach any child processes spawned by the pipeline.
+    // entire group and reach any child processes spawned by the definition.
     #[cfg(unix)]
     unsafe {
         libc::setpgid(0, 0);
@@ -1159,7 +1159,7 @@ async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> 
     let exit_code = match gremlin.run().await {
         Ok(ec) => ec,
         Err(e) => {
-            // A failure before the stage loop (bootstrap, pipeline loading)
+            // A failure before the stage loop (bootstrap, definition loading)
             // returns through `run()` without calling `finish`, leaving
             // `state.json` as "running" with no terminal marker.  Write
             // terminal state here so the run does not appear permanently

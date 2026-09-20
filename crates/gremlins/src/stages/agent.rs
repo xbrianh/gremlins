@@ -30,7 +30,7 @@ impl Agent {
     /// rejection, the framework-key collision check (`model` excepted, since an
     /// agent may target one), and the requirement that `prompt` be a list of
     /// strings. The `client` key is deliberately not read here: the client spec
-    /// is a pipeline concern and lives on the stage-tree node.
+    /// is a definition concern and lives on the stage-tree node.
     pub fn from_dict(d: &HashMap<String, serde_json::Value>) -> Result<Agent, String> {
         let name = d
             .get("name")
