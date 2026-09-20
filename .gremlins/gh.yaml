@@ -28,7 +28,7 @@ land:
     cmds:
       - gh pr merge --squash --delete-branch "{pr_url}"
       - git fetch origin
-      - git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main
+      - '(git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main)'
 
 stage-definitions:
   plan-gh: plan-gh
