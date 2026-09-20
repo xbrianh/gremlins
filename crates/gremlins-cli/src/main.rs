@@ -991,8 +991,6 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
     let log_path = gremlin.state_dir.join("log");
     fs::write(&log_path, "").map_err(|e| format!("failed to create log: {e}"))?;
 
-    // Spawn the child process: stdin is /dev/null, stdout and stderr go to
-    // the gremlin's log file.
     // Spawn the child process.
     spawn::spawn_gremlin(&gremlin_id, None)?;
 
