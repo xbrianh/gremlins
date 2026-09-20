@@ -7,7 +7,7 @@ pub mod openai_backend;
 pub mod openrouter_backend;
 pub mod protocol;
 pub(crate) mod retry;
-pub(crate) mod stream;
+pub(crate) mod log_util;
 pub(crate) mod stream_json;
 pub(crate) mod task;
 pub(crate) mod tools;
