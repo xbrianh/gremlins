@@ -712,7 +712,10 @@ mod tests {
             assert!(default_for(name).is_some(), "missing default for {name}");
         }
         assert!(default_for("nope").is_none());
-        assert_eq!(default_for("definition_args").unwrap(), Value::Array(vec![]));
+        assert_eq!(
+            default_for("definition_args").unwrap(),
+            Value::Array(vec![])
+        );
         assert_eq!(default_for("pid").unwrap(), Value::Null);
         assert_eq!(default_for("exit_code").unwrap(), Value::Null);
     }
@@ -724,7 +727,10 @@ mod tests {
         let d = data_with(&sf);
         assert_eq!(d.get_field("attempt").unwrap(), "");
         assert_eq!(d.get_field("stage").unwrap(), "implement");
-        assert_eq!(d.get_field("definition_args").unwrap(), Value::Array(vec![]));
+        assert_eq!(
+            d.get_field("definition_args").unwrap(),
+            Value::Array(vec![])
+        );
         assert!(d.get_field("bogus").is_none());
     }
 

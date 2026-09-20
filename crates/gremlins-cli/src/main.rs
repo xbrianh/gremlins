@@ -232,7 +232,10 @@ fn status(id: &str) -> Result<(), String> {
     println!("id:            {}", gremlin.id);
     println!("status:        {}", field_display(&gremlin.state, "status"));
     println!("stage:         {}", field_display(&gremlin.state, "stage"));
-    println!("definition:      {}", definition_display_name(&gremlin.state));
+    println!(
+        "definition:      {}",
+        definition_display_name(&gremlin.state)
+    );
     println!("project_root:  {}", gremlin.project_root.display());
     println!(
         "workdir:       {}",
@@ -907,8 +910,8 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     // Load the definition just enough to validate --key args against
     // bootstrap.source.
-    let definition =
-        GremlinDefinition::from_yaml(&definition_path, None).map_err(|e| format!("invalid definition: {e}"))?;
+    let definition = GremlinDefinition::from_yaml(&definition_path, None)
+        .map_err(|e| format!("invalid definition: {e}"))?;
 
     match &definition.bootstrap.source {
         Some(source) => {

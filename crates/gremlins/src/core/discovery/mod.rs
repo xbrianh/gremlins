@@ -56,7 +56,10 @@ pub fn list_definitions(project_root: PathBuf) -> Vec<(String, PathBuf)> {
     results
 }
 
-pub fn resolve_definition_name(name: &str, project_root: PathBuf) -> Result<PathBuf, DiscoveryError> {
+pub fn resolve_definition_name(
+    name: &str,
+    project_root: PathBuf,
+) -> Result<PathBuf, DiscoveryError> {
     resolve_definition_name_in(name, None, project_root)
 }
 
@@ -313,8 +316,9 @@ mod tests {
         // A running gremlin's export points at its own overlay; the caller
         // that names one explicitly must still be believed.
         env.set("GREMLINS_OVERLAY_DIR", project_overlay.as_path());
-        let found = resolve_definition_path_in("demo", Some(&explicit), project.path().to_path_buf())
-            .unwrap();
+        let found =
+            resolve_definition_path_in("demo", Some(&explicit), project.path().to_path_buf())
+                .unwrap();
         assert!(
             found.starts_with(explicit.canonicalize().unwrap()),
             "{found:?}"

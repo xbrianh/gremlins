@@ -524,7 +524,10 @@ stages:
     fn missing_file_is_reported() {
         let dir = tempfile::tempdir().unwrap();
         let err = GremlinDefinition::from_yaml(dir.path().join("absent.yaml"), None).unwrap_err();
-        assert!(err.to_string().contains("definition file not found"), "{err}");
+        assert!(
+            err.to_string().contains("definition file not found"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -405,8 +405,9 @@ impl Gremlin {
             )));
         };
 
-        let definition = GremlinDefinition::from_yaml(&definition_path, self.client_override.as_deref())
-            .map_err(|error| RunError::Message(error.to_string()))?;
+        let definition =
+            GremlinDefinition::from_yaml(&definition_path, self.client_override.as_deref())
+                .map_err(|error| RunError::Message(error.to_string()))?;
 
         // An unusable client must not abort a run: the state directory, the
         // worktree and the artifacts all have to exist before any stage can
@@ -485,7 +486,9 @@ impl Gremlin {
         child_definition_path: Option<&Path>,
     ) -> Result<Gremlin, RunError> {
         let definition = match child_definition_path {
-            Some(path) => GremlinDefinition::from_yaml(path, None).unwrap_or_else(|_| self.definition.clone()),
+            Some(path) => {
+                GremlinDefinition::from_yaml(path, None).unwrap_or_else(|_| self.definition.clone())
+            }
             None => self.definition.clone(),
         };
         self.fork_child(
