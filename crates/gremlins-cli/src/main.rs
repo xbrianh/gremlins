@@ -997,7 +997,9 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         cli_meta.insert("launch_cmd".to_string(), Value::String(launch_cmd));
         let mut meta_field = Map::new();
         meta_field.insert("cli".to_string(), Value::Object(cli_meta));
-        gremlin.state.patch(&[], &meta_field);
+        let mut outer = Map::new();
+        outer.insert("metadata".to_string(), Value::Object(meta_field));
+        gremlin.state.patch(&[], &outer);
     }
 
     // Snapshot the fully expanded pipeline YAML into the state directory so
