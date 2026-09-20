@@ -69,12 +69,12 @@ pub fn substitute_vars(
 }
 
 /// Sanitize a key into a `GREMLINS_<KEY>` environment variable name:
-/// uppercase, every non-alphanumeric character mapped to `_`.
+/// uppercase, every non-ASCII-alphanumeric character mapped to `_`.
 fn sanitize_key(key: &str) -> String {
     let sanitized: String = key
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() {
+            if c.is_ascii_alphanumeric() {
                 c.to_ascii_uppercase()
             } else {
                 '_'
@@ -143,19 +143,33 @@ pub fn substitute_vars_to_env(
                     None
                 }
             }) {
-                // Reuse an existing env-var name for this resolved key.
-                if let Some(env_name) = key_to_env.get(&resolved_key) {
+                // Normalize to underscores so that hyphen and underscore
+                // aliases (e.g. {child-plan} and {child_plan}) share the
+                // same env-var name.
+                let canonical_key = resolved_key.replace('-', "_");
+                if let Some(env_name) = key_to_env.get(&canonical_key) {
                     return format!("${{{}}}", env_name);
                 }
-                let base = sanitize_key(&resolved_key);
-                let count = used_names.entry(base.clone()).or_insert(0);
-                let env_name = if *count == 0 {
-                    base
-                } else {
-                    format!("{}_{}", base, count)
+                let base = sanitize_key(&canonical_key);
+                // Allocate a unique env-var name, checking env_map so that
+                // keys whose sanitized names collide with an already-assigned
+                // suffixed name (e.g. a_1 vs a-1 vs a_1_1) never overwrite.
+                let mut suffix: u32 = 0;
+                let env_name = loop {
+                    let candidate = if suffix == 0 {
+                        base.clone()
+                    } else {
+                        format!("{}_{}", base, suffix)
+                    };
+                    if !env_map.contains_key(&candidate) {
+                        break candidate;
+                    }
+                    suffix += 1;
                 };
-                *count += 1;
-                key_to_env.insert(resolved_key.clone(), env_name.clone());
+                // Track the count so repeated calls with the same
+                // accumulators continue from the right suffix.
+                used_names.insert(base, suffix + 1);
+                key_to_env.insert(canonical_key, env_name.clone());
                 env_map.insert(env_name.clone(), val.clone());
                 return format!("${{{}}}", env_name);
             }
@@ -493,18 +507,21 @@ mod tests {
 
     #[test]
     fn test_substitute_vars_to_env_collision_suffix() {
-        // Two different keys that sanitize to the same name get numeric suffixes.
+        // When two keys are hyphen/underscore aliases of each other, they
+        // share a single env var (the first-encountered value wins).
+        // The alias system adds "a-b" as an alias for "a_b", so both
+        // tokens resolve to the same canonical key and share one env var.
         let opts = HashMap::new();
         let extra = HashMap::from([
-            ("pr-title".to_string(), "first".to_string()),
-            ("pr_title".to_string(), "second".to_string()),
+            ("a-b".to_string(), "first".to_string()),
+            ("a_b".to_string(), "second".to_string()),
         ]);
         let fw = HashMap::new();
         let mut env_map = HashMap::new();
         let mut key_to_env = HashMap::new();
         let mut used_names = HashMap::new();
         let result = substitute_vars_to_env(
-            "{pr-title} {pr_title}",
+            "{a-b} {a_b}",
             &opts,
             &extra,
             &fw,
@@ -512,9 +529,79 @@ mod tests {
             &mut key_to_env,
             &mut used_names,
         );
-        assert_eq!(result, "${GREMLINS_PR_TITLE} ${GREMLINS_PR_TITLE_1}");
-        assert_eq!(env_map.get("GREMLINS_PR_TITLE").unwrap(), "first");
-        assert_eq!(env_map.get("GREMLINS_PR_TITLE_1").unwrap(), "second");
+        assert_eq!(result, "${GREMLINS_A_B} ${GREMLINS_A_B}");
+        assert_eq!(env_map.len(), 1);
+    }
+
+    #[test]
+    fn test_substitute_vars_to_env_hyphen_alias_shared_env() {
+        // {child_plan} and {child-plan} are aliases for the same variable
+        // and must share a single env var.
+        let opts = HashMap::new();
+        let extra = HashMap::from([("child_plan".to_string(), "shared".to_string())]);
+        let fw = HashMap::new();
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "{child_plan} {child-plan}",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
+        );
+        assert_eq!(result, "${GREMLINS_CHILD_PLAN} ${GREMLINS_CHILD_PLAN}");
+        assert_eq!(env_map.len(), 1);
+        assert_eq!(env_map.get("GREMLINS_CHILD_PLAN").unwrap(), "shared");
+    }
+
+    #[test]
+    fn test_substitute_vars_to_env_env_map_collision_avoided() {
+        // A key whose sanitized name collides with an already-assigned
+        // suffixed name must not overwrite it.
+        //
+        // a_1      → canonical a_1  → sanitize GREMLINS_A_1
+        // a-1      → canonical a_1  → same env var (alias)
+        // a_1_1    → canonical a_1_1 → sanitize GREMLINS_A_1_1 (no collision)
+        //
+        // The real danger is a_1 vs a-1 vs a_1_1 where the old counter-
+        // based allocator could assign GREMLINS_A_1_1 to both a-1 (as
+        // suffix _1 on base GREMLINS_A_1) and a_1_1 (as unsuffixed base).
+        let opts = HashMap::new();
+        let extra = HashMap::from([
+            ("a_1".to_string(), "v1".to_string()),
+            ("a-1".to_string(), "v1-alias".to_string()),
+            ("a_1_1".to_string(), "v2".to_string()),
+        ]);
+        let fw = HashMap::new();
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "{a_1} {a-1} {a_1_1}",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
+        );
+        // a_1 and a-1 share GREMLINS_A_1; a_1_1 gets GREMLINS_A_1_1.
+        assert_eq!(result, "${GREMLINS_A_1} ${GREMLINS_A_1} ${GREMLINS_A_1_1}");
+        assert_eq!(env_map.len(), 2);
+        // a_1 is encountered first, so its value wins for the shared env var.
+        assert_eq!(env_map.get("GREMLINS_A_1").unwrap(), "v1");
+        assert_eq!(env_map.get("GREMLINS_A_1_1").unwrap(), "v2");
+    }
+
+    #[test]
+    fn test_sanitize_key_unicode_rejected() {
+        // Unicode alphanumerics (e.g. é) must be mapped to '_', not left
+        // as non-ASCII characters in the env var name.
+        assert_eq!(sanitize_key("café"), "GREMLINS_CAF_");
+        assert_eq!(sanitize_key("niño"), "GREMLINS_NI_O");
     }
 
     #[test]
