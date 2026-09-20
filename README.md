@@ -662,6 +662,9 @@ The boss resumes from its child-spawn stage and proceeds with the next iteration
 | `GREMLINS_STREAM_IDLE_TIMEOUT` | `600` | Stream idle timeout in seconds for OpenAI-compatible backends. If the model produces no output for this duration the stream is cancelled and the call is retried. |
 | `GREMLINS_AGENT_MAX_TURNS` | `1000` | Maximum agent loop turns. Guards against runaway tool-call loops. Falls back to `GREMLINS_OPENAI_AGENTS_MAX_TURNS` for backward compatibility. |
 | `GREMLINS_LOG_LEVEL` | `INFO` | Log level for gremlins output. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. Also respects `RUST_LOG` (takes precedence when both are set). |
+| `GREMLINS_TELEMETRY` | *(unset)* | Set to `1` or `true` to enable per-turn telemetry (TTFT, token counts, cache hit ratio) in the gremlin log. Equivalent to the `--telemetry` / `-v` CLI flag. |
+| `GREMLINS_ARTIFACT_REMINDER_BUDGET` | `3` | How many times the agent loop will nudge the model when expected output artifacts have not been bound yet. |
+| `GREMLINS_COMPLETION_NUDGE_BUDGET` | `11` | How many empty-turn nudges to inject before giving up on a stuck agent loop. |
 
 ### Client specifier syntax
 
@@ -696,7 +699,11 @@ literal values.
 
 ### Filesystem overrides
 
-These are primarily for testing but can be used to redirect gremlins I/O:
+These are primarily for testing but can be used to redirect gremlins I/O.
+The harness itself sets `GREMLINS_PROJECT_ROOT` and `GREMLINS_OVERLAY_DIR`
+for every stage and bootstrap command, so pipeline authors can also rely on
+them at runtime — the override path is for testing and redirection, not the
+only way they exist.
 
 | Variable | Description |
 |---|---|
@@ -713,8 +720,9 @@ These are set by the launcher or executor and should not be set manually:
 | `GREMLINS_GREMLIN_ID` | Launcher | The current gremlin's unique ID. Stages and state bookkeeping no-op without it. |
 | `GREMLINS_WORKTREE_PATH` | Executor | Path to the gremlin's git worktree. |
 | `GREMLINS_ARTIFACT_DIR` | Executor | Path to the gremlin's artifact directory. |
-| `GREMLINS_RESUME_FROM` | CLI | Stage name to resume from. |
-| `GREMLINS_CWD_OF_CLI_CMD` | CLI | Working directory for CLI-spawned commands. |
+| `GREMLIN_WORKSPACE_DIR` | Executor | The working directory for the gremlin process. Equal to `GREMLINS_WORKTREE_PATH` when a worktree exists; falls back to the process cwd. Referenced in the agent stage's system prompt preamble. |
+| `GREMLIN_STATE_DIR` | Executor | Path to the gremlin's state directory (where `state.json` and `bail_*.json` live). |
+| `GREMLINS_SCRATCH_DIR` | Executor | Parent directory of `GREMLINS_ARTIFACT_DIR`; the gremlin-wide scratch root. Also read by `config::scratch_dir()` for tool scratch space. |
 | `GREMLINS_BOOTSTRAP_CWD` | Launcher | The original cwd captured at launch time. |
 
 ## What can a gremlin do to my machine?
