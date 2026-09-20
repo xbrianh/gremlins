@@ -662,8 +662,9 @@ impl Gremlin {
         std::fs::write(child_state_dir.join("log"), "")?;
 
         log::debug!(
-            "fork: child {child_id} ready (client={})",
-            self.client.model()
+            "fork: child {child_id} ready (provider={}, model={} — shares client with parent {parent_id})",
+            self.client.provider(),
+            self.client.model(),
         );
 
         Ok(Gremlin {

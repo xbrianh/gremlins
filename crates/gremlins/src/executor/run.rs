@@ -19,6 +19,7 @@ use crate::artifacts::registry::ArtifactRegistry;
 use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
+use crate::config;
 use crate::executor::bootstrap::run_pipeline_bootstrap;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::parallel::run_parallel;
@@ -157,7 +158,7 @@ pub(crate) async fn run_stage(
     stage: &RunnableStage,
     gremlin: &mut Gremlin,
 ) -> Result<(), RunError> {
-    run_stage_scoped(stage, gremlin, "").await
+    run_stage_scoped(stage, gremlin, "", None).await
 }
 
 /// Run one stage, tracking it under `scope`.
@@ -169,6 +170,7 @@ async fn run_stage_scoped(
     stage: &RunnableStage,
     gremlin: &mut Gremlin,
     scope: &str,
+    enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
     let loop_iter = loop_iter_of(&gremlin.loop_stack);
     let skip = stage.skip_if_exists();
@@ -187,32 +189,92 @@ async fn run_stage_scoped(
     }
 
     match stage {
-        RunnableStage::Agent { .. } => run_agent(stage, gremlin).await,
-        RunnableStage::Exec { .. } => run_exec(stage, gremlin).await,
+        RunnableStage::Agent { .. } => run_agent(stage, gremlin, enclosing_client).await,
+        RunnableStage::Exec { .. } => run_exec(stage, gremlin, enclosing_client).await,
         RunnableStage::Sequence { .. } => {
             log::debug!("stage '{}': entering sequence", stage.name());
-            run_sequence(stage, gremlin, scope).await
+            run_sequence(stage, gremlin, scope, enclosing_client).await
         }
-        RunnableStage::Loop { .. } => run_loop(stage, gremlin).await,
+        RunnableStage::Loop { .. } => run_loop(stage, gremlin, enclosing_client).await,
         RunnableStage::Parallel { .. } => {
             log::debug!("dispatching stage '{}' to run_parallel", stage.name());
-            run_parallel(stage, gremlin).await
+            run_parallel(stage, gremlin, enclosing_client).await
         }
     }
 }
 
-/// The client a stage runs with: its own spec when it declared one, else the
-/// gremlin's. The pipeline default parses to the very client the gremlin
-/// already carries, so reuse that handle rather than building a second.
-fn resolve_client(stage: &RunnableStage, gremlin: &Gremlin) -> Result<Client, RunError> {
-    match stage.client() {
-        Some(spec) if spec.0 != gremlin.pipeline.default_client => {
-            Client::parse(&spec.0).map_err(|message| RunError::StageFailed {
-                stage: stage.name().to_string(),
-                message,
-            })
+/// Resolve the client spec string for a stage, consulting:
+/// 1. The stage's own `client:` field (always wins)
+/// 2. The enclosing composite's explicit `client:` (new — the `fill_client` replacement)
+/// 3. `default-client-by-stage` from global config (exact → longest prefix)
+/// 4. The pipeline's `default_client`
+fn resolve_client_spec(
+    stage: &RunnableStage,
+    gremlin: &Gremlin,
+    enclosing_client: Option<&str>,
+) -> String {
+    // 1. Explicit stage client always wins
+    if let Some(spec) = stage.client() {
+        return spec.0.clone();
+    }
+
+    // 2. Enclosing composite's explicit client
+    if let Some(client) = enclosing_client {
+        return client.to_string();
+    }
+
+    let stage_name = stage.name();
+
+    // 3. Consult default-client-by-stage from global config
+    if let Some(cfg) = config::get_global() {
+        let (exact, prefix) = cfg.default_client_by_stage();
+
+        // Exact match
+        if let Some(client_spec) = exact.get(stage_name) {
+            return client_spec.clone();
         }
-        _ => Ok(gremlin.client.clone()),
+
+        // Longest prefix match
+        let mut best: Option<(&str, &str)> = None;
+        for (prefix_key, client_spec) in prefix {
+            if stage_name.starts_with(prefix_key.as_str()) {
+                match best {
+                    Some((prev_key, _prev_spec)) if prefix_key.len() > prev_key.len() => {
+                        best = Some((prefix_key, client_spec));
+                    }
+                    None => {
+                        best = Some((prefix_key, client_spec));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some((_prefix_key, client_spec)) = best {
+            return client_spec.to_string();
+        }
+    }
+
+    // 4. Fall back to pipeline default
+    gremlin.pipeline.default_client.clone()
+}
+
+/// The client a stage runs with: resolved via [`resolve_client_spec`], then
+/// parsed. When the resolved spec equals the pipeline default, the gremlin's
+/// already-constructed client handle is reused to avoid building a second
+/// backend for the same spec.
+fn resolve_client(
+    stage: &RunnableStage,
+    gremlin: &Gremlin,
+    enclosing_client: Option<&str>,
+) -> Result<Client, RunError> {
+    let spec = resolve_client_spec(stage, gremlin, enclosing_client);
+    if spec == gremlin.pipeline.default_client {
+        Ok(gremlin.client.clone())
+    } else {
+        Client::parse(&spec).map_err(|message| RunError::StageFailed {
+            stage: stage.name().to_string(),
+            message,
+        })
     }
 }
 
@@ -220,12 +282,16 @@ fn resolve_client(stage: &RunnableStage, gremlin: &Gremlin) -> Result<Client, Ru
 // Agent
 // ---------------------------------------------------------------------------
 
-async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), RunError> {
+async fn run_agent(
+    node: &RunnableStage,
+    gremlin: &mut Gremlin,
+    enclosing_client: Option<&str>,
+) -> Result<(), RunError> {
     let RunnableStage::Agent { stage: agent, .. } = node else {
         unreachable!("run_agent is only called for agent stages")
     };
 
-    let client = resolve_client(node, gremlin)?;
+    let client = resolve_client(node, gremlin, enclosing_client)?;
     let framework_subs = gremlin.framework_subs(node);
     let loop_iter = loop_iter_of(&gremlin.loop_stack);
 
@@ -285,6 +351,7 @@ async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Ru
             .map(PathBuf::from)
             .collect(),
         system_prompt: Some(prepared.system_prompt()),
+        gremlin_id: Some(gremlin.id.to_string()),
     };
 
     log::debug!(
@@ -359,7 +426,11 @@ async fn run_agent(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Ru
 // Exec
 // ---------------------------------------------------------------------------
 
-async fn run_exec(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), RunError> {
+async fn run_exec(
+    node: &RunnableStage,
+    gremlin: &mut Gremlin,
+    _enclosing_client: Option<&str>,
+) -> Result<(), RunError> {
     let RunnableStage::Exec { stage: exec, .. } = node else {
         unreachable!("run_exec is only called for exec stages")
     };
@@ -442,10 +513,19 @@ async fn run_sequence(
     node: &RunnableStage,
     gremlin: &mut Gremlin,
     scope: &str,
+    enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
-    let RunnableStage::Sequence { attrs, body, .. } = node else {
+    let RunnableStage::Sequence {
+        attrs,
+        body,
+        client,
+        ..
+    } = node
+    else {
         unreachable!("run_sequence is only called for sequence stages")
     };
+
+    let enclosing_client = client.as_ref().map(|c| c.0.as_str()).or(enclosing_client);
 
     let key = stage_key(scope, &attrs.name);
     let done = gremlin.state.done_for(&key);
@@ -455,7 +535,7 @@ async fn run_sequence(
         }
         // Boxed: the dispatcher recurses through composites, and an unboxed
         // recursive `async fn` future would have no finite size.
-        Box::pin(run_stage_scoped(child, gremlin, &key)).await?;
+        Box::pin(run_stage_scoped(child, gremlin, &key, enclosing_client)).await?;
         gremlin.state.mark_done(&key, child.name());
 
         // A bail — scoped to the sequence or written for the run as a whole —
@@ -485,20 +565,25 @@ async fn run_sequence(
 /// The frame carries the loop's own name, so nested loops read
 /// `outer~1~inner~2`; the enclosing scope is bookkeeping for `done_children`,
 /// not part of the iteration substitution.
-async fn run_loop(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), RunError> {
+async fn run_loop(
+    node: &RunnableStage,
+    gremlin: &mut Gremlin,
+    enclosing_client: Option<&str>,
+) -> Result<(), RunError> {
     let RunnableStage::Loop {
         attrs,
         max_iterations,
         stop_when_exists,
         interval,
         body,
-        ..
+        client,
     } = node
     else {
         unreachable!("run_loop is only called for loop stages")
     };
     let name = attrs.name.as_str();
     let max_iterations = *max_iterations;
+    let enclosing_client = client.as_ref().map(|c| c.0.as_str()).or(enclosing_client);
 
     gremlin.loop_stack.push((name.to_string(), 0));
 
@@ -518,7 +603,14 @@ async fn run_loop(node: &RunnableStage, gremlin: &mut Gremlin) -> Result<(), Run
 
         for child in body {
             // Boxed for the same reason as the sequence body above.
-            if let Err(error) = Box::pin(run_stage_scoped(child, gremlin, &loop_iter)).await {
+            if let Err(error) = Box::pin(run_stage_scoped(
+                child,
+                gremlin,
+                &loop_iter,
+                enclosing_client,
+            ))
+            .await
+            {
                 outcome = Err(error);
                 break 'iterations;
             }
@@ -679,7 +771,13 @@ impl Gremlin {
     /// write the terminal state — the bookkeeping every exit path owes the
     /// operator, whether the run succeeded, bailed, or blew up.
     fn finish(&mut self, exit_code: i32) {
-        self.client.reap_all();
+        log::debug!(
+            "gremlin {}: finish() calling client.reap_all() (exit_code={exit_code}, provider={}, model={})",
+            self.id.as_str(),
+            self.client.provider(),
+            self.client.model(),
+        );
+        self.client.reap_all(self.id.as_str());
         let mut total = self.client.total_cost_usd().unwrap_or(0.0);
         // Subprocess spend is only meaningful when it is a real, non-negative
         // number; a blank or junk field must not poison the total.

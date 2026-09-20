@@ -1,70 +1,46 @@
-PYTHON ?= python
-
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc) --output-sync=line
 
-TEST_FILES := $(wildcard tests/test_*.py)
+.PHONY: test check fmt fmt-check clippy build release autoformat
 
-.PHONY: lint format format-write autoformat typecheck test check \
-        rust-test rust-fmt rust-fmt-check rust-clippy install release \
-        validate-gremlin-overlays test-github-integration-scripts \
-        $(TEST_FILES)
+# --- Test ---
 
-lint:
-	$(PYTHON) -m ruff check .
+test:
+	cargo test -q -p gremlins --lib
 
-format:
-	$(PYTHON) -m ruff format --check .
+# --- Check ---
 
-format-write:
-	$(PYTHON) -m ruff format .
+check: fmt-check clippy
+	cargo check
 
-autoformat: format-write rust-fmt
-	$(PYTHON) -m ruff check --fix .
-	cargo clippy --fix --all-targets --allow-dirty
+# --- Format ---
 
-typecheck:
-	$(PYTHON) -m pyright
-
-test: rust-test $(TEST_FILES)
-
-$(TEST_FILES): install
-	$(PYTHON) -m pytest -q --tb=short $@
-
-# --- Rust ---
-
-rust-test: install
-	cargo test -q -p gremlins --lib && cargo test -q -p gremlins-pyext --lib
-
-rust-fmt:
+fmt:
 	cargo fmt --all
 
-rust-fmt-check:
+fmt-check:
 	cargo fmt --all -- --check
 
-rust-clippy:
+# --- Lint ---
+
+clippy:
 	cargo clippy -q --all-targets -- -D warnings
+
+# --- Autoformat ---
+
+autoformat: fmt
+	cargo clippy --fix --all-targets --allow-dirty
 
 # --- Build ---
 
-install: ## Build and install the native extension
-	maturin develop
+build:
+	cargo build
 
-release: ## Build and install the native extension in release mode
-	maturin develop --release
+release:
+	cargo build --release
 
-check: lint format typecheck rust-fmt-check rust-clippy
+# --- Install ---
 
-# --- Shell tests (bats) ---
+PREFIX ?= /usr/local
 
-test-github-integration-scripts:
-	bats .gremlins/bin/tests/
-
-# --- Validate ---
-
-GREMLIN_DEFS := $(wildcard .gremlins/*.yaml .gremlins/*.yml)
-
-validate-gremlin-overlays: install $(GREMLIN_DEFS)
-
-.PHONY: $(GREMLIN_DEFS)
-$(GREMLIN_DEFS): install
-	$(PYTHON) -m gremlins validate $@
+install:
+	cargo install --path crates/gremlins-cli --root $(DESTDIR)$(PREFIX)

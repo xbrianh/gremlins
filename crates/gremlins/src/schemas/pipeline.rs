@@ -21,7 +21,6 @@ use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 use crate::schemas::expand;
 use crate::schemas::loader::{self, StageNode};
-use crate::stages::composite::ClientSpec;
 use crate::stages::node::RunnableStage;
 
 /// The message emitted when no layer supplied a default client.
@@ -133,7 +132,7 @@ impl Pipeline {
         let base_ref = base_ref_from_yaml(root)?;
 
         let mut raw_stages = stages_from_yaml(root)?;
-        let mut stages = RunnableStage::parse_stages(&mut raw_stages, 0)?;
+        let stages = RunnableStage::parse_stages(&mut raw_stages, 0)?;
 
         if root.contains_key("inputs") {
             return Err(SchemaError::Generic(
@@ -147,7 +146,7 @@ impl Pipeline {
             Some(value) => Bootstrap::from_yaml(Some(value))?,
         };
 
-        let mut land = land_from_yaml(root)?;
+        let land = land_from_yaml(root)?;
 
         // The validators walk the typed tree: its names are the filled ones,
         // including nested stages the raw YAML never had named.
@@ -156,13 +155,6 @@ impl Pipeline {
         loader::check_unresolved_consumers(&nodes, &bootstrap.launch_cmds, &bootstrap.cli_out)?;
 
         let default_client = resolve_default_client(yaml_default_client, default_client_override)?;
-        let spec = ClientSpec(default_client.clone());
-        for stage in &mut stages {
-            stage.fill_client(&spec);
-        }
-        if let Some(land) = land.as_mut() {
-            land.fill_client(&spec);
-        }
 
         Ok(Pipeline {
             name,
@@ -291,6 +283,7 @@ fn resolve_default_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stages::composite::ClientSpec;
     use crate::test_support::Sandbox;
 
     const WITH_CLIENT: &str = r#"
@@ -363,9 +356,11 @@ stages:
         let path = write_fixture(dir.path(), "demo", WITH_CLIENT);
 
         let pipeline = Pipeline::from_yaml(&path, None).unwrap();
-        let default = Some(&ClientSpec("xai:grok-4".into()));
-        assert_eq!(pipeline.stages[0].client(), default);
-        assert_eq!(pipeline.stages[1].client(), default);
+        // Stages without an explicit `client:` carry None — the pipeline
+        // default_client is resolved at runtime by the executor.
+        assert_eq!(pipeline.stages[0].client(), None);
+        assert_eq!(pipeline.stages[1].client(), None);
+        assert_eq!(pipeline.default_client, "xai:grok-4");
     }
 
     #[test]
@@ -400,10 +395,9 @@ stages:
             pipeline.stages[0].client(),
             Some(&ClientSpec("local:model".into()))
         );
-        assert_eq!(
-            pipeline.stages[1].client(),
-            Some(&ClientSpec("xai:grok-4".into()))
-        );
+        // Stage without explicit client carries None — resolved at runtime.
+        assert_eq!(pipeline.stages[1].client(), None);
+        assert_eq!(pipeline.default_client, "xai:grok-4");
     }
 
     #[test]
@@ -422,10 +416,8 @@ stages:
 
         let pipeline = Pipeline::from_yaml(&path, Some("cli:model")).unwrap();
         assert_eq!(pipeline.default_client, "cli:model");
-        assert_eq!(
-            pipeline.stages[0].client(),
-            Some(&ClientSpec("cli:model".into()))
-        );
+        // Stages without explicit client carry None — resolved at runtime.
+        assert_eq!(pipeline.stages[0].client(), None);
     }
 
     /// A pipeline whose client has to come from the sandbox's config, plus
@@ -632,10 +624,9 @@ land:
         );
 
         let pipeline = Pipeline::from_yaml(&path, None).unwrap();
-        assert_eq!(
-            pipeline.land.as_ref().unwrap().client(),
-            Some(&ClientSpec("xai:grok-4".into()))
-        );
+        // Land without explicit client carries None — resolved at runtime.
+        assert_eq!(pipeline.land.as_ref().unwrap().client(), None);
+        assert_eq!(pipeline.default_client, "xai:grok-4");
     }
 
     #[test]

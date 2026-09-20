@@ -130,6 +130,35 @@ pub fn resolve_state_file(gremlin_id: Option<&str>) -> Option<PathBuf> {
     Some(config::state_root().join(id).join("state.json"))
 }
 
+/// Enumerate `(id, state.json path)` pairs under the state root.
+///
+/// Only subdirectories that actually contain a `state.json` are returned.
+/// Callers that need to skip closed gremlins check the marker file next to the
+/// returned path themselves.
+pub fn list_state_dirs() -> Vec<(String, PathBuf)> {
+    let root = config::state_root();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let state_json_path = path.join("state.json");
+        if !state_json_path.is_file() {
+            continue;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        out.push((name, state_json_path));
+    }
+    out.sort();
+    out
+}
+
 pub fn read_state_json(sf: Option<&Path>) -> Map<String, Value> {
     let Some(p) = sf else {
         return Map::new();

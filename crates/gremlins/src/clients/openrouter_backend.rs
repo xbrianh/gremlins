@@ -11,7 +11,6 @@ use super::backend::{Backend, ClientError, RunParams};
 use super::openai_backend::{build_extra_params, run_with_agent_loop, task_model_selector};
 use super::protocol::CompletedRun;
 use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
-use super::stream;
 
 /// Provider name this backend answers to, used to match `task-clients` specs.
 const PROVIDER_NAME: &str = "openrouter";
@@ -78,7 +77,7 @@ pub struct OpenRouterBackend {
     tool_filter: Option<Vec<String>>,
     client_params: HashMap<String, String>,
     last_ctx: Mutex<Option<RunContext>>,
-    cancels: Mutex<HashMap<u64, Arc<CancelToken>>>,
+    cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
     next_id: AtomicU64,
 }
 
@@ -117,11 +116,24 @@ impl OpenRouterBackend {
     }
 
     async fn attempt(&self, prompt: &str, ctx: &RunContext) -> Result<CompletedRun, ClientError> {
+        let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let cancel = CancelToken::new();
-        self.cancels.lock().unwrap().insert(id, cancel.clone());
+        self.cancels
+            .lock()
+            .unwrap()
+            .entry(gremlin_id.clone())
+            .or_default()
+            .insert(id, cancel.clone());
         let result = self.attempt_inner(prompt, ctx, cancel).await;
-        self.cancels.lock().unwrap().remove(&id);
+        if let Ok(mut guard) = self.cancels.lock() {
+            if let Some(inner) = guard.get_mut(&gremlin_id) {
+                inner.remove(&id);
+                if inner.is_empty() {
+                    guard.remove(&gremlin_id);
+                }
+            }
+        }
         result
     }
 
@@ -201,10 +213,8 @@ impl Backend for OpenRouterBackend {
                     ClientError::ApiServerError { .. } => "transient-error",
                     _ => "error",
                 };
-                eprintln!(
-                    "{} {}stream {cause}, retrying in {wait}s ({}/{})...",
-                    stream::ts_internal(),
-                    prefix,
+                log::warn!(
+                    "{prefix}stream {cause}, retrying in {wait}s ({}/{})...",
                     attempt + 1,
                     params.max_retries
                 );
@@ -229,9 +239,19 @@ impl Backend for OpenRouterBackend {
         self.run(params).await
     }
 
-    fn reap_all(&self) {
-        if let Ok(guard) = self.cancels.lock() {
-            for token in guard.values() {
+    fn reap_all(&self, gremlin_id: &str) {
+        if let Ok(mut guard) = self.cancels.lock() {
+            let tokens: Vec<_> = guard
+                .remove(gremlin_id)
+                .into_iter()
+                .flat_map(|m| m.into_values())
+                .collect();
+            let count = tokens.len();
+            log::debug!(
+                "OpenRouterBackend::reap_all: cancelling {count} in-flight token(s) for gremlin_id={gremlin_id} (model={})",
+                self.model,
+            );
+            for token in &tokens {
                 token.cancel();
             }
         }

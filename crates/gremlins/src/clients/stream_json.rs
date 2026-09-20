@@ -110,14 +110,7 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                 .get("num_turns")
                 .and_then(|v| v.as_i64())
                 .map_or("?".to_string(), |t| t.to_string());
-            eprintln!(
-                "{} {}final: subtype={} turns={} cost={}",
-                crate::clients::stream::ts_internal(),
-                prefix,
-                subtype,
-                turns,
-                cost_str
-            );
+            log::info!("{prefix}final: subtype={subtype} turns={turns} cost={cost_str}");
         }
         _ => {}
     }

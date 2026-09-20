@@ -36,14 +36,15 @@ use crate::stages::parallel::ErrorPolicy;
 pub(crate) async fn run_parallel(
     stage: &RunnableStage,
     gremlin: &mut Gremlin,
+    enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
     let RunnableStage::Parallel {
         attrs,
         max_concurrent,
         cancel_on_error,
         error_policy,
+        client,
         body,
-        ..
     } = stage
     else {
         unreachable!("run_parallel is only called for parallel stages")
@@ -117,6 +118,23 @@ pub(crate) async fn run_parallel(
             child_stages,
         )?;
 
+        // Resolve the effective client for this parallel group:
+        // 1. The group's own `client:` always wins.
+        // 2. Otherwise, the enclosing client from the parent sequence/loop.
+        let enclosing_spec =
+            enclosing_client.map(|c| crate::stages::composite::ClientSpec(c.to_string()));
+        let effective_client = client.as_ref().or(enclosing_spec.as_ref());
+        if let Some(c) = &effective_client {
+            // The pipeline default is what `resolve_client_spec` step 4
+            // falls back to.
+            child_gremlin.pipeline.default_client = c.0.clone();
+            // Also set the client handle directly on the child, so
+            // `resolve_client`'s early return (when the spec equals the
+            // pipeline default) picks up the right backend.
+            child_gremlin.client = crate::clients::client::Client::parse(&c.0)
+                .unwrap_or_else(|_| child_gremlin.client.clone());
+        }
+
         log::debug!(
             "parallel group {group_name}: child {child_name} forked (state_dir={}, artifact_dir={})",
             child_gremlin.state_dir.display(),
@@ -150,6 +168,12 @@ pub(crate) async fn run_parallel(
             // before starting real work. If the group has already been
             // cancelled, exit immediately.
             if cancel.load(Ordering::Acquire) {
+                log::debug!(
+                    "parallel group {group_name_owned}: child {child_name_for_thread} cancel flag set before run() — exiting"
+                );
+                // Mark the child terminal so its state directory isn't left
+                // permanently as "running" with no finished marker.
+                child_gremlin.state.write_terminal_state(-1);
                 let _ = tx.send((
                     child_name_for_thread,
                     child_id_for_thread,
@@ -159,11 +183,11 @@ pub(crate) async fn run_parallel(
             }
 
             log::debug!(
-                "parallel group {group_name_owned}: child {child_name_for_thread} starting run() on thread"
+                "parallel group {group_name_owned}: child {child_name_for_thread} (id={child_id_for_thread}) calling run()"
             );
             let outcome = rt.block_on(async { child_gremlin.run().await.map(|_| ()) });
             log::debug!(
-                "parallel group {group_name_owned}: child {child_name_for_thread} run() completed (outcome={})",
+                "parallel group {group_name_owned}: child {child_name_for_thread} (id={child_id_for_thread}) run() completed (outcome={})",
                 match &outcome {
                     Ok(()) => "Ok".to_string(),
                     Err(e) => format!("Err: {e}"),
@@ -628,7 +652,7 @@ mod tests {
             body: vec![],
         };
         let (_tmp, mut gremlin) = test_gremlin(vec![], "cmd:true");
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok());
     }
 
@@ -647,7 +671,7 @@ mod tests {
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -671,7 +695,7 @@ mod tests {
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         match result {
             Err(RunError::StageFailed { stage, .. }) => {
                 assert_eq!(stage, "bad");
@@ -700,7 +724,7 @@ mod tests {
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         // One success is enough with All policy.
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
@@ -723,7 +747,7 @@ mod tests {
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         match result {
             Err(RunError::StageFailed { .. }) => {}
             other => panic!("expected StageFailed, got {other:?}"),
@@ -758,7 +782,7 @@ mod tests {
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         match result {
             Err(RunError::StageFailed { stage, .. }) => {
                 assert_eq!(stage, "bad");
@@ -794,7 +818,7 @@ mod tests {
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = stages[0].clone();
         let start = std::time::Instant::now();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         let elapsed = start.elapsed();
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         // With max_concurrent=1, 3 × 0.1s ≈ 0.3s minimum.
@@ -827,7 +851,7 @@ mod tests {
         gremlin.state.mark_done("group", "a");
 
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
         // After success, done tracking is cleared.
@@ -856,7 +880,7 @@ mod tests {
         gremlin.state.mark_done("group", "b");
 
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         // Should succeed without running any child (which would fail).
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
@@ -878,7 +902,7 @@ mod tests {
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -902,7 +926,7 @@ mod tests {
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -921,8 +945,32 @@ mod tests {
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = stages[0].clone();
-        let result = run_parallel(&stage, &mut gremlin).await;
+        let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         // Cost aggregation is best-effort; the test just verifies no panic.
+    }
+
+    // --- Client inheritance ---
+
+    #[tokio::test]
+    async fn parallel_with_explicit_client_succeeds() {
+        // Smoke test: a parallel with an explicit `client:` propagates it
+        // to child pipelines so resolve_client_spec's step-4 fallback
+        // picks it up. An exec child doesn't call resolve_client, so this
+        // just proves the new code path doesn't crash.
+        let yaml = r#"
+- name: group
+  client: "cmd:true"
+  parallel:
+    - name: a
+      type: exec
+      options:
+        cmds: ["true"]
+"#;
+        let stages = parse_stages(yaml);
+        let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
+        let stage = stages[0].clone();
+        let result = run_parallel(&stage, &mut gremlin, None).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 }

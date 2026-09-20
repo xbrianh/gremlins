@@ -127,7 +127,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     stream::flush();
 
     if cwd.is_none() {
-        eprintln!("{prefix}warning: no cwd set for worktree enforcement");
+        log::warn!("{prefix}warning: no cwd set for worktree enforcement");
     }
 
     let mut raw = raw_path
@@ -221,12 +221,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     max_turns: usize,
     completion_nudge_budget: usize,
 ) -> Result<CompletedRun, ClientError> {
-    eprintln!(
-        "{} {}task: begin (max_turns={})",
-        stream::ts_internal(),
-        prefix,
-        max_turns
-    );
+    log::info!("{prefix}task: begin (max_turns={max_turns})");
     let opts = LoopOpts {
         extra: None,
         tool_filter,
@@ -254,7 +249,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         completion_nudge_budget,
     )
     .await;
-    eprintln!("{} {}task: end", stream::ts_internal(), prefix);
+    log::info!("{prefix}task: end");
     result
 }
 
@@ -360,6 +355,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
     for _ in 0..max_turns {
         if cancel.is_cancelled() {
+            log::debug!("agent_loop: cancelled before turn (label={})", prefix);
             return Err(ClientError::Runtime {
                 message: "cancelled".into(),
             });
@@ -401,6 +397,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         loop {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
+                    log::debug!("agent_loop: cancelled mid-stream (label={})", prefix);
                     response.cancel();
                     return Err(ClientError::Runtime {
                         message: "cancelled".into(),
@@ -989,12 +986,7 @@ pub(crate) fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value
 }
 
 pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
-    eprintln!(
-        "{} {}final: turns={turns} cost=not-reported{suffix}",
-        stream::ts_internal(),
-        prefix
-    );
-    stream::flush();
+    log::info!("{prefix}final: turns={turns} cost=not-reported{suffix}");
 }
 
 #[cfg(test)]
@@ -1149,6 +1141,7 @@ mod tests {
                 extra_env: None,
                 expected_artifact_paths: vec![],
                 system_prompt: None,
+                gremlin_id: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,

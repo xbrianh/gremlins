@@ -13,7 +13,6 @@ use tokio::process::{Child, Command};
 use super::backend::{Backend, ClientError, RunParams};
 use super::protocol::CompletedRun;
 use super::retry::{validate_max_retries, with_retry, STREAM_IDLE_BACKOFF};
-use super::stream;
 use super::stream_json::{self, StreamState};
 
 fn footer_re() -> &'static Regex {
@@ -25,9 +24,13 @@ pub struct CmdBackend {
     command: Vec<String>,
     stream_json: bool,
     footer_re: Option<Regex>,
-    pids: Mutex<Vec<u32>>,
-    /// Per-task context for resume
-    ctx: Mutex<Option<CmdContext>>,
+    pids: Mutex<HashMap<String, Vec<u32>>>,
+    /// Per-gremlin retry context, keyed by gremlin_id so parallel children
+    /// don't overwrite each other's prompt/session when a timeout occurs.
+    ctx: Mutex<HashMap<String, CmdContext>>,
+    /// The gremlin_id most recently passed to `run`, used by `resume`
+    /// to look up the right context.
+    last_gremlin_id: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +48,7 @@ struct CmdContext {
     prefix: String,
     last_session_id: Option<String>,
     artifact_dir: Option<PathBuf>,
+    gremlin_id: String,
 }
 
 impl CmdBackend {
@@ -70,20 +74,26 @@ impl CmdBackend {
             command: args,
             stream_json,
             footer_re,
-            pids: Mutex::new(Vec::new()),
-            ctx: Mutex::new(None),
+            pids: Mutex::new(HashMap::new()),
+            ctx: Mutex::new(HashMap::new()),
+            last_gremlin_id: Mutex::new(None),
         })
     }
 
-    fn track_pid(&self, pid: u32) {
+    fn track_pid(&self, gremlin_id: &str, pid: u32) {
         if let Ok(mut pids) = self.pids.lock() {
-            pids.push(pid);
+            pids.entry(gremlin_id.to_string()).or_default().push(pid);
         }
     }
 
-    fn untrack_pid(&self, pid: u32) {
+    fn untrack_pid(&self, gremlin_id: &str, pid: u32) {
         if let Ok(mut pids) = self.pids.lock() {
-            pids.retain(|p| *p != pid);
+            if let Some(vec) = pids.get_mut(gremlin_id) {
+                vec.retain(|p| *p != pid);
+                if vec.is_empty() {
+                    pids.remove(gremlin_id);
+                }
+            }
         }
     }
 
@@ -335,12 +345,15 @@ impl CmdBackend {
         &self,
         prompt: &str,
         session_id: Option<&str>,
+        gremlin_id: &str,
     ) -> Result<CompletedRun, ClientError> {
         let (model, cwd, extra_env, prefix, raw_path, capture_events, idle_timeout, artifact_dir) = {
             let ctx_guard = self.ctx.lock().unwrap();
-            let ctx = ctx_guard.as_ref().ok_or_else(|| ClientError::Runtime {
-                message: "attempt() called before run()".into(),
-            })?;
+            let ctx = ctx_guard
+                .get(gremlin_id)
+                .ok_or_else(|| ClientError::Runtime {
+                    message: format!("attempt() called before run() for gremlin {gremlin_id}"),
+                })?;
             (
                 ctx.model.clone(),
                 ctx.cwd.clone(),
@@ -359,7 +372,7 @@ impl CmdBackend {
             .await?;
         let pid = child.id();
         if let Some(pid) = pid {
-            self.track_pid(pid);
+            self.track_pid(gremlin_id, pid);
         }
 
         let result = if self.stream_json {
@@ -374,7 +387,7 @@ impl CmdBackend {
 
             if let Some(ref sid) = sid {
                 if let Ok(mut ctx) = self.ctx.lock() {
-                    if let Some(ref mut c) = *ctx {
+                    if let Some(c) = ctx.get_mut(gremlin_id) {
                         c.last_session_id = Some(sid.clone());
                     }
                 }
@@ -385,7 +398,7 @@ impl CmdBackend {
             })?;
 
             if let Some(pid) = pid {
-                self.untrack_pid(pid);
+                self.untrack_pid(gremlin_id, pid);
             }
 
             if timed_out {
@@ -425,7 +438,7 @@ impl CmdBackend {
             })?;
 
             if let Some(pid) = pid {
-                self.untrack_pid(pid);
+                self.untrack_pid(gremlin_id, pid);
             }
 
             if timed_out {
@@ -469,26 +482,32 @@ impl Backend for CmdBackend {
             format!("[{}] ", params.label)
         };
 
+        let gremlin_id = params.gremlin_id.clone().unwrap_or_default();
         {
             let mut ctx = self.ctx.lock().unwrap();
-            *ctx = Some(CmdContext {
-                prompt: effective_prompt.clone(),
-                label: params.label.clone(),
-                model: params.model.clone(),
-                raw_path: params.raw_path.clone(),
-                capture_events: params.capture_events,
-                on_timeout_prompt: params.on_timeout_prompt.clone(),
-                max_retries: params.max_retries,
-                cwd: params.cwd.clone(),
-                idle_timeout,
-                extra_env: params.extra_env.clone(),
-                prefix: prefix.clone(),
-                last_session_id: None,
-                artifact_dir: params.artifact_dir.clone(),
-            });
+            ctx.insert(
+                gremlin_id.clone(),
+                CmdContext {
+                    prompt: effective_prompt.clone(),
+                    label: params.label.clone(),
+                    model: params.model.clone(),
+                    raw_path: params.raw_path.clone(),
+                    capture_events: params.capture_events,
+                    on_timeout_prompt: params.on_timeout_prompt.clone(),
+                    max_retries: params.max_retries,
+                    cwd: params.cwd.clone(),
+                    idle_timeout,
+                    extra_env: params.extra_env.clone(),
+                    prefix: prefix.clone(),
+                    last_session_id: None,
+                    artifact_dir: params.artifact_dir.clone(),
+                    gremlin_id: gremlin_id.clone(),
+                },
+            );
+            *self.last_gremlin_id.lock().unwrap() = Some(gremlin_id.clone());
         }
 
-        let result = self.attempt(&effective_prompt, None).await;
+        let result = self.attempt(&effective_prompt, None, &gremlin_id).await;
 
         match result {
             Ok(r) => {
@@ -510,10 +529,14 @@ impl Backend for CmdBackend {
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        let (prompt, on_timeout_prompt, max_retries, prefix, last_session_id) = {
-            let ctx = self.ctx.lock().unwrap();
-            let ctx = ctx.as_ref().ok_or_else(|| ClientError::Runtime {
+        let (prompt, on_timeout_prompt, max_retries, prefix, last_session_id, gremlin_id) = {
+            let gid = self.last_gremlin_id.lock().unwrap();
+            let gid = gid.as_ref().ok_or_else(|| ClientError::Runtime {
                 message: "resume() called before run()".into(),
+            })?;
+            let ctx = self.ctx.lock().unwrap();
+            let ctx = ctx.get(gid).ok_or_else(|| ClientError::Runtime {
+                message: format!("resume(): no context for gremlin {gid}"),
             })?;
             (
                 ctx.prompt.clone(),
@@ -521,6 +544,7 @@ impl Backend for CmdBackend {
                 ctx.max_retries,
                 ctx.prefix.clone(),
                 ctx.last_session_id.clone(),
+                ctx.gremlin_id.clone(),
             )
         };
 
@@ -542,12 +566,8 @@ impl Backend for CmdBackend {
                     ClientError::ApiServerError { .. } => "api server error",
                     _ => "error",
                 };
-                eprintln!(
-                    "{} {}{}, resuming in {}s ({}/{})...",
-                    stream::ts_internal(),
-                    prefix,
-                    cause,
-                    wait,
+                log::warn!(
+                    "{prefix}{cause}, resuming in {wait}s ({}/{})...",
                     attempt + 1,
                     max_retries
                 );
@@ -559,7 +579,8 @@ impl Backend for CmdBackend {
                     active_prompt.clone()
                 };
                 let sid = last_session_id.clone();
-                async move { self.attempt(&p, sid.as_deref()).await }
+                let gid = gremlin_id.clone();
+                async move { self.attempt(&p, sid.as_deref(), &gid).await }
             },
         )
         .await;
@@ -568,8 +589,12 @@ impl Backend for CmdBackend {
             Ok(r) => {
                 if r.exit_code != 0 {
                     let label = {
+                        let gid = self.last_gremlin_id.lock().unwrap();
+                        let gid_opt = gid.as_ref();
                         let ctx = self.ctx.lock().unwrap();
-                        ctx.as_ref().map_or("?".to_string(), |c| c.label.clone())
+                        gid_opt
+                            .and_then(|gid| ctx.get(gid.as_str()))
+                            .map_or("?".to_string(), |c| c.label.clone())
                     };
                     return Err(ClientError::Runtime {
                         message: format!(
@@ -584,10 +609,10 @@ impl Backend for CmdBackend {
         }
     }
 
-    fn reap_all(&self) {
+    fn reap_all(&self, gremlin_id: &str) {
         let pids: Vec<u32> = {
             let mut pids = self.pids.lock().unwrap();
-            std::mem::take(&mut *pids)
+            pids.remove(gremlin_id).unwrap_or_default()
         };
         #[cfg(unix)]
         for &pid in &pids {

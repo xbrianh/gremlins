@@ -1,1 +1,0 @@
-../prompts/github_review_pull_request.md

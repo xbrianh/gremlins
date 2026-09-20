@@ -675,6 +675,33 @@ fn audit_key_arg(args_json: &str) -> String {
     String::new()
 }
 
+/// Seconds-resolution UTC timestamp for audit JSONL entries.
+fn audit_ts() -> String {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = d.as_secs();
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // civil_from_days inline
+    let z = (days as i64) + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+}
+
 fn audit(
     log: Option<&Path>,
     lock: Option<&std::sync::Mutex<()>>,
@@ -687,7 +714,7 @@ fn audit(
     };
     let truncated: String = key_arg.chars().take(200).collect();
     let entry = serde_json::json!({
-        "ts": super::stream::ts_internal(),
+        "ts": audit_ts(),
         "tool": tool,
         "key_arg": truncated,
         "status": status,
@@ -1310,11 +1337,28 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
                 } else {
                     format!("{{{}}}", found.join(", "))
                 };
-                return Some(format!(
+                let mut msg = format!(
                     "Error: missing '{field}' for {name} tool. \
                      Expected: {{{}}}. Got: {found_str}",
                     expected.join(", ")
-                ));
+                );
+                // If file_path is missing for Edit and any edit item has a
+                // file_path key, the model likely nested it — give a targeted hint.
+                if name == "Edit" && *field == "file_path" {
+                    if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
+                        let misplaced = edits.iter().any(|e| {
+                            e.as_object()
+                                .map(|o| o.contains_key("file_path"))
+                                .unwrap_or(false)
+                        });
+                        if misplaced {
+                            msg.push_str(
+                                " (Note: file_path belongs at the top level, not inside individual edits — all edits target the same file)",
+                            );
+                        }
+                    }
+                }
+                return Some(msg);
             }
             Some(val) => {
                 let ok = match *expected_type {
@@ -1510,7 +1554,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Edit".into(),
-            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match). Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file.".into(),
+            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match). Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2065,6 +2109,30 @@ mod tests {
         let err = validate_tool_args("Read", &serde_json::json!("not an object")).unwrap();
         assert!(err.contains("missing 'file_path'"));
         assert!(err.contains("<not an object>"));
+    }
+
+    #[test]
+    fn validate_tool_args_edit_missing_file_path_no_hint() {
+        // file_path missing, but no edit item has file_path either — no hint.
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"edits": [{"old_string": "a", "new_string": "b"}]}),
+        )
+        .unwrap();
+        assert!(err.contains("missing 'file_path'"));
+        assert!(!err.contains("Note:"));
+    }
+
+    #[test]
+    fn validate_tool_args_edit_file_path_nested_hint() {
+        // file_path missing at top level but present inside an edit item — hint fires.
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"edits": [{"file_path": "x.py", "old_string": "a", "new_string": "b"}]}),
+        )
+        .unwrap();
+        assert!(err.contains("missing 'file_path'"));
+        assert!(err.contains("Note: file_path belongs at the top level"));
     }
 
     #[test]

@@ -1,12 +1,5 @@
-__pycache__/
-*.pyc
-.pytest_cache/
-.ruff_cache/
-*.egg-info/
-.venv/
-dist/
-build/
 plans/*.md
+plans/completed/
 !plans/SINGLE_GREMLIN_PLAN_INSTRUCTIONS.md
 .at_venv
 .claude/
@@ -14,10 +7,8 @@ plans/*.md
 
 # Rust
 /target/
-/.cargo-gremlin-target/
 *.so
 *.dylib
 *.dSYM/
-uv.lock
 
 /.gremlins/env
