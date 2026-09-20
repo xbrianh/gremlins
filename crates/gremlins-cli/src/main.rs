@@ -17,7 +17,7 @@ use gremlins::schemas::expand;
 use gremlins::schemas::pipeline::Pipeline;
 use gremlins::stages::exec::prepare_exec;
 use gremlins::stages::node::RunnableStage;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 mod spawn;
 
@@ -147,7 +147,7 @@ fn ls(here: bool) -> Result<(), String> {
         .map(|path| path.canonicalize().unwrap_or(path))
         .unwrap_or_else(|_| PathBuf::from("."));
 
-    let headers = ["ID", "STATUS", "STAGE", "PIPELINE", "PROJECT"];
+    let headers = ["ID", "STATUS", "STAGE", "PIPELINE", "PROJECT", "LAUNCH"];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     for (id, state_json_path) in state::list_state_dirs() {
@@ -184,12 +184,21 @@ fn ls(here: bool) -> Result<(), String> {
             }
         }
 
+        let launch = state_map
+            .get("metadata")
+            .and_then(|v| v.get("cli"))
+            .and_then(|v| v.get("launch_cmd"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
         rows.push(vec![
             id,
             map_field_display(&state_map, "status"),
             map_field_display(&state_map, "stage"),
             pipeline_display_name(&data),
             project.to_string(),
+            launch,
         ]);
     }
 
@@ -977,6 +986,19 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         base_ref_sha_opt,
     )
     .map_err(|e| format!("failed to create gremlin: {e}"))?;
+
+    // Record the launch command in metadata so `gremlins ls` can show it.
+    {
+        let launch_cmd = std::iter::once(definition.to_string())
+            .chain(raw_args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut cli_meta = Map::new();
+        cli_meta.insert("launch_cmd".to_string(), Value::String(launch_cmd));
+        let mut meta_field = Map::new();
+        meta_field.insert("cli".to_string(), Value::Object(cli_meta));
+        gremlin.state.patch(&[], &meta_field);
+    }
 
     // Snapshot the fully expanded pipeline YAML into the state directory so
     // the run is hermetic — all prompts, stage-definitions, and recipes are
