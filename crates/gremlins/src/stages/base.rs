@@ -68,6 +68,103 @@ pub fn substitute_vars(
         .to_string()
 }
 
+/// Sanitize a key into a `GREMLINS_<KEY>` environment variable name:
+/// uppercase, every non-alphanumeric character mapped to `_`.
+fn sanitize_key(key: &str) -> String {
+    let sanitized: String = key
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("GREMLINS_{}", sanitized)
+}
+
+/// Substitute `{var}` tokens in `text` with `$GREMLINS_<KEY>` environment
+/// variable references instead of literal values. Populates `env_map` with
+/// `GREMLINS_<KEY> → value` entries and tracks name assignments in
+/// `key_to_env` and `used_names` so that repeated calls with the same
+/// accumulators produce consistent env var names.
+///
+/// Uses the same resolution order as [`substitute_vars`]: string options →
+/// extra → framework_subs (framework wins). Hyphen-normalized variants are
+/// added for underscore keys. Token semantics: `${key}` left verbatim,
+/// `{{key}}` collapses to `{$GREMLINS_KEY}`, unknown tokens left verbatim.
+pub fn substitute_vars_to_env(
+    text: &str,
+    string_options: &HashMap<String, String>,
+    extra: &HashMap<String, String>,
+    framework_subs: &HashMap<String, String>,
+    env_map: &mut HashMap<String, String>,
+    key_to_env: &mut HashMap<String, String>,
+    used_names: &mut HashMap<String, u32>,
+) -> String {
+    let mut subs: HashMap<String, String> = HashMap::new();
+    subs.extend(string_options.iter().map(|(k, v)| (k.clone(), v.clone())));
+    subs.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+    subs.extend(framework_subs.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+    let hyphenated: Vec<(String, String)> = subs
+        .iter()
+        .filter_map(|(k, v)| {
+            if k.contains('_') {
+                Some((k.replace('_', "-"), v.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (hk, hv) in hyphenated {
+        subs.entry(hk).or_insert(hv);
+    }
+
+    VAR_SUB_RE
+        .replace_all(text, |caps: &regex::Captures| {
+            let start = caps.get(0).unwrap().start();
+            if start > 0 && text.as_bytes()[start - 1] == b'$' {
+                return caps.get(0).unwrap().as_str().to_string();
+            }
+            let key = caps.get(1).unwrap().as_str();
+
+            // Resolve the key to a value, then look up or assign an env var name.
+            let resolve = |k: &str| -> Option<(&String, String)> {
+                subs.get(k).map(|val| (val, k.to_string()))
+            };
+
+            if let Some((val, resolved_key)) = resolve(key).or_else(|| {
+                let alt = key.replace('-', "_");
+                if alt != key {
+                    resolve(&alt)
+                } else {
+                    None
+                }
+            }) {
+                // Reuse an existing env-var name for this resolved key.
+                if let Some(env_name) = key_to_env.get(&resolved_key) {
+                    return format!("${{{}}}", env_name);
+                }
+                let base = sanitize_key(&resolved_key);
+                let count = used_names.entry(base.clone()).or_insert(0);
+                let env_name = if *count == 0 {
+                    base
+                } else {
+                    format!("{}_{}", base, count)
+                };
+                *count += 1;
+                key_to_env.insert(resolved_key.clone(), env_name.clone());
+                env_map.insert(env_name.clone(), val.clone());
+                return format!("${{{}}}", env_name);
+            }
+
+            caps.get(0).unwrap().as_str().to_string()
+        })
+        .to_string()
+}
+
 /// Trait representing the contract every Rust stage implements.
 /// Mirrors the Python `Stage` ABC + `StageProtocol` surface.
 pub trait Stage: Send + Sync {
@@ -263,5 +360,171 @@ mod tests {
         let fw = HashMap::new();
         let result = stage.substitute_vars("{greeting}", &extra, &fw);
         assert_eq!(result, "hi");
+    }
+
+    // --- sanitize_key ---
+
+    #[test]
+    fn test_sanitize_key_basic() {
+        assert_eq!(sanitize_key("pr_title"), "GREMLINS_PR_TITLE");
+    }
+
+    #[test]
+    fn test_sanitize_key_hyphen() {
+        assert_eq!(sanitize_key("pr-title"), "GREMLINS_PR_TITLE");
+    }
+
+    #[test]
+    fn test_sanitize_key_special_chars() {
+        assert_eq!(sanitize_key("a.b!c@d#e"), "GREMLINS_A_B_C_D_E");
+    }
+
+    #[test]
+    fn test_sanitize_key_empty() {
+        assert_eq!(sanitize_key(""), "GREMLINS_");
+    }
+
+    // --- substitute_vars_to_env ---
+
+    #[test]
+    fn test_substitute_vars_to_env_basic() {
+        let opts = HashMap::new();
+        let extra = HashMap::from([("var".to_string(), "world".to_string())]);
+        let fw = HashMap::new();
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "hello {var}", &opts, &extra, &fw,
+            &mut env_map, &mut key_to_env, &mut used_names,
+        );
+        assert_eq!(result, "hello ${GREMLINS_VAR}");
+        assert_eq!(env_map.get("GREMLINS_VAR").unwrap(), "world");
+    }
+
+    #[test]
+    fn test_substitute_vars_to_env_dollar_skip() {
+        let opts = HashMap::new();
+        let extra = HashMap::from([("x".to_string(), "y".to_string())]);
+        let fw = HashMap::new();
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "${x}", &opts, &extra, &fw,
+            &mut env_map, &mut key_to_env, &mut used_names,
+        );
+        assert_eq!(result, "${x}");
+        assert!(env_map.is_empty());
+    }
+
+    #[test]
+    fn test_substitute_vars_to_env_unknown_token() {
+        let opts = HashMap::new();
+        let extra = HashMap::new();
+        let fw = HashMap::new();
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "hello {unknown}", &opts, &extra, &fw,
+            &mut env_map, &mut key_to_env, &mut used_names,
+        );
+        assert_eq!(result, "hello {unknown}");
+        assert!(env_map.is_empty());
+    }
+
+    #[test]
+    fn test_substitute_vars_to_env_framework_overrides() {
+        let opts = HashMap::new();
+        let extra = HashMap::from([("name".to_string(), "extra".to_string())]);
+        let fw = HashMap::from([("name".to_string(), "fw".to_string())]);
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "{name}", &opts, &extra, &fw,
+            &mut env_map, &mut key_to_env, &mut used_names,
+        );
+        assert_eq!(result, "${GREMLINS_NAME}");
+        assert_eq!(env_map.get("GREMLINS_NAME").unwrap(), "fw");
+    }
+
+    #[test]
+    fn test_substitute_vars_to_env_hyphen_normalization() {
+        let opts = HashMap::new();
+        let extra = HashMap::from([("child_plan".to_string(), "value".to_string())]);
+        let fw = HashMap::new();
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "{child-plan}", &opts, &extra, &fw,
+            &mut env_map, &mut key_to_env, &mut used_names,
+        );
+        assert_eq!(result, "${GREMLINS_CHILD_PLAN}");
+        assert_eq!(env_map.get("GREMLINS_CHILD_PLAN").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_substitute_vars_to_env_collision_suffix() {
+        // Two different keys that sanitize to the same name get numeric suffixes.
+        let opts = HashMap::new();
+        let extra = HashMap::from([
+            ("pr-title".to_string(), "first".to_string()),
+            ("pr_title".to_string(), "second".to_string()),
+        ]);
+        let fw = HashMap::new();
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "{pr-title} {pr_title}", &opts, &extra, &fw,
+            &mut env_map, &mut key_to_env, &mut used_names,
+        );
+        assert_eq!(result, "${GREMLINS_PR_TITLE} ${GREMLINS_PR_TITLE_1}");
+        assert_eq!(env_map.get("GREMLINS_PR_TITLE").unwrap(), "first");
+        assert_eq!(env_map.get("GREMLINS_PR_TITLE_1").unwrap(), "second");
+    }
+
+    #[test]
+    fn test_substitute_vars_to_env_injection_payload_not_escaped() {
+        // The value is placed verbatim in the env map — no shell escaping.
+        let opts = HashMap::new();
+        let extra = HashMap::from([(
+            "pr_title".to_string(),
+            "`touch /tmp/pwned`; $(rm -rf /)".to_string(),
+        )]);
+        let fw = HashMap::new();
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "printf '%s' \"{pr_title}\"", &opts, &extra, &fw,
+            &mut env_map, &mut key_to_env, &mut used_names,
+        );
+        assert_eq!(result, "printf '%s' \"${GREMLINS_PR_TITLE}\"");
+        assert_eq!(
+            env_map.get("GREMLINS_PR_TITLE").unwrap(),
+            "`touch /tmp/pwned`; $(rm -rf /)"
+        );
+    }
+
+    #[test]
+    fn test_substitute_vars_to_env_same_key_reused() {
+        // Same key used twice gets the same env var name.
+        let opts = HashMap::new();
+        let extra = HashMap::from([("x".to_string(), "val".to_string())]);
+        let fw = HashMap::new();
+        let mut env_map = HashMap::new();
+        let mut key_to_env = HashMap::new();
+        let mut used_names = HashMap::new();
+        let result = substitute_vars_to_env(
+            "{x} {x}", &opts, &extra, &fw,
+            &mut env_map, &mut key_to_env, &mut used_names,
+        );
+        assert_eq!(result, "${GREMLINS_X} ${GREMLINS_X}");
+        assert_eq!(env_map.len(), 1);
+        assert_eq!(env_map.get("GREMLINS_X").unwrap(), "val");
     }
 }

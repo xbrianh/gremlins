@@ -160,6 +160,10 @@ pub struct ExecPrepared {
     /// environment instead.
     pub env: HashMap<String, String>,
     pub(crate) loop_iter: String,
+    /// Substitution env vars (`GREMLINS_<KEY> → value`) populated by
+    /// `prepare_exec` for the exec command templates. Merged into the
+    /// child shell's environment in `run_shell`.
+    pub(crate) substitution_env: HashMap<String, String>,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
@@ -236,9 +240,25 @@ pub fn prepare_exec(
         })
         .unwrap_or_default();
 
+    // Substitute {key} tokens with $GREMLINS_<KEY> env-var references.
+    // All commands share one env map so the same key always maps to the
+    // same env var name.
+    let mut substitution_env: HashMap<String, String> = HashMap::new();
+    let mut key_to_env: HashMap<String, String> = HashMap::new();
+    let mut used_names: HashMap<String, u32> = HashMap::new();
     let cmds: Vec<String> = raw_cmds
         .iter()
-        .map(|c| base::substitute_vars(c, &str_opts, &subst_vars, framework_subs))
+        .map(|c| {
+            base::substitute_vars_to_env(
+                c,
+                &str_opts,
+                &subst_vars,
+                framework_subs,
+                &mut substitution_env,
+                &mut key_to_env,
+                &mut used_names,
+            )
+        })
         .collect();
 
     let timeout: Option<f64> = exec.options.get("timeout").and_then(|v| v.as_f64());
@@ -255,6 +275,7 @@ pub fn prepare_exec(
         timeout,
         env: HashMap::new(),
         loop_iter: loop_iter.to_string(),
+        substitution_env,
     })
 }
 
@@ -278,6 +299,11 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         "GREMLINS_ARTIFACT_DIR".to_string(),
         prepared.artifact_dir.to_string_lossy().to_string(),
     );
+    // Merge substitution env vars (GREMLINS_<KEY> → value) into the child
+    // shell's environment so {key} tokens resolve verbatim.
+    for (k, v) in &prepared.substitution_env {
+        env.insert(k.clone(), v.clone());
+    }
 
     let result =
         run_shell_async(&joined, Some(&prepared.cwd), Some(&env), prepared.timeout).await?;
