@@ -124,7 +124,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         .and_then(|r| r.get("effort"))
         .and_then(|e| e.as_str());
     log::info!(
-        "{}init model={} cwd={} reasoning_effort={}",
+        "{}using client model={} cwd={} reasoning_effort={}",
         prefix,
         model_name,
         cwd_display,
