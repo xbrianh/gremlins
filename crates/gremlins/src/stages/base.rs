@@ -395,8 +395,13 @@ mod tests {
         let mut key_to_env = HashMap::new();
         let mut used_names = HashMap::new();
         let result = substitute_vars_to_env(
-            "hello {var}", &opts, &extra, &fw,
-            &mut env_map, &mut key_to_env, &mut used_names,
+            "hello {var}",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
         );
         assert_eq!(result, "hello ${GREMLINS_VAR}");
         assert_eq!(env_map.get("GREMLINS_VAR").unwrap(), "world");
@@ -411,8 +416,13 @@ mod tests {
         let mut key_to_env = HashMap::new();
         let mut used_names = HashMap::new();
         let result = substitute_vars_to_env(
-            "${x}", &opts, &extra, &fw,
-            &mut env_map, &mut key_to_env, &mut used_names,
+            "${x}",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
         );
         assert_eq!(result, "${x}");
         assert!(env_map.is_empty());
@@ -427,8 +437,13 @@ mod tests {
         let mut key_to_env = HashMap::new();
         let mut used_names = HashMap::new();
         let result = substitute_vars_to_env(
-            "hello {unknown}", &opts, &extra, &fw,
-            &mut env_map, &mut key_to_env, &mut used_names,
+            "hello {unknown}",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
         );
         assert_eq!(result, "hello {unknown}");
         assert!(env_map.is_empty());
@@ -443,8 +458,13 @@ mod tests {
         let mut key_to_env = HashMap::new();
         let mut used_names = HashMap::new();
         let result = substitute_vars_to_env(
-            "{name}", &opts, &extra, &fw,
-            &mut env_map, &mut key_to_env, &mut used_names,
+            "{name}",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
         );
         assert_eq!(result, "${GREMLINS_NAME}");
         assert_eq!(env_map.get("GREMLINS_NAME").unwrap(), "fw");
@@ -459,8 +479,13 @@ mod tests {
         let mut key_to_env = HashMap::new();
         let mut used_names = HashMap::new();
         let result = substitute_vars_to_env(
-            "{child-plan}", &opts, &extra, &fw,
-            &mut env_map, &mut key_to_env, &mut used_names,
+            "{child-plan}",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
         );
         assert_eq!(result, "${GREMLINS_CHILD_PLAN}");
         assert_eq!(env_map.get("GREMLINS_CHILD_PLAN").unwrap(), "value");
@@ -479,8 +504,13 @@ mod tests {
         let mut key_to_env = HashMap::new();
         let mut used_names = HashMap::new();
         let result = substitute_vars_to_env(
-            "{pr-title} {pr_title}", &opts, &extra, &fw,
-            &mut env_map, &mut key_to_env, &mut used_names,
+            "{pr-title} {pr_title}",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
         );
         assert_eq!(result, "${GREMLINS_PR_TITLE} ${GREMLINS_PR_TITLE_1}");
         assert_eq!(env_map.get("GREMLINS_PR_TITLE").unwrap(), "first");
@@ -500,8 +530,13 @@ mod tests {
         let mut key_to_env = HashMap::new();
         let mut used_names = HashMap::new();
         let result = substitute_vars_to_env(
-            "printf '%s' \"{pr_title}\"", &opts, &extra, &fw,
-            &mut env_map, &mut key_to_env, &mut used_names,
+            "printf '%s' \"{pr_title}\"",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
         );
         assert_eq!(result, "printf '%s' \"${GREMLINS_PR_TITLE}\"");
         assert_eq!(
@@ -520,8 +555,13 @@ mod tests {
         let mut key_to_env = HashMap::new();
         let mut used_names = HashMap::new();
         let result = substitute_vars_to_env(
-            "{x} {x}", &opts, &extra, &fw,
-            &mut env_map, &mut key_to_env, &mut used_names,
+            "{x} {x}",
+            &opts,
+            &extra,
+            &fw,
+            &mut env_map,
+            &mut key_to_env,
+            &mut used_names,
         );
         assert_eq!(result, "${GREMLINS_X} ${GREMLINS_X}");
         assert_eq!(env_map.len(), 1);
