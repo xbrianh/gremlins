@@ -73,6 +73,11 @@ enum Cmds {
         #[arg(long)]
         keep: bool,
     },
+    /// Remove a gremlin and all its filesystem assets.
+    Rm {
+        /// Gremlin id to remove.
+        id: String,
+    },
     /// Run the pipeline's land block in the current working directory.
     Land {
         /// Gremlin id whose land block to run.
@@ -102,6 +107,7 @@ async fn main() {
         Some(Cmds::Resume { id }) => resume(&id).await,
         Some(Cmds::Log { id }) => log_gremlin(&id),
         Some(Cmds::Clean { id, keep }) => clean(&id, keep),
+        Some(Cmds::Rm { id }) => rm(&id),
         Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::External(args)) => status_external(&args),
         None => {
@@ -524,6 +530,53 @@ fn log_gremlin(id: &str) -> Result<(), String> {
         return Err(format!("less exited with status {status}"));
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// rm
+// ---------------------------------------------------------------------------
+
+/// Remove a gremlin and all its filesystem assets.
+///
+/// This is a simpler variant of `clean` that always removes the state
+/// directory — there is no `--keep` option.  A running gremlin is rejected;
+/// stop it first.  Nonexistent gremlins produce an error.
+fn rm(id: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        return Err(format!(
+            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+        ));
+    }
+
+    let gremlin = match Gremlin::from(id) {
+        Ok(g) => g,
+        Err(e) => {
+            if !state_dir.is_dir() || !state_file.is_file() {
+                println!("gremlin {id} is already removed");
+                return Ok(());
+            }
+            return Err(format!("gremlin {id}: {e}"));
+        }
+    };
+
+    let status = gremlin.state.read_str("status");
+    if status == "running" {
+        return Err(format!(
+            "gremlin {id} is running — use `gremlins stop {id}` first"
+        ));
+    }
+
+    gremlin.clean(true);
+    println!("gremlin {id} removed");
     Ok(())
 }
 
