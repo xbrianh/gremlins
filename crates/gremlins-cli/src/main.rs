@@ -139,7 +139,7 @@ fn ls(here: bool) -> Result<(), String> {
         .map(|path| path.canonicalize().unwrap_or(path))
         .unwrap_or_else(|_| PathBuf::from("."));
 
-    let headers = ["ID", "STATUS", "STAGE", "DEFINITION", "PROJECT", "LAUNCH"];
+    let headers = ["ID", "STATUS", "STAGE", "PROJECT", "LAUNCH"];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     for (id, state_json_path) in state::list_state_dirs() {
@@ -188,7 +188,6 @@ fn ls(here: bool) -> Result<(), String> {
             id,
             map_field_display(&state_map, "status"),
             map_field_display(&state_map, "stage"),
-            definition_display_name(&data),
             project.to_string(),
             launch,
         ]);
