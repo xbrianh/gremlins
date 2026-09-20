@@ -163,7 +163,7 @@ pub struct ExecPrepared {
     /// Substitution env vars (`GREMLINS_<KEY> → value`) populated by
     /// `prepare_exec` for the exec command templates. Merged into the
     /// child shell's environment in `run_shell`.
-    pub(crate) substitution_env: HashMap<String, String>,
+    pub substitution_env: HashMap<String, String>,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
