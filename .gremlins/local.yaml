@@ -21,6 +21,13 @@ bootstrap:
         source "$THE_ENV"
     fi
 
+land:
+  options:
+    cmds:
+      - WORKTREE_HEAD=$(git -C "$GREMLINS_WORKTREE_PATH" rev-parse HEAD)
+      - git merge --squash "$WORKTREE_HEAD"
+      - 'git diff --cached --quiet || git commit -m "land: squash worktree changes"'
+
 stage-definitions:
   check-and-fix:
     type: sequence

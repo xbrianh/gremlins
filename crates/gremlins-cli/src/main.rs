@@ -5,14 +5,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clap::{Parser, Subcommand};
+use gremlins::artifacts::registry::ArtifactRegistry;
 use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
-use gremlins::executor::gremlin::{validate_gremlin_id, Gremlin};
+use gremlins::core::proc::run_shell_async;
+use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
 use gremlins::schemas::expand;
 use gremlins::schemas::pipeline::Pipeline;
+use gremlins::stages::exec::prepare_exec;
+use gremlins::stages::node::RunnableStage;
 use serde_json::Value;
 
 #[derive(Parser)]
@@ -69,6 +73,11 @@ enum Cmds {
         #[arg(long)]
         keep: bool,
     },
+    /// Run the pipeline's land block in the current working directory.
+    Land {
+        /// Gremlin id whose land block to run.
+        id: String,
+    },
     /// `gremlins <id>` — print detailed status for one gremlin.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -93,6 +102,7 @@ async fn main() {
         Some(Cmds::Resume { id }) => resume(&id).await,
         Some(Cmds::Log { id }) => log_gremlin(&id),
         Some(Cmds::Clean { id, keep }) => clean(&id, keep),
+        Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::External(args)) => status_external(&args),
         None => {
             // No subcommand — print help and exit 0.
@@ -567,6 +577,125 @@ fn clean(id: &str, keep: bool) -> Result<(), String> {
 
     gremlin.clean(!keep);
     println!("gremlin {id} cleaned");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// land
+// ---------------------------------------------------------------------------
+
+/// Run the pipeline's `land` block in the current working directory.
+async fn land(id: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        return Err(format!(
+            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+        ));
+    }
+
+    // Load the pipeline from the hermetic snapshot.
+    let pipeline_path = state_dir.join("pipeline.yaml");
+    if !pipeline_path.is_file() {
+        return Err(format!(
+            "gremlin {id}: pipeline snapshot not found at {}",
+            pipeline_path.display()
+        ));
+    }
+    let pipeline = Pipeline::from_yaml(&pipeline_path, None)
+        .map_err(|e| format!("gremlin {id}: failed to load pipeline: {e}"))?;
+
+    let land_stage = match &pipeline.land {
+        Some(stage) => stage,
+        None => {
+            return Err(format!("gremlin {id}: pipeline has no land block"));
+        }
+    };
+
+    // Extract the Exec from the RunnableStage::Exec variant.
+    let exec = match land_stage {
+        RunnableStage::Exec { stage, .. } => stage,
+        _ => {
+            return Err(format!(
+                "gremlin {id}: land stage is not an exec (internal error)"
+            ));
+        }
+    };
+
+    // Read project_root and workdir from state.json for system_env.
+    let raw = state::read_state_json(Some(&state_file));
+
+    // A running gremlin must not be landed — its worktree is still being
+    // mutated by the agent process.
+    if raw.get("status").and_then(Value::as_str) == Some("running") {
+        return Err(format!(
+            "gremlin {id} is running — use `gremlins stop {id}` first"
+        ));
+    }
+
+    let project_root = {
+        let from_state = raw
+            .get("project_root")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if from_state.is_empty() {
+            config::project_root()
+        } else {
+            PathBuf::from(from_state)
+        }
+    };
+    let workdir = raw.get("workdir").and_then(Value::as_str).unwrap_or("");
+    let worktree = (!workdir.is_empty()).then(|| PathBuf::from(workdir));
+    let overlay_dir = config::project_overlay_dir(&project_root);
+
+    // Build a read-only artifact registry from the artifact directory.
+    let artifact_dir = config::scratch_root(Some(id)).join("artifacts");
+    let registry = ArtifactRegistry::new(artifact_dir.clone());
+
+    // Resolve interpolation references.
+    let prepared = prepare_exec(exec, &registry, "", &HashMap::new())
+        .map_err(|e| format!("gremlin {id}: {e}"))?;
+
+    if prepared.cmds.is_empty() {
+        return Err(format!("gremlin {id}: land block has no commands"));
+    }
+
+    let joined = prepared.cmds.join(" && ");
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("failed to get current directory: {e}"))?;
+
+    let env = system_env(
+        &artifact_dir,
+        &state_dir,
+        id,
+        &project_root,
+        worktree.as_deref(),
+        &overlay_dir,
+    );
+
+    let result = run_shell_async(&joined, Some(&cwd), Some(&env), prepared.timeout)
+        .await
+        .map_err(|e| format!("gremlin {id}: land: {e}"))?;
+
+    // Stream captured output to the terminal.
+    {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        let _ = handle.write_all(&result.stdout);
+        let _ = handle.write_all(&result.stderr);
+        let _ = handle.flush();
+    }
+
+    if result.returncode != 0 {
+        std::process::exit(result.returncode);
+    }
     Ok(())
 }
 

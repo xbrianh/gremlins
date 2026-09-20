@@ -1134,7 +1134,7 @@ pub fn framework_subs(
 /// These are both *seeded into* the base the bootstrap script is sourced
 /// against and *re-asserted* on top of the result, so the script can read
 /// them but can never override them.
-fn system_env(
+pub fn system_env(
     artifact_dir: &Path,
     state_dir: &Path,
     gremlin_id: &str,
