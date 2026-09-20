@@ -991,6 +991,7 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
     {
         let launch_cmd = std::iter::once(definition.to_string())
             .chain(raw_args.iter().cloned())
+            .map(|arg| shell_escape(&arg))
             .collect::<Vec<_>>()
             .join(" ");
         let mut cli_meta = Map::new();
@@ -1021,6 +1022,37 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     println!("{gremlin_id}");
     Ok(())
+}
+
+/// Quote a single argv element so the launch command can be re-displayed
+/// unambiguously on one line. Values with whitespace or shell-significant
+/// characters are wrapped in double quotes; embedded quotes, backslashes, and
+/// control characters are backslash-escaped so newlines can't corrupt the
+/// plain-column `ls` output.
+fn shell_escape(arg: &str) -> String {
+    let needs_quoting = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\\' | '$' | '`' | '\''));
+    if !needs_quoting {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    for c in arg.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Turn `["--key1", "value1", "--key2", "value2"]` into a map.
