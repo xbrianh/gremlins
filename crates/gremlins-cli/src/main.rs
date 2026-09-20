@@ -306,10 +306,11 @@ fn stop(id: &str) -> Result<(), String> {
 
     let pid = pid_raw as libc::pid_t;
 
-    // Send SIGTERM.
+    // Send SIGTERM to the entire process group so child processes
+    // (agent commands, shell tools) are signalled alongside the runner.
     let mut exit_code = -15i32;
     unsafe {
-        let ret = libc::kill(pid, libc::SIGTERM);
+        let ret = libc::kill(-pid, libc::SIGTERM);
         if ret != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::ESRCH) {
@@ -333,10 +334,10 @@ fn stop(id: &str) -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     unsafe {
-        // kill(pid, 0) is the standard existence check — fails with ESRCH
-        // if the process is gone, succeeds if it still exists.
-        if libc::kill(pid, 0) == 0 {
-            let ret = libc::kill(pid, libc::SIGKILL);
+        // kill(-pgid, 0) checks whether any process in the group is still
+        // alive — fails with ESRCH when the group is empty.
+        if libc::kill(-pid, 0) == 0 {
+            let ret = libc::kill(-pid, libc::SIGKILL);
             if ret != 0 {
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() != Some(libc::ESRCH) {
@@ -349,13 +350,13 @@ fn stop(id: &str) -> Result<(), String> {
                 // Poll until the process exits (bounded).
                 for _ in 0..10 {
                     std::thread::sleep(std::time::Duration::from_millis(100));
-                    if libc::kill(pid, 0) != 0 {
+                    if libc::kill(-pid, 0) != 0 {
                         break;
                     }
                 }
-                if libc::kill(pid, 0) == 0 {
+                if libc::kill(-pid, 0) == 0 {
                     return Err(format!(
-                        "gremlin {id}: process {pid} did not exit after SIGKILL"
+                        "gremlin {id}: process group {pid} did not exit after SIGKILL"
                     ));
                 }
             }
@@ -872,6 +873,13 @@ async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> 
         serde_json::Value::from(std::process::id() as i64),
     );
     gremlin.state.patch(&[], &fields);
+
+    // Put ourselves in our own process group so `stop` can signal the
+    // entire group and reach any child processes spawned by the pipeline.
+    #[cfg(unix)]
+    unsafe {
+        libc::setpgid(0, 0);
+    }
 
     // Redirect stdout and stderr to the gremlin's log file so all output
     // is captured.

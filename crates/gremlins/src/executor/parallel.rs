@@ -171,6 +171,9 @@ pub(crate) async fn run_parallel(
                 log::debug!(
                     "parallel group {group_name_owned}: child {child_name_for_thread} cancel flag set before run() — exiting"
                 );
+                // Mark the child terminal so its state directory isn't left
+                // permanently as "running" with no finished marker.
+                child_gremlin.state.write_terminal_state(-1);
                 let _ = tx.send((
                     child_name_for_thread,
                     child_id_for_thread,
