@@ -11,10 +11,11 @@
 //! eventually runs a stage is the one that pays for resolving the API key.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use indexmap::IndexMap;
 use regex::Regex;
+use rig_core::http_client::ReqwestClient;
 use rig_core::providers::openai;
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
@@ -130,14 +131,69 @@ fn resolve_api_key(kind: OpenAiProvider) -> Option<String> {
     api_key(kind.api_key_env(), kind.name())
 }
 
+// ---------------------------------------------------------------------------
+// Module-level pools
+// ---------------------------------------------------------------------------
+
+fn backend_pool() -> &'static Mutex<HashMap<String, Arc<dyn Backend>>> {
+    static POOL: OnceLock<Mutex<HashMap<String, Arc<dyn Backend>>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn http_client_pool() -> &'static Mutex<HashMap<(String, String), ReqwestClient>> {
+    static POOL: OnceLock<Mutex<HashMap<(String, String), ReqwestClient>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Return the last `n` characters of `s`, or the whole string if it's shorter.
+///
+/// This is character-aware: it will never split a multi-byte UTF-8 sequence.
+fn last_n_chars(s: &str, n: usize) -> &str {
+    let char_count = s.chars().count();
+    if char_count <= n {
+        s
+    } else {
+        let skip = char_count - n;
+        s.char_indices()
+            .nth(skip)
+            .map(|(idx, _)| &s[idx..])
+            .unwrap_or(s)
+    }
+}
+
 /// Build the rig OpenAI-compatible client shared by openai, xai and openrouter.
-fn build_openai_client(
-    api_key: String,
-    base_url: &str,
-) -> Result<openai::CompletionsClient, String> {
+///
+/// HTTP clients are pooled by `(base_url, api_key)` so that every backend
+/// targeting the same provider endpoint shares one connection pool.  The pool
+/// lock is held across construction so that concurrent callers cannot race to
+/// build duplicate clients.
+fn build_openai_client(api_key: &str, base_url: &str) -> Result<openai::CompletionsClient, String> {
+    let cache_key = (base_url.to_string(), api_key.to_string());
+
+    let http_client = {
+        let mut pool = http_client_pool()
+            .lock()
+            .expect("http client pool poisoned");
+        if let Some(client) = pool.get(&cache_key) {
+            log::debug!(
+                "HTTP client cache hit for {base_url} (key ...{})",
+                last_n_chars(api_key, 4)
+            );
+            client.clone()
+        } else {
+            log::info!("Creating new HTTP client for provider at {base_url}");
+            let client = ReqwestClient::builder()
+                .build()
+                .map_err(|e| e.to_string())?;
+            pool.insert(cache_key, client.clone());
+            client
+        }
+    };
+
     openai::Client::builder()
-        .api_key(rig_core::client::BearerAuth::from(api_key))
+        .api_key(rig_core::client::BearerAuth::from(api_key.to_string()))
         .base_url(base_url)
+        .http_client(http_client)
         .build()
         .map(|client| client.completions_api())
         .map_err(|e| e.to_string())
@@ -177,7 +233,7 @@ pub fn build_openai_backend(
             providers_json_path().display(),
         )
     })?;
-    let client = build_openai_client(key, kind.base_url())?;
+    let client = build_openai_client(&key, kind.base_url())?;
     Ok(Arc::new(OpenAiBackend::new(
         kind,
         client,
@@ -203,7 +259,7 @@ pub fn build_openrouter_backend(
             providers_json_path().display(),
         )
     })?;
-    let client = build_openai_client(key, OPENROUTER_BASE_URL)?;
+    let client = build_openai_client(&key, OPENROUTER_BASE_URL)?;
     let model = if model.is_empty() {
         "gpt-4o".to_string()
     } else {
@@ -217,18 +273,18 @@ pub fn build_openrouter_backend(
     )))
 }
 
-/// A resolved `provider:model` spec plus its lazily-built backend.
+/// A resolved `provider:model` spec.
 ///
-/// The backend sits behind a mutex because building it is both expensive and
-/// fallible, and because `run` takes `&self`: two stages may share one
-/// `Client`, and exactly one of them should win the race to build.
+/// Backend construction is delegated to a module-level pool so that every
+/// [`Client`] with the same spec shares one [`Backend`] (and therefore one
+/// HTTP connection pool).  Callers see no difference: [`Client::parse`],
+/// [`Client::run`], and [`Gremlin::client`] all keep their current signatures.
 #[derive(Clone)]
 pub struct Client {
     provider: String,
     model: String,
     extra_params: IndexMap<String, String>,
     native_block: HashMap<String, Vec<String>>,
-    inner: Arc<Mutex<Option<Arc<dyn Backend>>>>,
 }
 
 impl Client {
@@ -250,7 +306,6 @@ impl Client {
             model,
             extra_params,
             native_block: default_native_block(),
-            inner: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -268,27 +323,46 @@ impl Client {
         backend.run(params).await
     }
 
-    /// Return the backend for this spec, constructing and memoising it on the
-    /// first call.
+    /// Return the backend for this spec, looking it up in the module-level
+    /// pool or constructing it on first use.
     ///
-    /// Construction happens *under the lock*, and the guard is only ever held
-    /// across synchronous work — no `.await` runs while it is live, so an async
-    /// caller can never deadlock on it. Building is the expensive, fallible step
-    /// (it resolves a credential and mints an HTTP client), and two stages that
-    /// share one `Client` must not race to build two: the first to arrive
-    /// builds and caches, the second finds the cache already warm.
+    /// The pool lock is never held across an `.await`, so an async caller
+    /// cannot deadlock on it.  Building is the expensive, fallible step (it
+    /// resolves a credential and mints an HTTP client).
     ///
     /// The error is a `String` rather than a [`ClientError`] because every
     /// failure here is a configuration mistake (unknown provider, bad command,
     /// missing key) rather than a runtime condition — callers surface it as
     /// [`ClientError::Runtime`] at the [`Client::run`] boundary.
     pub fn get_or_build_backend(&self) -> Result<Arc<dyn Backend>, String> {
-        let mut guard = self.inner.lock().expect("client backend mutex poisoned");
-        if let Some(ref backend) = *guard {
+        let spec = self.to_string();
+
+        let mut pool = backend_pool().lock().expect("backend pool poisoned");
+        if let Some(backend) = pool.get(&spec) {
+            log::debug!("Backend cache hit for spec {spec}");
             return Ok(backend.clone());
         }
+
+        // Build while holding the lock so concurrent callers for the same spec
+        // cannot race to construct duplicate backends.  build_backend() is
+        // synchronous (no .await), so the lock is never held across an async
+        // yield point.
         let backend = self.build_backend()?;
-        *guard = Some(backend.clone());
+
+        let base_url = match self.provider.as_str() {
+            "openai" => OpenAiProvider::OpenAi.base_url(),
+            "xai" => OpenAiProvider::Xai.base_url(),
+            "openrouter" => OPENROUTER_BASE_URL,
+            "cmd" => "(shell)",
+            _ => "(unknown)",
+        };
+        log::info!(
+            "Built new backend: provider={}, model={}, base_url={base_url}",
+            self.provider,
+            self.model,
+        );
+
+        pool.insert(spec, backend.clone());
         Ok(backend)
     }
 
@@ -330,8 +404,9 @@ impl Client {
             self.provider,
             self.model,
         );
-        let guard = self.inner.lock().expect("client backend mutex poisoned");
-        if let Some(ref backend) = *guard {
+        let spec = self.to_string();
+        let pool = backend_pool().lock().expect("backend pool poisoned");
+        if let Some(backend) = pool.get(&spec) {
             backend.reap_all(gremlin_id);
         }
     }
@@ -339,11 +414,9 @@ impl Client {
     /// Cumulative spend reported by the backend, when it can report one and
     /// when it has been built at all.
     pub fn total_cost_usd(&self) -> Option<f64> {
-        self.inner
-            .lock()
-            .expect("client backend mutex poisoned")
-            .as_ref()
-            .and_then(|b| b.total_cost_usd())
+        let spec = self.to_string();
+        let pool = backend_pool().lock().expect("backend pool poisoned");
+        pool.get(&spec).and_then(|b| b.total_cost_usd())
     }
 
     /// The model half of the spec, after any parameter suffix was stripped.
@@ -382,8 +455,6 @@ impl std::fmt::Display for Client {
 }
 
 impl std::fmt::Debug for Client {
-    /// The backend handle is not `Debug`, so the derived form would be
-    /// misleading; show only what identifies the client.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
             .field("provider", &self.provider)
@@ -396,8 +467,7 @@ impl std::fmt::Debug for Client {
 impl PartialEq for Client {
     /// Two clients are the same when they would build the same backend.
     ///
-    /// `native_block` and `inner` are excluded: the former is always the
-    /// default allowlist, and the latter is build state, not identity.
+    /// `native_block` is excluded: it is always the default allowlist.
     fn eq(&self, other: &Self) -> bool {
         self.provider == other.provider
             && self.model == other.model
