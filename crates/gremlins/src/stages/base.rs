@@ -5,6 +5,24 @@ use regex::Regex;
 
 static VAR_SUB_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([-\w]+)\}").unwrap());
 
+/// Backslash-escape shell metacharacters so the value is safe inside
+/// double quotes.  Handles backslash, dollar, backtick, double-quote,
+/// and newlines (squashed to spaces).
+pub fn shell_escape(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => result.push_str("\\\\"),
+            '$' => result.push_str("\\$"),
+            '"' => result.push_str("\\\""),
+            '`' => result.push_str("\\`"),
+            '\n' => result.push(' '),
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
 /// Extract string-valued entries from an options map, filtering out
 /// non-string JSON values (numbers, booleans, arrays, etc.).
 pub fn string_options(options: &HashMap<String, serde_json::Value>) -> HashMap<String, String> {
@@ -191,6 +209,44 @@ mod tests {
         let fw = HashMap::new();
         let result = substitute_vars("{count}", &str_opts, &extra, &fw);
         assert_eq!(result, "{count}");
+    }
+
+    #[test]
+    fn test_shell_escape_backtick() {
+        assert_eq!(shell_escape("`ls`"), "\\`ls\\`");
+    }
+
+    #[test]
+    fn test_shell_escape_dollar() {
+        assert_eq!(shell_escape("$HOME"), "\\$HOME");
+    }
+
+    #[test]
+    fn test_shell_escape_double_quote() {
+        assert_eq!(shell_escape("a\"b"), "a\\\"b");
+    }
+
+    #[test]
+    fn test_shell_escape_backslash() {
+        assert_eq!(shell_escape("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn test_shell_escape_newline() {
+        assert_eq!(shell_escape("a\nb"), "a b");
+    }
+
+    #[test]
+    fn test_shell_escape_plain() {
+        assert_eq!(shell_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_shell_escape_pr_title() {
+        assert_eq!(
+            shell_escape("add LAUNCH column to `gremlins ls`"),
+            "add LAUNCH column to \\`gremlins ls\\`"
+        );
     }
 
     #[test]

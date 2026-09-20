@@ -224,6 +224,17 @@ pub fn prepare_exec(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    // Shell-escape values for command substitution so that content
+    // containing backticks, $, etc. can't inject shell commands.
+    let escape_map = |m: &HashMap<String, String>| -> HashMap<String, String> {
+        m.iter()
+            .map(|(k, v)| (k.clone(), base::shell_escape(v)))
+            .collect()
+    };
+    let str_opts_escaped = escape_map(&str_opts);
+    let subst_vars_escaped = escape_map(&subst_vars);
+    let fw_escaped = escape_map(framework_subs);
+
     let raw_cmds: Vec<String> = exec
         .options
         .get("cmds")
@@ -238,7 +249,7 @@ pub fn prepare_exec(
 
     let cmds: Vec<String> = raw_cmds
         .iter()
-        .map(|c| base::substitute_vars(c, &str_opts, &subst_vars, framework_subs))
+        .map(|c| base::substitute_vars(c, &str_opts_escaped, &subst_vars_escaped, &fw_escaped))
         .collect();
 
     let timeout: Option<f64> = exec.options.get("timeout").and_then(|v| v.as_f64());
