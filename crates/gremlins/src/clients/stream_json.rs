@@ -56,7 +56,7 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                 let model = evt.get("model").and_then(|v| v.as_str()).unwrap_or("?");
                 let cwd = evt.get("cwd").and_then(|v| v.as_str()).unwrap_or("?");
                 log::info!(
-                    "{}init model={} cwd={} reasoning_effort={}",
+                    "{}using client model={} cwd={} reasoning_effort={}",
                     prefix,
                     model,
                     cwd,
