@@ -5,14 +5,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clap::{Parser, Subcommand};
+use gremlins::artifacts::registry::ArtifactRegistry;
 use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
+use gremlins::core::proc::run_shell_async;
 use gremlins::executor::gremlin::{validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
 use gremlins::schemas::expand;
 use gremlins::schemas::pipeline::Pipeline;
+use gremlins::stages::exec::prepare_exec;
+use gremlins::stages::node::RunnableStage;
 use serde_json::Value;
 
 #[derive(Parser)]
@@ -69,6 +73,11 @@ enum Cmds {
         #[arg(long)]
         keep: bool,
     },
+    /// Run the pipeline's land block in the current working directory.
+    Land {
+        /// Gremlin id whose land block to run.
+        id: String,
+    },
     /// `gremlins <id>` — print detailed status for one gremlin.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -93,6 +102,7 @@ async fn main() {
         Some(Cmds::Resume { id }) => resume(&id).await,
         Some(Cmds::Log { id }) => log_gremlin(&id),
         Some(Cmds::Clean { id, keep }) => clean(&id, keep),
+        Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::External(args)) => status_external(&args),
         None => {
             // No subcommand — print help and exit 0.
@@ -567,6 +577,90 @@ fn clean(id: &str, keep: bool) -> Result<(), String> {
 
     gremlin.clean(!keep);
     println!("gremlin {id} cleaned");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// land
+// ---------------------------------------------------------------------------
+
+/// Run the pipeline's `land` block in the current working directory.
+async fn land(id: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        return Err(format!(
+            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
+        ));
+    }
+
+    // Load the pipeline from the hermetic snapshot.
+    let pipeline_path = state_dir.join("pipeline.yaml");
+    if !pipeline_path.is_file() {
+        return Err(format!(
+            "gremlin {id}: pipeline snapshot not found at {}",
+            pipeline_path.display()
+        ));
+    }
+    let pipeline = Pipeline::from_yaml(&pipeline_path, None)
+        .map_err(|e| format!("gremlin {id}: failed to load pipeline: {e}"))?;
+
+    let land_stage = match &pipeline.land {
+        Some(stage) => stage,
+        None => {
+            return Err(format!("gremlin {id}: pipeline has no land block"));
+        }
+    };
+
+    // Extract the Exec from the RunnableStage::Exec variant.
+    let exec = match land_stage {
+        RunnableStage::Exec { stage, .. } => stage,
+        _ => {
+            return Err(format!(
+                "gremlin {id}: land stage is not an exec (internal error)"
+            ));
+        }
+    };
+
+    // Build a read-only artifact registry from the artifact directory.
+    let artifact_dir = config::scratch_root(Some(id)).join("artifacts");
+    let registry = ArtifactRegistry::new(artifact_dir);
+
+    // Resolve interpolation references.
+    let prepared = prepare_exec(exec, &registry, "", &HashMap::new())
+        .map_err(|e| format!("gremlin {id}: {e}"))?;
+
+    if prepared.cmds.is_empty() {
+        return Err(format!("gremlin {id}: land block has no commands"));
+    }
+
+    let joined = prepared.cmds.join(" && ");
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("failed to get current directory: {e}"))?;
+
+    let result = run_shell_async(&joined, Some(&cwd), None, prepared.timeout)
+        .await
+        .map_err(|e| format!("gremlin {id}: land: {e}"))?;
+
+    // Stream captured output to the terminal.
+    {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        let _ = handle.write_all(&result.stdout);
+        let _ = handle.write_all(&result.stderr);
+        let _ = handle.flush();
+    }
+
+    if result.returncode != 0 {
+        std::process::exit(result.returncode);
+    }
     Ok(())
 }
 
