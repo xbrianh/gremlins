@@ -783,6 +783,11 @@ async fn land(id: &str) -> Result<(), String> {
         worktree.as_deref(),
         &overlay_dir,
     ));
+    // Merge substitution env vars (GREMLINS_<KEY> → value) so that
+    // {key} tokens in command templates resolve to their actual values.
+    for (k, v) in &prepared.substitution_env {
+        env.insert(k.clone(), v.clone());
+    }
 
     let result = run_shell_async(&joined, Some(&cwd), Some(&env), prepared.timeout)
         .await
