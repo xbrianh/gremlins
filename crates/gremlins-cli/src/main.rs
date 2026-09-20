@@ -17,7 +17,7 @@ use gremlins::schemas::expand;
 use gremlins::schemas::pipeline::Pipeline;
 use gremlins::stages::exec::prepare_exec;
 use gremlins::stages::node::RunnableStage;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 mod spawn;
 
@@ -139,7 +139,7 @@ fn ls(here: bool) -> Result<(), String> {
         .map(|path| path.canonicalize().unwrap_or(path))
         .unwrap_or_else(|_| PathBuf::from("."));
 
-    let headers = ["ID", "STATUS", "STAGE", "PIPELINE", "PROJECT"];
+    let headers = ["ID", "STATUS", "STAGE", "PIPELINE", "PROJECT", "LAUNCH"];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     for (id, state_json_path) in state::list_state_dirs() {
@@ -176,12 +176,21 @@ fn ls(here: bool) -> Result<(), String> {
             }
         }
 
+        let launch = state_map
+            .get("metadata")
+            .and_then(|v| v.get("cli"))
+            .and_then(|v| v.get("launch_cmd"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
         rows.push(vec![
             id,
             map_field_display(&state_map, "status"),
             map_field_display(&state_map, "stage"),
             pipeline_display_name(&data),
             project.to_string(),
+            launch,
         ]);
     }
 
@@ -970,6 +979,22 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
     )
     .map_err(|e| format!("failed to create gremlin: {e}"))?;
 
+    // Record the launch command in metadata so `gremlins ls` can show it.
+    {
+        let launch_cmd = std::iter::once(definition.to_string())
+            .chain(raw_args.iter().cloned())
+            .map(|arg| shell_escape(&arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut cli_meta = Map::new();
+        cli_meta.insert("launch_cmd".to_string(), Value::String(launch_cmd));
+        let mut meta_field = Map::new();
+        meta_field.insert("cli".to_string(), Value::Object(cli_meta));
+        let mut outer = Map::new();
+        outer.insert("metadata".to_string(), Value::Object(meta_field));
+        gremlin.state.patch(&[], &outer);
+    }
+
     // Snapshot the fully expanded pipeline YAML into the state directory so
     // the run is hermetic — all prompts, stage-definitions, and recipes are
     // inlined, making the snapshot independent of the original project.
@@ -989,6 +1014,37 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     println!("{gremlin_id}");
     Ok(())
+}
+
+/// Quote a single argv element so the launch command can be re-displayed
+/// unambiguously on one line. Values with whitespace or shell-significant
+/// characters are wrapped in double quotes; embedded quotes, backslashes, and
+/// control characters are backslash-escaped so newlines can't corrupt the
+/// plain-column `ls` output.
+fn shell_escape(arg: &str) -> String {
+    let needs_quoting = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\\' | '$' | '`' | '\''));
+    if !needs_quoting {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    for c in arg.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Turn `["--key1", "value1", "--key2", "value2"]` into a map.

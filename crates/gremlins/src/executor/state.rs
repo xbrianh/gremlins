@@ -95,13 +95,13 @@ pub fn default_for(name: &str) -> Option<Value> {
         | "status" | "started_at" | "description" | "parent_id" | "client" | "pipeline_path"
         | "stage" | "group_name" | "child_key" => Value::String(String::new()),
         "pipeline_args" => Value::Array(Vec::new()),
-        "stage_inputs" => Value::Object(Map::new()),
+        "stage_inputs" | "metadata" => Value::Object(Map::new()),
         "pid" | "exit_code" => Value::Null,
         _ => return None,
     })
 }
 
-pub fn field_names() -> [&'static str; 19] {
+pub fn field_names() -> [&'static str; 20] {
     [
         "attempt",
         "kind",
@@ -119,6 +119,7 @@ pub fn field_names() -> [&'static str; 19] {
         "stage",
         "pid",
         "stage_inputs",
+        "metadata",
         "group_name",
         "child_key",
         "exit_code",

@@ -923,6 +923,9 @@ fn write_launch_state(
         initial.insert("child_key".to_string(), Value::String(String::new()));
     }
     initial.insert("exit_code".to_string(), Value::Null);
+    if !initial.contains_key("metadata") {
+        initial.insert("metadata".to_string(), Value::Object(Map::new()));
+    }
     state.persist(state_dir, &initial)?;
 
     // Re-assert the worktree fields now that the checkout exists, matching the
