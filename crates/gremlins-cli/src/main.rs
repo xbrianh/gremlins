@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use clap::{Parser, Subcommand};
 use gremlins::artifacts::registry::ArtifactRegistry;
@@ -18,6 +18,8 @@ use gremlins::schemas::pipeline::Pipeline;
 use gremlins::stages::exec::prepare_exec;
 use gremlins::stages::node::RunnableStage;
 use serde_json::Value;
+
+mod spawn;
 
 #[derive(Parser)]
 #[command(name = "gremlins", about = "AI-backed gremlin pipeline runner")]
@@ -36,7 +38,7 @@ enum Cmds {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    #[command(hide = true, name = "_run")]
+    #[command(hide = true, name = "spawn")]
     Run {
         /// Gremlin id to resume or start fresh.
         id: String,
@@ -539,32 +541,7 @@ async fn resume(id: &str) -> Result<(), String> {
     );
     gremlin.state.patch(&[], &fields);
 
-    // Spawn the child process: stdin is /dev/null, stdout and stderr go to
-    // the gremlin's log file in append mode.
-    let log_path = state_dir.join("log");
-    let log_file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&log_path)
-        .map_err(|e| format!("failed to open log: {e}"))?;
-
-    let stdout_file = log_file
-        .try_clone()
-        .map_err(|e| format!("failed to clone log handle: {e}"))?;
-
-    let current_exe =
-        std::env::current_exe().map_err(|e| format!("cannot find own binary: {e}"))?;
-
-    Command::new(current_exe)
-        .arg("_run")
-        .arg(id)
-        .arg("--resume-from")
-        .arg(&stage)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(log_file))
-        .spawn()
-        .map_err(|e| format!("failed to spawn gremlin: {e}"))?;
+    spawn::spawn_gremlin(id, Some(&stage))?;
 
     println!("{id}");
     Ok(())
@@ -1016,27 +993,8 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     // Spawn the child process: stdin is /dev/null, stdout and stderr go to
     // the gremlin's log file.
-    let log_file = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&log_path)
-        .map_err(|e| format!("failed to open log: {e}"))?;
-
-    let stdout_file = log_file
-        .try_clone()
-        .map_err(|e| format!("failed to clone log handle: {e}"))?;
-
-    let current_exe =
-        std::env::current_exe().map_err(|e| format!("cannot find own binary: {e}"))?;
-
-    Command::new(current_exe)
-        .arg("_run")
-        .arg(&gremlin_id)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(log_file))
-        .spawn()
-        .map_err(|e| format!("failed to spawn gremlin: {e}"))?;
+    // Spawn the child process.
+    spawn::spawn_gremlin(&gremlin_id, None)?;
 
     println!("{gremlin_id}");
     Ok(())
