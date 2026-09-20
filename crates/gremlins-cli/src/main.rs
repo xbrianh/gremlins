@@ -773,14 +773,15 @@ async fn land(id: &str) -> Result<(), String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("failed to get current directory: {e}"))?;
 
-    let env = system_env(
+    let mut env: HashMap<String, String> = std::env::vars().collect();
+    env.extend(system_env(
         &artifact_dir,
         &state_dir,
         id,
         &project_root,
         worktree.as_deref(),
         &overlay_dir,
-    );
+    ));
 
     let result = run_shell_async(&joined, Some(&cwd), Some(&env), prepared.timeout)
         .await
