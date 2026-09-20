@@ -907,10 +907,10 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     // Load the definition just enough to validate --key args against
     // bootstrap.source.
-    let definition = GremlinDefinition::from_yaml(&definition_path, None)
+    let gremlin_def = GremlinDefinition::from_yaml(&definition_path, None)
         .map_err(|e| format!("invalid definition: {e}"))?;
 
-    match &definition.bootstrap.source {
+    match &gremlin_def.bootstrap.source {
         Some(source) => {
             // Reject any --key that is not a declared source.
             let declared: Vec<String> = source.all_sources();
@@ -945,7 +945,7 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     // Resolve the definition's base_ref so the worktree branches from the
     // configured branch/tag rather than always from HEAD.
-    let base_ref = definition.base_ref.clone();
+    let base_ref = gremlin_def.base_ref.clone();
     let base_ref_sha = if base_ref.is_empty() || base_ref == "HEAD" {
         String::new()
     } else {
