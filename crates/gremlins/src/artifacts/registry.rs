@@ -32,8 +32,8 @@ pub struct DuplicateArtifact {
 ///
 /// Implemented by [`FileSystemArtifactRegistry`] (the real filesystem-backed registry)
 /// and [`DryRunArtifactRegistry`] (a no-I/O stub for dry-run execution).
-#[allow(async_fn_in_trait)]
-pub trait ArtifactRegistry {
+#[async_trait::async_trait]
+pub trait ArtifactRegistry: Send + Sync {
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact>;
     async fn content(
         &self,
@@ -48,6 +48,11 @@ pub trait ArtifactRegistry {
         uri: &Uri,
         content: &str,
     ) -> Result<String, Box<dyn std::error::Error>>;
+    /// Whether the given path was produced by this registry.
+    ///
+    /// Used by the commit phase to determine whether an output artifact
+    /// should be committed, replacing direct filesystem probes.
+    async fn is_path_produced(&self, path: &str) -> bool;
 }
 
 // --- FileSystemArtifactRegistry ---
@@ -373,6 +378,7 @@ impl FileSystemArtifactRegistry {
 
 // --- ArtifactRegistry impl for FileSystemArtifactRegistry ---
 
+#[async_trait::async_trait]
 impl ArtifactRegistry for FileSystemArtifactRegistry {
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
         self.data_uri(key).await
@@ -404,6 +410,13 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
         content: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
         self.write_into_registry(uri, content).await
+    }
+
+    async fn is_path_produced(&self, path: &str) -> bool {
+        tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
     }
 }
 
@@ -464,6 +477,7 @@ impl Default for DryRunArtifactRegistry {
     }
 }
 
+#[async_trait::async_trait]
 impl ArtifactRegistry for DryRunArtifactRegistry {
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
         let map = self.produced.lock().unwrap();
@@ -508,6 +522,10 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
         let path = Self::sentinel_path(uri);
         self.produced.lock().unwrap().insert(key, path.clone());
         Ok(path)
+    }
+
+    async fn is_path_produced(&self, _path: &str) -> bool {
+        true
     }
 }
 

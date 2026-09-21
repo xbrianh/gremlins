@@ -260,12 +260,7 @@ pub async fn commit_agent(
 ) -> Result<(), AgentError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
-        let produced = tokio::fs::metadata(path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0)
-            > 0;
-        if produced {
+        if artifacts.is_path_produced(path).await {
             artifacts
                 .commit(uri_str, path)
                 .await

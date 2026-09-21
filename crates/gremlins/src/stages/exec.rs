@@ -167,7 +167,7 @@ pub struct ExecPrepared {
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
-/// Requires `&FileSystemArtifactRegistry` (for interpolation lookups). Returns a
+/// Requires `&impl ArtifactRegistry` (for interpolation lookups). Returns a
 /// fully-prepared struct that can be passed to `run_shell` and `commit_exec`
 /// without further registry mutation.
 pub async fn prepare_exec(
@@ -373,7 +373,7 @@ pub async fn commit_exec(
 ) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
-        if tokio::fs::try_exists(path).await.unwrap_or(false) {
+        if artifacts.is_path_produced(path).await {
             artifacts
                 .commit(uri_str, path)
                 .await
