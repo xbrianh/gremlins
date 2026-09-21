@@ -15,11 +15,11 @@ bootstrap:
     - gremlins:bind_artifact("artifact://instructions.txt", instructions)
   env: |
     export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
-    export PREFIX="${GREMLINS_SCRATCH_DIR}/install"
     THE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"
     if [ -f "$THE_ENV" ]; then
         source "$THE_ENV"
     fi
+    export PREFIX="${GREMLINS_SCRATCH_DIR}/install"
     export PATH="${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"
 
 land:

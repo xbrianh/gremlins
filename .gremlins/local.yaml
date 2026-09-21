@@ -16,11 +16,11 @@ bootstrap:
   env: |
     export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${GREMLINS_PROJECT_ROOT}/.cargo-gremlin-target}"
-    export PREFIX="${GREMLINS_SCRATCH_DIR}/install"
     THE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"
     if [ -f "$THE_ENV" ]; then
         source "$THE_ENV"
     fi
+    export PREFIX="${GREMLINS_SCRATCH_DIR}/install"
 
 land:
   interpolation:
