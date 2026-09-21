@@ -19,15 +19,15 @@ stages:
       plan: artifact://plan.md
     options:
       cmds:
-        - 'gh_resolve_plan_source "{plan}" "{plan_source_issue_number}"'
+        - 'gh_resolve_plan_source "{plan}" "{plan_issue_number}"'
     bind:
-      plan_source_issue_number?: "artifact://plan-source-issue-number.txt"
+      plan_issue_number?: "artifact://plan-issue-number.txt"
 
   - name: publish-as-issue
     type: exec
     interpolation:
       plan: artifact://plan.md
-    skip_if_exists: "artifact://plan-source-issue-number.txt"
+    skip_if_exists: "artifact://plan-issue-number.txt"
     options:
       cmds:
         - 'gh_publish_issue "{plan}" > "{plan_issue_number}"'
