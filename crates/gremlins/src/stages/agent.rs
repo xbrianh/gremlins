@@ -167,7 +167,7 @@ impl From<ResolveError> for AgentError {
 
 pub async fn prepare_agent(
     agent: &Agent,
-    artifacts: &ArtifactRegistry,
+    artifacts: &impl ArtifactRegistry,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<AgentPrepared, AgentError> {
@@ -256,16 +256,11 @@ pub async fn prepare_agent(
 /// binds may be absent.
 pub async fn commit_agent(
     prepared: &AgentPrepared,
-    artifacts: &ArtifactRegistry,
+    artifacts: &impl ArtifactRegistry,
 ) -> Result<(), AgentError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
-        let produced = tokio::fs::metadata(path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0)
-            > 0;
-        if produced {
+        if artifacts.is_path_produced(path).await {
             artifacts
                 .commit(uri_str, path)
                 .await
@@ -404,7 +399,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use crate::artifacts::registry::ArtifactRegistry;
+    use crate::artifacts::registry::FileSystemArtifactRegistry;
 
     // ---- check_bail tests ----
 
@@ -562,11 +557,11 @@ mod tests {
 
     // ---- prepare_agent tests ----
 
-    fn make_registry(artifact_dir: PathBuf) -> ArtifactRegistry {
-        ArtifactRegistry::new(artifact_dir)
+    fn make_registry(artifact_dir: PathBuf) -> FileSystemArtifactRegistry {
+        FileSystemArtifactRegistry::new(artifact_dir)
     }
 
-    async fn register_file(reg: &ArtifactRegistry, name: &str, content: &str) -> String {
+    async fn register_file(reg: &FileSystemArtifactRegistry, name: &str, content: &str) -> String {
         let uri = Uri::parse(&format!("artifact://{name}")).unwrap();
         reg.write_into_registry(&uri, content).await.unwrap()
     }

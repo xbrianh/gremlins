@@ -167,12 +167,12 @@ pub struct ExecPrepared {
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
-/// Requires `&ArtifactRegistry` (for interpolation lookups). Returns a
+/// Requires `&impl ArtifactRegistry` (for interpolation lookups). Returns a
 /// fully-prepared struct that can be passed to `run_shell` and `commit_exec`
 /// without further registry mutation.
 pub async fn prepare_exec(
     exec: &Exec,
-    artifacts: &ArtifactRegistry,
+    artifacts: &impl ArtifactRegistry,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<ExecPrepared, ExecError> {
@@ -369,11 +369,11 @@ pub fn process_shell_result(
 /// Non-optional artifacts that are absent abort the stage, except bail URIs.
 pub async fn commit_exec(
     prepared: &ExecPrepared,
-    artifacts: &ArtifactRegistry,
+    artifacts: &impl ArtifactRegistry,
 ) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
-        if tokio::fs::try_exists(path).await.unwrap_or(false) {
+        if artifacts.is_path_produced(path).await {
             artifacts
                 .commit(uri_str, path)
                 .await
@@ -440,6 +440,7 @@ impl crate::stages::base::Stage for Exec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifacts::registry::FileSystemArtifactRegistry;
     use std::fs;
     use std::path::Path;
 
@@ -448,7 +449,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = ArtifactRegistry::new(artifact_dir);
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
 
         // A sibling already committed this URI.
         let uri = Uri::parse("artifact://out.txt").unwrap();
@@ -491,7 +492,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = ArtifactRegistry::new(artifact_dir);
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -511,7 +512,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = ArtifactRegistry::new(artifact_dir);
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -530,7 +531,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = ArtifactRegistry::new(artifact_dir);
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
