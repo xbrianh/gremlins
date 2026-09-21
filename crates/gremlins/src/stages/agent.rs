@@ -1036,27 +1036,6 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_agent_allows_recovering_from_stale_binding() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let reg = make_registry(ensure_artifact_dir(&tmp));
-
-        // Registered but its file is gone: a skip_if_exists producer must be
-        // able to run (and commit) again.
-        let uri = Uri::parse("artifact://plan.md").unwrap();
-        let stale = reg.write_into_registry(&uri, "# plan").unwrap();
-        std::fs::remove_file(&stale).unwrap();
-
-        let agent = agent_with_bind("plan", "artifact://plan.md");
-        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new()).unwrap();
-        std::fs::write(&prepared.bind_paths["plan"], "# new plan").unwrap();
-        commit_agent(&prepared, &reg).unwrap();
-        assert_eq!(
-            reg.content("artifact://plan.md", None).unwrap(),
-            "# new plan",
-        );
-    }
-
-    #[test]
     fn test_commit_agent_rejects_missing_non_optional() {
         let tmp = tempfile::TempDir::new().unwrap();
         let reg = make_registry(ensure_artifact_dir(&tmp));

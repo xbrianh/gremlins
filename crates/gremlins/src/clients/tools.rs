@@ -3295,4 +3295,120 @@ mod tests {
         let err = bash_check(&roots, "cat /etc/passwd", Some(&worktree)).unwrap();
         assert!(err.contains("outside sandbox"), "got: {err}");
     }
+
+    // --- Opaque artifact key resolution tests ---
+
+    /// Minimal test resolver: maps known hex keys to artifact_dir paths,
+    /// returns None for anything else. The real hex-key validation is tested
+    /// in registry.rs; here we just verify the tool-layer wiring.
+    fn opaque_resolver_fn(
+        artifact_dir: &Path,
+    ) -> Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync> {
+        let dir = artifact_dir.to_path_buf();
+        Arc::new(move |key: &str| {
+            // Accept any key that looks like an opaque hex key (11+ hex chars
+            // with optional extension) — the real resolver does stricter
+            // validation; this is just for testing the tool-layer wiring.
+            let hex_part = if let Some(dot) = key.find('.') {
+                &key[..dot]
+            } else {
+                key
+            };
+            if hex_part.len() >= 11 && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+                Some(dir.join(key))
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn read_sync_resolves_opaque_key() {
+        let dir = tmp();
+        let artifact_dir = dir.join("artifacts");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let hex_key = "a1b2c3d4e5f.md";
+        let real_path = artifact_dir.join(hex_key);
+        std::fs::write(&real_path, "secret content").unwrap();
+
+        let resolver = opaque_resolver_fn(&artifact_dir);
+        // Canonicalize roots to match what io_enforce sees (macOS /var -> /private/var).
+        let roots = vec![artifact_dir.canonicalize().unwrap()];
+        let args = serde_json::json!({"file_path": hex_key}).to_string();
+        let result = read_sync(None, &roots, Some(resolver.as_ref()), &args);
+        assert_eq!(result, "secret content");
+    }
+
+    #[test]
+    fn read_sync_falls_back_when_opaque_key_invalid() {
+        let dir = tmp();
+        let artifact_dir = dir.join("artifacts");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let normal_file = dir.join("normal.txt");
+        std::fs::write(&normal_file, "normal content").unwrap();
+
+        let resolver = opaque_resolver_fn(&artifact_dir);
+        let roots = vec![dir.canonicalize().unwrap()];
+        // "normal.txt" is not a valid hex key, so resolver returns None
+        // and it falls through to standard path resolution.
+        let args = serde_json::json!({"file_path": "normal.txt"}).to_string();
+        let result = read_sync(Some(&dir), &roots, Some(resolver.as_ref()), &args);
+        assert_eq!(result, "normal content");
+    }
+
+    #[test]
+    fn write_sync_resolves_opaque_key() {
+        let dir = tmp();
+        let artifact_dir = dir.join("artifacts");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let hex_key = "f0e1d2c3b4a.txt";
+
+        let resolver = opaque_resolver_fn(&artifact_dir);
+        let roots = vec![artifact_dir.canonicalize().unwrap()];
+        let args =
+            serde_json::json!({"file_path": hex_key, "content": "written via opaque"}).to_string();
+        let result = write_sync(None, &roots, Some(resolver.as_ref()), &args);
+        assert_eq!(result, "OK");
+        let real_path = artifact_dir.join(hex_key);
+        assert_eq!(
+            std::fs::read_to_string(&real_path).unwrap(),
+            "written via opaque"
+        );
+    }
+
+    #[test]
+    fn write_sync_falls_back_when_opaque_key_invalid() {
+        let dir = tmp();
+        let artifact_dir = dir.join("artifacts");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+
+        let resolver = opaque_resolver_fn(&artifact_dir);
+        let roots = vec![dir.canonicalize().unwrap()];
+        let normal_file = dir.join("output.txt");
+        let args =
+            serde_json::json!({"file_path": normal_file.to_str().unwrap(), "content": "fallback"})
+                .to_string();
+        let result = write_sync(None, &roots, Some(resolver.as_ref()), &args);
+        assert_eq!(result, "OK");
+        assert_eq!(std::fs::read_to_string(&normal_file).unwrap(), "fallback");
+    }
+
+    #[test]
+    fn read_sync_opaque_key_still_enforces_containment() {
+        let dir = tmp();
+        let artifact_dir = dir.join("artifacts");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let hex_key = "a1b2c3d4e5f.md";
+        let real_path = artifact_dir.join(hex_key);
+        std::fs::write(&real_path, "secret").unwrap();
+
+        let resolver = opaque_resolver_fn(&artifact_dir);
+        // Roots do NOT include artifact_dir — containment should fail.
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let roots = vec![other.canonicalize().unwrap()];
+        let args = serde_json::json!({"file_path": hex_key}).to_string();
+        let result = read_sync(None, &roots, Some(resolver.as_ref()), &args);
+        assert!(result.contains("outside sandbox"), "got: {result}");
+    }
 }

@@ -163,10 +163,13 @@ impl ArtifactRegistry {
         Ok((opaque_key, real_path.to_string_lossy().to_string()))
     }
 
-    /// Resolve an opaque key string to a real filesystem path inside
-    /// `artifact_dir`, if the key looks valid (11 hex chars + optional
-    /// extension) and the resolved path stays inside `artifact_dir`.
-    pub fn resolve_opaque_key(&self, key: &str) -> Option<PathBuf> {
+    /// Shared validation and resolution for opaque keys. Returns the
+    /// canonicalized real path on success, or `None` if the key is invalid.
+    fn resolve_opaque_key_impl(artifact_dir: &Path, key: &str) -> Option<PathBuf> {
+        // Reject path separators — opaque keys are bare filenames.
+        if key.contains('/') || key.contains('\\') {
+            return None;
+        }
         // Must start with 11 hex chars, optionally followed by a dot and extension.
         let hex_part = if let Some(dot_pos) = key.find('.') {
             &key[..dot_pos]
@@ -176,16 +179,16 @@ impl ArtifactRegistry {
         if hex_part.len() != 11 || !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
-        // Extension must be non-empty if present.
+        // Extension must be non-empty if present, and must not contain path separators.
         if let Some(dot_pos) = key.find('.') {
             let ext = &key[dot_pos + 1..];
-            if ext.is_empty() {
+            if ext.is_empty() || ext.contains('/') || ext.contains('\\') {
                 return None;
             }
         }
-        let real = self.artifact_dir.join(key);
+        let real = artifact_dir.join(key);
         // Containment: the resolved path must start with artifact_dir.
-        let base = self.artifact_dir.canonicalize().ok()?;
+        let base = artifact_dir.canonicalize().ok()?;
         let resolved = match real.canonicalize() {
             Ok(c) => c,
             Err(_) => {
@@ -197,7 +200,16 @@ impl ArtifactRegistry {
         if !resolved.starts_with(&base) {
             return None;
         }
-        Some(real)
+        // Return the canonicalized path so downstream io_enforce (which
+        // canonicalizes roots) sees a matching prefix.
+        Some(resolved)
+    }
+
+    /// Resolve an opaque key string to a real filesystem path inside
+    /// `artifact_dir`, if the key looks valid (11 hex chars + optional
+    /// extension) and the resolved path stays inside `artifact_dir`.
+    pub fn resolve_opaque_key(&self, key: &str) -> Option<PathBuf> {
+        Self::resolve_opaque_key_impl(&self.artifact_dir, key)
     }
 
     /// Return a closure that delegates to [`resolve_opaque_key`], for
@@ -205,41 +217,12 @@ impl ArtifactRegistry {
     #[allow(clippy::type_complexity)]
     pub fn opaque_resolver(&self) -> Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync> {
         let artifact_dir = self.artifact_dir.clone();
-        Arc::new(move |key: &str| {
-            // Must start with 11 hex chars, optionally followed by a dot and extension.
-            let hex_part = if let Some(dot_pos) = key.find('.') {
-                &key[..dot_pos]
-            } else {
-                key
-            };
-            if hex_part.len() != 11 || !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
-                return None;
-            }
-            if let Some(dot_pos) = key.find('.') {
-                let ext = &key[dot_pos + 1..];
-                if ext.is_empty() {
-                    return None;
-                }
-            }
-            let real = artifact_dir.join(key);
-            let base = artifact_dir.canonicalize().ok()?;
-            let resolved = match real.canonicalize() {
-                Ok(c) => c,
-                Err(_) => {
-                    let parent = real.parent()?.canonicalize().ok()?;
-                    parent.join(real.file_name()?)
-                }
-            };
-            if !resolved.starts_with(&base) {
-                return None;
-            }
-            Some(real)
-        })
+        Arc::new(move |key: &str| Self::resolve_opaque_key_impl(&artifact_dir, key))
     }
 
     /// Bind `key` to `path` and persist. The file at `path` must already exist;
     /// idempotent for an identical binding; a conflicting binding is a
-    /// `DuplicateArtifact` error unless the existing file is gone (stale binding).
+    /// `DuplicateArtifact` error.
     pub fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.locked_write(|data| {
             if let Some(existing) = data.get(key) {
@@ -247,21 +230,11 @@ impl ArtifactRegistry {
                     log::debug!("commit: {:?} already bound to same path — idempotent", key);
                     return Ok(());
                 }
-                // Allow overwriting a stale binding whose file is gone.
-                if !Path::new(existing).exists() {
-                    log::debug!(
-                        "commit: {:?} stale binding (file gone) — replacing {:?} with {:?}",
-                        key,
-                        existing,
-                        path
-                    );
-                } else {
-                    return Err(Box::new(DuplicateArtifact {
-                        key: key.to_string(),
-                        existing: existing.clone(),
-                        incoming: path.to_string(),
-                    }));
-                }
+                return Err(Box::new(DuplicateArtifact {
+                    key: key.to_string(),
+                    existing: existing.clone(),
+                    incoming: path.to_string(),
+                }));
             }
             if !Path::new(path).exists() {
                 return Err(Box::new(std::io::Error::new(
@@ -789,7 +762,8 @@ mod tests {
         let (key, _path) = reg.opaque_path(&uri).unwrap();
         let resolved = reg.resolve_opaque_key(&key).unwrap();
         assert!(resolved.ends_with(&key));
-        assert!(resolved.starts_with(&reg.artifact_dir));
+        let canonical_artifact_dir = reg.artifact_dir.canonicalize().unwrap();
+        assert!(resolved.starts_with(&canonical_artifact_dir));
     }
 
     #[test]
@@ -807,6 +781,18 @@ mod tests {
         let reg = ArtifactRegistry::new(artifact_dir);
         // A valid-looking hex key with ../ traversal
         assert!(reg.resolve_opaque_key("../etc/passwd").is_none());
+    }
+
+    #[test]
+    fn test_resolve_opaque_key_rejects_path_separators() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        // Hex key with a slash in the extension — must be rejected.
+        assert!(reg.resolve_opaque_key("0123456789a.md/subdir").is_none());
+        // Backslash in key.
+        assert!(reg.resolve_opaque_key("0123456789a\\etc").is_none());
+        // Slash in the hex part.
+        assert!(reg.resolve_opaque_key("01234/6789a").is_none());
     }
 
     #[test]
