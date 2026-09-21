@@ -3298,12 +3298,12 @@ mod tests {
 
     // --- Opaque artifact key resolution tests ---
 
+    type OpaqueResolver = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+
     /// Minimal test resolver: maps known hex keys to artifact_dir paths,
     /// returns None for anything else. The real hex-key validation is tested
     /// in registry.rs; here we just verify the tool-layer wiring.
-    fn opaque_resolver_fn(
-        artifact_dir: &Path,
-    ) -> Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync> {
+    fn opaque_resolver_fn(artifact_dir: &Path) -> OpaqueResolver {
         let dir = artifact_dir.to_path_buf();
         Arc::new(move |key: &str| {
             // Accept any key that looks like an opaque hex key (11+ hex chars
