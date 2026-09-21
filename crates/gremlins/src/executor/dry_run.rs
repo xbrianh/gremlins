@@ -125,10 +125,23 @@ fn walk_stage<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
         match stage {
-            RunnableStage::Agent { stage: agent, .. } => {
+            RunnableStage::Agent {
+                stage: agent,
+                skip_if_exists,
+                ..
+            } => {
                 let mut fsubs = framework_subs.clone();
                 fsubs.insert("name".to_string(), agent.name.clone());
                 let loop_iter = fsubs.get("loop_iter").map(String::as_str).unwrap_or("1");
+
+                // Respect skip_if_exists: if the guard artifact is already
+                // registered, the stage is a no-op at runtime — skip it.
+                if !skip_if_exists.is_empty() {
+                    let resolved = skip_if_exists.replace("{loop_iter}", loop_iter);
+                    if registry.is_registered(&resolved).await {
+                        return;
+                    }
+                }
 
                 match prepare_agent(agent, registry, loop_iter, &fsubs).await {
                     Ok(prepared) => commit_prepared_agent(registry, &prepared, errors).await,
@@ -137,10 +150,23 @@ fn walk_stage<'a>(
                     }
                 }
             }
-            RunnableStage::Exec { stage: exec, .. } => {
+            RunnableStage::Exec {
+                stage: exec,
+                skip_if_exists,
+                ..
+            } => {
                 let mut fsubs = framework_subs.clone();
                 fsubs.insert("name".to_string(), exec.name.clone());
                 let loop_iter = fsubs.get("loop_iter").map(String::as_str).unwrap_or("1");
+
+                // Respect skip_if_exists: if the guard artifact is already
+                // registered, the stage is a no-op at runtime — skip it.
+                if !skip_if_exists.is_empty() {
+                    let resolved = skip_if_exists.replace("{loop_iter}", loop_iter);
+                    if registry.is_registered(&resolved).await {
+                        return;
+                    }
+                }
 
                 match prepare_exec(exec, registry, loop_iter, &fsubs).await {
                     Ok(prepared) => commit_prepared_exec(registry, &prepared, errors).await,
@@ -190,7 +216,9 @@ fn commit_prepared_agent<'a>(
     errors: &'a mut DryRunErrors,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        for (key, uri_str, _optional) in &prepared.bind_uris {
+        for (key, uri_str, optional) in &prepared.bind_uris {
+            // Always parse the URI first — even optional binds must be
+            // validated so malformed URIs are caught.
             let uri = match crate::artifacts::uri::Uri::parse(uri_str) {
                 Ok(u) => u,
                 Err(e) => {
@@ -198,6 +226,13 @@ fn commit_prepared_agent<'a>(
                     continue;
                 }
             };
+            // Optional binds only skip committing when the artifact already
+            // exists at runtime.  If it is not yet registered, the optional
+            // bind is the first producer and must commit so downstream
+            // consumers can resolve it.
+            if *optional && registry.is_registered(uri_str).await {
+                continue;
+            }
             let path = match registry.path_for_uri(&uri).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -224,7 +259,9 @@ fn commit_prepared_exec<'a>(
     errors: &'a mut DryRunErrors,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        for (key, uri_str, _optional) in &prepared.bind_uris {
+        for (key, uri_str, optional) in &prepared.bind_uris {
+            // Always parse the URI first — even optional binds must be
+            // validated so malformed URIs are caught.
             let uri = match crate::artifacts::uri::Uri::parse(uri_str) {
                 Ok(u) => u,
                 Err(e) => {
@@ -232,6 +269,13 @@ fn commit_prepared_exec<'a>(
                     continue;
                 }
             };
+            // Optional binds only skip committing when the artifact already
+            // exists at runtime.  If it is not yet registered, the optional
+            // bind is the first producer and must commit so downstream
+            // consumers can resolve it.
+            if *optional && registry.is_registered(uri_str).await {
+                continue;
+            }
             let path = match registry.path_for_uri(&uri).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -289,6 +333,12 @@ fn bootstrap_artifact_keys(definition: &GremlinDefinition) -> Vec<String> {
             }
         }
     }
+
+    // Implicit artifacts always bound at launch — the schema-level
+    // `check_unresolved_consumers` treats these as always-produced, so
+    // the dry-run registry must seed them as well.
+    keys.push("artifact://base_sha".to_string());
+    keys.push("artifact://base_ref".to_string());
 
     keys
 }
@@ -501,6 +551,126 @@ stages:
         let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
         let errors = validate_definition(&definition).await;
         // Parallel children have isolated registries, so no conflict.
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[tokio::test]
+    async fn skip_if_exists_on_seeded_artifact_skips_stage() {
+        // A stage with skip_if_exists on an artifact seeded via cli_out
+        // should be skipped entirely — no error, no duplicate from its bind.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(
+            dir.path(),
+            "demo",
+            r#"
+default_client: 'cmd:true'
+bootstrap:
+  cli_out:
+    done: "artifact://done"
+
+stages:
+  - name: conditional
+    type: exec
+    skip_if_exists: "artifact://done"
+    bind:
+      out: "artifact://done"
+    options:
+      cmds: ["echo {out}"]
+"#,
+        );
+
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let errors = validate_definition(&definition).await;
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[tokio::test]
+    async fn optional_bind_after_non_optional_skips_no_duplicate() {
+        // An optional bind whose artifact is already registered (by a
+        // prior non-optional bind) is skipped — no false duplicate.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(
+            dir.path(),
+            "demo",
+            r#"
+default_client: 'cmd:true'
+
+stages:
+  - name: first
+    type: exec
+    bind:
+      out: "artifact://plan.md"
+    options:
+      cmds: ["echo {out}"]
+  - name: second
+    type: exec
+    bind:
+      out?: "artifact://plan.md"
+    options:
+      cmds: ["echo {out}"]
+"#,
+        );
+
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let errors = validate_definition(&definition).await;
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[tokio::test]
+    async fn optional_bind_as_first_producer_commits() {
+        // An optional bind that is the first producer must commit so
+        // downstream consumers can resolve the artifact.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(
+            dir.path(),
+            "demo",
+            r#"
+default_client: 'cmd:true'
+
+stages:
+  - name: producer
+    type: exec
+    bind:
+      out?: "artifact://plan.md"
+    options:
+      cmds: ["echo {out}"]
+  - name: consumer
+    type: exec
+    interpolation:
+      plan: content("artifact://plan.md")
+    options:
+      cmds: ["echo {plan}"]
+"#,
+        );
+
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let errors = validate_definition(&definition).await;
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[tokio::test]
+    async fn stage_consuming_base_sha_passes() {
+        // artifact://base_sha is an implicit artifact always available.
+        // The dry-run must seed it so interpolation consumers find it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(
+            dir.path(),
+            "demo",
+            r#"
+default_client: 'cmd:true'
+
+stages:
+  - name: reader
+    type: exec
+    interpolation:
+      base: content("artifact://base_sha")
+    options:
+      cmds: ["echo {base}"]
+"#,
+        );
+
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let errors = validate_definition(&definition).await;
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 }
