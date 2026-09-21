@@ -12,6 +12,7 @@ use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
 pub mod bootstrap;
+pub mod dry_run;
 pub mod gremlin;
 pub mod parallel;
 pub mod run;

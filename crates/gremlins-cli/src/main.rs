@@ -10,6 +10,7 @@ use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
+use gremlins::executor::dry_run;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
@@ -90,6 +91,11 @@ enum Cmds {
         /// Gremlin id whose land block to run.
         id: String,
     },
+    /// Validate a definition without executing it.
+    Validate {
+        /// Gremlin definition: a bare name (resolved under .gremlins/) or a path.
+        definition: String,
+    },
     /// `gremlins <id>` — print detailed status for one gremlin.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -109,6 +115,7 @@ async fn main() {
         Some(Cmds::Clean { id, keep }) => clean(&id, keep),
         Some(Cmds::Rm { id }) => rm(&id),
         Some(Cmds::Land { id }) => land(&id).await,
+        Some(Cmds::Validate { definition }) => validate(&definition).await,
         Some(Cmds::External(args)) => status_external(&args),
         None => {
             // No subcommand — print help and exit 0.
@@ -808,6 +815,33 @@ async fn land(id: &str) -> Result<(), String> {
         std::process::exit(result.returncode);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate
+// ---------------------------------------------------------------------------
+
+/// Validate a definition without executing anything.
+async fn validate(definition: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    let project_root = config::project_root();
+    let definition_path = discovery::resolve_definition_path(definition, project_root.clone())
+        .map_err(|e| format!("definition not found: {e}"))?;
+
+    let gremlin_def = GremlinDefinition::from_yaml(&definition_path, None)
+        .map_err(|e| format!("invalid definition: {e}"))?;
+
+    let errors = dry_run::validate_definition(&gremlin_def).await;
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        for error in &errors {
+            eprintln!("{error}");
+        }
+        Err(format!("definition has {} error(s)", errors.len()))
+    }
 }
 
 /// Read a state field for display, treating null/absent as empty.
