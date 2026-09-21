@@ -65,36 +65,24 @@ A provider also requires either its API key (`OPENAI_API_KEY`, `XAI_API_KEY`,
 ## Dev install
 
 ```sh
-uv venv
-source .venv/bin/activate  # or `.venv\Scripts\activate` on Windows
-uv pip install -e ".[dev]"
-make install               # build + install the Rust native extension
+cargo build
 ```
-
-Run `uv pip install -e ".[dev]"` **before** `make install` — the dev extra installs `maturin`, which `make install` requires.
 
 ## Make targets
 
 | Target | What it runs |
 |---|---|
-| `make install` | `maturin develop` |
-| `make release` | `maturin develop --release` |
-| `make test` | `cargo test -p gremlins --lib && cargo test -p gremlins-pyext --lib`, then each `tests/test_*.py` via pytest |
-| `make lint` | `ruff check .` |
-| `make format` | `ruff format --check .` |
-| `make format-write` | `ruff format .` |
-| `make typecheck` | `pyright` (gremlins/) |
-| `make rust-test` | `cargo test -p gremlins --lib && cargo test -p gremlins-pyext --lib` |
+| `make test` | `cargo test -p gremlins --lib` |
+| `make rust-test` | `cargo test -p gremlins --lib` |
 | `make rust-fmt` | `cargo fmt --all` |
 | `make rust-fmt-check` | `cargo fmt --all -- --check` |
 | `make rust-clippy` | `cargo clippy --all-targets -- -D warnings` |
-| `make check` | lint + format + typecheck + rust-fmt-check + rust-clippy |
+| `make check` | rust-fmt-check + rust-clippy |
 
 ## CLI subcommands
 
-Invoked as `python -m gremlins.cli <subcommand>` or `gremlins <subcommand>`
-after install. The authoritative list and per-subcommand description lives in
-the dispatch table in [`gremlins/cli/__init__.py`](gremlins/cli/__init__.py).
+Invoked as `gremlins <subcommand>`. The authoritative list and per-subcommand
+description lives in the CLI dispatch table.
 
 | Subcommand | Purpose |
 |---|---|
@@ -193,11 +181,7 @@ bootstrap:                    # optional; CLI contract and setup commands
   launch_cmds:
     - gremlins:bind_artifact("artifact://plan.md", plan)
   cmds:
-    - "uv sync"
-  cli_out:
-    pr: "opaque://pr/{read:pr-num}"
-
-prompts:                      # optional; named prompt map
+    - "cargo build"
   code-style: gremlins:code_style.md
 
 prompt_dir: ../prompts        # optional; relative to YAML, defaults to the YAML's directory
@@ -206,7 +190,7 @@ stage-definitions:            # optional; reusable stage patterns
   normalize:
     type: exec
     options:
-      cmds: ["ruff format . && ruff check --fix ."]
+      cmds: ["cargo fmt --all && cargo clippy --fix --allow-dirty"]
 
 land:                         # optional; exec stage run by `gremlins land`
   interpolation:
@@ -331,7 +315,7 @@ options:
 
 ### Stage types: primitives
 
-Five primitive stage types are built into the engine (`gremlins/definition/loader.py`):
+Five primitive stage types are built into the engine:
 
 | Type | Description |
 |---|---|
@@ -381,7 +365,7 @@ bootstrap:
   launch_cmds:
     - gremlins:bind_artifact("artifact://plan.md", plan)
   cmds:
-    - "uv sync"
+    - "cargo build"
   cli_out:
     pr: "opaque://pr/{read:pr-num}"
 ```
@@ -390,7 +374,7 @@ bootstrap:
 |---|---|
 | `source` | Declares CLI flags. Each key becomes a `--<key>` flag (required unless `optional: true`). Supported types: `filepath`, `string`. |
 | `launch_cmds` | Shell commands run once at launch. Supports the `gremlins:bind_artifact(uri, source_key)` DSL for resolving source values into artifacts. |
-| `cmds` | Shell commands run in every worktree (e.g. `uv sync` to set up the dev environment). |
+| `cmds` | Shell commands run in every worktree (e.g. `cargo build` to build the crate). |
 | `cli_out` | Artifact bindings computed at launch from source values (e.g. binding an `opaque://pr/{read:pr-num}` URI from a `--pr-num` flag). |
 
 The `gremlins:bind_artifact` DSL resolves a source value (GitHub issue ref, filepath, or inline text) and binds it as an artifact in the registry. GitHub issue refs (`#N` or `owner/repo#N`) are downloaded via `gh issue view`.
@@ -470,7 +454,7 @@ default_client: xai:grok-4
 stages:
   - { type: gremlins:plan,       prompt: [code-style, gremlins:plan.md] }
   - { type: gremlins:implement,  prompt: [code-style, gremlins:implement_local.md] }
-  - { type: verify,              options: { cmds: ["pytest"] }, prompt: verify }
+  - { type: verify,              options: { cmds: ["cargo test"] }, prompt: verify }
   - { type: review-code }
   - { name: address-code, type: agent, client: openai:gpt-4o, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md], interpolation: {text: review-code} }
 ```
@@ -540,7 +524,7 @@ stages:
   - name: scan
     type: exec
     options:
-      cmds: ["python scan.py > \"{report}\""]
+      cmds: ["./scan > \"{report}\""]
     bind:
       report: file://session/report
 
@@ -761,7 +745,7 @@ for their interactive session is exactly what the subprocess sees:
   Discover it at runtime:
 
   ```
-  python -c "from gremlins import paths; print(paths.work_root())"
+  gremlins paths work-root
   ```
 
   On Linux/macOS this is `/tmp/gremlins`; the OS reclaims orphaned
@@ -784,8 +768,8 @@ The file is sourced via `bash`, so it can use command substitution,
 conditionals, and anything bash supports:
 
 ```sh
-export VIRTUAL_ENV=$(poetry env info --path)
-export PATH="$VIRTUAL_ENV/bin:$PATH"
+export RUST_BACKTRACE=1
+export RUST_LOG=debug
 export TEST_DATABASE_URL=postgresql://localhost/mydb_test
 ```
 
@@ -793,16 +777,10 @@ Add `.gremlins/env` to your `~/.gitignore_global` or project `.gitignore`.
 
 ### Loader API
 
-- `gremlins/definition/__init__.py::GremlinDefinition.from_yaml(path)` — loads and expands a gremlin definition YAML file, validates duplicate producers, fills stage clients.
-- `gremlins/definition/loader.py` — `STAGE_TYPES` (primitive type → class map), `parse_stages`, `parse_stage`, `fill_names`, `check_duplicate_producers`.
-- `gremlins/definition/discovery.py` — `resolve_definition_path`, `resolve_definition_name`, `list_definitions`.
-- `gremlins/definition/preprocess.py` — `expand_definition` (include/prompt/recipe/stage-definition expansion).
+- `gremlins/definition/` — `GremlinDefinition`, loader, discovery, and preprocess modules for YAML definition loading, stage parsing, and recipe expansion.
 
 ## Internals docs
 
-- [`gremlins/AGENTS.md`](gremlins/AGENTS.md) — module layout, entry points,
-  testability seam, byte-stable strings
-- [`gremlins/clients/AGENTS.md`](gremlins/clients/AGENTS.md) — client backend internals
-- [`gremlins/fleet/AGENTS.md`](gremlins/fleet/AGENTS.md) — fleet manager internals
-- [`gremlins/definitions/AGENTS.md`](gremlins/definitions/AGENTS.md) — definition configuration internals
-- [`gremlins/stages/AGENTS.md`](gremlins/stages/AGENTS.md) — stage internals
+- [`crates/gremlins/`](crates/gremlins/) — main crate: executor, stages, clients, artifacts, CLI
+- [`DESIGN.md`](DESIGN.md) — system design
+- [`plans/`](plans/) — design notes and feature sketches
