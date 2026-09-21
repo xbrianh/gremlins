@@ -24,7 +24,7 @@ stages:
 
   - name: compose-pr
     type: agent
-    skip_if_exists: "artifact://pr-branch.txt"
+    skip_if_exists: "artifact://pr-title.txt"
     interpolation:
       base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
       plan_issue_number: content("artifact://plan-issue-number.txt")
@@ -35,7 +35,6 @@ stages:
     bind:
       pr_title:  "artifact://pr-title.txt"
       pr_body:   "artifact://pr-body.md"
-      pr_branch: "artifact://pr-branch.txt"
 
   - name: push-and-open
     type: exec
@@ -46,6 +45,7 @@ stages:
     bind:
       pr_number: "artifact://pr-number.txt"
       pr_url:    "artifact://pr-url.txt"
+      pr_branch: "artifact://pr-branch.txt"
     options:
       cmds:
-        - 'gh_create_pr "{base_ref_to_open_pr}" "{pr_title}" "{pr_body_file}" "{pr_number}" "{pr_url}"'
+        - 'gh_create_pr "{base_ref_to_open_pr}" "{pr_title}" "{pr_body_file}" "{pr_number}" "{pr_url}" "{pr_branch}"'

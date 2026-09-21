@@ -17,13 +17,15 @@ teardown() {
     rm -rf "$ARTIFACT_DIR"
 }
 
-@test "creates PR and writes number and URL files" {
+@test "creates PR and writes number, URL, and branch files" {
     mock_git 'push origin.*HEAD:refs/heads/' '' 0
     mock_gh 'pr create' 'https://github.com/owner/repo/pull/99'
-    run bash "$SCRIPT" "main" "My PR Title" "$BODY_FILE" "$NUMBER_FILE" "$URL_FILE"
+    BRANCH_FILE="$ARTIFACT_DIR/pr-branch.txt"
+    run bash "$SCRIPT" "main" "My PR Title" "$BODY_FILE" "$NUMBER_FILE" "$URL_FILE" "$BRANCH_FILE"
     [ "$status" -eq 0 ]
     [ "$(cat "$NUMBER_FILE")" = "99" ]
     [ "$(cat "$URL_FILE")" = "https://github.com/owner/repo/pull/99" ]
+    [[ "$(cat "$BRANCH_FILE")" =~ ^my-pr-title-[0-9a-f]{4}$ ]]
 }
 
 @test "dies without arguments" {
@@ -34,6 +36,7 @@ teardown() {
 
 @test "dies when git push fails" {
     mock_git 'push origin.*HEAD:refs/heads/' 'fatal: remote rejected' 1
-    run bash "$SCRIPT" "main" "My PR Title" "$BODY_FILE" "$NUMBER_FILE" "$URL_FILE"
+    BRANCH_FILE="$ARTIFACT_DIR/pr-branch.txt"
+    run bash "$SCRIPT" "main" "My PR Title" "$BODY_FILE" "$NUMBER_FILE" "$URL_FILE" "$BRANCH_FILE"
     [ "$status" -eq 1 ]
 }
