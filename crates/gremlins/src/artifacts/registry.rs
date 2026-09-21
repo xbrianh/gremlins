@@ -30,7 +30,7 @@ pub struct DuplicateArtifact {
 /// `commit_exec`, and `resolve_interpolation_map` require from a registry.
 ///
 /// Implemented by [`ArtifactRegistry`] (the real filesystem-backed registry)
-/// and [`DryRunRegistry`] (a no-I/O stub for dry-run execution).
+/// and [`DryRunArtifactRegistry`] (a no-I/O stub for dry-run execution).
 #[allow(async_fn_in_trait)]
 pub trait Registry {
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact>;
@@ -406,7 +406,7 @@ impl Registry for ArtifactRegistry {
     }
 }
 
-// --- DryRunRegistry ---
+// --- DryRunArtifactRegistry ---
 
 /// A no-I/O registry for dry-run execution.
 ///
@@ -415,11 +415,11 @@ impl Registry for ArtifactRegistry {
 /// paths under `/dev/null/dry-run/` — no filesystem access, no directory
 /// creation. `content` delegates to `data_uri`, mirroring the real
 /// `ArtifactRegistry` so the two methods are always consistent.
-pub struct DryRunRegistry {
+pub struct DryRunArtifactRegistry {
     produced: Mutex<HashMap<String, String>>,
 }
 
-impl DryRunRegistry {
+impl DryRunArtifactRegistry {
     /// Create a registry pre-populated with the given set of keys.
     /// Each key is mapped to a sentinel path derived from the key itself.
     pub fn seeded(keys: impl IntoIterator<Item = String>) -> Self {
@@ -430,14 +430,14 @@ impl DryRunRegistry {
                 (k, path)
             })
             .collect();
-        DryRunRegistry {
+        DryRunArtifactRegistry {
             produced: Mutex::new(map),
         }
     }
 
     /// Create an empty registry.
     pub fn new() -> Self {
-        DryRunRegistry {
+        DryRunArtifactRegistry {
             produced: Mutex::new(HashMap::new()),
         }
     }
@@ -457,13 +457,13 @@ impl DryRunRegistry {
     }
 }
 
-impl Default for DryRunRegistry {
+impl Default for DryRunArtifactRegistry {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Registry for DryRunRegistry {
+impl Registry for DryRunArtifactRegistry {
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
         let map = self.produced.lock().unwrap();
         map.get(key).cloned().ok_or_else(|| MissingArtifact {
@@ -543,15 +543,15 @@ mod tests {
     fn dry_run_registry_is_send_sync() {
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
-        assert_send::<DryRunRegistry>();
-        assert_sync::<DryRunRegistry>();
+        assert_send::<DryRunArtifactRegistry>();
+        assert_sync::<DryRunArtifactRegistry>();
     }
 
-    // --- DryRunRegistry tests ---
+    // --- DryRunArtifactRegistry tests ---
 
     #[tokio::test]
     async fn test_dry_run_is_registered_after_commit() {
-        let reg = DryRunRegistry::new();
+        let reg = DryRunArtifactRegistry::new();
         assert!(!reg.is_registered("artifact://out.md").await);
         reg.commit("artifact://out.md", "/dev/null/dry-run/out.md")
             .await
@@ -561,7 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dry_run_data_uri_returns_sentinel() {
-        let reg = DryRunRegistry::seeded(["artifact://x".to_string()]);
+        let reg = DryRunArtifactRegistry::seeded(["artifact://x".to_string()]);
         assert_eq!(
             reg.data_uri("artifact://x").await.unwrap(),
             "/dev/null/dry-run/x"
@@ -570,27 +570,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_dry_run_data_uri_missing() {
-        let reg = DryRunRegistry::new();
+        let reg = DryRunArtifactRegistry::new();
         let err = reg.data_uri("artifact://x").await.unwrap_err();
         assert!(err.to_string().contains("artifact://x"));
     }
 
     #[tokio::test]
     async fn test_dry_run_content_returns_placeholder() {
-        let reg = DryRunRegistry::seeded(["artifact://x".to_string()]);
+        let reg = DryRunArtifactRegistry::seeded(["artifact://x".to_string()]);
         assert_eq!(reg.content("artifact://x", None).await.unwrap(), "dry-run");
     }
 
     #[tokio::test]
     async fn test_dry_run_content_missing() {
-        let reg = DryRunRegistry::new();
+        let reg = DryRunArtifactRegistry::new();
         let err = reg.content("artifact://x", None).await.unwrap_err();
         assert!(err.to_string().contains("artifact://x"));
     }
 
     #[tokio::test]
     async fn test_dry_run_path_for_uri_returns_sentinel() {
-        let reg = DryRunRegistry::new();
+        let reg = DryRunArtifactRegistry::new();
         let uri = Uri::parse("artifact://out.md").unwrap();
         assert_eq!(
             reg.path_for_uri(&uri).await.unwrap(),
@@ -600,7 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dry_run_write_into_registry_returns_sentinel() {
-        let reg = DryRunRegistry::new();
+        let reg = DryRunArtifactRegistry::new();
         let uri = Uri::parse("artifact://out.md").unwrap();
         let path = reg.write_into_registry(&uri, "content").await.unwrap();
         assert_eq!(path, "/dev/null/dry-run/out.md");
