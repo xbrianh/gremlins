@@ -24,15 +24,16 @@ pub struct DuplicateArtifact {
     pub incoming: String,
 }
 
-// --- Registry trait ---
+// --- ArtifactRegistry trait ---
 
 /// The set of operations that `prepare_agent`, `commit_agent`, `prepare_exec`,
-/// `commit_exec`, and `resolve_interpolation_map` require from a registry.
+/// `commit_exec`, and `resolve_interpolation_map` require from an
+/// [`ArtifactRegistry`].
 ///
 /// Implemented by [`FileSystemArtifactRegistry`] (the real filesystem-backed registry)
 /// and [`DryRunArtifactRegistry`] (a no-I/O stub for dry-run execution).
 #[allow(async_fn_in_trait)]
-pub trait Registry {
+pub trait ArtifactRegistry {
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact>;
     async fn content(
         &self,
@@ -370,9 +371,9 @@ impl FileSystemArtifactRegistry {
     }
 }
 
-// --- Registry impl for FileSystemArtifactRegistry ---
+// --- ArtifactRegistry impl for FileSystemArtifactRegistry ---
 
-impl Registry for FileSystemArtifactRegistry {
+impl ArtifactRegistry for FileSystemArtifactRegistry {
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
         self.data_uri(key).await
     }
@@ -463,7 +464,7 @@ impl Default for DryRunArtifactRegistry {
     }
 }
 
-impl Registry for DryRunArtifactRegistry {
+impl ArtifactRegistry for DryRunArtifactRegistry {
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
         let map = self.produced.lock().unwrap();
         map.get(key).cloned().ok_or_else(|| MissingArtifact {

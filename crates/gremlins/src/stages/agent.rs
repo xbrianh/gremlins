@@ -3,7 +3,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::artifacts::registry::Registry;
+use crate::artifacts::registry::ArtifactRegistry;
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::clients::protocol::CompletedRun;
@@ -167,7 +167,7 @@ impl From<ResolveError> for AgentError {
 
 pub async fn prepare_agent(
     agent: &Agent,
-    artifacts: &impl Registry,
+    artifacts: &impl ArtifactRegistry,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<AgentPrepared, AgentError> {
@@ -256,7 +256,7 @@ pub async fn prepare_agent(
 /// binds may be absent.
 pub async fn commit_agent(
     prepared: &AgentPrepared,
-    artifacts: &impl Registry,
+    artifacts: &impl ArtifactRegistry,
 ) -> Result<(), AgentError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
