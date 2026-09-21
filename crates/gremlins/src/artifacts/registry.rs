@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json;
 use thiserror::Error;
 
 use crate::artifacts::uri::Uri;
+use crate::executor::state;
 
 // --- Errors ---
 
@@ -143,9 +145,104 @@ impl ArtifactRegistry {
         Ok(resolved.to_string_lossy().to_string())
     }
 
+    /// Generate an opaque hex key for `uri` and return `(opaque_key, real_path)`.
+    ///
+    /// The opaque key is a random 11-character hex string, optionally with the
+    /// filename extension from the URI path (e.g. `a1b2c3d4e5f.md`). The real
+    /// path is `artifact_dir/<opaque_key>`. The agent sees only the opaque key;
+    /// the real filesystem path stays hidden.
+    pub fn opaque_path(
+        &self,
+        uri: &Uri,
+    ) -> Result<(String, String), Box<dyn std::error::Error>> {
+        let hex = &state::token_hex(6)[..11];
+        let ext = std::path::Path::new(uri.path.trim_start_matches('/'))
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+        let opaque_key = format!("{hex}{ext}");
+        let real_path = self.artifact_dir.join(&opaque_key);
+        fs::create_dir_all(&self.artifact_dir)?;
+        Ok((opaque_key, real_path.to_string_lossy().to_string()))
+    }
+
+    /// Resolve an opaque key string to a real filesystem path inside
+    /// `artifact_dir`, if the key looks valid (11 hex chars + optional
+    /// extension) and the resolved path stays inside `artifact_dir`.
+    pub fn resolve_opaque_key(&self, key: &str) -> Option<PathBuf> {
+        // Must start with 11 hex chars, optionally followed by a dot and extension.
+        let hex_part = if let Some(dot_pos) = key.find('.') {
+            &key[..dot_pos]
+        } else {
+            key
+        };
+        if hex_part.len() != 11 || !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        // Extension must be non-empty if present.
+        if let Some(dot_pos) = key.find('.') {
+            let ext = &key[dot_pos + 1..];
+            if ext.is_empty() {
+                return None;
+            }
+        }
+        let real = self.artifact_dir.join(key);
+        // Containment: the resolved path must start with artifact_dir.
+        let base = self.artifact_dir.canonicalize().ok()?;
+        let resolved = match real.canonicalize() {
+            Ok(c) => c,
+            Err(_) => {
+                // File may not exist yet (Write creates it). Resolve parent.
+                let parent = real.parent()?.canonicalize().ok()?;
+                parent.join(real.file_name()?)
+            }
+        };
+        if !resolved.starts_with(&base) {
+            return None;
+        }
+        Some(real)
+    }
+
+    /// Return a closure that delegates to [`resolve_opaque_key`], for
+    /// threading through [`RunParams`] and [`ToolContext`].
+    #[allow(clippy::type_complexity)]
+    pub fn opaque_resolver(&self) -> Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync> {
+        let artifact_dir = self.artifact_dir.clone();
+        Arc::new(move |key: &str| {
+            // Must start with 11 hex chars, optionally followed by a dot and extension.
+            let hex_part = if let Some(dot_pos) = key.find('.') {
+                &key[..dot_pos]
+            } else {
+                key
+            };
+            if hex_part.len() != 11 || !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            if let Some(dot_pos) = key.find('.') {
+                let ext = &key[dot_pos + 1..];
+                if ext.is_empty() {
+                    return None;
+                }
+            }
+            let real = artifact_dir.join(key);
+            let base = artifact_dir.canonicalize().ok()?;
+            let resolved = match real.canonicalize() {
+                Ok(c) => c,
+                Err(_) => {
+                    let parent = real.parent()?.canonicalize().ok()?;
+                    parent.join(real.file_name()?)
+                }
+            };
+            if !resolved.starts_with(&base) {
+                return None;
+            }
+            Some(real)
+        })
+    }
+
     /// Bind `key` to `path` and persist. The file at `path` must already exist;
     /// idempotent for an identical binding; a conflicting binding is a
-    /// `DuplicateArtifact` error.
+    /// `DuplicateArtifact` error unless the existing file is gone (stale binding).
     pub fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.locked_write(|data| {
             if let Some(existing) = data.get(key) {
@@ -153,11 +250,21 @@ impl ArtifactRegistry {
                     log::debug!("commit: {:?} already bound to same path — idempotent", key);
                     return Ok(());
                 }
-                return Err(Box::new(DuplicateArtifact {
-                    key: key.to_string(),
-                    existing: existing.clone(),
-                    incoming: path.to_string(),
-                }));
+                // Allow overwriting a stale binding whose file is gone.
+                if !Path::new(existing).exists() {
+                    log::debug!(
+                        "commit: {:?} stale binding (file gone) — replacing {:?} with {:?}",
+                        key,
+                        existing,
+                        path
+                    );
+                } else {
+                    return Err(Box::new(DuplicateArtifact {
+                        key: key.to_string(),
+                        existing: existing.clone(),
+                        incoming: path.to_string(),
+                    }));
+                }
             }
             if !Path::new(path).exists() {
                 return Err(Box::new(std::io::Error::new(
@@ -633,5 +740,89 @@ mod tests {
         fs::write(&reg_file, r#"{"a":"b"}"#).unwrap();
         let reg = ArtifactRegistry::from_registry_file(&reg_file, artifact_dir).unwrap();
         assert_eq!(reg.data_uri("a").unwrap(), "b");
+    }
+
+    // --- opaque key tests ---
+
+    #[test]
+    fn test_opaque_path_format() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        let uri = Uri::parse("artifact://out.md").unwrap();
+        let (key, path) = reg.opaque_path(&uri).unwrap();
+        // Key format: 11 hex chars + ".md"
+        assert_eq!(key.len(), 14); // 11 hex + ".md"
+        let dot = key.find('.').unwrap();
+        assert_eq!(&key[dot..], ".md");
+        let hex_part = &key[..dot];
+        assert_eq!(hex_part.len(), 11);
+        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
+        // Real path is inside artifact_dir
+        assert!(path.starts_with(reg.artifact_dir.to_string_lossy().as_ref()));
+        assert!(path.ends_with(&key));
+    }
+
+    #[test]
+    fn test_opaque_path_no_extension() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        let uri = Uri::parse("artifact://plain").unwrap();
+        let (key, path) = reg.opaque_path(&uri).unwrap();
+        // No extension: key is just 11 hex chars
+        assert_eq!(key.len(), 11);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(path.ends_with(&key));
+    }
+
+    #[test]
+    fn test_opaque_path_uniqueness() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        let uri = Uri::parse("artifact://x.txt").unwrap();
+        let (k1, _) = reg.opaque_path(&uri).unwrap();
+        let (k2, _) = reg.opaque_path(&uri).unwrap();
+        assert_ne!(k1, k2, "two calls should produce different keys");
+    }
+
+    #[test]
+    fn test_resolve_opaque_key_roundtrip() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        let uri = Uri::parse("artifact://out.md").unwrap();
+        let (key, _path) = reg.opaque_path(&uri).unwrap();
+        let resolved = reg.resolve_opaque_key(&key).unwrap();
+        assert!(resolved.ends_with(&key));
+        assert!(resolved.starts_with(&reg.artifact_dir));
+    }
+
+    #[test]
+    fn test_resolve_opaque_key_rejects_non_hex() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        assert!(reg.resolve_opaque_key("not-hex-key").is_none());
+        assert!(reg.resolve_opaque_key("abc.md").is_none()); // too short
+        assert!(reg.resolve_opaque_key("ggggggggggg").is_none()); // 'g' not hex
+    }
+
+    #[test]
+    fn test_resolve_opaque_key_rejects_traversal() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        // A valid-looking hex key with ../ traversal
+        assert!(reg
+            .resolve_opaque_key("../etc/passwd")
+            .is_none());
+    }
+
+    #[test]
+    fn test_opaque_resolver_closure_works() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        let uri = Uri::parse("artifact://out.md").unwrap();
+        let (key, _path) = reg.opaque_path(&uri).unwrap();
+        let resolver = reg.opaque_resolver();
+        let resolved = resolver(&key).unwrap();
+        assert!(resolved.ends_with(&key));
+        assert!(resolver("not-hex").is_none());
     }
 }

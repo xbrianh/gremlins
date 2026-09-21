@@ -171,6 +171,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
+        artifact_opaque_resolver: ctx.params.artifact_opaque_resolver.clone(),
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter);
 
@@ -1263,6 +1264,7 @@ mod tests {
                 expected_artifact_paths: vec![],
                 system_prompt: None,
                 gremlin_id: None,
+                artifact_opaque_resolver: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,

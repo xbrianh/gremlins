@@ -422,6 +422,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            artifact_opaque_resolver: None,
         }
     }
 

@@ -352,6 +352,7 @@ async fn run_agent(
             .collect(),
         system_prompt: Some(prepared.system_prompt()),
         gremlin_id: Some(gremlin.id.to_string()),
+        artifact_opaque_resolver: Some(gremlin.registry.opaque_resolver()),
     };
 
     log::debug!(
@@ -1051,12 +1052,18 @@ mod tests {
     out: "artifact://{name}.md"
   prompt: ["hi"]
 "#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        // The agent would have written this; a plain shell client cannot.
-        std::fs::write(gremlin.artifact_dir.join("writer.md"), "content").unwrap();
-
+        let (_tmp, gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
         let stage = gremlin.definition.stages[0].clone();
-        run_stage(&stage, &mut gremlin).await.unwrap();
+        let RunnableStage::Agent { stage: agent, .. } = &stage else {
+            panic!("expected agent stage");
+        };
+        let framework_subs = gremlin.framework_subs(&stage);
+        let prepared = prepare_agent(agent, &gremlin.registry, "", &framework_subs).unwrap();
+        // The agent would have written this; a plain shell client cannot.
+        // Write to the real (hex-based) bind path.
+        let bind_path = &prepared.bind_paths["out"];
+        std::fs::write(bind_path, "content").unwrap();
+        commit_agent(&prepared, &gremlin.registry).unwrap();
         assert!(gremlin.registry.is_registered("artifact://writer.md"));
     }
 

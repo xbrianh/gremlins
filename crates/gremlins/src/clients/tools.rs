@@ -41,6 +41,9 @@ type TaskFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
 /// Callback that `invoke` calls for Task tool invocations.
 pub(crate) type TaskFn = Arc<dyn Fn(String, String) -> TaskFuture + Send + Sync>;
 
+/// Opaque artifact key resolver: maps a hex key to a real filesystem path.
+pub(crate) type OpaqueResolverFn = dyn Fn(&str) -> Option<PathBuf> + Send + Sync;
+
 #[derive(Clone)]
 pub(crate) struct ToolContext {
     pub cwd: Option<PathBuf>,
@@ -50,6 +53,7 @@ pub(crate) struct ToolContext {
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) task_fn: Option<TaskFn>,
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
+    pub(crate) artifact_opaque_resolver: Option<Arc<OpaqueResolverFn>>,
 }
 
 pub(crate) fn project_root() -> PathBuf {
@@ -804,11 +808,17 @@ fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String
 pub(crate) async fn read_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.allowed_roots.clone();
+    let resolver = ctx.artifact_opaque_resolver.clone();
     let args_json = args_json.to_string();
-    blocking_string(move || read_sync(cwd.as_deref(), &roots, &args_json)).await
+    blocking_string(move || read_sync(cwd.as_deref(), &roots, resolver.as_deref(), &args_json)).await
 }
 
-fn read_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
+fn read_sync(
+    cwd: Option<&Path>,
+    roots: &[PathBuf],
+    resolver: Option<&OpaqueResolverFn>,
+    args_json: &str,
+) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -817,7 +827,16 @@ fn read_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let path = resolve(file_path, cwd);
+    // Resolve opaque key before containment check.
+    let path = if let Some(r) = resolver {
+        if let Some(real) = r(file_path) {
+            real
+        } else {
+            resolve(file_path, cwd)
+        }
+    } else {
+        resolve(file_path, cwd)
+    };
     if let Some(err) = io_enforce(&path, roots) {
         return err;
     }
@@ -843,8 +862,9 @@ fn read_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
 pub(crate) async fn edit_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.allowed_roots.clone();
+    let resolver = ctx.artifact_opaque_resolver.clone();
     let args_json = args_json.to_string();
-    blocking_string(move || edit_sync(cwd.as_deref(), &roots, &args_json)).await
+    blocking_string(move || edit_sync(cwd.as_deref(), &roots, resolver.as_deref(), &args_json)).await
 }
 
 fn edit_not_found_diagnostic(
@@ -888,7 +908,12 @@ fn edit_not_found_diagnostic(
     )
 }
 
-fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
+fn edit_sync(
+    cwd: Option<&Path>,
+    roots: &[PathBuf],
+    resolver: Option<&OpaqueResolverFn>,
+    args_json: &str,
+) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -905,7 +930,16 @@ fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         return "Error: no edits provided".into();
     }
 
-    let path = resolve(file_path, cwd);
+    // Resolve opaque key before containment check.
+    let path = if let Some(r) = resolver {
+        if let Some(real) = r(file_path) {
+            real
+        } else {
+            resolve(file_path, cwd)
+        }
+    } else {
+        resolve(file_path, cwd)
+    };
     if let Some(err) = io_enforce(&path, roots) {
         return err;
     }
@@ -1036,11 +1070,17 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
 pub(crate) async fn write_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.allowed_roots.clone();
+    let resolver = ctx.artifact_opaque_resolver.clone();
     let args_json = args_json.to_string();
-    blocking_string(move || write_sync(cwd.as_deref(), &roots, &args_json)).await
+    blocking_string(move || write_sync(cwd.as_deref(), &roots, resolver.as_deref(), &args_json)).await
 }
 
-fn write_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
+fn write_sync(
+    cwd: Option<&Path>,
+    roots: &[PathBuf],
+    resolver: Option<&OpaqueResolverFn>,
+    args_json: &str,
+) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1053,7 +1093,16 @@ fn write_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String 
         Ok(s) => s,
         Err(e) => return e,
     };
-    let path = resolve(file_path, cwd);
+    // Resolve opaque key before containment check.
+    let path = if let Some(r) = resolver {
+        if let Some(real) = r(file_path) {
+            real
+        } else {
+            resolve(file_path, cwd)
+        }
+    } else {
+        resolve(file_path, cwd)
+    };
     if let Some(err) = io_enforce(&path, roots) {
         return err;
     }
@@ -1746,6 +1795,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            artifact_opaque_resolver: None,
         }
     }
 
@@ -1856,6 +1906,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            artifact_opaque_resolver: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
         let output = bash_invoke(&c, &args).await;
@@ -1881,6 +1932,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            artifact_opaque_resolver: None,
         };
         let expected = std::env::current_dir().unwrap();
         let args = serde_json::json!({"command": "pwd"}).to_string();
@@ -2504,6 +2556,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into()]),
             task_fn: None,
             audit_lock: None,
+            artifact_opaque_resolver: None,
         };
         let write_args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"})
@@ -2758,7 +2811,7 @@ mod tests {
             "edits": [{"old_string": "fn alpha() {}", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args);
         assert!(result.contains("Error: old_string not found"));
         assert!(result.contains("fn alpha() {}"));
     }
@@ -2772,7 +2825,7 @@ mod tests {
             "edits": [{"old_string": "fn alpha() {\n  x = 1\n}", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args);
         assert!(result.contains("did you mean to match"));
         assert!(result.contains("fn alpha"));
     }
@@ -2786,7 +2839,7 @@ mod tests {
             "edits": [{"old_string": "", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args);
         assert!(result.contains("old_string is empty"));
     }
 
@@ -2800,7 +2853,7 @@ mod tests {
             "edits": [{"old_string": "\n  fn alpha() {}", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args);
         assert!(result.contains("first line is empty"));
     }
 
@@ -2816,7 +2869,7 @@ mod tests {
             "edits": [{"old_string": old, "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args);
         assert!(result.contains("old_string not found"));
         // The needle should be truncated to 80 chars, not 80 bytes.
         // 100 é's is 200 bytes, so untruncated needle would be 200 bytes.
@@ -2834,7 +2887,7 @@ mod tests {
             "edits": [{"old_string": "fn alpha() {\n  x = 1\n}", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args);
         assert!(result.contains("did you mean to match"));
         // Must not panic on byte-slice boundary.
     }
@@ -2853,7 +2906,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            edit_sync(Some(&dir), std::slice::from_ref(&dir), &args),
+            edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args),
             "OK"
         );
         assert_eq!(
@@ -2874,7 +2927,7 @@ mod tests {
             ]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args);
         assert!(result.contains("overlap"));
     }
 
@@ -2883,7 +2936,7 @@ mod tests {
         let dir = tmp();
         std::fs::write(dir.join("x.txt"), "x\n").unwrap();
         let args = serde_json::json!({"file_path": "x.txt", "edits": []}).to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args);
         assert!(result.contains("no edits provided"));
     }
 
@@ -2892,7 +2945,7 @@ mod tests {
         let dir = tmp();
         std::fs::write(dir.join("x.txt"), "x\n").unwrap();
         let args = serde_json::json!({"file_path": "x.txt"}).to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), None, &args);
         assert!(result.contains("missing 'edits'"));
     }
 
@@ -2909,6 +2962,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            artifact_opaque_resolver: None,
         };
         let args = serde_json::json!({"description": "d", "prompt": "do something"}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -2932,6 +2986,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
+            artifact_opaque_resolver: None,
         };
         let args =
             serde_json::json!({"description": "label", "prompt": "do something"}).to_string();
@@ -2954,6 +3009,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
+            artifact_opaque_resolver: None,
         };
         let args = serde_json::json!({"description": "d", "prompt": ""}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -2977,6 +3033,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
+            artifact_opaque_resolver: None,
         };
         let args = serde_json::json!({"description": "scout docs", "prompt": "go"}).to_string();
         assert_eq!(invoke("Task", &c, &args).await, "# scout docs\n\nbody");

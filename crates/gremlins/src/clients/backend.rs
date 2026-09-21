@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use super::protocol::CompletedRun;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RunParams {
     pub prompt: String,
     pub label: String,
@@ -21,6 +22,8 @@ pub struct RunParams {
     pub expected_artifact_paths: Vec<PathBuf>,
     pub system_prompt: Option<String>,
     pub gremlin_id: Option<String>,
+    #[allow(clippy::type_complexity)]
+    pub artifact_opaque_resolver: Option<Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>>,
 }
 
 #[derive(Debug)]

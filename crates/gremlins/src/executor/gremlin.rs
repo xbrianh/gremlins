@@ -179,7 +179,7 @@ impl Gremlin {
         let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
 
         let state_dir = config::state_root().join(gremlin_id.as_str());
-        let artifact_dir = config::scratch_root(Some(gremlin_id.as_str())).join("artifacts");
+        let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&state_dir)?;
         std::fs::create_dir_all(&artifact_dir)?;
 
@@ -329,7 +329,7 @@ impl Gremlin {
         // one (the way `definition.path` is read) sees the same string.
         .map(|path| path.canonicalize().unwrap_or(path));
 
-        let artifact_dir = config::scratch_root(Some(gremlin_id.as_str())).join("artifacts");
+        let artifact_dir = state_dir.join("artifacts");
         let state = StateData::new(Some(gremlin_id.as_str().to_string()));
 
         let worktree = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
@@ -555,8 +555,7 @@ impl Gremlin {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(child_gremlin_id.as_str());
-        let child_artifact_dir =
-            config::scratch_root(Some(child_gremlin_id.as_str())).join("artifacts");
+        let child_artifact_dir = child_state_dir.join("artifacts");
         std::fs::create_dir_all(&child_state_dir)?;
         std::fs::create_dir_all(&child_artifact_dir)?;
 

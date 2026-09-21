@@ -183,6 +183,7 @@ pub fn prepare_agent(
         })?;
 
     let mut bind_paths: HashMap<String, String> = HashMap::new();
+    let mut bind_opaque_keys: HashMap<String, String> = HashMap::new();
     let mut bind_uris: Vec<(String, String, bool)> = Vec::new();
     for (raw_key, raw_uri_str) in &agent.bind_map {
         let k = base::substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
@@ -206,20 +207,22 @@ pub fn prepare_agent(
                 detail: format!("artifact {uri_str:?} is already produced — duplicate producer"),
             });
         }
-        let path = artifacts
-            .path_for_uri(&uri)
+        // Use opaque_path for agent-facing keys; path_for_uri for real paths.
+        let (opaque_key, real_path) = artifacts
+            .opaque_path(&uri)
             .map_err(|e| AgentError::Generic {
                 name: name.clone(),
                 detail: e.to_string(),
             })?;
-        bind_paths.insert(key.clone(), path);
+        bind_paths.insert(key.clone(), real_path);
+        bind_opaque_keys.insert(key.clone(), opaque_key);
         bind_uris.push((key, uri_str, optional));
     }
 
-    // Merge: bind output paths shadow interpolation keys on collision
+    // Merge: bind opaque keys shadow interpolation keys on collision
     let subst_vars: HashMap<String, String> = interpolation_map
         .iter()
-        .chain(bind_paths.iter())
+        .chain(bind_opaque_keys.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -324,7 +327,12 @@ pub(crate) fn build_workspace_preamble(cwd: &str, worktree: Option<&str>) -> Str
         }
     }
     parts.push(
-        "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR, $GREMLINS_ARTIFACT_DIR"
+        "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR"
+            .to_string(),
+    );
+    parts.push(
+        "Artifact files are accessed via opaque hex keys (e.g. a1b2c3d4e5f.md) \
+         provided in the prompt — pass them directly as file_path to Read/Write tools."
             .to_string(),
     );
     parts.join("\n")
@@ -638,13 +646,21 @@ mod tests {
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, "", &fw).unwrap();
-        // bind_paths should contain the registered path, not "interp-val"
+        // bind_paths should contain the real path (for commit_agent), not "interp-val"
         assert!(prepared.bind_paths.contains_key("key"));
         let path = &prepared.bind_paths["key"];
-        assert!(path.contains("out.md"));
-        // The prompt should use the bind path (shadow)
-        assert!(prepared.prompt.contains("out.md"));
+        // The real path is artifact_dir/<hex>.md, not artifact_dir/out.md
+        assert!(path.ends_with(".md"));
+        assert!(path.starts_with(reg.artifact_dir.to_string_lossy().as_ref()));
+        // The prompt should use the opaque hex key (shadow), not the real path
+        assert!(!prepared.prompt.contains("out.md"));
         assert!(!prepared.prompt.contains("interp-val"));
+        // The prompt contains an 11-char hex key with .md extension
+        let prompt_words: Vec<&str> = prepared.prompt.split_whitespace().collect();
+        let hex_word = prompt_words.iter().find(|w| w.ends_with(".md")).unwrap();
+        assert_eq!(hex_word.len(), 14); // 11 hex + ".md"
+        let dot = hex_word.find('.').unwrap();
+        assert!(hex_word[..dot].chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -784,7 +800,8 @@ mod tests {
         prepared.cwd = String::new();
         prepared.worktree = None;
         let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
-        assert_eq!(preamble, "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR, $GREMLINS_ARTIFACT_DIR");
+        assert!(preamble.contains("Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR"));
+        assert!(preamble.contains("opaque hex keys"));
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(!full.contains("Your working directory is"));
     }
