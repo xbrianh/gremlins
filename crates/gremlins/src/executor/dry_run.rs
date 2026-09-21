@@ -193,13 +193,26 @@ fn walk_stage<'a>(
                 walk_stages(body, registry, &fsubs, &loop_iter, errors).await;
             }
             RunnableStage::Parallel { attrs: _, body, .. } => {
-                // Each child gets its own isolated registry clone.
+                // Each child gets its own isolated registry clone so
+                // sibling producers of the same URI don't conflict.
+                // After walking all children, merge bindings back into
+                // the parent so downstream stages can resolve them.
+                let mut child_registries: Vec<(String, DryRunArtifactRegistry)> = Vec::new();
                 for child in body {
                     let child_registry = registry.clone();
                     let mut fsubs = framework_subs.clone();
                     fsubs.insert("name".to_string(), child.name().to_string());
 
                     walk_stage(child, &child_registry, &fsubs, scope, errors).await;
+                    child_registries.push((child.name().to_string(), child_registry));
+                }
+                for (child_name, child_registry) in &child_registries {
+                    if let Err(e) = registry.merge_child_keys(child_name, child_registry).await {
+                        errors.push(
+                            format!("parallel/{child_name}"),
+                            format!("artifact merge failed: {e}"),
+                        );
+                    }
                 }
             }
         }

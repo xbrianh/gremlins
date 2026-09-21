@@ -53,7 +53,34 @@ pub trait ArtifactRegistry: Send + Sync {
     /// Used by the commit phase to determine whether an output artifact
     /// should be committed, replacing direct filesystem probes.
     async fn is_path_produced(&self, path: &str) -> bool;
-}
+    /// All artifact URIs currently registered.
+    async fn keys(&self) -> Vec<String>;
+    /// Merge child-scoped artifacts from `other` into this registry.
+    /// `child_name` is used to construct parent-scoped keys (e.g.
+    /// `artifact://child-name/bare-key`). Both the remapped and the
+    /// original key are registered so downstream stages can reference
+    /// artifacts by either URI. Returns the number of keys merged.
+    async fn merge_child_keys(
+        &self,
+        child_name: &str,
+        other: &(dyn ArtifactRegistry + Sync),
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut merged = 0usize;
+        for key in other.keys().await {
+            let data = other.data_uri(&key).await.unwrap_or_default();
+            let bare = key.strip_prefix("artifact://").unwrap_or(&key);
+            let parent_key = format!("artifact://{}/{}", child_name, bare);
+            if !self.is_registered(&parent_key).await {
+                self.commit(&parent_key, &data).await?;
+                merged += 1;
+            }
+            if key != parent_key && !self.is_registered(&key).await {
+                self.commit(&key, &data).await?;
+                merged += 1;
+            }
+        }
+        Ok(merged)
+    }}
 
 // --- FileSystemArtifactRegistry ---
 
@@ -418,6 +445,10 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
             .map(|m| m.len() > 0)
             .unwrap_or(false)
     }
+
+    async fn keys(&self) -> Vec<String> {
+        self.read_registry_json().await.into_keys().collect()
+    }
 }
 
 // --- DryRunArtifactRegistry ---
@@ -535,6 +566,10 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
 
     async fn is_path_produced(&self, _path: &str) -> bool {
         true
+    }
+
+    async fn keys(&self) -> Vec<String> {
+        self.produced.lock().unwrap().keys().cloned().collect()
     }
 }
 
