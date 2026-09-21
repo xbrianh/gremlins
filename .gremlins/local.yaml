@@ -20,6 +20,7 @@ bootstrap:
     if [ -f "$THE_ENV" ]; then
         source "$THE_ENV"
     fi
+    export PREFIX="${GREMLINS_SCRATCH_DIR}/install"
 
 land:
   interpolation:
