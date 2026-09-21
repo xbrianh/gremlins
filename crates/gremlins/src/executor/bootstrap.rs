@@ -354,7 +354,8 @@ async fn run_cli_out(
         interpolation_map: HashMap::new(),
         bind_map: cli_out.clone(),
     };
-    let loop_iter = loop_iter_of(&gremlin.loop_stack, None);
+    let attempt = gremlin.state.read_str("attempt");
+    let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
     let framework_subs = HashMap::from([
         ("name".to_string(), exec.name.clone()),
         ("model".to_string(), gremlin.client.model().to_string()),

@@ -93,10 +93,10 @@ fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
     }
     let path = Path::new(&raw);
     if !path.exists() {
-        log::warn!(
-            "bail_at_uri: registered artifact {uri:?} has no backing file at {raw} — stale binding"
-        );
-        return None;
+        let msg =
+            format!("stale binding: registered artifact {uri:?} has no backing file at {raw}");
+        log::warn!("bail_at_uri: {msg}");
+        return Some(msg);
     }
     match std::fs::read_to_string(path) {
         Ok(text) => non_empty(text.trim()),
@@ -106,6 +106,8 @@ fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
 
 /// The bail reason recorded for `scope`: the content of `artifact://<scope>/bail`.
 /// `None` when unregistered or when the content is empty/whitespace.
+/// A registered artifact whose backing file is missing (stale binding) is
+/// treated as a bail with an error message as the reason.
 pub(crate) fn bail_reason(registry: &ArtifactRegistry, scope: &str) -> Option<String> {
     bail_at_uri(registry, &format!("artifact://{scope}/bail"))
 }
