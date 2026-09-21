@@ -217,12 +217,8 @@ fn commit_prepared_agent<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
         for (key, uri_str, optional) in &prepared.bind_uris {
-            // Optional binds do not commit when the artifact already exists
-            // at runtime — skip them so a non-optional bind downstream does
-            // not see a false duplicate.
-            if *optional {
-                continue;
-            }
+            // Always parse the URI first — even optional binds must be
+            // validated so malformed URIs are caught.
             let uri = match crate::artifacts::uri::Uri::parse(uri_str) {
                 Ok(u) => u,
                 Err(e) => {
@@ -230,6 +226,13 @@ fn commit_prepared_agent<'a>(
                     continue;
                 }
             };
+            // Optional binds only skip committing when the artifact already
+            // exists at runtime.  If it is not yet registered, the optional
+            // bind is the first producer and must commit so downstream
+            // consumers can resolve it.
+            if *optional && registry.is_registered(uri_str).await {
+                continue;
+            }
             let path = match registry.path_for_uri(&uri).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -257,12 +260,8 @@ fn commit_prepared_exec<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
         for (key, uri_str, optional) in &prepared.bind_uris {
-            // Optional binds do not commit when the artifact already exists
-            // at runtime — skip them so a non-optional bind downstream does
-            // not see a false duplicate.
-            if *optional {
-                continue;
-            }
+            // Always parse the URI first — even optional binds must be
+            // validated so malformed URIs are caught.
             let uri = match crate::artifacts::uri::Uri::parse(uri_str) {
                 Ok(u) => u,
                 Err(e) => {
@@ -270,6 +269,13 @@ fn commit_prepared_exec<'a>(
                     continue;
                 }
             };
+            // Optional binds only skip committing when the artifact already
+            // exists at runtime.  If it is not yet registered, the optional
+            // bind is the first producer and must commit so downstream
+            // consumers can resolve it.
+            if *optional && registry.is_registered(uri_str).await {
+                continue;
+            }
             let path = match registry.path_for_uri(&uri).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -579,9 +585,9 @@ stages:
     }
 
     #[tokio::test]
-    async fn optional_bind_followed_by_non_optional_bind_no_duplicate() {
-        // An optional bind does not commit in the dry-run, so a downstream
-        // non-optional bind for the same artifact does not see a duplicate.
+    async fn optional_bind_after_non_optional_skips_no_duplicate() {
+        // An optional bind whose artifact is already registered (by a
+        // prior non-optional bind) is skipped — no false duplicate.
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(
             dir.path(),
@@ -593,15 +599,47 @@ stages:
   - name: first
     type: exec
     bind:
-      out?: "artifact://plan.md"
+      out: "artifact://plan.md"
     options:
       cmds: ["echo {out}"]
   - name: second
     type: exec
     bind:
-      out: "artifact://plan.md"
+      out?: "artifact://plan.md"
     options:
       cmds: ["echo {out}"]
+"#,
+        );
+
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let errors = validate_definition(&definition).await;
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[tokio::test]
+    async fn optional_bind_as_first_producer_commits() {
+        // An optional bind that is the first producer must commit so
+        // downstream consumers can resolve the artifact.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(
+            dir.path(),
+            "demo",
+            r#"
+default_client: 'cmd:true'
+
+stages:
+  - name: producer
+    type: exec
+    bind:
+      out?: "artifact://plan.md"
+    options:
+      cmds: ["echo {out}"]
+  - name: consumer
+    type: exec
+    interpolation:
+      plan: content("artifact://plan.md")
+    options:
+      cmds: ["echo {plan}"]
 "#,
         );
 
