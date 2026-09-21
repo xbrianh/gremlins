@@ -147,14 +147,6 @@ impl ArtifactRegistry {
     /// idempotent for an identical binding; a conflicting binding is a
     /// `DuplicateArtifact` error.
     pub async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Check file existence outside the lock so we don't block inside
-        // locked_write (which takes a sync closure).
-        if !tokio::fs::try_exists(path).await.unwrap_or(false) {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("artifact {key:?} has no file at {path}"),
-            )));
-        }
         self.locked_write(|data| {
             if let Some(existing) = data.get(key) {
                 if existing == path {
@@ -425,16 +417,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_commit_rejects_missing_file() {
+    async fn test_commit_with_missing_file_succeeds() {
         let (tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
         let missing = tmp.path().join("does-not-exist.txt");
-        let err = reg
-            .commit("artifact://gone.txt", &missing.to_string_lossy())
+        // commit does not check file existence; it only enforces key uniqueness
+        reg.commit("artifact://gone.txt", &missing.to_string_lossy())
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("has no file at"));
-        assert!(!reg.is_registered("artifact://gone.txt").await);
+            .unwrap();
+        assert!(reg.is_registered("artifact://gone.txt").await);
     }
 
     #[tokio::test]
