@@ -181,11 +181,7 @@ bootstrap:                    # optional; CLI contract and setup commands
   launch_cmds:
     - gremlins:bind_artifact("artifact://plan.md", plan)
   cmds:
-    - "uv sync"
-  cli_out:
-    pr: "opaque://pr/{read:pr-num}"
-
-prompts:                      # optional; named prompt map
+    - "cargo build"
   code-style: gremlins:code_style.md
 
 prompt_dir: ../prompts        # optional; relative to YAML, defaults to the YAML's directory
@@ -369,7 +365,7 @@ bootstrap:
   launch_cmds:
     - gremlins:bind_artifact("artifact://plan.md", plan)
   cmds:
-    - "uv sync"
+    - "cargo build"
   cli_out:
     pr: "opaque://pr/{read:pr-num}"
 ```
@@ -378,7 +374,7 @@ bootstrap:
 |---|---|
 | `source` | Declares CLI flags. Each key becomes a `--<key>` flag (required unless `optional: true`). Supported types: `filepath`, `string`. |
 | `launch_cmds` | Shell commands run once at launch. Supports the `gremlins:bind_artifact(uri, source_key)` DSL for resolving source values into artifacts. |
-| `cmds` | Shell commands run in every worktree (e.g. `uv sync` to set up the dev environment). |
+| `cmds` | Shell commands run in every worktree (e.g. `cargo build` to build the crate). |
 | `cli_out` | Artifact bindings computed at launch from source values (e.g. binding an `opaque://pr/{read:pr-num}` URI from a `--pr-num` flag). |
 
 The `gremlins:bind_artifact` DSL resolves a source value (GitHub issue ref, filepath, or inline text) and binds it as an artifact in the registry. GitHub issue refs (`#N` or `owner/repo#N`) are downloaded via `gh issue view`.
@@ -772,8 +768,8 @@ The file is sourced via `bash`, so it can use command substitution,
 conditionals, and anything bash supports:
 
 ```sh
-export VIRTUAL_ENV=$(poetry env info --path)
-export PATH="$VIRTUAL_ENV/bin:$PATH"
+export RUST_BACKTRACE=1
+export RUST_LOG=debug
 export TEST_DATABASE_URL=postgresql://localhost/mydb_test
 ```
 
