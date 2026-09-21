@@ -151,10 +151,7 @@ impl ArtifactRegistry {
     /// filename extension from the URI path (e.g. `a1b2c3d4e5f.md`). The real
     /// path is `artifact_dir/<opaque_key>`. The agent sees only the opaque key;
     /// the real filesystem path stays hidden.
-    pub fn opaque_path(
-        &self,
-        uri: &Uri,
-    ) -> Result<(String, String), Box<dyn std::error::Error>> {
+    pub fn opaque_path(&self, uri: &Uri) -> Result<(String, String), Box<dyn std::error::Error>> {
         let hex = &state::token_hex(6)[..11];
         let ext = std::path::Path::new(uri.path.trim_start_matches('/'))
             .extension()
@@ -809,9 +806,7 @@ mod tests {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
         // A valid-looking hex key with ../ traversal
-        assert!(reg
-            .resolve_opaque_key("../etc/passwd")
-            .is_none());
+        assert!(reg.resolve_opaque_key("../etc/passwd").is_none());
     }
 
     #[test]

@@ -810,7 +810,8 @@ pub(crate) async fn read_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let roots = ctx.allowed_roots.clone();
     let resolver = ctx.artifact_opaque_resolver.clone();
     let args_json = args_json.to_string();
-    blocking_string(move || read_sync(cwd.as_deref(), &roots, resolver.as_deref(), &args_json)).await
+    blocking_string(move || read_sync(cwd.as_deref(), &roots, resolver.as_deref(), &args_json))
+        .await
 }
 
 fn read_sync(
@@ -864,7 +865,8 @@ pub(crate) async fn edit_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let roots = ctx.allowed_roots.clone();
     let resolver = ctx.artifact_opaque_resolver.clone();
     let args_json = args_json.to_string();
-    blocking_string(move || edit_sync(cwd.as_deref(), &roots, resolver.as_deref(), &args_json)).await
+    blocking_string(move || edit_sync(cwd.as_deref(), &roots, resolver.as_deref(), &args_json))
+        .await
 }
 
 fn edit_not_found_diagnostic(
@@ -1072,7 +1074,8 @@ pub(crate) async fn write_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let roots = ctx.allowed_roots.clone();
     let resolver = ctx.artifact_opaque_resolver.clone();
     let args_json = args_json.to_string();
-    blocking_string(move || write_sync(cwd.as_deref(), &roots, resolver.as_deref(), &args_json)).await
+    blocking_string(move || write_sync(cwd.as_deref(), &roots, resolver.as_deref(), &args_json))
+        .await
 }
 
 fn write_sync(

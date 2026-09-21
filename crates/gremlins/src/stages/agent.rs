@@ -208,12 +208,13 @@ pub fn prepare_agent(
             });
         }
         // Use opaque_path for agent-facing keys; path_for_uri for real paths.
-        let (opaque_key, real_path) = artifacts
-            .opaque_path(&uri)
-            .map_err(|e| AgentError::Generic {
-                name: name.clone(),
-                detail: e.to_string(),
-            })?;
+        let (opaque_key, real_path) =
+            artifacts
+                .opaque_path(&uri)
+                .map_err(|e| AgentError::Generic {
+                    name: name.clone(),
+                    detail: e.to_string(),
+                })?;
         bind_paths.insert(key.clone(), real_path);
         bind_opaque_keys.insert(key.clone(), opaque_key);
         bind_uris.push((key, uri_str, optional));
@@ -800,7 +801,9 @@ mod tests {
         prepared.cwd = String::new();
         prepared.worktree = None;
         let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
-        assert!(preamble.contains("Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR"));
+        assert!(preamble.contains(
+            "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR"
+        ));
         assert!(preamble.contains("opaque hex keys"));
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(!full.contains("Your working directory is"));

@@ -446,7 +446,9 @@ fn merge_child_artifacts(gremlin: &mut Gremlin, outcome: &ChildOutcome) -> Resul
     use crate::artifacts::registry::ArtifactRegistry;
     use crate::config;
 
-    let child_artifact_dir = config::state_root().join(&outcome.child_id).join("artifacts");
+    let child_artifact_dir = config::state_root()
+        .join(&outcome.child_id)
+        .join("artifacts");
     if !child_artifact_dir.exists() {
         return Ok(());
     }
