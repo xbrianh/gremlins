@@ -2,7 +2,7 @@
 //!
 //! A [`Gremlin`] is the runtime handle for one run — the thing the run loop
 //! drives a stage tree through. It owns the resolved [`GremlinDefinition`], the
-//! [`ArtifactRegistry`], and the [`StateData`] handle, and it is the single
+//! [`FileSystemArtifactRegistry`], and the [`StateData`] handle, and it is the single
 //! place where a gremlin's environment is assembled.
 //!
 //! Three constructors cover the lifecycles the Python executor had:
@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::artifacts::registry::ArtifactRegistry;
+use crate::artifacts::registry::FileSystemArtifactRegistry;
 use crate::artifacts::uri::Uri;
 use crate::clients::client::Client;
 use crate::config;
@@ -129,7 +129,7 @@ pub struct Gremlin {
     /// definition is finally loaded.
     pub client_override: Option<String>,
     pub definition: GremlinDefinition,
-    pub registry: ArtifactRegistry,
+    pub registry: FileSystemArtifactRegistry,
     pub worktree: Option<PathBuf>,
     pub worktree_parent: Option<PathBuf>,
     pub project_root: PathBuf,
@@ -365,7 +365,7 @@ impl Gremlin {
             definition_path,
             client_override: None,
             definition,
-            registry: ArtifactRegistry::new(artifact_dir),
+            registry: FileSystemArtifactRegistry::new(artifact_dir),
             worktree,
             worktree_parent: None,
             project_root,
@@ -427,7 +427,7 @@ impl Gremlin {
             self.base_ref.clone()
         };
 
-        let registry = ArtifactRegistry::new(self.artifact_dir.clone());
+        let registry = FileSystemArtifactRegistry::new(self.artifact_dir.clone());
         register_stage_inputs(&registry, &definition.bootstrap, &self.stage_inputs).await;
         register_base_sha(
             &registry,
@@ -604,7 +604,7 @@ impl Gremlin {
             log::debug!("fork: no parent worktree — child inherits no worktree");
         }
 
-        let registry = ArtifactRegistry::from_registry_file(
+        let registry = FileSystemArtifactRegistry::from_registry_file(
             &self.registry.registry_path,
             child_artifact_dir.clone(),
         )
@@ -966,7 +966,7 @@ fn write_launch_state(
         definition_path: Some(definition_path.to_path_buf()),
         client_override: client_override.map(String::from),
         definition,
-        registry: ArtifactRegistry::new(artifact_dir.to_path_buf()),
+        registry: FileSystemArtifactRegistry::new(artifact_dir.to_path_buf()),
         worktree,
         worktree_parent: worktree_parent.map(Path::to_path_buf),
         project_root: project_root.to_path_buf(),
@@ -991,7 +991,7 @@ fn write_launch_state(
 /// about, but it must not abort a launch, because the stage that wanted the
 /// artifact will report it precisely.
 async fn register_stage_inputs(
-    registry: &ArtifactRegistry,
+    registry: &FileSystemArtifactRegistry,
     bootstrap: &Bootstrap,
     stage_inputs: &HashMap<String, String>,
 ) {
@@ -1020,7 +1020,7 @@ async fn register_stage_inputs(
 }
 
 /// Record the commit the run started from, once, as `artifact://base_sha`.
-async fn register_base_sha(registry: &ArtifactRegistry, cwd: &Path) {
+async fn register_base_sha(registry: &FileSystemArtifactRegistry, cwd: &Path) {
     if registry.is_registered("artifact://base_sha").await {
         return;
     }
@@ -1871,7 +1871,7 @@ mod tests {
         Gremlin {
             id: validate_gremlin_id(id).unwrap(),
             state_dir,
-            registry: ArtifactRegistry::new(artifact_dir.clone()),
+            registry: FileSystemArtifactRegistry::new(artifact_dir.clone()),
             artifact_dir,
             definition_path: None,
             client_override: None,

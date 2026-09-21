@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::artifacts::registry::ArtifactRegistry;
+use crate::artifacts::registry::FileSystemArtifactRegistry;
 use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
@@ -83,7 +83,7 @@ fn non_empty(text: &str) -> Option<String> {
 /// A binding whose value is an absolute path is read from disk — an empty or
 /// whitespace-only file is not a reason — while any other value *is* the
 /// reason, so a `git://` or bare-string bail still reads back.
-async fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
+async fn bail_at_uri(registry: &FileSystemArtifactRegistry, uri: &str) -> Option<String> {
     if !registry.is_registered(uri).await {
         return None;
     }
@@ -108,17 +108,20 @@ async fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
 /// `None` when unregistered or when the content is empty/whitespace.
 /// A registered artifact whose backing file is missing (stale binding) is
 /// treated as a bail with an error message as the reason.
-pub(crate) async fn bail_reason(registry: &ArtifactRegistry, scope: &str) -> Option<String> {
+pub(crate) async fn bail_reason(
+    registry: &FileSystemArtifactRegistry,
+    scope: &str,
+) -> Option<String> {
     bail_at_uri(registry, &format!("artifact://{scope}/bail")).await
 }
 
 /// The run-wide bail marker, `artifact://bail`.
-pub(crate) async fn global_bail_reason(registry: &ArtifactRegistry) -> Option<String> {
+pub(crate) async fn global_bail_reason(registry: &FileSystemArtifactRegistry) -> Option<String> {
     bail_at_uri(registry, BAIL_KEY).await
 }
 
 /// Whether a bail is recorded for `scope` or for the run as a whole.
-pub(crate) async fn is_bail_set(registry: &ArtifactRegistry, scope: &str) -> bool {
+pub(crate) async fn is_bail_set(registry: &FileSystemArtifactRegistry, scope: &str) -> bool {
     bail_reason(registry, scope).await.is_some() || global_bail_reason(registry).await.is_some()
 }
 
@@ -126,7 +129,7 @@ pub(crate) async fn is_bail_set(registry: &ArtifactRegistry, scope: &str) -> boo
 /// content, else the run-wide marker's, else the `detail` of the state bail
 /// file. `None` when no bail is recorded anywhere.
 async fn bail_reason_for(
-    registry: &ArtifactRegistry,
+    registry: &FileSystemArtifactRegistry,
     scope: &str,
     state: &state::StateData,
 ) -> Option<String> {
@@ -147,7 +150,7 @@ async fn bail_reason_for(
 
 /// Whether `key` is registered, accepting both a bare key and its `artifact://` URI:
 /// guards and stop conditions are spelled either way in the wild.
-async fn is_registered_uri(registry: &ArtifactRegistry, key: &str) -> bool {
+async fn is_registered_uri(registry: &FileSystemArtifactRegistry, key: &str) -> bool {
     registry.is_registered(key).await || registry.is_registered(&format!("artifact://{key}")).await
 }
 
@@ -883,7 +886,7 @@ mod tests {
                 stages: stages.clone(),
                 land: None,
             },
-            registry: ArtifactRegistry::new(artifact_dir),
+            registry: FileSystemArtifactRegistry::new(artifact_dir),
             worktree: None,
             worktree_parent: None,
             project_root: tmp.path().to_path_buf(),
@@ -900,11 +903,11 @@ mod tests {
     }
 
     /// A registry over a throwaway artifact directory, for the free functions.
-    fn scratch_registry() -> (tempfile::TempDir, ArtifactRegistry) {
+    fn scratch_registry() -> (tempfile::TempDir, FileSystemArtifactRegistry) {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         std::fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = ArtifactRegistry::new(artifact_dir);
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
         (tmp, registry)
     }
 

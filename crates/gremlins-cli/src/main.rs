@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::{Parser, Subcommand};
-use gremlins::artifacts::registry::ArtifactRegistry;
+use gremlins::artifacts::registry::FileSystemArtifactRegistry;
 use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
@@ -760,7 +760,7 @@ async fn land(id: &str) -> Result<(), String> {
 
     // Build a read-only artifact registry from the artifact directory.
     let artifact_dir = config::scratch_root(Some(id)).join("artifacts");
-    let registry = ArtifactRegistry::new(artifact_dir.clone());
+    let registry = FileSystemArtifactRegistry::new(artifact_dir.clone());
 
     // Resolve interpolation references.
     let prepared = prepare_exec(exec, &registry, "", &HashMap::new())
