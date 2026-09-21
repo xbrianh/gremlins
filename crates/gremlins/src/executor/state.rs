@@ -203,6 +203,15 @@ pub fn acquire_lock(sf: &Path) -> Result<File, StateError> {
     Ok(f)
 }
 
+/// Async counterpart of [`acquire_lock`]: runs the flock on a blocking thread
+/// so the tokio runtime is never blocked on filesystem locks.
+pub async fn acquire_lock_async(sf: &Path) -> Result<File, StateError> {
+    let sf = sf.to_path_buf();
+    tokio::task::spawn_blocking(move || acquire_lock(&sf))
+        .await
+        .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?
+}
+
 pub fn read_json_map(sf: &Path) -> Result<Map<String, Value>, StateError> {
     Ok(serde_json::from_str(&std::fs::read_to_string(sf)?)?)
 }
@@ -215,6 +224,22 @@ pub fn atomic_write_json(sf: &Path, data: &Map<String, Value>) -> Result<(), Sta
     let tmp = sf.with_file_name(format!("{name}.{}.{}.tmp", std::process::id(), rand_hex(8)));
     std::fs::write(&tmp, serde_json::to_string(data)?)?;
     std::fs::rename(&tmp, sf)?;
+    Ok(())
+}
+
+/// Async counterpart of [`atomic_write_json`]: uses [`tokio::fs::write`] and
+/// [`tokio::fs::rename`] so the write + rename never block the runtime.
+pub async fn atomic_write_json_async(
+    sf: &Path,
+    data: &Map<String, Value>,
+) -> Result<(), StateError> {
+    let name = sf
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("state.json");
+    let tmp = sf.with_file_name(format!("{name}.{}.{}.tmp", std::process::id(), rand_hex(8)));
+    tokio::fs::write(&tmp, serde_json::to_string(data)?).await?;
+    tokio::fs::rename(&tmp, sf).await?;
     Ok(())
 }
 

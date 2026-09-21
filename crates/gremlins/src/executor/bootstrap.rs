@@ -223,7 +223,11 @@ pub fn parse_bind_artifact_args(args: &[String]) -> Result<(String, String), Str
 /// A match, not a table: there is one command, and a table would be a
 /// one-entry indirection. Adding a second means adding an arm here and a
 /// handler beside it.
-fn run_dsl_command(cmd_name: &str, args: &[String], gremlin: &mut Gremlin) -> Result<(), RunError> {
+async fn run_dsl_command(
+    cmd_name: &str,
+    args: &[String],
+    gremlin: &mut Gremlin,
+) -> Result<(), RunError> {
     match cmd_name {
         "bind_artifact" => {
             let (source_key, uri_str) =
@@ -231,7 +235,7 @@ fn run_dsl_command(cmd_name: &str, args: &[String], gremlin: &mut Gremlin) -> Re
                     exit_code: 1,
                     stderr: message,
                 })?;
-            bind_artifact(&source_key, &uri_str, gremlin)
+            bind_artifact(&source_key, &uri_str, gremlin).await
         }
         unknown => Err(RunError::BootstrapFailed {
             exit_code: 1,
@@ -246,7 +250,11 @@ fn run_dsl_command(cmd_name: &str, args: &[String], gremlin: &mut Gremlin) -> Re
 /// project root — is copied into the registry; anything else is inline text and
 /// written. An absent or empty source is an optional source with nothing to
 /// bind, so it is a no-op rather than an error.
-fn bind_artifact(source_key: &str, uri_str: &str, gremlin: &mut Gremlin) -> Result<(), RunError> {
+async fn bind_artifact(
+    source_key: &str,
+    uri_str: &str,
+    gremlin: &mut Gremlin,
+) -> Result<(), RunError> {
     let value = match gremlin.stage_inputs.get(source_key) {
         Some(value) if !value.is_empty() => value.clone(),
         _ => return Ok(()),
@@ -263,11 +271,11 @@ fn bind_artifact(source_key: &str, uri_str: &str, gremlin: &mut Gremlin) -> Resu
         .filter(|path| path.is_file());
 
     let bound = if direct.is_file() {
-        gremlin.registry.copy_into_registry(&uri, direct)
+        gremlin.registry.copy_into_registry(&uri, direct).await
     } else if let Some(path) = from_project {
-        gremlin.registry.copy_into_registry(&uri, &path)
+        gremlin.registry.copy_into_registry(&uri, &path).await
     } else {
-        gremlin.registry.write_into_registry(&uri, &value)
+        gremlin.registry.write_into_registry(&uri, &value).await
     };
 
     bound
@@ -316,7 +324,7 @@ pub async fn run_definition_bootstrap(gremlin: &mut Gremlin) -> Result<(), RunEr
             match parse_gremlins_command(command) {
                 Some((cmd_name, args)) => {
                     log::info!("launch DSL: {}({})", cmd_name, args.join(", "));
-                    run_dsl_command(&cmd_name, &args, gremlin)?;
+                    run_dsl_command(&cmd_name, &args, gremlin).await?;
                 }
                 None => shell_cmds.push(substitute_bootstrap_vars(command, &cwd, &values)),
             }
@@ -369,6 +377,7 @@ async fn run_cli_out(
     };
 
     let mut prepared = prepare_exec(&exec, &gremlin.registry, &loop_iter, &framework_subs)
+        .await
         .map_err(|error| failed(error.to_string()))?;
     prepared.cwd = cwd.to_path_buf();
     prepared.artifact_dir = gremlin.artifact_dir.clone();
@@ -378,7 +387,9 @@ async fn run_cli_out(
     run_shell(&prepared)
         .await
         .map_err(|error| failed(error.to_string()))?;
-    commit_exec(&prepared, &gremlin.registry).map_err(|error| failed(error.to_string()))?;
+    commit_exec(&prepared, &gremlin.registry)
+        .await
+        .map_err(|error| failed(error.to_string()))?;
 
     Ok(())
 }
@@ -651,11 +662,12 @@ mod tests {
 
         run_definition_bootstrap(&mut gremlin).await.unwrap();
 
-        assert!(gremlin.registry.is_registered("artifact://plan.md"));
+        assert!(gremlin.registry.is_registered("artifact://plan.md").await);
         assert_eq!(
             gremlin
                 .registry
                 .content("artifact://plan.md", None)
+                .await
                 .unwrap(),
             "# plan\n"
         );
@@ -676,6 +688,7 @@ mod tests {
             gremlin
                 .registry
                 .content("artifact://note.txt", None)
+                .await
                 .unwrap(),
             "hello"
         );
@@ -691,7 +704,7 @@ mod tests {
 
         run_definition_bootstrap(&mut gremlin).await.unwrap();
 
-        assert!(!gremlin.registry.is_registered("artifact://plan.md"));
+        assert!(!gremlin.registry.is_registered("artifact://plan.md").await);
     }
 
     #[tokio::test]
@@ -733,12 +746,12 @@ mod tests {
         // The synthetic exec verifies the bound file exists, so the producer's
         // output is staged first — exactly as a real cli_out follows its cmds.
         let uri = Uri::parse("artifact://pr.txt").unwrap();
-        let path = gremlin.registry.path_for_uri(&uri).unwrap();
+        let path = gremlin.registry.path_for_uri(&uri).await.unwrap();
         std::fs::write(&path, "123").unwrap();
 
         run_definition_bootstrap(&mut gremlin).await.unwrap();
 
-        assert!(gremlin.registry.is_registered("artifact://pr.txt"));
+        assert!(gremlin.registry.is_registered("artifact://pr.txt").await);
     }
 
     #[tokio::test]

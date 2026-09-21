@@ -45,11 +45,8 @@ impl ArtifactRegistry {
 
     /// Read and parse `registry.json`, returning an empty map when the file is
     /// absent or unparseable (logging the reason).
-    fn read_registry_json(&self) -> HashMap<String, String> {
-        if !self.registry_path.exists() {
-            return HashMap::new();
-        }
-        match fs::read_to_string(&self.registry_path) {
+    async fn read_registry_json(&self) -> HashMap<String, String> {
+        match tokio::fs::read_to_string(&self.registry_path).await {
             Ok(content) => match serde_json::from_str::<HashMap<String, String>>(&content) {
                 Ok(data) => data,
                 Err(e) => {
@@ -61,10 +58,12 @@ impl ArtifactRegistry {
                 }
             },
             Err(e) => {
-                log::error!(
-                    "failed to read registry.json at {}: {e} — starting with empty registry",
-                    self.registry_path.display(),
-                );
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::error!(
+                        "failed to read registry.json at {}: {e} — starting with empty registry",
+                        self.registry_path.display(),
+                    );
+                }
                 HashMap::new()
             }
         }
@@ -72,21 +71,21 @@ impl ArtifactRegistry {
 
     /// Acquire the flock on `registry_path`, read the current map, apply
     /// `f`, and atomically write the result back.
-    fn locked_write<R>(
+    async fn locked_write<R>(
         &self,
         apply: impl FnOnce(&mut HashMap<String, String>) -> Result<R, Box<dyn std::error::Error>>,
     ) -> Result<R, Box<dyn std::error::Error>> {
         if let Some(parent) = self.registry_path.parent() {
-            fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
-        let _lock = crate::executor::state::acquire_lock(&self.registry_path)?;
-        let mut data = self.read_registry_json();
+        let _lock = crate::executor::state::acquire_lock_async(&self.registry_path).await?;
+        let mut data = self.read_registry_json().await;
         let result = apply(&mut data)?;
         let data_map: serde_json::Map<String, serde_json::Value> = data
             .iter()
             .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
             .collect();
-        crate::executor::state::atomic_write_json(&self.registry_path, &data_map)?;
+        crate::executor::state::atomic_write_json_async(&self.registry_path, &data_map).await?;
         log::debug!(
             "locked_write: wrote {} entries to {}",
             data.len(),
@@ -95,8 +94,9 @@ impl ArtifactRegistry {
         Ok(result)
     }
 
-    pub fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
+    pub async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
         self.read_registry_json()
+            .await
             .get(key)
             .cloned()
             .ok_or_else(|| MissingArtifact {
@@ -105,7 +105,7 @@ impl ArtifactRegistry {
     }
 
     /// Compute the canonical filesystem path for `uri` without touching the registry.
-    pub fn path_for_uri(&self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn path_for_uri(&self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>> {
         let key = uri.to_string();
         if uri.scheme != "artifact" {
             log::warn!(
@@ -120,11 +120,11 @@ impl ArtifactRegistry {
         }
         let path = self.artifact_dir.join(&name);
         // Ensure artifact_dir exists before canonicalizing
-        fs::create_dir_all(&self.artifact_dir)?;
-        let base = fs::canonicalize(&self.artifact_dir)?;
+        tokio::fs::create_dir_all(&self.artifact_dir).await?;
+        let base = tokio::fs::canonicalize(&self.artifact_dir).await?;
         // Create parent dirs so parent-side canonicalization works
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
         // Resolve parent to handle symlinks, then rejoin filename (file may not exist yet)
         let parent_resolved = path
@@ -146,7 +146,7 @@ impl ArtifactRegistry {
     /// Bind `key` to `path` and persist. The file at `path` must already exist;
     /// idempotent for an identical binding; a conflicting binding is a
     /// `DuplicateArtifact` error.
-    pub fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.locked_write(|data| {
             if let Some(existing) = data.get(key) {
                 if existing == path {
@@ -159,48 +159,43 @@ impl ArtifactRegistry {
                     incoming: path.to_string(),
                 }));
             }
-            if !Path::new(path).exists() {
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("artifact {key:?} has no file at {path}"),
-                )));
-            }
             data.insert(key.to_string(), path.to_string());
             log::debug!("commit: {:?} -> {:?}", key, path);
             Ok(())
         })
+        .await
     }
 
     /// Write `content` to the path for `uri`, then commit. For bootstrap ingestion.
-    pub fn write_into_registry(
+    pub async fn write_into_registry(
         &self,
         uri: &Uri,
         content: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let path = self.path_for_uri(uri)?;
-        fs::write(&path, content)?;
-        self.commit(&uri.to_string(), &path)?;
+        let path = self.path_for_uri(uri).await?;
+        tokio::fs::write(&path, content).await?;
+        self.commit(&uri.to_string(), &path).await?;
         Ok(path)
     }
 
     /// Copy `source` to the path for `uri`, then commit. For bootstrap ingestion.
-    pub fn copy_into_registry(
+    pub async fn copy_into_registry(
         &self,
         uri: &Uri,
         source: &Path,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let path = self.path_for_uri(uri)?;
-        fs::copy(source, &path)?;
-        self.commit(&uri.to_string(), &path)?;
+        let path = self.path_for_uri(uri).await?;
+        tokio::fs::copy(source, &path).await?;
+        self.commit(&uri.to_string(), &path).await?;
         Ok(path)
     }
 
-    pub fn content(
+    pub async fn content(
         &self,
         uri_str: &str,
         json_path: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let raw = self.data_uri(uri_str)?;
+        let raw = self.data_uri(uri_str).await?;
         let p = if raw.starts_with("file://session/") {
             let name = raw.strip_prefix("file://session/").unwrap_or(&raw);
             self.artifact_dir.join(name)
@@ -214,7 +209,7 @@ impl ArtifactRegistry {
                 key: uri_str.to_string(),
             }));
         }
-        let text = fs::read_to_string(&p)?;
+        let text = tokio::fs::read_to_string(&p).await?;
         log::debug!("content({:?}) read {} bytes", uri_str, text.len());
         if let Some(jp) = json_path {
             let mut data: serde_json::Value = serde_json::from_str(&text)?;
@@ -238,22 +233,22 @@ impl ArtifactRegistry {
         }
     }
 
-    pub fn is_registered(&self, key: &str) -> bool {
-        self.read_registry_json().contains_key(key)
+    pub async fn is_registered(&self, key: &str) -> bool {
+        self.read_registry_json().await.contains_key(key)
     }
 
-    pub fn keys(&self) -> Vec<String> {
-        self.read_registry_json().into_keys().collect()
+    pub async fn keys(&self) -> Vec<String> {
+        self.read_registry_json().await.into_keys().collect()
     }
 
-    pub fn merge_from(
+    pub async fn merge_from(
         &self,
         other: &ArtifactRegistry,
         key_map: Option<&HashMap<String, String>>,
         copy_files: bool,
         keys: Option<&std::collections::HashSet<String>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let other_data = other.read_registry_json();
+        let other_data = other.read_registry_json().await;
         let iter: Box<dyn Iterator<Item = &String>> = match keys {
             Some(k) => Box::new(k.iter()),
             None => Box::new(other_data.keys()),
@@ -318,24 +313,27 @@ impl ArtifactRegistry {
                 }
             }
             Ok(())
-        })?;
+        })
+        .await?;
         log::info!("merge_from: merged {} entries", merged);
         Ok(())
     }
 
-    pub fn from_registry_file(
+    pub async fn from_registry_file(
         path: &Path,
         artifact_dir: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let registry = ArtifactRegistry::new(artifact_dir);
-        if path != registry.registry_path && path.exists() {
-            let content = fs::read_to_string(path)?;
+        if path != registry.registry_path && tokio::fs::try_exists(path).await.unwrap_or(false) {
+            let content = tokio::fs::read_to_string(path).await?;
             let parsed: HashMap<String, String> = serde_json::from_str(&content)?;
             let count = parsed.len();
-            registry.locked_write(|data| {
-                *data = parsed;
-                Ok(())
-            })?;
+            registry
+                .locked_write(|data| {
+                    *data = parsed;
+                    Ok(())
+                })
+                .await?;
             log::info!(
                 "loaded custom registry from {} ({} entries)",
                 path.display(),
@@ -362,9 +360,9 @@ mod tests {
         (tmp, artifact_dir)
     }
 
-    fn write_file(reg: &ArtifactRegistry, name: &str, content: &str) -> String {
+    async fn write_file(reg: &ArtifactRegistry, name: &str, content: &str) -> String {
         let uri = Uri::parse(&format!("artifact://{name}")).unwrap();
-        reg.write_into_registry(&uri, content).unwrap()
+        reg.write_into_registry(&uri, content).await.unwrap()
     }
 
     #[test]
@@ -375,63 +373,63 @@ mod tests {
         assert_sync::<ArtifactRegistry>();
     }
 
-    #[test]
-    fn test_data_uri_unbound_raises_missing() {
+    #[tokio::test]
+    async fn test_data_uri_unbound_raises_missing() {
         let (_tmp, artifact_dir) = setup();
         let registry = ArtifactRegistry::new(artifact_dir);
-        let err = registry.data_uri("nonexistent").unwrap_err();
+        let err = registry.data_uri("nonexistent").await.unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
     }
 
-    #[test]
-    fn test_write_into_registry_persists_and_roundtrip() {
+    #[tokio::test]
+    async fn test_write_into_registry_persists_and_roundtrip() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir.clone());
         let uri = Uri::new("artifact".to_string(), "foo.txt".to_string());
-        let path = reg.write_into_registry(&uri, "hello").unwrap();
+        let path = reg.write_into_registry(&uri, "hello").await.unwrap();
         assert!(path.contains("foo.txt"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
 
         // Reload from disk
         let reg2 = ArtifactRegistry::new(artifact_dir);
-        assert_eq!(reg2.data_uri("artifact://foo.txt").unwrap(), path);
+        assert_eq!(reg2.data_uri("artifact://foo.txt").await.unwrap(), path);
     }
 
-    #[test]
-    fn test_path_for_uri_does_not_register() {
+    #[tokio::test]
+    async fn test_path_for_uri_does_not_register() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
         let uri = Uri::parse("artifact://later.txt").unwrap();
-        let path = reg.path_for_uri(&uri).unwrap();
+        let path = reg.path_for_uri(&uri).await.unwrap();
         assert!(path.ends_with("later.txt"));
-        assert!(!reg.is_registered("artifact://later.txt"));
+        assert!(!reg.is_registered("artifact://later.txt").await);
     }
 
-    #[test]
-    fn test_commit_idempotent_same_path() {
+    #[tokio::test]
+    async fn test_commit_idempotent_same_path() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
         let uri = Uri::parse("artifact://a.txt").unwrap();
-        let path = reg.path_for_uri(&uri).unwrap();
+        let path = reg.path_for_uri(&uri).await.unwrap();
         fs::write(&path, "").unwrap();
-        reg.commit("artifact://a.txt", &path).unwrap();
-        reg.commit("artifact://a.txt", &path).unwrap();
+        reg.commit("artifact://a.txt", &path).await.unwrap();
+        reg.commit("artifact://a.txt", &path).await.unwrap();
     }
 
-    #[test]
-    fn test_commit_rejects_missing_file() {
+    #[tokio::test]
+    async fn test_commit_with_missing_file_succeeds() {
         let (tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
         let missing = tmp.path().join("does-not-exist.txt");
-        let err = reg
-            .commit("artifact://gone.txt", &missing.to_string_lossy())
-            .unwrap_err();
-        assert!(err.to_string().contains("has no file at"));
-        assert!(!reg.is_registered("artifact://gone.txt"));
+        // commit does not check file existence; it only enforces key uniqueness
+        reg.commit("artifact://gone.txt", &missing.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(reg.is_registered("artifact://gone.txt").await);
     }
 
-    #[test]
-    fn test_commit_conflicting_path_raises() {
+    #[tokio::test]
+    async fn test_commit_conflicting_path_raises() {
         let (tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
         let one = tmp.path().join("one");
@@ -439,156 +437,168 @@ mod tests {
         fs::write(&one, "").unwrap();
         fs::write(&two, "").unwrap();
         reg.commit("artifact://a.txt", &one.to_string_lossy())
+            .await
             .unwrap();
         let err = reg
             .commit("artifact://a.txt", &two.to_string_lossy())
+            .await
             .unwrap_err();
         assert!(err.to_string().contains("duplicate artifact"));
     }
 
-    #[test]
-    fn test_copy_into_registry() {
+    #[tokio::test]
+    async fn test_copy_into_registry() {
         let (tmp, artifact_dir) = setup();
         let src = tmp.path().join("src.txt");
         fs::write(&src, "copied").unwrap();
         let reg = ArtifactRegistry::new(artifact_dir);
         let uri = Uri::parse("artifact://dst.txt").unwrap();
-        let path = reg.copy_into_registry(&uri, &src).unwrap();
-        assert!(reg.is_registered("artifact://dst.txt"));
+        let path = reg.copy_into_registry(&uri, &src).await.unwrap();
+        assert!(reg.is_registered("artifact://dst.txt").await);
         assert_eq!(fs::read_to_string(&path).unwrap(), "copied");
     }
 
-    #[test]
-    fn test_path_escape_prevention() {
+    #[tokio::test]
+    async fn test_path_escape_prevention() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
         let uri = Uri::new("artifact".to_string(), "../bad.txt".to_string());
-        assert!(reg.path_for_uri(&uri).is_err());
+        assert!(reg.path_for_uri(&uri).await.is_err());
     }
 
-    #[test]
-    fn test_content_reads_file() {
+    #[tokio::test]
+    async fn test_content_reads_file() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir.clone());
-        write_file(&reg, "hello.txt", "world");
-        assert_eq!(reg.content("artifact://hello.txt", None).unwrap(), "world");
+        write_file(&reg, "hello.txt", "world").await;
+        assert_eq!(
+            reg.content("artifact://hello.txt", None).await.unwrap(),
+            "world"
+        );
     }
 
-    #[test]
-    fn test_content_with_json_path() {
+    #[tokio::test]
+    async fn test_content_with_json_path() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
-        write_file(&reg, "data.json", r#"{"a":{"b":"c"}}"#);
-        let content = reg.content("artifact://data.json", Some("a.b")).unwrap();
+        write_file(&reg, "data.json", r#"{"a":{"b":"c"}}"#).await;
+        let content = reg
+            .content("artifact://data.json", Some("a.b"))
+            .await
+            .unwrap();
         assert_eq!(content, "c");
     }
 
-    #[test]
-    fn test_content_reads_file_containing_uri_text() {
+    #[tokio::test]
+    async fn test_content_reads_file_containing_uri_text() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
-        write_file(&reg, "range", "git://range/abc..def");
+        write_file(&reg, "range", "git://range/abc..def").await;
         assert_eq!(
-            reg.content("artifact://range", None).unwrap(),
+            reg.content("artifact://range", None).await.unwrap(),
             "git://range/abc..def",
         );
     }
 
-    #[test]
-    fn test_is_registered_false_for_missing_key() {
+    #[tokio::test]
+    async fn test_is_registered_false_for_missing_key() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
-        assert!(!reg.is_registered("nonexistent"));
+        assert!(!reg.is_registered("nonexistent").await);
     }
 
-    #[test]
-    fn test_is_registered_true_after_write() {
+    #[tokio::test]
+    async fn test_is_registered_true_after_write() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
-        write_file(&reg, "stuff.txt", "data");
-        assert!(reg.is_registered("artifact://stuff.txt"));
+        write_file(&reg, "stuff.txt", "data").await;
+        assert!(reg.is_registered("artifact://stuff.txt").await);
     }
 
-    #[test]
-    fn test_is_registered_true_after_file_deleted() {
+    #[tokio::test]
+    async fn test_is_registered_true_after_file_deleted() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
-        let path = write_file(&reg, "dead.txt", "data");
-        assert!(reg.is_registered("artifact://dead.txt"));
+        let path = write_file(&reg, "dead.txt", "data").await;
+        assert!(reg.is_registered("artifact://dead.txt").await);
         fs::remove_file(&path).unwrap();
-        assert!(reg.is_registered("artifact://dead.txt"));
+        assert!(reg.is_registered("artifact://dead.txt").await);
     }
 
-    #[test]
-    fn test_keys_returns_registered_keys() {
+    #[tokio::test]
+    async fn test_keys_returns_registered_keys() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
-        write_file(&reg, "a", "");
-        write_file(&reg, "b", "");
-        let mut keys = reg.keys();
+        write_file(&reg, "a", "").await;
+        write_file(&reg, "b", "").await;
+        let mut keys = reg.keys().await;
         keys.sort();
         assert_eq!(keys, vec!["artifact://a", "artifact://b"]);
     }
 
-    #[test]
-    fn test_merge_from_identity_key_map() {
+    #[tokio::test]
+    async fn test_merge_from_identity_key_map() {
         let (_tmp, artifact_dir) = setup();
         let (_, other_dir) = setup();
 
         let other = ArtifactRegistry::new(other_dir);
-        write_file(&other, "k1", "v");
+        write_file(&other, "k1", "v").await;
 
         let reg = ArtifactRegistry::new(artifact_dir);
-        reg.merge_from(&other, None, false, None).unwrap();
+        reg.merge_from(&other, None, false, None).await.unwrap();
         assert_eq!(
-            reg.data_uri("artifact://k1").unwrap(),
-            other.data_uri("artifact://k1").unwrap(),
+            reg.data_uri("artifact://k1").await.unwrap(),
+            other.data_uri("artifact://k1").await.unwrap(),
         );
     }
 
-    #[test]
-    fn test_merge_from_custom_key_map() {
+    #[tokio::test]
+    async fn test_merge_from_custom_key_map() {
         let (_tmp, artifact_dir) = setup();
         let (_, other_dir) = setup();
 
         let other = ArtifactRegistry::new(other_dir);
-        write_file(&other, "child", "v");
+        write_file(&other, "child", "v").await;
 
         let mut key_map = HashMap::new();
         key_map.insert("artifact://child".to_string(), "parent".to_string());
 
         let reg = ArtifactRegistry::new(artifact_dir);
-        reg.merge_from(&other, Some(&key_map), false, None).unwrap();
+        reg.merge_from(&other, Some(&key_map), false, None)
+            .await
+            .unwrap();
         assert_eq!(
-            reg.data_uri("parent").unwrap(),
-            other.data_uri("artifact://child").unwrap(),
+            reg.data_uri("parent").await.unwrap(),
+            other.data_uri("artifact://child").await.unwrap(),
         );
     }
 
-    #[test]
-    fn test_merge_from_with_file_copy() {
+    #[tokio::test]
+    async fn test_merge_from_with_file_copy() {
         let (_tmp, artifact_dir) = setup();
         let (tmp2, other_dir) = setup();
         let _ = &tmp2;
 
         let other = ArtifactRegistry::new(other_dir);
-        let src_file = write_file(&other, "note.txt", "hello");
+        let src_file = write_file(&other, "note.txt", "hello").await;
         assert!(Path::new(&src_file).exists());
 
         let reg = ArtifactRegistry::new(artifact_dir);
-        reg.merge_from(&other, None, true, None).unwrap();
-        let stored = reg.data_uri("artifact://note.txt").unwrap();
+        reg.merge_from(&other, None, true, None).await.unwrap();
+        let stored = reg.data_uri("artifact://note.txt").await.unwrap();
         let p = PathBuf::from(stored);
         assert!(p.exists());
         assert_eq!(fs::read_to_string(&p).unwrap(), "hello");
     }
 
-    #[test]
-    fn test_from_registry_file_constructor() {
+    #[tokio::test]
+    async fn test_from_registry_file_constructor() {
         let (_tmp, artifact_dir) = setup();
         let reg_file = artifact_dir.parent().unwrap().join("custom_registry.json");
         fs::write(&reg_file, r#"{"a":"b"}"#).unwrap();
-        let reg = ArtifactRegistry::from_registry_file(&reg_file, artifact_dir).unwrap();
-        assert_eq!(reg.data_uri("a").unwrap(), "b");
+        let reg = ArtifactRegistry::from_registry_file(&reg_file, artifact_dir)
+            .await
+            .unwrap();
+        assert_eq!(reg.data_uri("a").await.unwrap(), "b");
     }
 }

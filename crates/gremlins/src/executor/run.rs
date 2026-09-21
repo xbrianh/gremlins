@@ -83,22 +83,22 @@ fn non_empty(text: &str) -> Option<String> {
 /// A binding whose value is an absolute path is read from disk — an empty or
 /// whitespace-only file is not a reason — while any other value *is* the
 /// reason, so a `git://` or bare-string bail still reads back.
-fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
-    if !registry.is_registered(uri) {
+async fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
+    if !registry.is_registered(uri).await {
         return None;
     }
-    let raw = registry.data_uri(uri).ok()?;
+    let raw = registry.data_uri(uri).await.ok()?;
     if !raw.starts_with('/') {
         return non_empty(raw.trim());
     }
     let path = Path::new(&raw);
-    if !path.exists() {
+    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
         let msg =
             format!("stale binding: registered artifact {uri:?} has no backing file at {raw}");
         log::warn!("bail_at_uri: {msg}");
         return Some(msg);
     }
-    match std::fs::read_to_string(path) {
+    match tokio::fs::read_to_string(path).await {
         Ok(text) => non_empty(text.trim()),
         Err(_) => non_empty(&raw),
     }
@@ -108,35 +108,37 @@ fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
 /// `None` when unregistered or when the content is empty/whitespace.
 /// A registered artifact whose backing file is missing (stale binding) is
 /// treated as a bail with an error message as the reason.
-pub(crate) fn bail_reason(registry: &ArtifactRegistry, scope: &str) -> Option<String> {
-    bail_at_uri(registry, &format!("artifact://{scope}/bail"))
+pub(crate) async fn bail_reason(registry: &ArtifactRegistry, scope: &str) -> Option<String> {
+    bail_at_uri(registry, &format!("artifact://{scope}/bail")).await
 }
 
 /// The run-wide bail marker, `artifact://bail`.
-pub(crate) fn global_bail_reason(registry: &ArtifactRegistry) -> Option<String> {
-    bail_at_uri(registry, BAIL_KEY)
+pub(crate) async fn global_bail_reason(registry: &ArtifactRegistry) -> Option<String> {
+    bail_at_uri(registry, BAIL_KEY).await
 }
 
 /// Whether a bail is recorded for `scope` or for the run as a whole.
-pub(crate) fn is_bail_set(registry: &ArtifactRegistry, scope: &str) -> bool {
-    bail_reason(registry, scope).is_some() || global_bail_reason(registry).is_some()
+pub(crate) async fn is_bail_set(registry: &ArtifactRegistry, scope: &str) -> bool {
+    bail_reason(registry, scope).await.is_some() || global_bail_reason(registry).await.is_some()
 }
 
 /// The best reason available for a bail under `scope`: the scoped artifact's
 /// content, else the run-wide marker's, else the `detail` of the state bail
 /// file. `None` when no bail is recorded anywhere.
-fn bail_reason_for(
+async fn bail_reason_for(
     registry: &ArtifactRegistry,
     scope: &str,
     state: &state::StateData,
 ) -> Option<String> {
-    bail_reason(registry, scope)
-        .or_else(|| global_bail_reason(registry))
-        .or_else(|| {
-            state
-                .read_bail_info()
-                .and_then(|info| info.get("detail").and_then(Value::as_str).map(String::from))
-        })
+    if let Some(reason) = bail_reason(registry, scope).await {
+        return Some(reason);
+    }
+    if let Some(reason) = global_bail_reason(registry).await {
+        return Some(reason);
+    }
+    state
+        .read_bail_info()
+        .and_then(|info| info.get("detail").and_then(Value::as_str).map(String::from))
 }
 
 // ---------------------------------------------------------------------------
@@ -145,8 +147,8 @@ fn bail_reason_for(
 
 /// Whether `key` is registered, accepting both a bare key and its `artifact://` URI:
 /// guards and stop conditions are spelled either way in the wild.
-fn is_registered_uri(registry: &ArtifactRegistry, key: &str) -> bool {
-    registry.is_registered(key) || registry.is_registered(&format!("artifact://{key}"))
+async fn is_registered_uri(registry: &ArtifactRegistry, key: &str) -> bool {
+    registry.is_registered(key).await || registry.is_registered(&format!("artifact://{key}")).await
 }
 
 /// Run one top-level stage.
@@ -179,7 +181,7 @@ async fn run_stage_scoped(
     );
     if !skip.is_empty() {
         let resolved = skip.replace("{loop_iter}", &loop_iter);
-        if is_registered_uri(&gremlin.registry, &resolved) {
+        if is_registered_uri(&gremlin.registry, &resolved).await {
             log::info!("stage skipped (artifact exists): {}", stage.name());
             return Ok(());
         }
@@ -301,6 +303,7 @@ async fn run_agent(
     );
 
     let mut prepared = prepare_agent(agent, &gremlin.registry, &loop_iter, &framework_subs)
+        .await
         .map_err(|error| match error {
             // An unbound interpolation input is a bail, not a crash: the run
             // cannot proceed, but nothing is broken.
@@ -406,16 +409,18 @@ async fn run_agent(
         },
     })?;
 
-    commit_agent(&prepared, &gremlin.registry).map_err(|error| match error {
-        // A declared output that never materialised is the agent's bail.
-        AgentError::MissingArtifact { .. } => RunError::Bail {
-            reason: error.to_string(),
-        },
-        other => RunError::StageFailed {
-            stage: prepared.name.clone(),
-            message: other.to_string(),
-        },
-    })?;
+    commit_agent(&prepared, &gremlin.registry)
+        .await
+        .map_err(|error| match error {
+            // A declared output that never materialised is the agent's bail.
+            AgentError::MissingArtifact { .. } => RunError::Bail {
+                reason: error.to_string(),
+            },
+            other => RunError::StageFailed {
+                stage: prepared.name.clone(),
+                message: other.to_string(),
+            },
+        })?;
 
     Ok(())
 }
@@ -443,20 +448,19 @@ async fn run_exec(
         gremlin.id.as_str()
     );
 
-    let mut prepared =
-        prepare_exec(exec, &gremlin.registry, &loop_iter, &framework_subs).map_err(|error| {
-            match error {
-                ExecError::Resolve {
-                    source: ResolveError::MissingArtifact(key),
-                    ..
-                } => RunError::Bail {
-                    reason: format!("artifact not bound: {key:?}"),
-                },
-                other => RunError::StageFailed {
-                    stage: exec.name.clone(),
-                    message: other.to_string(),
-                },
-            }
+    let mut prepared = prepare_exec(exec, &gremlin.registry, &loop_iter, &framework_subs)
+        .await
+        .map_err(|error| match error {
+            ExecError::Resolve {
+                source: ResolveError::MissingArtifact(key),
+                ..
+            } => RunError::Bail {
+                reason: format!("artifact not bound: {key:?}"),
+            },
+            other => RunError::StageFailed {
+                stage: exec.name.clone(),
+                message: other.to_string(),
+            },
         })?;
 
     prepared.cwd = gremlin.cwd();
@@ -485,16 +489,18 @@ async fn run_exec(
             })?;
     }
 
-    commit_exec(&prepared, &gremlin.registry).map_err(|error| match error {
-        // An unproduced output that is not a bail URI aborts the run.
-        ExecError::MissingArtifact { .. } => RunError::Bail {
-            reason: error.to_string(),
-        },
-        other => RunError::StageFailed {
-            stage: prepared.name.clone(),
-            message: other.to_string(),
-        },
-    })?;
+    commit_exec(&prepared, &gremlin.registry)
+        .await
+        .map_err(|error| match error {
+            // An unproduced output that is not a bail URI aborts the run.
+            ExecError::MissingArtifact { .. } => RunError::Bail {
+                reason: error.to_string(),
+            },
+            other => RunError::StageFailed {
+                stage: prepared.name.clone(),
+                message: other.to_string(),
+            },
+        })?;
 
     Ok(())
 }
@@ -540,9 +546,10 @@ async fn run_sequence(
         // A bail — scoped to the sequence or written for the run as a whole —
         // ends the body, and the sequence reports it: falling through to `Ok`
         // would let the caller read a bailed subtree as a success.
-        if is_bail_set(&gremlin.registry, &key) || gremlin.state.read_bail_info().is_some() {
-            let reason =
-                bail_reason_for(&gremlin.registry, &key, &gremlin.state).unwrap_or_default();
+        if is_bail_set(&gremlin.registry, &key).await || gremlin.state.read_bail_info().is_some() {
+            let reason = bail_reason_for(&gremlin.registry, &key, &gremlin.state)
+                .await
+                .unwrap_or_default();
             gremlin.state.clear_done(&key);
             return Err(RunError::Bail { reason });
         }
@@ -615,23 +622,26 @@ async fn run_loop(
             // A bail — scoped to this iteration or written for the run as a
             // whole — ends the body at once: the children after it would only
             // run against a definition that has already stopped.
-            if is_bail_set(&gremlin.registry, &loop_iter)
+            if is_bail_set(&gremlin.registry, &loop_iter).await
                 || gremlin.state.read_bail_info().is_some()
             {
                 break;
             }
         }
 
-        if is_bail_set(&gremlin.registry, &loop_iter) || gremlin.state.read_bail_info().is_some() {
-            let reason =
-                bail_reason_for(&gremlin.registry, &loop_iter, &gremlin.state).unwrap_or_default();
+        if is_bail_set(&gremlin.registry, &loop_iter).await
+            || gremlin.state.read_bail_info().is_some()
+        {
+            let reason = bail_reason_for(&gremlin.registry, &loop_iter, &gremlin.state)
+                .await
+                .unwrap_or_default();
             outcome = Err(RunError::Bail { reason });
             break 'iterations;
         }
 
         if let Some(stop) = stop_when_exists {
             let resolved = stop.replace("{loop_iter}", &loop_iter);
-            if is_registered_uri(&gremlin.registry, &resolved) {
+            if is_registered_uri(&gremlin.registry, &resolved).await {
                 stopped = true;
                 break 'iterations;
             }
@@ -670,7 +680,7 @@ impl Gremlin {
         // resolving the environment are all deferred out of the constructors so
         // that a handle nobody runs is cheap. This is the one place they happen
         // — and the one place a missing definition becomes a hard error.
-        self.init_runtime()?;
+        self.init_runtime().await?;
 
         // A first start owes its checkout a bootstrap before any stage can use
         // it. The Python guard was `worktree_dir and not resume_from and
@@ -751,7 +761,7 @@ impl Gremlin {
             // An exec stage can bail through the registry instead of state:
             // `artifact://bail` is the marker its bind writes. Stop the walk on
             // it too, and record it the way any other bail is recorded.
-            if let Some(reason) = global_bail_reason(&self.registry) {
+            if let Some(reason) = global_bail_reason(&self.registry).await {
                 self.state.write_bail_file("other", &truncate(&reason, 200));
                 exit_code = 1;
                 break;
@@ -933,30 +943,39 @@ mod tests {
 
     // --- bail reading ---
 
-    #[test]
-    fn bail_reason_reads_the_bound_file() {
+    #[tokio::test]
+    async fn bail_reason_reads_the_bound_file() {
         let (_tmp, registry) = scratch_registry();
-        assert!(bail_reason(&registry, "scope").is_none());
+        assert!(bail_reason(&registry, "scope").await.is_none());
 
         let uri = Uri::parse("artifact://scope/bail").unwrap();
-        registry.write_into_registry(&uri, "boom\n").unwrap();
-        assert_eq!(bail_reason(&registry, "scope").as_deref(), Some("boom"));
+        registry.write_into_registry(&uri, "boom\n").await.unwrap();
+        assert_eq!(
+            bail_reason(&registry, "scope").await.as_deref(),
+            Some("boom")
+        );
 
         // Neither is an empty one.
-        registry.write_into_registry(&uri, "").unwrap();
-        assert!(bail_reason(&registry, "scope").is_none());
+        registry.write_into_registry(&uri, "").await.unwrap();
+        assert!(bail_reason(&registry, "scope").await.is_none());
     }
 
-    #[test]
-    fn global_bail_and_is_bail_set() {
+    #[tokio::test]
+    async fn global_bail_and_is_bail_set() {
         let (_tmp, registry) = scratch_registry();
-        assert!(!is_bail_set(&registry, "scope"));
-        assert!(global_bail_reason(&registry).is_none());
+        assert!(!is_bail_set(&registry, "scope").await);
+        assert!(global_bail_reason(&registry).await.is_none());
 
         let uri = Uri::parse(BAIL_KEY).unwrap();
-        registry.write_into_registry(&uri, "stopped\n").unwrap();
-        assert_eq!(global_bail_reason(&registry).as_deref(), Some("stopped"));
-        assert!(is_bail_set(&registry, "scope"));
+        registry
+            .write_into_registry(&uri, "stopped\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            global_bail_reason(&registry).await.as_deref(),
+            Some("stopped")
+        );
+        assert!(is_bail_set(&registry, "scope").await);
     }
 
     // --- agent ---
@@ -974,6 +993,7 @@ mod tests {
         gremlin
             .registry
             .write_into_registry(&Uri::parse("artifact://done.md").unwrap(), "done")
+            .await
             .unwrap();
 
         let stage = gremlin.definition.stages[0].clone();
@@ -995,6 +1015,7 @@ mod tests {
         gremlin
             .registry
             .write_into_registry(&Uri::parse("artifact://done.md").unwrap(), "done")
+            .await
             .unwrap();
 
         let stage = gremlin.definition.stages[0].clone();
@@ -1043,7 +1064,7 @@ mod tests {
 
         let stage = gremlin.definition.stages[0].clone();
         run_stage(&stage, &mut gremlin).await.unwrap();
-        assert!(gremlin.registry.is_registered("artifact://writer.md"));
+        assert!(gremlin.registry.is_registered("artifact://writer.md").await);
     }
 
     #[tokio::test]
@@ -1111,9 +1132,9 @@ mod tests {
         let stage = gremlin.definition.stages[0].clone();
 
         run_stage(&stage, &mut gremlin).await.unwrap();
-        assert!(gremlin.registry.is_registered(BAIL_KEY));
+        assert!(gremlin.registry.is_registered(BAIL_KEY).await);
         assert_eq!(
-            global_bail_reason(&gremlin.registry).as_deref(),
+            global_bail_reason(&gremlin.registry).await.as_deref(),
             Some("reason")
         );
     }
@@ -1206,6 +1227,7 @@ mod tests {
         gremlin
             .registry
             .write_into_registry(&Uri::parse("artifact://seq/bail").unwrap(), "boom")
+            .await
             .unwrap();
         let stage = gremlin.definition.stages[0].clone();
 
@@ -1262,6 +1284,7 @@ mod tests {
         gremlin
             .registry
             .write_into_registry(&Uri::parse("artifact://done").unwrap(), "yes")
+            .await
             .unwrap();
 
         let stage = gremlin.definition.stages[0].clone();
@@ -1317,9 +1340,12 @@ mod tests {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
             other => panic!("expected Bail, got {other:?}"),
         }
-        assert!(gremlin
-            .registry
-            .is_registered("artifact://poll~1~test-0001/bail"));
+        assert!(
+            gremlin
+                .registry
+                .is_registered("artifact://poll~1~test-0001/bail")
+                .await
+        );
     }
 
     #[tokio::test]
@@ -1375,9 +1401,12 @@ mod tests {
             other => panic!("expected Bail, got {other:?}"),
         }
         // The enclosing sequence scopes `done_children`, not the iteration key.
-        assert!(gremlin
-            .registry
-            .is_registered("artifact://poll~1~test-0001/bail"));
+        assert!(
+            gremlin
+                .registry
+                .is_registered("artifact://poll~1~test-0001/bail")
+                .await
+        );
     }
 
     #[tokio::test]
@@ -1405,9 +1434,12 @@ mod tests {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
             other => panic!("expected Bail, got {other:?}"),
         }
-        assert!(gremlin
-            .registry
-            .is_registered("artifact://outer~1~inner~1~test-0001/bail"));
+        assert!(
+            gremlin
+                .registry
+                .is_registered("artifact://outer~1~inner~1~test-0001/bail")
+                .await
+        );
     }
 
     #[tokio::test]

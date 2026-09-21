@@ -764,6 +764,7 @@ async fn land(id: &str) -> Result<(), String> {
 
     // Resolve interpolation references.
     let prepared = prepare_exec(exec, &registry, "", &HashMap::new())
+        .await
         .map_err(|e| format!("gremlin {id}: {e}"))?;
 
     if prepared.cmds.is_empty() {

@@ -108,15 +108,17 @@ pub(crate) async fn run_parallel(
         log::debug!(
             "parallel group {group_name}: forking child {child_name} (child_id={child_id})"
         );
-        // Fork the child gremlin synchronously (before spawning), so the
+        // Fork the child gremlin (before spawning), so the
         // worker thread only has to call `run()`.
-        let mut child_gremlin = gremlin.fork_with_stages(
-            &child_id,
-            &parent_id,
-            &group_name_owned,
-            &child_name,
-            child_stages,
-        )?;
+        let mut child_gremlin = gremlin
+            .fork_with_stages(
+                &child_id,
+                &parent_id,
+                &group_name_owned,
+                &child_name,
+                child_stages,
+            )
+            .await?;
 
         // Resolve the effective client for this parallel group:
         // 1. The group's own `client:` always wins.
@@ -372,7 +374,7 @@ pub(crate) async fn run_parallel(
     );
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
-            if let Err(e) = merge_child_artifacts(gremlin, outcome) {
+            if let Err(e) = merge_child_artifacts(gremlin, outcome).await {
                 log::warn!(
                     "parallel group {group_name}: failed to merge artifacts from {}: {e}",
                     outcome.child_name
@@ -442,7 +444,10 @@ struct ChildOutcome {
 }
 
 /// Merge artifacts from a successful child into the parent registry.
-fn merge_child_artifacts(gremlin: &mut Gremlin, outcome: &ChildOutcome) -> Result<(), RunError> {
+async fn merge_child_artifacts(
+    gremlin: &mut Gremlin,
+    outcome: &ChildOutcome,
+) -> Result<(), RunError> {
     use crate::artifacts::registry::ArtifactRegistry;
     use crate::config;
 
@@ -454,7 +459,7 @@ fn merge_child_artifacts(gremlin: &mut Gremlin, outcome: &ChildOutcome) -> Resul
     let child_registry = ArtifactRegistry::new(child_artifact_dir);
     // Map child artifact keys to parent-scoped keys.
     let mut key_map = HashMap::new();
-    for key in child_registry.keys() {
+    for key in child_registry.keys().await {
         // Strip the artifact:// prefix, prepend the child name.
         let bare = key.strip_prefix("artifact://").unwrap_or(&key);
         let parent_key = format!("artifact://{}/{}", outcome.child_name, bare);
@@ -464,6 +469,7 @@ fn merge_child_artifacts(gremlin: &mut Gremlin, outcome: &ChildOutcome) -> Resul
     gremlin
         .registry
         .merge_from(&child_registry, Some(&key_map), true, None)
+        .await
         .map_err(|e| RunError::Message(format!("artifact merge failed: {e}")))?;
 
     Ok(())
