@@ -27,7 +27,7 @@ stages:
     skip_if_exists: "artifact://pr-branch.txt"
     interpolation:
       base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
-      plan_issue_number: content("artifact://plan-issue-number.txt")?
+      plan_issue_number: content("artifact://plan-issue-number.txt")
       plan: content("artifact://plan.md")?
       diff_summary: content("artifact://diff-summary.txt")
     prompt:

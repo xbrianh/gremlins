@@ -21,7 +21,7 @@ stages:
       cmds:
         - 'gh_resolve_plan_source "{plan}" "{plan_issue_number}"'
     bind:
-      plan_issue_number?: "artifact://plan-issue-number.txt"
+      plan_issue_number: "artifact://plan-issue-number.txt"
 
   - name: publish-as-issue
     type: exec
