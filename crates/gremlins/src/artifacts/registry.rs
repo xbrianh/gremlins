@@ -46,9 +46,6 @@ impl ArtifactRegistry {
     /// Read and parse `registry.json`, returning an empty map when the file is
     /// absent or unparseable (logging the reason).
     async fn read_registry_json(&self) -> HashMap<String, String> {
-        if !self.registry_path.exists() {
-            return HashMap::new();
-        }
         match tokio::fs::read_to_string(&self.registry_path).await {
             Ok(content) => match serde_json::from_str::<HashMap<String, String>>(&content) {
                 Ok(data) => data,
@@ -61,10 +58,12 @@ impl ArtifactRegistry {
                 }
             },
             Err(e) => {
-                log::error!(
-                    "failed to read registry.json at {}: {e} — starting with empty registry",
-                    self.registry_path.display(),
-                );
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::error!(
+                        "failed to read registry.json at {}: {e} — starting with empty registry",
+                        self.registry_path.display(),
+                    );
+                }
                 HashMap::new()
             }
         }
@@ -148,6 +147,14 @@ impl ArtifactRegistry {
     /// idempotent for an identical binding; a conflicting binding is a
     /// `DuplicateArtifact` error.
     pub async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Check file existence outside the lock so we don't block inside
+        // locked_write (which takes a sync closure).
+        if !tokio::fs::try_exists(path).await.unwrap_or(false) {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("artifact {key:?} has no file at {path}"),
+            )));
+        }
         self.locked_write(|data| {
             if let Some(existing) = data.get(key) {
                 if existing == path {
@@ -159,12 +166,6 @@ impl ArtifactRegistry {
                     existing: existing.clone(),
                     incoming: path.to_string(),
                 }));
-            }
-            if !Path::new(path).exists() {
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("artifact {key:?} has no file at {path}"),
-                )));
             }
             data.insert(key.to_string(), path.to_string());
             log::debug!("commit: {:?} -> {:?}", key, path);
@@ -331,7 +332,7 @@ impl ArtifactRegistry {
         artifact_dir: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let registry = ArtifactRegistry::new(artifact_dir);
-        if path != registry.registry_path && path.exists() {
+        if path != registry.registry_path && tokio::fs::try_exists(path).await.unwrap_or(false) {
             let content = tokio::fs::read_to_string(path).await?;
             let parsed: HashMap<String, String> = serde_json::from_str(&content)?;
             let count = parsed.len();

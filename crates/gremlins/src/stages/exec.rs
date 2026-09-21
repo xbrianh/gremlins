@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use thiserror::Error;
 
@@ -373,7 +373,7 @@ pub async fn commit_exec(
 ) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
-        if Path::new(path).exists() {
+        if tokio::fs::try_exists(path).await.unwrap_or(false) {
             artifacts
                 .commit(uri_str, path)
                 .await
@@ -441,6 +441,7 @@ impl crate::stages::base::Stage for Exec {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
 
     #[tokio::test]
     async fn test_commit_exec_optional_bind_ignores_duplicate_registration() {

@@ -260,8 +260,8 @@ pub async fn commit_agent(
 ) -> Result<(), AgentError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
-        let produced = std::path::Path::new(path)
-            .metadata()
+        let produced = tokio::fs::metadata(path)
+            .await
             .map(|m| m.len())
             .unwrap_or(0)
             > 0;

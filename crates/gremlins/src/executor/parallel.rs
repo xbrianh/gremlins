@@ -108,7 +108,7 @@ pub(crate) async fn run_parallel(
         log::debug!(
             "parallel group {group_name}: forking child {child_name} (child_id={child_id})"
         );
-        // Fork the child gremlin synchronously (before spawning), so the
+        // Fork the child gremlin (before spawning), so the
         // worker thread only has to call `run()`.
         let mut child_gremlin = gremlin
             .fork_with_stages(

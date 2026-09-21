@@ -92,13 +92,13 @@ async fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
         return non_empty(raw.trim());
     }
     let path = Path::new(&raw);
-    if !path.exists() {
+    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
         let msg =
             format!("stale binding: registered artifact {uri:?} has no backing file at {raw}");
         log::warn!("bail_at_uri: {msg}");
         return Some(msg);
     }
-    match std::fs::read_to_string(path) {
+    match tokio::fs::read_to_string(path).await {
         Ok(text) => non_empty(text.trim()),
         Err(_) => non_empty(&raw),
     }
