@@ -15,7 +15,7 @@ You are composing a GitHub pull request for implementation work that has already
 Do NOT run git commands or inspect the working tree — all the information you need is above.
 Write exactly the following three files using the provided content, then stop:
 
-- `{pr_branch}` — One line: the branch name to push. If `{plan_issue_number}` is non-empty, use `issue-{plan_issue_number}-<short-slug>`; otherwise derive a short descriptive slug from the plan or diff summary.
+- `{pr_branch}` — One line: the branch name to push. Use `issue-{plan_issue_number}-<short-slug>`.
 - `{pr_title}` — One line: the PR title. Derive from the plan heading.
 - `{pr_body}` — The PR body in markdown. Summarize the plan briefly, then reference the changes from the diff summary. Include `Closes #{plan_issue_number}` on its own line.
 
