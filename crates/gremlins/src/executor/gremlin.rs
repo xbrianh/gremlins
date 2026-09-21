@@ -394,7 +394,7 @@ impl Gremlin {
     /// handle a stub, and a retry — `resume` re-entering the run loop after a
     /// transient bootstrap failure — starts the whole sequence over instead of
     /// finding a half-built runtime it believes is finished.
-    pub(crate) fn init_runtime(&mut self) -> Result<(), RunError> {
+    pub(crate) async fn init_runtime(&mut self) -> Result<(), RunError> {
         if !self.definition.is_stub() {
             return Ok(());
         }
@@ -428,11 +428,12 @@ impl Gremlin {
         };
 
         let registry = ArtifactRegistry::new(self.artifact_dir.clone());
-        register_stage_inputs(&registry, &definition.bootstrap, &self.stage_inputs);
+        register_stage_inputs(&registry, &definition.bootstrap, &self.stage_inputs).await;
         register_base_sha(
             &registry,
             self.worktree.as_deref().unwrap_or(&self.project_root),
-        );
+        )
+        .await;
 
         let overlay_dir = self.state_dir.join(config::overlay_dirname());
         let env = resolve_env(
@@ -477,7 +478,7 @@ impl Gremlin {
     ///
     /// `child_definition_path` is the branch's hermetic `definition.yaml`; pass
     /// `None` to inherit the parent's persisted `definition_path`.
-    pub fn fork(
+    pub async fn fork(
         &self,
         child_id: &str,
         parent_id: &str,
@@ -499,6 +500,7 @@ impl Gremlin {
             child_definition_path,
             definition,
         )
+        .await
     }
 
     /// Fork a child gremlin that runs only the given `stages`.
@@ -507,7 +509,7 @@ impl Gremlin {
     /// disk, the child inherits the parent's definition metadata and runs only
     /// the provided stage list. Used by the parallel executor so each child
     /// runs exactly one stage without needing a separate definition file.
-    pub fn fork_with_stages(
+    pub async fn fork_with_stages(
         &self,
         child_id: &str,
         parent_id: &str,
@@ -526,6 +528,7 @@ impl Gremlin {
         definition.bootstrap.launch_cmds.clear();
         definition.bootstrap.cli_out.clear();
         self.fork_child(child_id, parent_id, group_name, child_key, None, definition)
+            .await
     }
 
     /// The shared body of [`Gremlin::fork`] and [`Gremlin::fork_with_stages`].
@@ -536,7 +539,7 @@ impl Gremlin {
     /// whose `definition` the caller has already resolved. `child_definition_path`
     /// is the branch's hermetic `definition.yaml`, recorded in the child state
     /// when present and otherwise inherited from the parent's persisted path.
-    fn fork_child(
+    async fn fork_child(
         &self,
         child_id: &str,
         parent_id: &str,
@@ -605,6 +608,7 @@ impl Gremlin {
             &self.registry.registry_path,
             child_artifact_dir.clone(),
         )
+        .await
         .map_err(|error| RunError::Message(error.to_string()))?;
 
         let parent = state::read_state_json(self.state.state_file.as_deref());
@@ -986,7 +990,7 @@ fn write_launch_state(
 /// skipped too — a stage input that cannot be written is worth complaining
 /// about, but it must not abort a launch, because the stage that wanted the
 /// artifact will report it precisely.
-fn register_stage_inputs(
+async fn register_stage_inputs(
     registry: &ArtifactRegistry,
     bootstrap: &Bootstrap,
     stage_inputs: &HashMap<String, String>,
@@ -1001,12 +1005,12 @@ fn register_stage_inputs(
             continue;
         }
         let uri_str = format!("artifact://{key}");
-        if registry.is_registered(&uri_str) {
+        if registry.is_registered(&uri_str).await {
             continue;
         }
         match Uri::parse(&uri_str) {
             Ok(uri) => {
-                if let Err(error) = registry.write_into_registry(&uri, value) {
+                if let Err(error) = registry.write_into_registry(&uri, value).await {
                     log::warn!("launch: could not register stage input {key:?}: {error}");
                 }
             }
@@ -1016,8 +1020,8 @@ fn register_stage_inputs(
 }
 
 /// Record the commit the run started from, once, as `artifact://base_sha`.
-fn register_base_sha(registry: &ArtifactRegistry, cwd: &Path) {
-    if registry.is_registered("artifact://base_sha") {
+async fn register_base_sha(registry: &ArtifactRegistry, cwd: &Path) {
+    if registry.is_registered("artifact://base_sha").await {
         return;
     }
     let sha = git::head_sha(Some(cwd));
@@ -1025,7 +1029,7 @@ fn register_base_sha(registry: &ArtifactRegistry, cwd: &Path) {
         return;
     }
     if let Ok(uri) = Uri::parse("artifact://base_sha") {
-        if let Err(error) = registry.write_into_registry(&uri, &sha) {
+        if let Err(error) = registry.write_into_registry(&uri, &sha).await {
             log::warn!("launch: could not register artifact://base_sha: {error}");
         }
     }
@@ -1526,115 +1530,113 @@ mod tests {
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"))
     }
 
-    #[test]
-    fn create_creates_state_and_worktree() {
+    #[tokio::test]
+    async fn create_creates_state_and_worktree() {
         if !git_available() {
             eprintln!("git is unavailable; skipping create_creates_state_and_worktree");
             return;
         }
-        with_sandbox(None, |sandbox| {
-            let repo = tempfile::tempdir().unwrap();
-            if !init_repo(repo.path()) {
-                eprintln!("could not prepare a git fixture; skipping");
-                return;
-            }
-            let definition_path = repo.path().join(".gremlins").join("demo.yaml");
+        let sandbox = crate::test_support::Sandbox::with_config(None);
+        let repo = tempfile::tempdir().unwrap();
+        if !init_repo(repo.path()) {
+            eprintln!("could not prepare a git fixture; skipping");
+            return;
+        }
+        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
-            let mut gremlin = Gremlin::create(
-                "gr-test",
-                &definition_path,
-                None,
-                None,
-                None,
-                &HashMap::new(),
-                false,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+        let mut gremlin = Gremlin::create(
+            "gr-test",
+            &definition_path,
+            None,
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
-            let worktree = gremlin.worktree.clone().expect("a worktree");
-            assert!(worktree.is_dir(), "{worktree:?}");
+        let worktree = gremlin.worktree.clone().expect("a worktree");
+        assert!(worktree.is_dir(), "{worktree:?}");
 
-            let state_file = sandbox.join("state").join("gr-test").join("state.json");
-            assert!(state_file.is_file(), "{state_file:?}");
-            let raw = read_state(&state_file);
-            assert_eq!(raw["id"], "gr-test");
-            assert_eq!(raw["status"], "running");
-            assert_eq!(raw["pid"].as_i64().unwrap(), std::process::id() as i64);
-            assert!(raw["definition_path"]
-                .as_str()
-                .unwrap()
-                .ends_with("demo.yaml"));
-            // Construction is cheap: the client label is blank until the run
-            // loads the definition, and nothing has been parsed yet.
-            assert_eq!(raw["client"], "");
-            assert!(gremlin.definition.is_stub());
-            assert!(gremlin.env.is_empty());
+        let state_file = sandbox.join("state").join("gr-test").join("state.json");
+        assert!(state_file.is_file(), "{state_file:?}");
+        let raw = read_state(&state_file);
+        assert_eq!(raw["id"], "gr-test");
+        assert_eq!(raw["status"], "running");
+        assert_eq!(raw["pid"].as_i64().unwrap(), std::process::id() as i64);
+        assert!(raw["definition_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("demo.yaml"));
+        // Construction is cheap: the client label is blank until the run
+        // loads the definition, and nothing has been parsed yet.
+        assert_eq!(raw["client"], "");
+        assert!(gremlin.definition.is_stub());
+        assert!(gremlin.env.is_empty());
 
-            // The checkout and the commit it was branched from are on record,
-            // and the returned handle agrees with what was persisted.
-            assert_eq!(raw["workdir"].as_str().unwrap(), worktree.to_string_lossy());
-            let base = raw["worktree_base"].as_str().unwrap();
-            assert_eq!(base.len(), 40, "worktree_base should be a SHA: {base:?}");
-            assert_eq!(base, gremlin.base_ref_sha);
+        // The checkout and the commit it was branched from are on record,
+        // and the returned handle agrees with what was persisted.
+        assert_eq!(raw["workdir"].as_str().unwrap(), worktree.to_string_lossy());
+        let base = raw["worktree_base"].as_str().unwrap();
+        assert_eq!(base.len(), 40, "worktree_base should be a SHA: {base:?}");
+        assert_eq!(base, gremlin.base_ref_sha);
 
-            // Lazy init is what fills in the runtime fields.
-            gremlin.init_runtime().unwrap();
-            assert_eq!(gremlin.definition.name, "demo");
-            assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], "gr-test");
-            assert!(gremlin.registry.artifact_dir.ends_with("artifacts"));
-            let raw = read_state(&state_file);
-            assert_eq!(raw["client"], "cmd:true");
+        // Lazy init is what fills in the runtime fields.
+        gremlin.init_runtime().await.unwrap();
+        assert_eq!(gremlin.definition.name, "demo");
+        assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], "gr-test");
+        assert!(gremlin.registry.artifact_dir.ends_with("artifacts"));
+        let raw = read_state(&state_file);
+        assert_eq!(raw["client"], "cmd:true");
 
-            // Idempotent: a second call is a no-op, not a re-parse.
-            let path_before = gremlin.definition.path.clone();
-            gremlin.init_runtime().unwrap();
-            assert_eq!(gremlin.definition.path, path_before);
-        });
+        // Idempotent: a second call is a no-op, not a re-parse.
+        let path_before = gremlin.definition.path.clone();
+        gremlin.init_runtime().await.unwrap();
+        assert_eq!(gremlin.definition.path, path_before);
     }
 
-    #[test]
-    fn create_then_from_roundtrips() {
+    #[tokio::test]
+    async fn create_then_from_roundtrips() {
         if !git_available() {
             eprintln!("git is unavailable; skipping create_then_from_roundtrips");
             return;
         }
-        with_sandbox(None, |_sandbox| {
-            let repo = tempfile::tempdir().unwrap();
-            if !init_repo(repo.path()) {
-                eprintln!("could not prepare a git fixture; skipping");
-                return;
-            }
-            let definition_path = repo.path().join(".gremlins").join("demo.yaml");
+        let _sandbox = crate::test_support::Sandbox::with_config(None);
+        let repo = tempfile::tempdir().unwrap();
+        if !init_repo(repo.path()) {
+            eprintln!("could not prepare a git fixture; skipping");
+            return;
+        }
+        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
-            let mut launched = Gremlin::create(
-                "gr-test",
-                &definition_path,
-                None,
-                None,
-                None,
-                &HashMap::new(),
-                false,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-            let mut opened = Gremlin::from("gr-test").unwrap();
+        let mut launched = Gremlin::create(
+            "gr-test",
+            &definition_path,
+            None,
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut opened = Gremlin::from("gr-test").unwrap();
 
-            assert_eq!(opened.id, launched.id);
-            assert_eq!(opened.state_dir, launched.state_dir);
-            assert_eq!(opened.project_root, launched.project_root);
-            assert_eq!(opened.worktree, launched.worktree);
-            assert_eq!(opened.definition_path, launched.definition_path);
+        assert_eq!(opened.id, launched.id);
+        assert_eq!(opened.state_dir, launched.state_dir);
+        assert_eq!(opened.project_root, launched.project_root);
+        assert_eq!(opened.worktree, launched.worktree);
+        assert_eq!(opened.definition_path, launched.definition_path);
 
-            launched.init_runtime().unwrap();
-            opened.init_runtime().unwrap();
-            assert_eq!(opened.definition.name, launched.definition.name);
-            assert_eq!(opened.env["GREMLINS_GREMLIN_ID"], "gr-test");
-        });
+        launched.init_runtime().await.unwrap();
+        opened.init_runtime().await.unwrap();
+        assert_eq!(opened.definition.name, launched.definition.name);
+        assert_eq!(opened.env["GREMLINS_GREMLIN_ID"], "gr-test");
     }
 
     #[test]
@@ -1723,112 +1725,111 @@ mod tests {
         assert_eq!(handle.definition.name, "demo");
     }
 
-    #[test]
-    fn fork_copies_artifacts_and_seeds_child_state() {
+    #[tokio::test]
+    async fn fork_copies_artifacts_and_seeds_child_state() {
         if !git_available() {
             eprintln!("git is unavailable; skipping fork_copies_artifacts_and_seeds_child_state");
             return;
         }
-        with_sandbox(None, |sandbox| {
-            let repo = tempfile::tempdir().unwrap();
-            if !init_repo(repo.path()) {
-                eprintln!("could not prepare a git fixture; skipping");
-                return;
-            }
-            let definition_path = repo.path().join(".gremlins").join("demo.yaml");
+        let sandbox = crate::test_support::Sandbox::with_config(None);
+        let repo = tempfile::tempdir().unwrap();
+        if !init_repo(repo.path()) {
+            eprintln!("could not prepare a git fixture; skipping");
+            return;
+        }
+        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
-            let parent = Gremlin::create(
-                "gr-test",
-                &definition_path,
-                None,
-                None,
-                None,
-                &HashMap::new(),
-                false,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+        let parent = Gremlin::create(
+            "gr-test",
+            &definition_path,
+            None,
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
-            std::fs::write(parent.artifact_dir.join("note.txt"), "hello").unwrap();
+        std::fs::write(parent.artifact_dir.join("note.txt"), "hello").unwrap();
 
-            let child = parent.fork("gr-child", "", "", "", None).unwrap();
+        let child = parent.fork("gr-child", "", "", "", None).await.unwrap();
 
-            assert_ne!(child.artifact_dir, parent.artifact_dir);
-            assert!(child.artifact_dir.ends_with("artifacts"));
-            assert!(child.artifact_dir.join("note.txt").is_file());
+        assert_ne!(child.artifact_dir, parent.artifact_dir);
+        assert!(child.artifact_dir.ends_with("artifacts"));
+        assert!(child.artifact_dir.join("note.txt").is_file());
 
-            let child_state = sandbox.join("state").join("gr-child").join("state.json");
-            let raw = read_state(&child_state);
-            assert_eq!(raw["id"], "gr-child");
-            assert_eq!(raw["status"], "running");
-            assert!(raw["pid"].is_null());
-            assert!(raw.get("token_usage").is_none());
+        let child_state = sandbox.join("state").join("gr-child").join("state.json");
+        let raw = read_state(&child_state);
+        assert_eq!(raw["id"], "gr-child");
+        assert_eq!(raw["status"], "running");
+        assert!(raw["pid"].is_null());
+        assert!(raw.get("token_usage").is_none());
 
-            let parent_worktree = parent.worktree.clone().unwrap();
-            let child_worktree = child.worktree.clone().expect("child worktree");
-            assert_ne!(child_worktree, parent_worktree);
-            assert!(child_worktree.is_dir(), "{child_worktree:?}");
+        let parent_worktree = parent.worktree.clone().unwrap();
+        let child_worktree = child.worktree.clone().expect("child worktree");
+        assert_ne!(child_worktree, parent_worktree);
+        assert!(child_worktree.is_dir(), "{child_worktree:?}");
 
-            // The child's own checkout is on record, never the parent's.
-            assert_eq!(
-                raw["workdir"].as_str().unwrap(),
-                child_worktree.to_string_lossy()
-            );
-            let base = raw["worktree_base"].as_str().unwrap();
-            assert_eq!(base.len(), 40, "worktree_base should be a SHA: {base:?}");
-            assert_eq!(base, child.base_ref_sha);
+        // The child's own checkout is on record, never the parent's.
+        assert_eq!(
+            raw["workdir"].as_str().unwrap(),
+            child_worktree.to_string_lossy()
+        );
+        let base = raw["worktree_base"].as_str().unwrap();
+        assert_eq!(base.len(), 40, "worktree_base should be a SHA: {base:?}");
+        assert_eq!(base, child.base_ref_sha);
 
-            assert_eq!(child.env, parent.env);
-        });
+        assert_eq!(child.env, parent.env);
     }
 
-    #[test]
-    fn fork_keeps_parent_id_unless_one_is_given() {
+    #[tokio::test]
+    async fn fork_keeps_parent_id_unless_one_is_given() {
         if !git_available() {
             eprintln!("git is unavailable; skipping fork_keeps_parent_id_unless_one_is_given");
             return;
         }
-        with_sandbox(None, |sandbox| {
-            let repo = tempfile::tempdir().unwrap();
-            if !init_repo(repo.path()) {
-                eprintln!("could not prepare a git fixture; skipping");
-                return;
-            }
-            let definition_path = repo.path().join(".gremlins").join("demo.yaml");
+        let sandbox = crate::test_support::Sandbox::with_config(None);
+        let repo = tempfile::tempdir().unwrap();
+        if !init_repo(repo.path()) {
+            eprintln!("could not prepare a git fixture; skipping");
+            return;
+        }
+        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
-            let parent = Gremlin::create(
-                "gr-test",
-                &definition_path,
-                None,
-                None,
-                None,
-                &HashMap::new(),
-                false,
-                None,
-                None,
-                None,
-            )
+        let parent = Gremlin::create(
+            "gr-test",
+            &definition_path,
+            None,
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Mirrors the reference implementation: an empty argument falls
+        // back to whatever the parent state carries (usually the parent's
+        // own parent, or nothing at all), never to the parent's own id.
+        parent.fork("gr-a", "", "", "", None).await.unwrap();
+        parent
+            .fork("gr-b", "gr-root", "group", "key", None)
+            .await
             .unwrap();
 
-            // Mirrors the reference implementation: an empty argument falls
-            // back to whatever the parent state carries (usually the parent's
-            // own parent, or nothing at all), never to the parent's own id.
-            parent.fork("gr-a", "", "", "", None).unwrap();
-            parent
-                .fork("gr-b", "gr-root", "group", "key", None)
-                .unwrap();
+        for (child_id, expected) in [("gr-a", ""), ("gr-b", "gr-root")] {
+            let raw = read_state(&sandbox.join("state").join(child_id).join("state.json"));
+            assert_eq!(raw["parent_id"], expected, "{child_id}");
+        }
 
-            for (child_id, expected) in [("gr-a", ""), ("gr-b", "gr-root")] {
-                let raw = read_state(&sandbox.join("state").join(child_id).join("state.json"));
-                assert_eq!(raw["parent_id"], expected, "{child_id}");
-            }
-
-            let grouped = read_state(&sandbox.join("state").join("gr-b").join("state.json"));
-            assert_eq!(grouped["group_name"], "group");
-            assert_eq!(grouped["child_key"], "key");
-        });
+        let grouped = read_state(&sandbox.join("state").join("gr-b").join("state.json"));
+        assert_eq!(grouped["group_name"], "group");
+        assert_eq!(grouped["child_key"], "key");
     }
 
     #[test]

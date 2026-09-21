@@ -170,7 +170,7 @@ pub struct ExecPrepared {
 /// Requires `&ArtifactRegistry` (for interpolation lookups). Returns a
 /// fully-prepared struct that can be passed to `run_shell` and `commit_exec`
 /// without further registry mutation.
-pub fn prepare_exec(
+pub async fn prepare_exec(
     exec: &Exec,
     artifacts: &ArtifactRegistry,
     loop_iter: &str,
@@ -180,12 +180,12 @@ pub fn prepare_exec(
     let str_opts = base::string_options(&exec.options);
 
     let interpolation_map =
-        resolve_interpolation_map(artifacts, &exec.interpolation_map, loop_iter).map_err(|e| {
-            ExecError::Resolve {
+        resolve_interpolation_map(artifacts, &exec.interpolation_map, loop_iter)
+            .await
+            .map_err(|e| ExecError::Resolve {
                 name: name.clone(),
                 source: e,
-            }
-        })?;
+            })?;
 
     let mut bind_paths: HashMap<String, String> = HashMap::new();
     let mut bind_uris: Vec<(String, String, bool)> = Vec::new();
@@ -203,7 +203,7 @@ pub fn prepare_exec(
             detail: e.to_string(),
         })?;
         // Optional binds are skipped when a sibling already committed the URI.
-        if !optional && artifacts.is_registered(&uri_str) {
+        if !optional && artifacts.is_registered(&uri_str).await {
             return Err(ExecError::Generic {
                 name: name.clone(),
                 detail: format!("artifact {uri_str:?} is already produced — duplicate producer"),
@@ -211,6 +211,7 @@ pub fn prepare_exec(
         }
         let path = artifacts
             .path_for_uri(&uri)
+            .await
             .map_err(|e| ExecError::Generic {
                 name: name.clone(),
                 detail: e.to_string(),
@@ -366,12 +367,16 @@ pub fn process_shell_result(
 
 /// Phase 3: commit produced artifacts into the registry.
 /// Non-optional artifacts that are absent abort the stage, except bail URIs.
-pub fn commit_exec(prepared: &ExecPrepared, artifacts: &ArtifactRegistry) -> Result<(), ExecError> {
+pub async fn commit_exec(
+    prepared: &ExecPrepared,
+    artifacts: &ArtifactRegistry,
+) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
         if Path::new(path).exists() {
             artifacts
                 .commit(uri_str, path)
+                .await
                 .map_err(|e| ExecError::Generic {
                     name: prepared.name.clone(),
                     detail: e.to_string(),
@@ -437,8 +442,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[test]
-    fn test_commit_exec_optional_bind_ignores_duplicate_registration() {
+    #[tokio::test]
+    async fn test_commit_exec_optional_bind_ignores_duplicate_registration() {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -446,7 +451,10 @@ mod tests {
 
         // A sibling already committed this URI.
         let uri = Uri::parse("artifact://out.txt").unwrap();
-        registry.write_into_registry(&uri, "existing").unwrap();
+        registry
+            .write_into_registry(&uri, "existing")
+            .await
+            .unwrap();
 
         let fw = HashMap::new();
 
@@ -457,7 +465,9 @@ mod tests {
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
-        let prepared = prepare_exec(&optional_exec, &registry, "", &fw).unwrap();
+        let prepared = prepare_exec(&optional_exec, &registry, "", &fw)
+            .await
+            .unwrap();
         assert_eq!(prepared.bind_uris[0].0, "out");
         assert!(prepared.bind_uris[0].2);
 
@@ -469,13 +479,14 @@ mod tests {
             bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let err = prepare_exec(&non_optional_exec, &registry, "", &fw)
+            .await
             .err()
             .expect("expected duplicate-producer error");
         assert!(matches!(err, ExecError::Generic { .. }));
     }
 
-    #[test]
-    fn test_commit_exec_missing_non_optional_errors() {
+    #[tokio::test]
+    async fn test_commit_exec_missing_non_optional_errors() {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -488,14 +499,14 @@ mod tests {
             bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &registry, "", &fw).unwrap();
-        let err = commit_exec(&prepared, &registry).unwrap_err();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).await.unwrap();
+        let err = commit_exec(&prepared, &registry).await.unwrap_err();
         assert!(matches!(err, ExecError::MissingArtifact { .. }));
-        assert!(!registry.is_registered("artifact://out.txt"));
+        assert!(!registry.is_registered("artifact://out.txt").await);
     }
 
-    #[test]
-    fn test_commit_exec_allows_missing_optional() {
+    #[tokio::test]
+    async fn test_commit_exec_allows_missing_optional() {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -508,13 +519,13 @@ mod tests {
             bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &registry, "", &fw).unwrap();
-        commit_exec(&prepared, &registry).unwrap();
-        assert!(!registry.is_registered("artifact://out.txt"));
+        let prepared = prepare_exec(&exec, &registry, "", &fw).await.unwrap();
+        commit_exec(&prepared, &registry).await.unwrap();
+        assert!(!registry.is_registered("artifact://out.txt").await);
     }
 
-    #[test]
-    fn test_commit_exec_registers_produced_file() {
+    #[tokio::test]
+    async fn test_commit_exec_registers_produced_file() {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
@@ -527,10 +538,10 @@ mod tests {
             bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &registry, "", &fw).unwrap();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).await.unwrap();
         fs::write(&prepared.bind_paths["out"], "data").unwrap();
-        commit_exec(&prepared, &registry).unwrap();
-        assert!(registry.is_registered("artifact://out.txt"));
+        commit_exec(&prepared, &registry).await.unwrap();
+        assert!(registry.is_registered("artifact://out.txt").await);
     }
 
     #[test]

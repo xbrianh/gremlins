@@ -17,7 +17,7 @@ pub enum ResolveError {
     Other(Box<dyn std::error::Error>),
 }
 
-pub fn resolve_interpolation_map(
+pub async fn resolve_interpolation_map(
     artifacts: &ArtifactRegistry,
     interpolation_map: &HashMap<String, String>,
     loop_iter: &str,
@@ -34,7 +34,7 @@ pub fn resolve_interpolation_map(
                 uri_str = uri_str.replace("{loop_iter}", loop_iter);
             }
             let json_path = caps.get(2).map(|m| m.as_str());
-            match artifacts.content(&uri_str, json_path) {
+            match artifacts.content(&uri_str, json_path).await {
                 Ok(val) => {
                     log::debug!(
                         "resolve: {var:?} = content({uri_str:?}) -> {} bytes",
@@ -71,7 +71,7 @@ pub fn resolve_interpolation_map(
         if !loop_iter.is_empty() {
             key = key.replace("{loop_iter}", loop_iter);
         }
-        match artifacts.data_uri(&key) {
+        match artifacts.data_uri(&key).await {
             Ok(val) => {
                 log::debug!("resolve: {var:?} = {key:?} -> {} bytes", val.len());
                 result.insert(var.clone(), val);
@@ -103,9 +103,9 @@ mod tests {
         (tmp, reg)
     }
 
-    fn register_file(reg: &ArtifactRegistry, name: &str, content: &str) -> String {
+    async fn register_file(reg: &ArtifactRegistry, name: &str, content: &str) -> String {
         let uri = crate::artifacts::uri::Uri::parse(&format!("artifact://{name}")).unwrap();
-        reg.write_into_registry(&uri, content).unwrap()
+        reg.write_into_registry(&uri, content).await.unwrap()
     }
 
     fn unwrap_result<T>(r: Result<T, ResolveError>) -> T {
@@ -115,63 +115,63 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_resolve_bound_key() {
+    #[tokio::test]
+    async fn test_resolve_bound_key() {
         let (_tmp, reg) = setup_registry();
-        let path = register_file(&reg, "mykey", "myval");
+        let path = register_file(&reg, "mykey", "myval").await;
 
         let mut map = HashMap::new();
         map.insert("var".to_string(), "artifact://mykey".to_string());
 
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
         assert_eq!(result.get("var").unwrap(), &path);
     }
 
-    #[test]
-    fn test_resolve_default_fallback() {
+    #[tokio::test]
+    async fn test_resolve_default_fallback() {
         let (_tmp, reg) = setup_registry();
 
         let mut map = HashMap::new();
         map.insert("var".to_string(), "missing?default_val".to_string());
 
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
         assert_eq!(result.get("var").unwrap(), "default_val");
     }
 
-    #[test]
-    fn test_resolve_optional_content() {
+    #[tokio::test]
+    async fn test_resolve_optional_content() {
         let (_tmp, reg) = setup_registry();
 
         let mut map = HashMap::new();
         map.insert("var".to_string(), r#"content("missing.txt")?"#.to_string());
 
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
         assert_eq!(result.get("var").unwrap(), "");
     }
 
-    #[test]
-    fn test_resolve_content_with_json_path() {
+    #[tokio::test]
+    async fn test_resolve_content_with_json_path() {
         let (_tmp, reg) = setup_registry();
-        register_file(&reg, "data.json", r#"{"x":{"y":"z"}}"#);
+        register_file(&reg, "data.json", r#"{"x":{"y":"z"}}"#).await;
         let mut map = HashMap::new();
         map.insert(
             "var".to_string(),
             r#"content("artifact://data.json", "x.y")"#.to_string(),
         );
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, ""));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
         assert_eq!(result.get("var").unwrap(), "z");
     }
 
-    #[test]
-    fn test_resolve_loop_iter_substitution() {
+    #[tokio::test]
+    async fn test_resolve_loop_iter_substitution() {
         let (_tmp, reg) = setup_registry();
-        register_file(&reg, "key_0", "val0");
-        let path_1 = register_file(&reg, "key_1", "val1");
+        register_file(&reg, "key_0", "val0").await;
+        let path_1 = register_file(&reg, "key_1", "val1").await;
 
         let mut map = HashMap::new();
         map.insert("var".to_string(), "artifact://key_{loop_iter}".to_string());
 
-        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "1"));
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "1").await);
         assert_eq!(result.get("var").unwrap(), &path_1);
     }
 }
