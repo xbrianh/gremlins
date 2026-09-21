@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use thiserror::Error;
 
-use crate::artifacts::registry::{ArtifactRegistry, MissingArtifact};
+use crate::artifacts::registry::{MissingArtifact, Registry};
 
 static CONTENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^content\("([^"]+)"(?:,\s*"([^"]+)")?\)\s*$"#).unwrap());
@@ -18,7 +18,7 @@ pub enum ResolveError {
 }
 
 pub async fn resolve_interpolation_map(
-    artifacts: &ArtifactRegistry,
+    artifacts: &impl Registry,
     interpolation_map: &HashMap<String, String>,
     loop_iter: &str,
 ) -> Result<HashMap<String, String>, ResolveError> {

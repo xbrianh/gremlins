@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::artifacts::registry::ArtifactRegistry;
+use crate::artifacts::registry::Registry;
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_shell_async, ProcError, ProcResult};
@@ -172,7 +172,7 @@ pub struct ExecPrepared {
 /// without further registry mutation.
 pub async fn prepare_exec(
     exec: &Exec,
-    artifacts: &ArtifactRegistry,
+    artifacts: &impl Registry,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<ExecPrepared, ExecError> {
@@ -369,7 +369,7 @@ pub fn process_shell_result(
 /// Non-optional artifacts that are absent abort the stage, except bail URIs.
 pub async fn commit_exec(
     prepared: &ExecPrepared,
-    artifacts: &ArtifactRegistry,
+    artifacts: &impl Registry,
 ) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
@@ -440,6 +440,7 @@ impl crate::stages::base::Stage for Exec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifacts::registry::ArtifactRegistry;
     use std::fs;
     use std::path::Path;
 
