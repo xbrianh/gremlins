@@ -242,24 +242,6 @@ impl ArtifactRegistry {
         self.read_registry_json().contains_key(key)
     }
 
-    /// True when `key` is registered and its file is still on disk.
-    /// Non-file values (git://…, raw strings) are live on membership alone.
-    pub fn is_live(&self, key: &str) -> bool {
-        let data = self.read_registry_json();
-        let value = match data.get(key) {
-            Some(v) => v,
-            None => return false,
-        };
-        let p = if let Some(name) = value.strip_prefix("file://session/") {
-            self.artifact_dir.join(name)
-        } else if let Some(rest) = value.strip_prefix("file://") {
-            PathBuf::from(rest)
-        } else {
-            PathBuf::from(value)
-        };
-        !p.is_absolute() || fs::metadata(&p).is_ok()
-    }
-
     pub fn keys(&self) -> Vec<String> {
         self.read_registry_json().into_keys().collect()
     }
@@ -462,32 +444,6 @@ mod tests {
             .commit("artifact://a.txt", &two.to_string_lossy())
             .unwrap_err();
         assert!(err.to_string().contains("duplicate artifact"));
-    }
-
-    #[test]
-    fn test_is_live_true_after_write() {
-        let (_tmp, artifact_dir) = setup();
-        let reg = ArtifactRegistry::new(artifact_dir);
-        write_file(&reg, "live.txt", "data");
-        assert!(reg.is_live("artifact://live.txt"));
-    }
-
-    #[test]
-    fn test_is_live_false_after_delete() {
-        let (_tmp, artifact_dir) = setup();
-        let reg = ArtifactRegistry::new(artifact_dir);
-        let path = write_file(&reg, "dead.txt", "data");
-        assert!(reg.is_live("artifact://dead.txt"));
-        fs::remove_file(&path).unwrap();
-        assert!(reg.is_registered("artifact://dead.txt"));
-        assert!(!reg.is_live("artifact://dead.txt"));
-    }
-
-    #[test]
-    fn test_is_live_false_for_unregistered_key() {
-        let (_tmp, artifact_dir) = setup();
-        let reg = ArtifactRegistry::new(artifact_dir);
-        assert!(!reg.is_live("artifact://never"));
     }
 
     #[test]

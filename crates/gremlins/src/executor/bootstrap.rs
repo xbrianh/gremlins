@@ -651,7 +651,7 @@ mod tests {
 
         run_definition_bootstrap(&mut gremlin).await.unwrap();
 
-        assert!(gremlin.registry.is_live("artifact://plan.md"));
+        assert!(gremlin.registry.is_registered("artifact://plan.md"));
         assert_eq!(
             gremlin
                 .registry
@@ -691,7 +691,7 @@ mod tests {
 
         run_definition_bootstrap(&mut gremlin).await.unwrap();
 
-        assert!(!gremlin.registry.is_live("artifact://plan.md"));
+        assert!(!gremlin.registry.is_registered("artifact://plan.md"));
     }
 
     #[tokio::test]
@@ -738,7 +738,7 @@ mod tests {
 
         run_definition_bootstrap(&mut gremlin).await.unwrap();
 
-        assert!(gremlin.registry.is_live("artifact://pr.txt"));
+        assert!(gremlin.registry.is_registered("artifact://pr.txt"));
     }
 
     #[tokio::test]
