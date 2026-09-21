@@ -404,7 +404,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use crate::artifacts::registry::ArtifactRegistry;
+    use crate::artifacts::registry::FileSystemArtifactRegistry;
 
     // ---- check_bail tests ----
 
@@ -562,11 +562,11 @@ mod tests {
 
     // ---- prepare_agent tests ----
 
-    fn make_registry(artifact_dir: PathBuf) -> ArtifactRegistry {
-        ArtifactRegistry::new(artifact_dir)
+    fn make_registry(artifact_dir: PathBuf) -> FileSystemArtifactRegistry {
+        FileSystemArtifactRegistry::new(artifact_dir)
     }
 
-    async fn register_file(reg: &ArtifactRegistry, name: &str, content: &str) -> String {
+    async fn register_file(reg: &FileSystemArtifactRegistry, name: &str, content: &str) -> String {
         let uri = Uri::parse(&format!("artifact://{name}")).unwrap();
         reg.write_into_registry(&uri, content).await.unwrap()
     }

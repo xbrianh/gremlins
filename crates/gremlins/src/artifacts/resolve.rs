@@ -91,19 +91,19 @@ pub async fn resolve_interpolation_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifacts::registry::ArtifactRegistry;
+    use crate::artifacts::registry::FileSystemArtifactRegistry;
     use std::fs;
     use tempfile::TempDir;
 
-    fn setup_registry() -> (TempDir, ArtifactRegistry) {
+    fn setup_registry() -> (TempDir, FileSystemArtifactRegistry) {
         let tmp = TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let reg = ArtifactRegistry::new(artifact_dir);
+        let reg = FileSystemArtifactRegistry::new(artifact_dir);
         (tmp, reg)
     }
 
-    async fn register_file(reg: &ArtifactRegistry, name: &str, content: &str) -> String {
+    async fn register_file(reg: &FileSystemArtifactRegistry, name: &str, content: &str) -> String {
         let uri = crate::artifacts::uri::Uri::parse(&format!("artifact://{name}")).unwrap();
         reg.write_into_registry(&uri, content).await.unwrap()
     }

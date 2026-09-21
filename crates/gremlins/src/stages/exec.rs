@@ -167,7 +167,7 @@ pub struct ExecPrepared {
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
-/// Requires `&ArtifactRegistry` (for interpolation lookups). Returns a
+/// Requires `&FileSystemArtifactRegistry` (for interpolation lookups). Returns a
 /// fully-prepared struct that can be passed to `run_shell` and `commit_exec`
 /// without further registry mutation.
 pub async fn prepare_exec(
@@ -440,7 +440,7 @@ impl crate::stages::base::Stage for Exec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifacts::registry::ArtifactRegistry;
+    use crate::artifacts::registry::FileSystemArtifactRegistry;
     use std::fs;
     use std::path::Path;
 
@@ -449,7 +449,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = ArtifactRegistry::new(artifact_dir);
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
 
         // A sibling already committed this URI.
         let uri = Uri::parse("artifact://out.txt").unwrap();
@@ -492,7 +492,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = ArtifactRegistry::new(artifact_dir);
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -512,7 +512,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = ArtifactRegistry::new(artifact_dir);
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -531,7 +531,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = ArtifactRegistry::new(artifact_dir);
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),

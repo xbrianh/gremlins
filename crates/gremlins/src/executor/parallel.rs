@@ -448,7 +448,7 @@ async fn merge_child_artifacts(
     gremlin: &mut Gremlin,
     outcome: &ChildOutcome,
 ) -> Result<(), RunError> {
-    use crate::artifacts::registry::ArtifactRegistry;
+    use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::config;
 
     let child_artifact_dir = config::scratch_root(Some(&outcome.child_id)).join("artifacts");
@@ -456,7 +456,7 @@ async fn merge_child_artifacts(
         return Ok(());
     }
 
-    let child_registry = ArtifactRegistry::new(child_artifact_dir);
+    let child_registry = FileSystemArtifactRegistry::new(child_artifact_dir);
     // Map child artifact keys to parent-scoped keys.
     let mut key_map = HashMap::new();
     for key in child_registry.keys().await {
@@ -629,7 +629,7 @@ mod tests {
                 stages: stages.clone(),
                 land: None,
             },
-            registry: crate::artifacts::registry::ArtifactRegistry::new(artifact_dir),
+            registry: crate::artifacts::registry::FileSystemArtifactRegistry::new(artifact_dir),
             worktree: None,
             worktree_parent: None,
             project_root: tmp.path().to_path_buf(),

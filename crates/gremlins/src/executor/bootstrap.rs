@@ -404,7 +404,7 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use crate::artifacts::registry::ArtifactRegistry;
+    use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::clients::client::Client;
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::{self, StateData};
@@ -618,7 +618,7 @@ mod tests {
                 stages: Vec::new(),
                 land: None,
             },
-            registry: ArtifactRegistry::new(artifact_dir),
+            registry: FileSystemArtifactRegistry::new(artifact_dir),
             worktree: Some(worktree),
             worktree_parent: None,
             project_root: tmp.path().to_path_buf(),
