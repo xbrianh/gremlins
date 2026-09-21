@@ -433,6 +433,15 @@ pub struct DryRunArtifactRegistry {
     produced: Mutex<HashMap<String, String>>,
 }
 
+impl Clone for DryRunArtifactRegistry {
+    fn clone(&self) -> Self {
+        let map = self.produced.lock().unwrap().clone();
+        DryRunArtifactRegistry {
+            produced: Mutex::new(map),
+        }
+    }
+}
+
 impl DryRunArtifactRegistry {
     /// Create a registry pre-populated with the given set of keys.
     /// Each key is mapped to a sentinel path derived from the key itself.
