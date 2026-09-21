@@ -510,6 +510,16 @@ mod tests {
     }
 
     #[test]
+    fn test_is_registered_true_after_file_deleted() {
+        let (_tmp, artifact_dir) = setup();
+        let reg = ArtifactRegistry::new(artifact_dir);
+        let path = write_file(&reg, "dead.txt", "data");
+        assert!(reg.is_registered("artifact://dead.txt"));
+        fs::remove_file(&path).unwrap();
+        assert!(reg.is_registered("artifact://dead.txt"));
+    }
+
+    #[test]
     fn test_keys_returns_registered_keys() {
         let (_tmp, artifact_dir) = setup();
         let reg = ArtifactRegistry::new(artifact_dir);
