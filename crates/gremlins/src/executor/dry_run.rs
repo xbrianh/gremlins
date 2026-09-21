@@ -194,10 +194,7 @@ fn commit_prepared_agent<'a>(
             let uri = match crate::artifacts::uri::Uri::parse(uri_str) {
                 Ok(u) => u,
                 Err(e) => {
-                    errors.push(
-                        prepared.name.clone(),
-                        format!("invalid URI for {key}: {e}"),
-                    );
+                    errors.push(prepared.name.clone(), format!("invalid URI for {key}: {e}"));
                     continue;
                 }
             };
@@ -231,10 +228,7 @@ fn commit_prepared_exec<'a>(
             let uri = match crate::artifacts::uri::Uri::parse(uri_str) {
                 Ok(u) => u,
                 Err(e) => {
-                    errors.push(
-                        prepared.name.clone(),
-                        format!("invalid URI for {key}: {e}"),
-                    );
+                    errors.push(prepared.name.clone(), format!("invalid URI for {key}: {e}"));
                     continue;
                 }
             };
