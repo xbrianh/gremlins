@@ -562,10 +562,7 @@ mod tests {
     #[tokio::test]
     async fn test_dry_run_content_returns_placeholder() {
         let reg = DryRunRegistry::seeded(["artifact://x".to_string()]);
-        assert_eq!(
-            reg.content("artifact://x", None).await.unwrap(),
-            "dry-run"
-        );
+        assert_eq!(reg.content("artifact://x", None).await.unwrap(), "dry-run");
     }
 
     #[tokio::test]
