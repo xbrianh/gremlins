@@ -14,6 +14,8 @@ use crate::stages::agent::{prepare_agent, AgentPrepared};
 use crate::stages::exec::{prepare_exec, ExecPrepared};
 use crate::stages::node::RunnableStage;
 
+use super::bootstrap::parse_gremlins_command;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -126,8 +128,9 @@ fn walk_stage<'a>(
             RunnableStage::Agent { stage: agent, .. } => {
                 let mut fsubs = framework_subs.clone();
                 fsubs.insert("name".to_string(), agent.name.clone());
+                let loop_iter = fsubs.get("loop_iter").map(String::as_str).unwrap_or("1");
 
-                match prepare_agent(agent, registry, "1", &fsubs).await {
+                match prepare_agent(agent, registry, loop_iter, &fsubs).await {
                     Ok(prepared) => commit_prepared_agent(registry, &prepared, errors).await,
                     Err(e) => {
                         errors.push(agent.name.clone(), e.to_string());
@@ -137,8 +140,9 @@ fn walk_stage<'a>(
             RunnableStage::Exec { stage: exec, .. } => {
                 let mut fsubs = framework_subs.clone();
                 fsubs.insert("name".to_string(), exec.name.clone());
+                let loop_iter = fsubs.get("loop_iter").map(String::as_str).unwrap_or("1");
 
-                match prepare_exec(exec, registry, "1", &fsubs).await {
+                match prepare_exec(exec, registry, loop_iter, &fsubs).await {
                     Ok(prepared) => commit_prepared_exec(registry, &prepared, errors).await,
                     Err(e) => {
                         errors.push(exec.name.clone(), e.to_string());
@@ -187,7 +191,27 @@ fn commit_prepared_agent<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
         for (key, uri_str, _optional) in &prepared.bind_uris {
-            if let Err(e) = registry.commit(uri_str, uri_str).await {
+            let uri = match crate::artifacts::uri::Uri::parse(uri_str) {
+                Ok(u) => u,
+                Err(e) => {
+                    errors.push(
+                        prepared.name.clone(),
+                        format!("invalid URI for {key}: {e}"),
+                    );
+                    continue;
+                }
+            };
+            let path = match registry.path_for_uri(&uri).await {
+                Ok(p) => p,
+                Err(e) => {
+                    errors.push(
+                        prepared.name.clone(),
+                        format!("failed to resolve path for {key}: {e}"),
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = registry.commit(uri_str, &path).await {
                 errors.push(
                     prepared.name.clone(),
                     format!("failed to commit {key}: {e}"),
@@ -204,7 +228,27 @@ fn commit_prepared_exec<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
         for (key, uri_str, _optional) in &prepared.bind_uris {
-            if let Err(e) = registry.commit(uri_str, uri_str).await {
+            let uri = match crate::artifacts::uri::Uri::parse(uri_str) {
+                Ok(u) => u,
+                Err(e) => {
+                    errors.push(
+                        prepared.name.clone(),
+                        format!("invalid URI for {key}: {e}"),
+                    );
+                    continue;
+                }
+            };
+            let path = match registry.path_for_uri(&uri).await {
+                Ok(p) => p,
+                Err(e) => {
+                    errors.push(
+                        prepared.name.clone(),
+                        format!("failed to resolve path for {key}: {e}"),
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = registry.commit(uri_str, &path).await {
                 errors.push(
                     prepared.name.clone(),
                     format!("failed to commit {key}: {e}"),
@@ -234,26 +278,19 @@ fn bootstrap_artifact_keys(definition: &GremlinDefinition) -> Vec<String> {
         })
         .collect();
 
-    // `launch_cmds` can contain `gremlins:bind_artifact` calls — scan for
-    // them and extract the artifact URIs.
+    // `launch_cmds` can contain `gremlins:bind_artifact` DSL calls — use the
+    // same parser as the real bootstrap runner so validate agrees with runtime.
     for cmd in &definition.bootstrap.launch_cmds {
-        for needle in ["bind_artifact(\"", "bind_artifact('"] {
-            let mut rest = cmd.as_str();
-            while let Some(start) = rest.find(needle) {
-                let after = &rest[start + needle.len()..];
-                if let Some(end) = after.find(['"', '\'']) {
-                    let uri = after[..end].to_string();
-                    if !uri.is_empty() {
-                        let normalized = if uri.starts_with("artifact://") {
-                            uri
-                        } else {
-                            format!("artifact://{uri}")
-                        };
-                        keys.push(normalized);
-                    }
-                    rest = &after[end + 1..];
-                } else {
-                    break;
+        if let Some((cmd_name, args)) = parse_gremlins_command(cmd) {
+            if cmd_name == "bind_artifact" && !args.is_empty() {
+                let uri = &args[0];
+                if !uri.is_empty() {
+                    let normalized = if uri.starts_with("artifact://") {
+                        uri.clone()
+                    } else {
+                        format!("artifact://{uri}")
+                    };
+                    keys.push(normalized);
                 }
             }
         }
