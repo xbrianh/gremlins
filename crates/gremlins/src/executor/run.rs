@@ -49,15 +49,24 @@ pub(crate) fn stage_key(scope: &str, name: &str) -> String {
 /// Nested loops join their frames with the same separator
 /// (`outer~1~inner~2`), which is what the stage layer substitutes into
 /// `{loop_iter}` URIs.
-pub(crate) fn loop_iter_of(stack: &[(String, u32)]) -> String {
-    if stack.is_empty() {
-        return "1".to_string();
+///
+/// When `attempt` is non-empty it is appended as a final segment, so each
+/// attempt's per-iteration artifacts get distinct keys and a resumed run
+/// never collides with a previous attempt's artifacts.
+pub(crate) fn loop_iter_of(stack: &[(String, u32)], attempt: Option<&str>) -> String {
+    let base = if stack.is_empty() {
+        "1".to_string()
+    } else {
+        stack
+            .iter()
+            .map(|(name, iteration)| format!("{name}~{iteration}"))
+            .collect::<Vec<_>>()
+            .join("~")
+    };
+    match attempt {
+        Some(token) if !token.is_empty() => format!("{base}~{token}"),
+        _ => base,
     }
-    stack
-        .iter()
-        .map(|(name, iteration)| format!("{name}~{iteration}"))
-        .collect::<Vec<_>>()
-        .join("~")
 }
 
 /// `None` for an empty string, else the string itself.
@@ -84,7 +93,10 @@ fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
     }
     let path = Path::new(&raw);
     if !path.exists() {
-        return None;
+        let msg =
+            format!("stale binding: registered artifact {uri:?} has no backing file at {raw}");
+        log::warn!("bail_at_uri: {msg}");
+        return Some(msg);
     }
     match std::fs::read_to_string(path) {
         Ok(text) => non_empty(text.trim()),
@@ -93,8 +105,9 @@ fn bail_at_uri(registry: &ArtifactRegistry, uri: &str) -> Option<String> {
 }
 
 /// The bail reason recorded for `scope`: the content of `artifact://<scope>/bail`.
-/// `None` when unregistered, when the bound file is gone, or when the content is
-/// empty/whitespace.
+/// `None` when unregistered or when the content is empty/whitespace.
+/// A registered artifact whose backing file is missing (stale binding) is
+/// treated as a bail with an error message as the reason.
 pub(crate) fn bail_reason(registry: &ArtifactRegistry, scope: &str) -> Option<String> {
     bail_at_uri(registry, &format!("artifact://{scope}/bail"))
 }
@@ -126,31 +139,14 @@ fn bail_reason_for(
         })
 }
 
-/// Remove the file behind `artifact://<scope>/bail` if one is bound, so a
-/// resumed iteration does not read a previous attempt's bail as its own.
-///
-/// The binding itself cannot be unbound — the registry has no unbind — but a
-/// missing file is already indistinguishable from no bail to [`bail_reason`].
-fn clear_stale_bail(registry: &ArtifactRegistry, scope: &str) {
-    let Ok(raw) = registry.data_uri(&format!("artifact://{scope}/bail")) else {
-        return;
-    };
-    if !raw.starts_with('/') {
-        return;
-    }
-    if let Err(error) = std::fs::remove_file(&raw) {
-        log::debug!("clear_stale_bail: nothing to remove at {raw}: {error}");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
-/// Whether `key` is live, accepting both a bare key and its `artifact://` URI:
+/// Whether `key` is registered, accepting both a bare key and its `artifact://` URI:
 /// guards and stop conditions are spelled either way in the wild.
-fn is_live_uri(registry: &ArtifactRegistry, key: &str) -> bool {
-    registry.is_live(key) || registry.is_live(&format!("artifact://{key}"))
+fn is_registered_uri(registry: &ArtifactRegistry, key: &str) -> bool {
+    registry.is_registered(key) || registry.is_registered(&format!("artifact://{key}"))
 }
 
 /// Run one top-level stage.
@@ -172,7 +168,8 @@ async fn run_stage_scoped(
     scope: &str,
     enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
-    let loop_iter = loop_iter_of(&gremlin.loop_stack);
+    let attempt = gremlin.state.read_str("attempt");
+    let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
     let skip = stage.skip_if_exists();
     log::debug!(
         "stage '{}' (gremlin={}): entering (type={}, scope={scope:?}, skip_if_exists={skip:?})",
@@ -182,7 +179,7 @@ async fn run_stage_scoped(
     );
     if !skip.is_empty() {
         let resolved = skip.replace("{loop_iter}", &loop_iter);
-        if is_live_uri(&gremlin.registry, &resolved) {
+        if is_registered_uri(&gremlin.registry, &resolved) {
             log::info!("stage skipped (artifact exists): {}", stage.name());
             return Ok(());
         }
@@ -293,7 +290,8 @@ async fn run_agent(
 
     let client = resolve_client(node, gremlin, enclosing_client)?;
     let framework_subs = gremlin.framework_subs(node);
-    let loop_iter = loop_iter_of(&gremlin.loop_stack);
+    let attempt = gremlin.state.read_str("attempt");
+    let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
 
     log::debug!(
         "agent stage '{}' (gremlin={}): preparing (client={})",
@@ -436,7 +434,8 @@ async fn run_exec(
     };
 
     let framework_subs = gremlin.framework_subs(node);
-    let loop_iter = loop_iter_of(&gremlin.loop_stack);
+    let attempt = gremlin.state.read_str("attempt");
+    let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
 
     log::debug!(
         "exec stage '{}' (gremlin={}): preparing",
@@ -593,11 +592,10 @@ async fn run_loop(
         if let Some(top) = gremlin.loop_stack.last_mut() {
             top.1 = iteration;
         }
-        let loop_iter = loop_iter_of(&gremlin.loop_stack);
-        // Reset tracking left by an earlier partial iteration, then drop any
-        // stale scoped bail file: the binding cannot be unbound, its file can.
+        let attempt = gremlin.state.read_str("attempt");
+        let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
+        // Reset tracking left by an earlier partial iteration.
         gremlin.state.clear_done(&loop_iter);
-        clear_stale_bail(&gremlin.registry, &loop_iter);
 
         log::info!("loop {name}: iteration {iteration}/{max_iterations} starting");
 
@@ -633,7 +631,7 @@ async fn run_loop(
 
         if let Some(stop) = stop_when_exists {
             let resolved = stop.replace("{loop_iter}", &loop_iter);
-            if is_live_uri(&gremlin.registry, &resolved) {
+            if is_registered_uri(&gremlin.registry, &resolved) {
                 stopped = true;
                 break 'iterations;
             }
@@ -911,12 +909,18 @@ mod tests {
 
     #[test]
     fn loop_iter_joins_the_stack() {
-        assert_eq!(loop_iter_of(&[]), "1");
-        assert_eq!(loop_iter_of(&[("loop".to_string(), 2)]), "loop~2");
+        assert_eq!(loop_iter_of(&[], None), "1");
+        assert_eq!(loop_iter_of(&[("loop".to_string(), 2)], None), "loop~2");
         assert_eq!(
-            loop_iter_of(&[("outer".to_string(), 1), ("inner".to_string(), 3)]),
+            loop_iter_of(&[("outer".to_string(), 1), ("inner".to_string(), 3)], None),
             "outer~1~inner~3"
         );
+        // With an attempt token, it is appended as a final segment.
+        assert_eq!(
+            loop_iter_of(&[("loop".to_string(), 2)], Some("abc123")),
+            "loop~2~abc123"
+        );
+        assert_eq!(loop_iter_of(&[], Some("abc123")), "1~abc123");
     }
 
     #[test]
@@ -935,12 +939,8 @@ mod tests {
         assert!(bail_reason(&registry, "scope").is_none());
 
         let uri = Uri::parse("artifact://scope/bail").unwrap();
-        let path = registry.write_into_registry(&uri, "boom\n").unwrap();
+        registry.write_into_registry(&uri, "boom\n").unwrap();
         assert_eq!(bail_reason(&registry, "scope").as_deref(), Some("boom"));
-
-        // A binding whose file is gone is not a reason.
-        std::fs::remove_file(&path).unwrap();
-        assert!(bail_reason(&registry, "scope").is_none());
 
         // Neither is an empty one.
         registry.write_into_registry(&uri, "").unwrap();
@@ -957,20 +957,6 @@ mod tests {
         registry.write_into_registry(&uri, "stopped\n").unwrap();
         assert_eq!(global_bail_reason(&registry).as_deref(), Some("stopped"));
         assert!(is_bail_set(&registry, "scope"));
-    }
-
-    #[test]
-    fn clear_stale_bail_unreads_a_previous_bail() {
-        let (_tmp, registry) = scratch_registry();
-        let uri = Uri::parse("artifact://scope/bail").unwrap();
-        registry.write_into_registry(&uri, "old\n").unwrap();
-        assert!(bail_reason(&registry, "scope").is_some());
-
-        // The binding survives, the reason does not: that is what lets a
-        // resumed iteration tell its own bail from the previous one's.
-        clear_stale_bail(&registry, "scope");
-        assert!(registry.is_registered("artifact://scope/bail"));
-        assert!(bail_reason(&registry, "scope").is_none());
     }
 
     // --- agent ---
@@ -1331,7 +1317,9 @@ mod tests {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
             other => panic!("expected Bail, got {other:?}"),
         }
-        assert!(gremlin.registry.is_registered("artifact://poll~1/bail"));
+        assert!(gremlin
+            .registry
+            .is_registered("artifact://poll~1~test-0001/bail"));
     }
 
     #[tokio::test]
@@ -1387,7 +1375,9 @@ mod tests {
             other => panic!("expected Bail, got {other:?}"),
         }
         // The enclosing sequence scopes `done_children`, not the iteration key.
-        assert!(gremlin.registry.is_registered("artifact://poll~1/bail"));
+        assert!(gremlin
+            .registry
+            .is_registered("artifact://poll~1~test-0001/bail"));
     }
 
     #[tokio::test]
@@ -1417,7 +1407,7 @@ mod tests {
         }
         assert!(gremlin
             .registry
-            .is_registered("artifact://outer~1~inner~1/bail"));
+            .is_registered("artifact://outer~1~inner~1~test-0001/bail"));
     }
 
     #[tokio::test]

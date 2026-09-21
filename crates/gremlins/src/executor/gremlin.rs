@@ -1001,7 +1001,7 @@ fn register_stage_inputs(
             continue;
         }
         let uri_str = format!("artifact://{key}");
-        if registry.is_live(&uri_str) {
+        if registry.is_registered(&uri_str) {
             continue;
         }
         match Uri::parse(&uri_str) {
@@ -1017,7 +1017,7 @@ fn register_stage_inputs(
 
 /// Record the commit the run started from, once, as `artifact://base_sha`.
 fn register_base_sha(registry: &ArtifactRegistry, cwd: &Path) {
-    if registry.is_live("artifact://base_sha") {
+    if registry.is_registered("artifact://base_sha") {
         return;
     }
     let sha = git::head_sha(Some(cwd));

@@ -341,15 +341,6 @@ impl ArtifactRegistry {
         Ok(())
     }
 
-    /// Remove a key from the registry (the backing file is untouched).
-    pub fn unregister(&self, key: &str) {
-        self.locked_write(|data| {
-            data.remove(key);
-            Ok(())
-        })
-        .ok();
-    }
-
     pub fn from_registry_file(
         path: &Path,
         artifact_dir: PathBuf,
