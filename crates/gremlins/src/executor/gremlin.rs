@@ -567,8 +567,9 @@ impl Gremlin {
         child_definition_path: Option<&Path>,
     ) -> Result<Gremlin, RunError> {
         let definition = match child_definition_path {
-            Some(path) => GremlinDefinition::from_yaml(path, None)
-                .unwrap_or_else(|_| self.definition.clone()),
+            Some(path) => {
+                GremlinDefinition::from_yaml(path, None).unwrap_or_else(|_| self.definition.clone())
+            }
             None => self.definition.clone(),
         };
         self.fork_child(

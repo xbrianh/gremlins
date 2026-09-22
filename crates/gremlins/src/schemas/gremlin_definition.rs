@@ -548,8 +548,7 @@ stages:
     #[test]
     fn missing_file_is_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let err =
-            GremlinDefinition::from_yaml(dir.path().join("absent.yaml"), None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(dir.path().join("absent.yaml"), None).unwrap_err();
         assert!(
             err.to_string().contains("definition file not found"),
             "{err}"
@@ -581,7 +580,10 @@ stages:
 "#,
         );
 
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap().validate().unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None)
+            .unwrap()
+            .validate()
+            .unwrap_err();
         assert!(
             err.to_string().contains("duplicate artifact producer"),
             "{err}"
@@ -608,7 +610,10 @@ stages:
 "#,
         );
 
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap().validate().unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None)
+            .unwrap()
+            .validate()
+            .unwrap_err();
         assert!(
             err.to_string().contains("artifact://never-produced.md"),
             "{err}"
@@ -734,7 +739,10 @@ stages:
 "#,
         );
 
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap().validate().unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None)
+            .unwrap()
+            .validate()
+            .unwrap_err();
         // The unnamed nested stage is auto-named `exec` before validation.
         assert!(err.to_string().contains("stage exec:"), "{err}");
     }
