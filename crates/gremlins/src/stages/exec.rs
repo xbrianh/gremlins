@@ -367,13 +367,25 @@ pub fn process_shell_result(
 
 /// Phase 3: commit produced artifacts into the registry.
 /// Non-optional artifacts that are absent abort the stage, except bail URIs.
+///
+/// When `dry_run` is true the filesystem probe is skipped — the caller is
+/// running in dry-run mode and no real files exist.
 pub async fn commit_exec(
     prepared: &ExecPrepared,
     artifacts: &dyn ArtifactRegistry,
+    dry_run: bool,
 ) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
-        if artifacts.is_path_produced(path).await {
+        let produced = if dry_run {
+            true
+        } else {
+            tokio::fs::metadata(path)
+                .await
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        };
+        if produced {
             artifacts
                 .commit(uri_str, path)
                 .await
@@ -502,7 +514,7 @@ mod tests {
         };
         let fw = HashMap::new();
         let prepared = prepare_exec(&exec, &registry, "", &fw).await.unwrap();
-        let err = commit_exec(&prepared, &registry).await.unwrap_err();
+        let err = commit_exec(&prepared, &registry, false).await.unwrap_err();
         assert!(matches!(err, ExecError::MissingArtifact { .. }));
         assert!(!registry.is_registered("artifact://out.txt").await);
     }
@@ -522,7 +534,7 @@ mod tests {
         };
         let fw = HashMap::new();
         let prepared = prepare_exec(&exec, &registry, "", &fw).await.unwrap();
-        commit_exec(&prepared, &registry).await.unwrap();
+        commit_exec(&prepared, &registry, false).await.unwrap();
         assert!(!registry.is_registered("artifact://out.txt").await);
     }
 
@@ -542,7 +554,27 @@ mod tests {
         let fw = HashMap::new();
         let prepared = prepare_exec(&exec, &registry, "", &fw).await.unwrap();
         fs::write(&prepared.bind_paths["out"], "data").unwrap();
-        commit_exec(&prepared, &registry).await.unwrap();
+        commit_exec(&prepared, &registry, false).await.unwrap();
+        assert!(registry.is_registered("artifact://out.txt").await);
+    }
+
+    #[tokio::test]
+    async fn test_commit_exec_dry_run_succeeds_without_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
+
+        let exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+        };
+        let fw = HashMap::new();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).await.unwrap();
+        // No file written — dry_run skips the filesystem probe.
+        commit_exec(&prepared, &registry, true).await.unwrap();
         assert!(registry.is_registered("artifact://out.txt").await);
     }
 

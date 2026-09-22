@@ -68,11 +68,6 @@ pub trait ArtifactRegistry: Send + Sync {
         let content = tokio::fs::read_to_string(source).await?;
         self.write_into_registry(uri, &content).await
     }
-    /// Whether the given path was produced by this registry.
-    ///
-    /// Used by the commit phase to determine whether an output artifact
-    /// should be committed, replacing direct filesystem probes.
-    async fn is_path_produced(&self, path: &str) -> bool;
     /// All artifact URIs currently registered.
     async fn keys(&self) -> Vec<String>;
     /// Copy a single artifact file into this registry's storage.
@@ -547,13 +542,6 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
         self.copy_artifact_into(source_path, dest_filename).await
     }
 
-    async fn is_path_produced(&self, path: &str) -> bool {
-        tokio::fs::metadata(path)
-            .await
-            .map(|m| m.len() > 0)
-            .unwrap_or(false)
-    }
-
     async fn keys(&self) -> Vec<String> {
         self.read_registry_json().await.into_keys().collect()
     }
@@ -806,10 +794,6 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
             }
         }
         Ok(merged)
-    }
-
-    async fn is_path_produced(&self, _path: &str) -> bool {
-        true
     }
 
     async fn keys(&self) -> Vec<String> {

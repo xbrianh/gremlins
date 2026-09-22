@@ -404,7 +404,7 @@ async fn run_cli_out(
     run_shell(&prepared)
         .await
         .map_err(|error| failed(error.to_string()))?;
-    commit_exec(&prepared, gremlin.registry.as_ref())
+    commit_exec(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
         .await
         .map_err(|error| failed(error.to_string()))?;
 
