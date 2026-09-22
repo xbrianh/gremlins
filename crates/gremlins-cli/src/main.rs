@@ -841,7 +841,9 @@ async fn validate(definition: &str) -> Result<(), String> {
 
     match gremlin.run().await {
         Ok(0) => Ok(()),
-        Ok(exit_code) => Err(format!("definition validation failed with exit code {exit_code}")),
+        Ok(exit_code) => Err(format!(
+            "definition validation failed with exit code {exit_code}"
+        )),
         Err(gremlins::executor::RunError::StageFailed { stage, message }) => {
             eprintln!("stage {stage}: {message}");
             Err("definition validation failed".to_string())
