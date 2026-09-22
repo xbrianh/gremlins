@@ -386,9 +386,37 @@ fn stop(id: &str) -> Result<(), String> {
         .unwrap_or(0);
 
     if pid_raw == 0 {
-        // No OS process to signal (parallel child, or orphaned top-level).
-        // Just write terminal state — if the parent is still alive it owns
-        // the real process group and the user can stop the parent directly.
+        // No OS process to signal.
+        let parent_id = gremlin.state.read_str("parent_id");
+        if !parent_id.is_empty() {
+            // This is a parallel child running in the parent's process.
+            // Writing terminal state here would let rm/clean delete the
+            // child's resources while the parent's worker thread is still
+            // using them. Try to signal the parent instead.
+            if let Ok(parent) = Gremlin::from(&parent_id) {
+                let parent_pid = parent
+                    .state
+                    .read_field("pid")
+                    .and_then(|v| v.as_i64())
+                    .filter(|&n| n > 0 && n <= libc::pid_t::MAX as i64)
+                    .unwrap_or(0);
+                let parent_status = parent.state.read_str("status");
+                if parent_pid > 0 && parent_status == "running" {
+                    eprintln!(
+                        "gremlin {id} is a parallel child — stopping parent \
+                         {parent_id} instead"
+                    );
+                    unsafe {
+                        libc::kill(-(parent_pid as libc::pid_t), libc::SIGTERM);
+                    }
+                    return Ok(());
+                }
+                // Parent is already terminal or has no process itself.
+                // In either case the child's worker thread is done.
+            }
+            // Parent state is gone — child is orphaned, safe to mark.
+        }
+        // No parent, or parent gone / already terminal.
         eprintln!("warning: gremlin {id} has no process — marking stopped in state only");
         gremlin.state.write_terminal_state(-1);
         return Ok(());
