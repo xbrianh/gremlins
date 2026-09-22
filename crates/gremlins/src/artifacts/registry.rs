@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -132,9 +133,42 @@ pub trait ArtifactRegistry: Send + Sync {
                 }
             }
 
+            // When a prefix is in use, also check collisions on the
+            // original (un-prefixed) key before committing anything.
+            if key_prefix.is_some() && key != dest_key && self.is_registered(&key).await {
+                match collision {
+                    Collision::Error => {
+                        let existing = self.data_uri(&key).await.unwrap_or_default();
+                        return Err(Box::new(DuplicateArtifact {
+                            key,
+                            existing,
+                            incoming: data_uri,
+                        }));
+                    }
+                    Collision::Ignore => {
+                        // Fall through — skip the alias below.
+                    }
+                }
+            }
+
+            // Resolve file://session/ URIs against the *source* registry's
+            // artifact directory, not the destination's.
+            let resolved_source = if data_uri.starts_with("file://session/") {
+                if let Some(src_fs) = other.as_filesystem_registry() {
+                    let name = data_uri.strip_prefix("file://session/").unwrap();
+                    src_fs.artifact_dir.join(name).to_string_lossy().to_string()
+                } else {
+                    data_uri.clone()
+                }
+            } else {
+                data_uri.clone()
+            };
+
             let new_path = if is_file_artifact(&data_uri) {
                 let filename = disambiguate_filename(&dest_key, &data_uri);
-                let path = self.copy_artifact_into(&data_uri, &filename).await?;
+                let path = self
+                    .copy_artifact_into(&resolved_source, &filename)
+                    .await?;
                 let commit_err = match self.commit(&dest_key, &path).await {
                     Ok(()) => None,
                     Err(e) => Some(e.to_string()),
@@ -182,20 +216,33 @@ pub trait ArtifactRegistry: Send + Sync {
 
 /// Derive a deterministic, key-based filename for an artifact.
 ///
-/// Replaces `/` with `_` in the key text and preserves the source file's
-/// extension. Distinct keys always produce distinct filenames.
+/// Sanitises the key for filesystem use and preserves the source file's
+/// extension. A 16-hex-digit hash of the full key is appended as a suffix
+/// to guarantee that distinct keys always produce distinct filenames.
 pub fn disambiguate_filename(key: &str, source_path: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    let hash = hasher.finish();
+
     let mut name = key.replace('/', "_");
     // Strip leading "artifact:_" prefix for readability.
     if let Some(rest) = name.strip_prefix("artifact:_") {
         name = rest.to_string();
     }
+    // Keep the readable prefix reasonably short.
+    let max_prefix = 40usize;
+    if name.len() > max_prefix {
+        name.truncate(max_prefix);
+    }
+    // Append a hash suffix for injectivity.
+    name.push('_');
+    name.push_str(&format!("{:016x}", hash));
+
     // Preserve the extension from the source path.
     let src_ext = std::path::Path::new(source_path)
         .extension()
         .map(|e| e.to_string_lossy().to_string());
     if let Some(ext) = src_ext {
-        // Only append if the key-derived name doesn't already end with it.
         if !name.ends_with(&format!(".{}", ext)) {
             name.push('.');
             name.push_str(&ext);
@@ -708,6 +755,95 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
         Ok(format!("/dev/null/dry-run/{}", dest_filename))
     }
 
+    /// Merge override that preserves source content through the merge.
+    ///
+    /// The default [`ArtifactRegistry::merge_registry`] calls `commit`,
+    /// which stores an empty content string for dry-run registries. This
+    /// override copies each artifact's content from the source so that
+    /// `content()` on the merged registry returns the original value.
+    async fn merge_registry(
+        &self,
+        other: &(dyn ArtifactRegistry + Sync),
+        collision: Collision,
+        key_prefix: Option<&str>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut merged = 0usize;
+        for key in other.keys().await {
+            let data_uri = other.data_uri(&key).await.unwrap_or_default();
+            if data_uri.is_empty() {
+                continue;
+            }
+            // Snapshot content from the source before we compute
+            // destination keys or check collisions.
+            let content = other.content(&key, None).await.unwrap_or_default();
+
+            let bare = key.strip_prefix("artifact://").unwrap_or(&key);
+            let dest_key = if let Some(prefix) = key_prefix {
+                format!("artifact://{}/{}", prefix, bare)
+            } else {
+                key.clone()
+            };
+
+            // Check for collisions on the primary destination key.
+            if self.is_registered(&dest_key).await {
+                match collision {
+                    Collision::Error => {
+                        let existing = self.data_uri(&dest_key).await.unwrap_or_default();
+                        return Err(Box::new(DuplicateArtifact {
+                            key: dest_key,
+                            existing,
+                            incoming: data_uri,
+                        }));
+                    }
+                    Collision::Ignore => continue,
+                }
+            }
+
+            // When a prefix is in use, also check collisions on the
+            // original (un-prefixed) key before committing anything.
+            if key_prefix.is_some() && key != dest_key && self.is_registered(&key).await {
+                match collision {
+                    Collision::Error => {
+                        let existing = self.data_uri(&key).await.unwrap_or_default();
+                        return Err(Box::new(DuplicateArtifact {
+                            key,
+                            existing,
+                            incoming: data_uri,
+                        }));
+                    }
+                    Collision::Ignore => {
+                        // Fall through — skip the alias below.
+                    }
+                }
+            }
+
+            let new_path = if is_file_artifact(&data_uri) {
+                let filename = disambiguate_filename(&dest_key, &data_uri);
+                self.copy_artifact_into(&data_uri, &filename).await?
+            } else {
+                data_uri.clone()
+            };
+
+            // Store with content preserved (unlike the default impl,
+            // which calls `commit` and loses the content string).
+            self.produced.lock().unwrap().insert(
+                dest_key.clone(),
+                (new_path.clone(), content.clone()),
+            );
+            merged += 1;
+
+            // Also register under the original (un-prefixed) key.
+            if key_prefix.is_some() && key != dest_key && !self.is_registered(&key).await {
+                self.produced
+                    .lock()
+                    .unwrap()
+                    .insert(key.clone(), (new_path.clone(), content));
+                merged += 1;
+            }
+        }
+        Ok(merged)
+    }
+
     async fn is_path_produced(&self, _path: &str) -> bool {
         true
     }
@@ -1130,6 +1266,15 @@ mod tests {
     }
 
     #[test]
+    fn test_disambiguate_filename_slash_underscore_collision() {
+        // `artifact://a/b` and `artifact://a_b` must produce distinct
+        // filenames — replacing `/` with `_` is not injective on its own.
+        let f1 = disambiguate_filename("artifact://a/b", "/tmp/out.txt");
+        let f2 = disambiguate_filename("artifact://a_b", "/tmp/out.txt");
+        assert_ne!(f1, f2);
+    }
+
+    #[test]
     fn test_disambiguate_filename_preserves_extension() {
         let f = disambiguate_filename("artifact://foo/bar", "/tmp/data.json");
         assert!(f.ends_with(".json"));
@@ -1157,6 +1302,23 @@ mod tests {
         // The stored path should be a dry-run sentinel.
         let uri = dst.data_uri("artifact://k1").await.unwrap();
         assert!(uri.starts_with("/dev/null/dry-run/"));
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_merge_preserves_content() {
+        // Write an artifact into the source with real content.
+        let src = DryRunArtifactRegistry::new();
+        let uri = Uri::parse("artifact://note.txt").unwrap();
+        src.write_into_registry(&uri, "hello world").await.unwrap();
+
+        let dst = DryRunArtifactRegistry::new();
+        dst.merge_registry(&src, Collision::Error, None)
+            .await
+            .unwrap();
+
+        // The merged artifact must return the original content.
+        let got = dst.content("artifact://note.txt", None).await.unwrap();
+        assert_eq!(got, "hello world");
     }
 
     #[tokio::test]
