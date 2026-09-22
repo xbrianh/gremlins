@@ -523,25 +523,12 @@ fn collect_stage_text(stage: &serde_yaml::Value, out: &mut String) {
 
 /// Parse a gremlin definition YAML file from disk, expanding includes, stage-definitions,
 /// and prompts. Returns the fully expanded YAML tree.
-///
-/// When `validate_keys` is true, runs [`validate_stage_keys`] on the expanded tree
-/// and returns the first error. When false (the default), skips validation — the
-/// caller is responsible for validating separately.
 pub fn parse_definition_file(
     yaml_path: &Path,
     project_root: &Path,
-    validate_keys: bool,
 ) -> Result<serde_yaml::Value, SchemaError> {
     let resolver = BuiltinResolver;
-    let expanded = expand_definition(yaml_path, Some(project_root), &resolver)?;
-
-    if validate_keys {
-        if let Err(errors) = validate_stage_keys(&expanded) {
-            return Err(errors.into_iter().next().unwrap());
-        }
-    }
-
-    Ok(expanded)
+    expand_definition(yaml_path, Some(project_root), &resolver)
 }
 
 #[allow(clippy::too_many_arguments)]
