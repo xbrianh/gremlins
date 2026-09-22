@@ -1,0 +1,18 @@
+{
+  "reviewDecision": "APPROVED",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "name": "check",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/owner/repo/actions/runs/111"
+    },
+    {
+      "__typename": "StatusContext",
+      "context": "ci/test",
+      "state": "PENDING",
+      "targetUrl": "https://ci.example.com/1"
+    }
+  ]
+}
