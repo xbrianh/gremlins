@@ -60,7 +60,10 @@ impl Config {
         let raw = match parse_json_config(&path) {
             Ok(raw) => raw,
             Err(ConfigError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
+                return Ok(Config {
+                    default_client: env_default_client(),
+                    ..Config::default()
+                });
             }
             Err(e) => return Err(e),
         };
@@ -70,11 +73,7 @@ impl Config {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(String::from)
-            .or_else(|| {
-                std::env::var("GREMLINS_DEFAULT_CLIENT")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            });
+            .or_else(env_default_client);
 
         let (exact_stage_clients, prefix_stage_clients) = parse_stage_clients(&raw);
 
@@ -299,6 +298,12 @@ pub fn clear_global() {
 // ---------------------------------------------------------------------------
 // Env-var helpers
 // ---------------------------------------------------------------------------
+
+fn env_default_client() -> Option<String> {
+    std::env::var("GREMLINS_DEFAULT_CLIENT")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
 
 fn sandbox_override(subdir: &str) -> Option<PathBuf> {
     std::env::var("GREMLINS_SANDBOX_ROOT")
