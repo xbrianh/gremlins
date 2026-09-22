@@ -80,27 +80,37 @@ fn non_empty(text: &str) -> Option<String> {
 
 /// Read the bail reason stored at `uri`, if any.
 ///
-/// A binding whose value is an absolute path is read from disk — an empty or
-/// whitespace-only file is not a reason — while any other value *is* the
-/// reason, so a `git://` or bare-string bail still reads back.
+/// Tries `registry.content()` first — the portable path that works with any
+/// registry backend including dry-run stubs. Falls back to reading the
+/// backing file via `data_uri()` for registries where `content()` is not the
+/// canonical content source.
+///
+/// An empty or whitespace-only value is not a reason. A stale binding
+/// (registered with a filesystem path that no longer exists) is logged and
+/// treated as no-bail: an artifact that has been registered but never
+/// populated is indistinguishable from one that was deliberately emptied.
 async fn bail_at_uri(registry: &dyn ArtifactRegistry, uri: &str) -> Option<String> {
     if !registry.is_registered(uri).await {
         return None;
     }
+    // Prefer content() — it is the registry's own content authority.
+    if let Ok(content) = registry.content(uri, None).await {
+        return non_empty(content.trim());
+    }
+    // Fall back to data_uri + filesystem read for registries where
+    // content() is unavailable or returns empty.
     let raw = registry.data_uri(uri).await.ok()?;
     if !raw.starts_with('/') {
         return non_empty(raw.trim());
     }
     let path = Path::new(&raw);
     if !tokio::fs::try_exists(path).await.unwrap_or(false) {
-        let msg =
-            format!("stale binding: registered artifact {uri:?} has no backing file at {raw}");
-        log::warn!("bail_at_uri: {msg}");
-        return Some(msg);
+        log::warn!("bail_at_uri: stale binding at {raw} — artifact {uri:?}");
+        return None;
     }
     match tokio::fs::read_to_string(path).await {
         Ok(text) => non_empty(text.trim()),
-        Err(_) => non_empty(&raw),
+        Err(_) => None,
     }
 }
 

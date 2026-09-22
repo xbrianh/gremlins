@@ -503,13 +503,15 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
 
 /// A no-I/O registry for dry-run execution.
 ///
-/// All methods operate on an in-memory `HashMap<String, String>` (key → path)
-/// behind a `Mutex`. `path_for_uri` and `write_into_registry` return sentinel
-/// paths under `/dev/null/dry-run/` — no filesystem access, no directory
-/// creation. `content` delegates to `data_uri`, mirroring the real
-/// `FileSystemArtifactRegistry` so the two methods are always consistent.
+/// All methods operate on an in-memory `HashMap<String, (String, String)>`
+/// (key → (path, content)) behind a `Mutex`. `path_for_uri` and
+/// `write_into_registry` return sentinel paths under `/dev/null/dry-run/` —
+/// no filesystem access, no directory creation. `content` returns the stored
+/// content (or empty string for artifacts registered via `commit`/`copy`,
+/// whose real content lives on the filesystem).
 pub struct DryRunArtifactRegistry {
-    produced: Mutex<HashMap<String, String>>,
+    /// key → (path, content)
+    produced: Mutex<HashMap<String, (String, String)>>,
 }
 
 impl Clone for DryRunArtifactRegistry {
@@ -523,13 +525,14 @@ impl Clone for DryRunArtifactRegistry {
 
 impl DryRunArtifactRegistry {
     /// Create a registry pre-populated with the given set of keys.
-    /// Each key is mapped to a sentinel path derived from the key itself.
+    /// Each key is mapped to a sentinel path derived from the key itself,
+    /// with empty content.
     pub fn seeded(keys: impl IntoIterator<Item = String>) -> Self {
-        let map: HashMap<String, String> = keys
+        let map: HashMap<String, (String, String)> = keys
             .into_iter()
             .map(|k| {
                 let path = Self::key_to_sentinel_path(&k);
-                (k, path)
+                (k, (path, String::new()))
             })
             .collect();
         DryRunArtifactRegistry {
@@ -569,9 +572,11 @@ impl Default for DryRunArtifactRegistry {
 impl ArtifactRegistry for DryRunArtifactRegistry {
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
         let map = self.produced.lock().unwrap();
-        map.get(key).cloned().ok_or_else(|| MissingArtifact {
-            key: key.to_string(),
-        })
+        map.get(key)
+            .map(|(path, _)| path.clone())
+            .ok_or_else(|| MissingArtifact {
+                key: key.to_string(),
+            })
     }
 
     async fn content(
@@ -579,10 +584,11 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
         uri_str: &str,
         _json_path: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        // Delegate to data_uri so the two methods stay consistent — same
-        // pattern as the real FileSystemArtifactRegistry.
-        let _path = self.data_uri(uri_str).await?;
-        Ok("dry-run".to_string())
+        let map = self.produced.lock().unwrap();
+        let (_, content) = map.get(uri_str).ok_or_else(|| {
+            Box::<dyn std::error::Error>::from(format!("artifact not found: {uri_str}"))
+        })?;
+        Ok(content.clone())
     }
 
     async fn is_registered(&self, key: &str) -> bool {
@@ -594,21 +600,26 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
     }
 
     async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Store the path with empty content — real content lives on the
+        // filesystem, which is inaccessible in dry-run mode.
         self.produced
             .lock()
             .unwrap()
-            .insert(key.to_string(), path.to_string());
+            .insert(key.to_string(), (path.to_string(), String::new()));
         Ok(())
     }
 
     async fn write_into_registry(
         &self,
         uri: &Uri,
-        _content: &str,
+        content: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let key = uri.to_string();
         let path = Self::sentinel_path(uri);
-        self.produced.lock().unwrap().insert(key, path.clone());
+        self.produced
+            .lock()
+            .unwrap()
+            .insert(key, (path.clone(), content.to_string()));
         Ok(path)
     }
 
@@ -619,7 +630,10 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
     ) -> Result<String, Box<dyn std::error::Error>> {
         let key = uri.to_string();
         let path = Self::sentinel_path(uri);
-        self.produced.lock().unwrap().insert(key, path.clone());
+        self.produced
+            .lock()
+            .unwrap()
+            .insert(key, (path.clone(), String::new()));
         Ok(path)
     }
 
@@ -705,9 +719,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dry_run_content_returns_placeholder() {
+    async fn test_dry_run_content_returns_stored_value() {
         let reg = DryRunArtifactRegistry::seeded(["artifact://x".to_string()]);
-        assert_eq!(reg.content("artifact://x", None).await.unwrap(), "dry-run");
+        // Seeded artifacts have empty content.
+        assert_eq!(reg.content("artifact://x", None).await.unwrap(), "");
+        // Artifacts written via write_into_registry return the stored content.
+        let uri = Uri::parse("artifact://y").unwrap();
+        reg.write_into_registry(&uri, "hello").await.unwrap();
+        assert_eq!(reg.content("artifact://y", None).await.unwrap(), "hello");
     }
 
     #[tokio::test]
