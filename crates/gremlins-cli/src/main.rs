@@ -386,18 +386,38 @@ fn stop(id: &str) -> Result<(), String> {
         .unwrap_or(0);
 
     if pid_raw == 0 {
-        // A null PID is normal for a parallel child (fork_child seeds
-        // pid: null) — it has no OS process to signal.  Reject the stop
-        // so the operator stops the parent instead.
+        // No OS process to signal.
         let parent_id = gremlin.state.read_str("parent_id");
         if !parent_id.is_empty() {
-            return Err(format!(
-                "gremlin {id} is a parallel child — stop its parent {parent_id} instead"
-            ));
+            // This is a parallel child running in the parent's process.
+            // Writing terminal state here would let rm/clean delete the
+            // child's resources while the parent's worker thread is still
+            // using them. Try to signal the parent instead.
+            if let Ok(parent) = Gremlin::from(&parent_id) {
+                let parent_pid = parent
+                    .state
+                    .read_field("pid")
+                    .and_then(|v| v.as_i64())
+                    .filter(|&n| n > 0 && n <= libc::pid_t::MAX as i64)
+                    .unwrap_or(0);
+                let parent_status = parent.state.read_str("status");
+                if parent_pid > 0 && parent_status == "running" {
+                    eprintln!(
+                        "gremlin {id} is a parallel child — stopping parent \
+                         {parent_id} instead"
+                    );
+                    unsafe {
+                        libc::kill(-(parent_pid as libc::pid_t), libc::SIGTERM);
+                    }
+                    return Ok(());
+                }
+                // Parent is already terminal or has no process itself.
+                // In either case the child's worker thread is done.
+            }
+            // Parent state is gone — child is orphaned, safe to mark.
         }
-        // PID is null or absent in a top-level gremlin — it has already
-        // stopped on its own.
-        println!("gremlin {id} is already stopped");
+        // No parent, or parent gone / already terminal.
+        eprintln!("warning: gremlin {id} has no process — marking stopped in state only");
         gremlin.state.write_terminal_state(-1);
         return Ok(());
     }
@@ -416,9 +436,13 @@ fn stop(id: &str) -> Result<(), String> {
                 // the pid_raw == 0 case above.
                 let parent_id = gremlin.state.read_str("parent_id");
                 if !parent_id.is_empty() {
-                    return Err(format!(
-                        "gremlin {id} is a parallel child — stop its parent {parent_id} instead"
-                    ));
+                    // The child has no process of its own — just mark it
+                    // terminal. The parent owns the real process group.
+                    eprintln!(
+                        "warning: gremlin {id} has no process — marking stopped in state only"
+                    );
+                    gremlin.state.write_terminal_state(-1);
+                    return Ok(());
                 }
                 println!("gremlin {id} has already exited");
                 gremlin.state.write_terminal_state(-1);

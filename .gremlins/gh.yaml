@@ -127,5 +127,7 @@ stages:
       pr: content("artifact://pr-url.txt")
       content: content("artifact://github-review-content.md")
     prompt: [style_guide.md, dev-env-howto.md, github_address_pull_request_reviews.md]
+    bind:
+      review_summary: "artifact://review-summary.md"
   - { type: check-and-fix }
   - { type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, gremlins:ci_fix.md] }

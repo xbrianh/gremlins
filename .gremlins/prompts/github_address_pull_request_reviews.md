@@ -21,3 +21,5 @@ You are addressing review comments on a GitHub pull request. Your job is to fix 
 
 2. Reply to each comment thread. Skip comments that have already been resolved.
    - Post replies to review comments with `gh api repos/{{owner}}/{{repo}}/pulls/<number>/comments/{{comment_id}}/replies -f body="<reply>"`.
+
+3. Write a summary of what was addressed to `{review_summary}`.
