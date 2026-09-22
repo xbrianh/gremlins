@@ -166,9 +166,7 @@ pub trait ArtifactRegistry: Send + Sync {
 
             let new_path = if is_file_artifact(&data_uri) {
                 let filename = disambiguate_filename(&dest_key, &data_uri);
-                let path = self
-                    .copy_artifact_into(&resolved_source, &filename)
-                    .await?;
+                let path = self.copy_artifact_into(&resolved_source, &filename).await?;
                 let commit_err = match self.commit(&dest_key, &path).await {
                     Ok(()) => None,
                     Err(e) => Some(e.to_string()),
@@ -826,10 +824,10 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
 
             // Store with content preserved (unlike the default impl,
             // which calls `commit` and loses the content string).
-            self.produced.lock().unwrap().insert(
-                dest_key.clone(),
-                (new_path.clone(), content.clone()),
-            );
+            self.produced
+                .lock()
+                .unwrap()
+                .insert(dest_key.clone(), (new_path.clone(), content.clone()));
             merged += 1;
 
             // Also register under the original (un-prefixed) key.
