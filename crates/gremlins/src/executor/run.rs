@@ -930,6 +930,7 @@ mod tests {
                 bootstrap: Bootstrap::default(),
                 stages: stages.clone(),
                 land: None,
+                expanded_yaml: serde_yaml::Value::Null,
             },
             registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: None,

@@ -664,6 +664,7 @@ mod tests {
                 bootstrap: Bootstrap::default(),
                 stages: stages.clone(),
                 land: None,
+                expanded_yaml: serde_yaml::Value::Null,
             },
             registry: Box::new(crate::artifacts::registry::FileSystemArtifactRegistry::new(
                 artifact_dir,

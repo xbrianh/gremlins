@@ -1045,7 +1045,7 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
     // the run is hermetic — all prompts, stage-definitions, and recipes are
     // inlined, making the snapshot independent of the original project.
     let hermetic = gremlin.state_dir.join("definition.yaml");
-    let expanded = expand::parse_definition_file(&definition_path, &project_root, true)
+    let expanded = expand::parse_definition_file(&definition_path, &project_root, false)
         .map_err(|e| format!("failed to expand definition: {e}"))?;
     let yaml_str = serde_yaml::to_string(&expanded)
         .map_err(|e| format!("failed to serialize definition: {e}"))?;

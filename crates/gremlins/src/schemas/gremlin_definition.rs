@@ -45,6 +45,9 @@ pub struct GremlinDefinition {
     pub stages: Vec<RunnableStage>,
     /// The optional `land` stage — always an exec stage named `land`.
     pub land: Option<RunnableStage>,
+    /// The fully expanded YAML tree, kept so that [`GremlinDefinition::validate`]
+    /// can run every validator without re-parsing.
+    pub expanded_yaml: Value,
 }
 
 /// The name a not-yet-loaded definition carries. [`Gremlin::init_runtime`]
@@ -67,6 +70,7 @@ impl GremlinDefinition {
             bootstrap: Bootstrap::default(),
             stages: Vec::new(),
             land: None,
+            expanded_yaml: Value::Null,
         }
     }
 
@@ -102,10 +106,9 @@ impl GremlinDefinition {
     /// Load and resolve a gremlin definition. `default_client_override` is the CLI
     /// `--client` value; it is consulted only when the YAML declares none.
     ///
-    /// When `validate` is true, runs semantic validators (duplicate producers,
-    /// unresolved consumers, unused stage keys). When false (the default),
-    /// skips validation — the caller can call [`GremlinDefinition::validate`]
-    /// later.
+    /// When `validate` is true, runs all three semantic validators (duplicate
+    /// producers, unresolved consumers, unused stage keys). When false, skips
+    /// validation — the caller can call [`GremlinDefinition::validate`] later.
     pub fn from_yaml(
         path: impl AsRef<Path>,
         default_client_override: Option<&str>,
@@ -170,17 +173,19 @@ impl GremlinDefinition {
             bootstrap,
             stages,
             land,
+            expanded_yaml: expanded,
         })
     }
 
-    /// Run all three semantic validators against the already-parsed stage tree.
+    /// Run all three semantic validators against the already-loaded definition.
     ///
     /// This lets a caller load without validation then validate later without
-    /// re-parsing the YAML. Note that `validate_stage_keys` operates on the
-    /// expanded YAML tree, not the typed stage tree — it is only run when
-    /// `from_yaml` is called with `validate: true` (which passes
-    /// `validate_keys: true` through to `parse_definition_file`).
+    /// re-parsing the YAML. Uses the stored expanded YAML tree to run
+    /// `validate_stage_keys` in addition to the typed-tree validators.
     pub fn validate(&self) -> Result<(), SchemaError> {
+        if let Err(errors) = expand::validate_stage_keys(&self.expanded_yaml) {
+            return Err(errors.into_iter().next().unwrap());
+        }
         let nodes: Vec<StageNode> = self
             .stages
             .iter()
@@ -740,5 +745,110 @@ stages:
         let err = GremlinDefinition::from_yaml(&path, None, true).unwrap_err();
         // The unnamed nested stage is auto-named `exec` before validation.
         assert!(err.to_string().contains("stage exec:"), "{err}");
+    }
+
+    /// [`GremlinDefinition::validate`] catches issues discovered by
+    /// `validate_stage_keys` — an unused bind key — even when loaded without
+    /// validation.
+    #[test]
+    fn validate_method_catches_unused_bind_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(
+            dir.path(),
+            "demo",
+            r#"
+default_client: 'xai:grok-4'
+
+stages:
+  - name: orphan
+    type: agent
+    bind:
+      ghost: artifact://z
+    prompt:
+      - "hello\n"
+"#,
+        );
+
+        let def = GremlinDefinition::from_yaml(&path, None, false).unwrap();
+        let err = def.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("ghost"),
+            "validate() should catch unused bind key, got: {err}"
+        );
+    }
+
+    /// [`GremlinDefinition::validate`] catches duplicate producers without
+    /// needing `from_yaml(..., true)`.
+    #[test]
+    fn validate_method_catches_duplicate_producers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(
+            dir.path(),
+            "demo",
+            r#"
+default_client: 'xai:grok-4'
+
+stages:
+  - name: first
+    type: agent
+    prompt:
+      - "one {out}\n"
+    bind:
+      out: artifact://shared.md
+  - name: second
+    type: agent
+    prompt:
+      - "two {out}\n"
+    bind:
+      out: artifact://shared.md
+"#,
+        );
+
+        let def = GremlinDefinition::from_yaml(&path, None, false).unwrap();
+        let err = def.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate artifact producer"),
+            "{err}"
+        );
+    }
+
+    /// [`GremlinDefinition::validate`] catches unresolved consumers without
+    /// needing `from_yaml(..., true)`.
+    #[test]
+    fn validate_method_catches_unresolved_consumers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(
+            dir.path(),
+            "demo",
+            r#"
+default_client: 'xai:grok-4'
+
+stages:
+  - name: consumer
+    type: exec
+    interpolation:
+      missing: content("artifact://never-produced.md")
+    options:
+      cmds:
+        - "cat {missing}"
+"#,
+        );
+
+        let def = GremlinDefinition::from_yaml(&path, None, false).unwrap();
+        let err = def.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("artifact://never-produced.md"),
+            "{err}"
+        );
+    }
+
+    /// [`GremlinDefinition::validate`] is a no-op on a valid definition.
+    #[test]
+    fn validate_method_passes_on_valid_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(dir.path(), "demo", WITH_CLIENT);
+
+        let def = GremlinDefinition::from_yaml(&path, None, false).unwrap();
+        def.validate().unwrap();
     }
 }

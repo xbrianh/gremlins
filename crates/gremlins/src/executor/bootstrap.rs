@@ -634,6 +634,7 @@ mod tests {
                 bootstrap,
                 stages: Vec::new(),
                 land: None,
+                expanded_yaml: serde_yaml::Value::Null,
             },
             registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: Some(worktree),
