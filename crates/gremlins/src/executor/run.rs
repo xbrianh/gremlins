@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::artifacts::registry::ArtifactRegistry;
+use crate::artifacts::registry::{ArtifactRegistry, Collision};
 use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
@@ -26,6 +26,7 @@ use crate::executor::parallel::run_parallel;
 use crate::executor::state;
 use crate::executor::RunError;
 use crate::stages::agent::{check_bail, commit_agent, prepare_agent, AgentError};
+use crate::stages::base;
 use crate::stages::constants::BAIL_KEY;
 use crate::stages::exec::{commit_exec, prepare_exec, run_shell, ExecError};
 use crate::stages::node::RunnableStage;
@@ -312,9 +313,75 @@ async fn run_agent(
         client.model()
     );
 
+    // Compute checkout keys: bind_map keys + filepath-style interpolation keys.
+    // Content interpolation keys are NOT included — they're read once at prepare time.
+    //
+    // We need to resolve template variables in the URIs before looking them up.
+    // Do a preliminary content-only resolution against the main registry, then
+    // use those values + framework_subs + string_options to substitute URIs.
+    let str_opts = base::string_options(&agent.options);
+    let (content_map, filepath_map) =
+        crate::artifacts::resolve::split_interpolation_map(&agent.interpolation_map);
+    let content_interpolated = crate::artifacts::resolve::resolve_interpolation_map(
+        gremlin.registry.as_ref(),
+        &content_map,
+        &loop_iter,
+    )
+    .await
+    .map_err(|error| match error {
+        ResolveError::MissingArtifact(key) => RunError::Bail {
+            reason: format!("artifact not bound: {key:?}"),
+        },
+        other => RunError::StageFailed {
+            stage: agent.name.clone(),
+            message: other.to_string(),
+        },
+    })?;
+
+    // Build substitution map for URI resolution: content-interpolated values +
+    // framework_subs. (Bind paths and filepath interpolation aren't available yet.)
+    let mut uri_subs: HashMap<String, String> = content_interpolated.clone();
+    uri_subs.extend(framework_subs.clone());
+
+    let mut checkout_keys: Vec<String> = Vec::new();
+    for raw_uri_str in agent.bind_map.values() {
+        let resolved = base::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
+        let resolved = resolved.strip_suffix('?').unwrap_or(&resolved);
+        if !loop_iter.is_empty() {
+            let resolved = resolved.replace("{loop_iter}", &loop_iter);
+            if resolved.starts_with("artifact://") {
+                checkout_keys.push(resolved);
+            }
+        } else if resolved.starts_with("artifact://") {
+            checkout_keys.push(resolved.to_string());
+        }
+    }
+    for raw in filepath_map.values() {
+        let resolved = base::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
+        let resolved = resolved.strip_suffix('?').unwrap_or(&resolved);
+        if !loop_iter.is_empty() {
+            let resolved = resolved.replace("{loop_iter}", &loop_iter);
+            if resolved.starts_with("artifact://") {
+                checkout_keys.push(resolved);
+            }
+        } else if resolved.starts_with("artifact://") {
+            checkout_keys.push(resolved.to_string());
+        }
+    }
+
+    let local_registry = gremlin
+        .registry
+        .checkout(&checkout_keys)
+        .await
+        .map_err(|error| RunError::StageFailed {
+            stage: agent.name.clone(),
+            message: error.to_string(),
+        })?;
+
     let mut prepared = prepare_agent(
         agent,
         gremlin.registry.as_ref(),
+        local_registry.as_ref(),
         &loop_iter,
         &framework_subs,
     )
@@ -335,12 +402,7 @@ async fn run_agent(
     })?;
 
     prepared.cwd = gremlin.cwd().to_string_lossy().into_owned();
-    prepared.worktree = gremlin
-        .worktree
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned());
-    prepared.artifact_dir = gremlin.artifact_dir.to_string_lossy().into_owned();
-    std::fs::create_dir_all(&gremlin.artifact_dir)?;
+    prepared.artifact_dir = local_registry.artifact_dir().to_string_lossy().into_owned();
 
     if gremlin.dry_run {
         log::debug!(
@@ -348,7 +410,7 @@ async fn run_agent(
             prepared.name,
             gremlin.id.as_str()
         );
-        commit_agent(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
+        commit_agent(&prepared, local_registry.as_ref())
             .await
             .map_err(|error| match error {
                 AgentError::MissingArtifact { .. } => RunError::Bail {
@@ -359,8 +421,18 @@ async fn run_agent(
                     message: other.to_string(),
                 },
             })?;
+        gremlin
+            .registry
+            .merge_registry(local_registry.as_ref(), Collision::Error, None)
+            .await
+            .map_err(|error| RunError::StageFailed {
+                stage: prepared.name.clone(),
+                message: error.to_string(),
+            })?;
         return Ok(());
     }
+
+    std::fs::create_dir_all(local_registry.artifact_dir())?;
 
     let params = RunParams {
         prompt: prepared.user_prompt(),
@@ -378,7 +450,7 @@ async fn run_agent(
         on_timeout_prompt: None,
         max_retries: 3,
         cwd: Some(gremlin.cwd()),
-        artifact_dir: Some(gremlin.artifact_dir.clone()),
+        artifact_dir: Some(local_registry.artifact_dir().to_path_buf()),
         idle_timeout: None,
         extra_env: Some(gremlin.env.clone()),
         expected_artifact_paths: prepared
@@ -444,7 +516,7 @@ async fn run_agent(
         },
     })?;
 
-    commit_agent(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
+    commit_agent(&prepared, local_registry.as_ref())
         .await
         .map_err(|error| match error {
             // A declared output that never materialised is the agent's bail.
@@ -455,6 +527,16 @@ async fn run_agent(
                 stage: prepared.name.clone(),
                 message: other.to_string(),
             },
+        })?;
+
+    // Merge the localized registry back into the main registry.
+    gremlin
+        .registry
+        .merge_registry(local_registry.as_ref(), Collision::Error, None)
+        .await
+        .map_err(|error| RunError::StageFailed {
+            stage: prepared.name.clone(),
+            message: error.to_string(),
         })?;
 
     Ok(())
@@ -483,23 +565,88 @@ async fn run_exec(
         gremlin.id.as_str()
     );
 
-    let mut prepared = prepare_exec(exec, gremlin.registry.as_ref(), &loop_iter, &framework_subs)
+    // Compute checkout keys: bind_map keys + filepath-style interpolation keys.
+    // Content interpolation keys are NOT included — they're read once at prepare time.
+    let str_opts = base::string_options(&exec.options);
+    let (content_map, filepath_map) =
+        crate::artifacts::resolve::split_interpolation_map(&exec.interpolation_map);
+    let content_interpolated = crate::artifacts::resolve::resolve_interpolation_map(
+        gremlin.registry.as_ref(),
+        &content_map,
+        &loop_iter,
+    )
+    .await
+    .map_err(|error| match error {
+        ResolveError::MissingArtifact(key) => RunError::Bail {
+            reason: format!("artifact not bound: {key:?}"),
+        },
+        other => RunError::StageFailed {
+            stage: exec.name.clone(),
+            message: other.to_string(),
+        },
+    })?;
+
+    let mut uri_subs: HashMap<String, String> = content_interpolated.clone();
+    uri_subs.extend(framework_subs.clone());
+
+    let mut checkout_keys: Vec<String> = Vec::new();
+    for raw_uri_str in exec.bind_map.values() {
+        let resolved = base::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
+        let resolved = resolved.strip_suffix('?').unwrap_or(&resolved);
+        if !loop_iter.is_empty() {
+            let resolved = resolved.replace("{loop_iter}", &loop_iter);
+            if resolved.starts_with("artifact://") {
+                checkout_keys.push(resolved);
+            }
+        } else if resolved.starts_with("artifact://") {
+            checkout_keys.push(resolved.to_string());
+        }
+    }
+    for raw in filepath_map.values() {
+        let resolved = base::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
+        let resolved = resolved.strip_suffix('?').unwrap_or(&resolved);
+        if !loop_iter.is_empty() {
+            let resolved = resolved.replace("{loop_iter}", &loop_iter);
+            if resolved.starts_with("artifact://") {
+                checkout_keys.push(resolved);
+            }
+        } else if resolved.starts_with("artifact://") {
+            checkout_keys.push(resolved.to_string());
+        }
+    }
+
+    let local_registry = gremlin
+        .registry
+        .checkout(&checkout_keys)
         .await
-        .map_err(|error| match error {
-            ExecError::Resolve {
-                source: ResolveError::MissingArtifact(key),
-                ..
-            } => RunError::Bail {
-                reason: format!("artifact not bound: {key:?}"),
-            },
-            other => RunError::StageFailed {
-                stage: exec.name.clone(),
-                message: other.to_string(),
-            },
+        .map_err(|error| RunError::StageFailed {
+            stage: exec.name.clone(),
+            message: error.to_string(),
         })?;
 
+    let mut prepared = prepare_exec(
+        exec,
+        gremlin.registry.as_ref(),
+        local_registry.as_ref(),
+        &loop_iter,
+        &framework_subs,
+    )
+    .await
+    .map_err(|error| match error {
+        ExecError::Resolve {
+            source: ResolveError::MissingArtifact(key),
+            ..
+        } => RunError::Bail {
+            reason: format!("artifact not bound: {key:?}"),
+        },
+        other => RunError::StageFailed {
+            stage: exec.name.clone(),
+            message: other.to_string(),
+        },
+    })?;
+
     prepared.cwd = gremlin.cwd();
-    prepared.artifact_dir = gremlin.artifact_dir.clone();
+    prepared.artifact_dir = local_registry.artifact_dir().to_path_buf();
     prepared.state_dir = gremlin.state_dir.clone();
     prepared.env = gremlin.env.clone();
 
@@ -509,7 +656,7 @@ async fn run_exec(
             prepared.name,
             gremlin.id.as_str()
         );
-        commit_exec(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
+        commit_exec(&prepared, local_registry.as_ref())
             .await
             .map_err(|error| match error {
                 ExecError::MissingArtifact { .. } => RunError::Bail {
@@ -519,6 +666,14 @@ async fn run_exec(
                     stage: prepared.name.clone(),
                     message: other.to_string(),
                 },
+            })?;
+        gremlin
+            .registry
+            .merge_registry(local_registry.as_ref(), Collision::Error, None)
+            .await
+            .map_err(|error| RunError::StageFailed {
+                stage: prepared.name.clone(),
+                message: error.to_string(),
             })?;
         return Ok(());
     }
@@ -544,7 +699,7 @@ async fn run_exec(
             })?;
     }
 
-    commit_exec(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
+    commit_exec(&prepared, local_registry.as_ref())
         .await
         .map_err(|error| match error {
             // An unproduced output that is not a bail URI aborts the run.
@@ -555,6 +710,16 @@ async fn run_exec(
                 stage: prepared.name.clone(),
                 message: other.to_string(),
             },
+        })?;
+
+    // Merge the localized registry back into the main registry.
+    gremlin
+        .registry
+        .merge_registry(local_registry.as_ref(), Collision::Error, None)
+        .await
+        .map_err(|error| RunError::StageFailed {
+            stage: prepared.name.clone(),
+            message: error.to_string(),
         })?;
 
     Ok(())
@@ -888,7 +1053,7 @@ mod tests {
     use super::*;
     use std::path::Path as StdPath;
 
-    use crate::artifacts::registry::FileSystemArtifactRegistry;
+    use crate::artifacts::registry::{DryRunArtifactRegistry, FileSystemArtifactRegistry};
     use crate::artifacts::uri::Uri;
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
@@ -1109,22 +1274,20 @@ mod tests {
 
     #[tokio::test]
     async fn agent_commits_a_produced_bound_artifact() {
-        // `sh -c 'cat >/dev/null'` drains the prompt before exiting; a command
-        // that exits immediately can race the harness's stdin write into a
-        // broken pipe. `sh -c` also ignores the `--model`/`--add-dir` args the
-        // cmd backend appends.
         let yaml = r#"
 - name: writer
   type: agent
   client: "cmd:sh -c 'cat >/dev/null'"
   bind:
-    out: "artifact://{name}.md"
+    out?: "artifact://{name}.md"
   prompt: ["hi"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        // The agent would have written this; a plain shell client cannot.
-        std::fs::write(gremlin.artifact_dir.join("writer.md"), "content").unwrap();
-
+        // Use a dry-run registry so has_file always returns true — the cmd
+        // backend doesn't write real files, but commit_agent needs to see
+        // a produced file.
+        gremlin.registry = Box::new(DryRunArtifactRegistry::new());
+        gremlin.dry_run = true;
         let stage = gremlin.definition.stages[0].clone();
         run_stage(&stage, &mut gremlin).await.unwrap();
         assert!(

@@ -119,6 +119,12 @@ pub trait ArtifactRegistry: Send + Sync {
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         None
     }
+
+    /// Return `self` as a [`LocalizedArtifactRegistry`] if this backend
+    /// supports it. Default returns `None`.
+    fn as_localized(&self) -> Option<&dyn LocalizedArtifactRegistry> {
+        None
+    }
 }
 
 // --- LocalizedArtifactRegistry trait ---
@@ -148,6 +154,10 @@ pub trait LocalizedArtifactRegistry: ArtifactRegistry {
 
     /// The artifact storage directory (or sentinel path for dry-run).
     fn artifact_dir(&self) -> &Path;
+
+    /// Check whether a file exists and is non-empty at `path`.
+    /// For dry-run registries this always returns true.
+    async fn has_file(&self, path: &str) -> bool;
 }
 
 // --- Helpers ---
@@ -744,6 +754,10 @@ impl LocalizedArtifactRegistry for ScopedFileSystemArtifactRegistry {
     fn artifact_dir(&self) -> &Path {
         self.inner.artifact_dir()
     }
+
+    async fn has_file(&self, path: &str) -> bool {
+        self.inner.has_file(path).await
+    }
 }
 
 impl FileSystemArtifactRegistry {
@@ -781,8 +795,24 @@ impl FileSystemArtifactRegistry {
                     let content = self.content(key, None).await?;
                     new_reg.write_into_registry(&uri, &content).await?;
                 }
-                allowed.insert(key.clone());
+            } else {
+                // Key is not yet registered — pre-create the path so that
+                // path_for_uri works and the agent/exec can write to it.
+                // Do NOT commit — the stage's commit_agent/commit_exec will
+                // do that after the file is produced.
+                let uri = Uri::parse(key).map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("invalid key URI {key:?}: {e}"),
+                    ))
+                })?;
+                let path = new_reg.path_for_uri(&uri).await?;
+                // Create parent dirs so the agent/exec can write the file.
+                if let Some(parent) = Path::new(&path).parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
             }
+            allowed.insert(key.clone());
         }
 
         Ok(Box::new(ScopedFileSystemArtifactRegistry {
@@ -896,6 +926,10 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
+
+    fn as_localized(&self) -> Option<&dyn LocalizedArtifactRegistry> {
+        Some(self)
+    }
 }
 
 // --- LocalizedArtifactRegistry impl for FileSystemArtifactRegistry ---
@@ -916,6 +950,13 @@ impl LocalizedArtifactRegistry for FileSystemArtifactRegistry {
 
     fn artifact_dir(&self) -> &Path {
         self.artifact_dir()
+    }
+
+    async fn has_file(&self, path: &str) -> bool {
+        tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
     }
 }
 
@@ -1002,15 +1043,24 @@ impl DryRunArtifactRegistry {
     }
 
     /// Produce a filtered in-memory registry containing only the given keys.
+    /// Unregistered keys get sentinel entries so path_for_uri works.
     pub async fn checkout(
         &self,
         keys: &[String],
     ) -> Result<Box<dyn LocalizedArtifactRegistry>, Box<dyn std::error::Error>> {
         let map = self.produced.lock().unwrap();
-        let filtered: HashMap<String, (String, String)> = keys
-            .iter()
-            .filter_map(|k| map.get(k).map(|v| (k.clone(), v.clone())))
-            .collect();
+        let mut filtered: HashMap<String, (String, String)> = HashMap::new();
+        for k in keys {
+            if let Some(v) = map.get(k) {
+                filtered.insert(k.clone(), v.clone());
+            } else {
+                // Unregistered key — create a sentinel entry with empty
+                // path so merge_registry_via_content skips it (data_uri
+                // returns empty). path_for_uri still works because it
+                // doesn't consult the produced map.
+                filtered.insert(k.clone(), (String::new(), String::new()));
+            }
+        }
         Ok(Box::new(DryRunArtifactRegistry {
             produced: Mutex::new(filtered),
         }))
@@ -1115,6 +1165,10 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
+
+    fn as_localized(&self) -> Option<&dyn LocalizedArtifactRegistry> {
+        Some(self)
+    }
 }
 
 // --- LocalizedArtifactRegistry impl for DryRunArtifactRegistry ---
@@ -1135,6 +1189,10 @@ impl LocalizedArtifactRegistry for DryRunArtifactRegistry {
 
     fn artifact_dir(&self) -> &Path {
         self.artifact_dir()
+    }
+
+    async fn has_file(&self, _path: &str) -> bool {
+        true
     }
 }
 

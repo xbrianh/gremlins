@@ -3,7 +3,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::artifacts::registry::ArtifactRegistry;
+use crate::artifacts::registry::{ArtifactRegistry, LocalizedArtifactRegistry};
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::clients::protocol::CompletedRun;
@@ -128,7 +128,6 @@ pub struct AgentPrepared {
     pub(crate) bind_uris: Vec<(String, String, bool)>,
     pub expected_artifact_paths: Vec<String>,
     pub cwd: String,
-    pub worktree: Option<String>,
     pub artifact_dir: String,
 }
 
@@ -167,20 +166,36 @@ impl From<ResolveError> for AgentError {
 
 pub async fn prepare_agent(
     agent: &Agent,
-    artifacts: &dyn ArtifactRegistry,
+    main_registry: &dyn ArtifactRegistry,
+    local_registry: &dyn LocalizedArtifactRegistry,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<AgentPrepared, AgentError> {
     let name = &agent.name;
     let str_opts = base::string_options(&agent.options);
 
-    let interpolation_map =
-        resolve_interpolation_map(artifacts, &agent.interpolation_map, loop_iter)
-            .await
-            .map_err(|e| AgentError::Resolve {
-                name: name.clone(),
-                source: e,
-            })?;
+    // Split interpolation: content() entries resolved against main_registry,
+    // bare-URI (filepath) entries resolved against local_registry.
+    let (content_map, filepath_map) =
+        crate::artifacts::resolve::split_interpolation_map(&agent.interpolation_map);
+
+    let content_interpolated = resolve_interpolation_map(main_registry, &content_map, loop_iter)
+        .await
+        .map_err(|e| AgentError::Resolve {
+            name: name.clone(),
+            source: e,
+        })?;
+
+    let filepath_interpolated = resolve_interpolation_map(local_registry, &filepath_map, loop_iter)
+        .await
+        .map_err(|e| AgentError::Resolve {
+            name: name.clone(),
+            source: e,
+        })?;
+
+    // Merge: filepath shadows content on key collision.
+    let mut interpolation_map: HashMap<String, String> = content_interpolated;
+    interpolation_map.extend(filepath_interpolated);
 
     let mut bind_paths: HashMap<String, String> = HashMap::new();
     let mut bind_uris: Vec<(String, String, bool)> = Vec::new();
@@ -198,13 +213,14 @@ pub async fn prepare_agent(
             detail: e.to_string(),
         })?;
         // Optional binds are skipped when a sibling already committed the URI.
-        if !optional && artifacts.is_registered(&uri_str).await {
+        // Check against the main registry (the authority for what exists).
+        if !optional && main_registry.is_registered(&uri_str).await {
             return Err(AgentError::Generic {
                 name: name.clone(),
                 detail: format!("artifact {uri_str:?} is already produced — duplicate producer"),
             });
         }
-        let path = artifacts
+        let path = local_registry
             .path_for_uri(&uri)
             .await
             .map_err(|e| AgentError::Generic {
@@ -242,7 +258,6 @@ pub async fn prepare_agent(
         bind_uris,
         expected_artifact_paths,
         cwd: String::new(),
-        worktree: None,
         artifact_dir: String::new(),
     })
 }
@@ -251,29 +266,18 @@ pub async fn prepare_agent(
 // commit_agent
 // ---------------------------------------------------------------------------
 
-/// Commit produced artifacts into the registry. Every non-optional bind must
-/// have a non-empty produced file; only produced files are committed. Optional
-/// binds may be absent.
-///
-/// When `dry_run` is true the filesystem probe is skipped — the caller is
-/// running in dry-run mode and no real files exist.
+/// Commit produced artifacts into the localized registry. Every non-optional
+/// bind must have a non-empty produced file; only produced files are committed.
+/// Optional binds may be absent.
 pub async fn commit_agent(
     prepared: &AgentPrepared,
-    artifacts: &dyn ArtifactRegistry,
-    dry_run: bool,
+    local_registry: &dyn LocalizedArtifactRegistry,
 ) -> Result<(), AgentError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
-        let produced = if dry_run {
-            true
-        } else {
-            tokio::fs::metadata(path)
-                .await
-                .map(|m| m.len() > 0)
-                .unwrap_or(false)
-        };
+        let produced = local_registry.has_file(path).await;
         if produced {
-            artifacts
+            local_registry
                 .commit(uri_str, path)
                 .await
                 .map_err(|e| AgentError::Generic {
@@ -320,15 +324,10 @@ pub fn check_bail(completed: &CompletedRun) -> Result<(), AgentError> {
 // Workspace preamble assembly
 // ---------------------------------------------------------------------------
 
-pub(crate) fn build_workspace_preamble(cwd: &str, worktree: Option<&str>) -> String {
+pub(crate) fn build_workspace_preamble(cwd: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !cwd.is_empty() {
         parts.push(format!("Your working directory is: {cwd}"));
-    }
-    if let Some(wt) = worktree {
-        if !wt.is_empty() && wt != cwd {
-            parts.push(format!("Project worktree: {wt}"));
-        }
     }
     parts.push(
         "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR, $GREMLINS_ARTIFACT_DIR"
@@ -347,7 +346,7 @@ impl AgentPrepared {
 
     /// Workspace preamble + stage prompt (no harness system content).
     pub fn user_prompt(&self) -> String {
-        let preamble = build_workspace_preamble(&self.cwd, self.worktree.as_deref());
+        let preamble = build_workspace_preamble(&self.cwd);
         format!("{preamble}\n\n{}", self.prompt)
     }
 }
@@ -601,7 +600,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert!(prepared.prompt.contains("world-value"));
     }
 
@@ -622,7 +621,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert!(prepared.prompt.contains("from-fw"));
         assert!(!prepared.prompt.contains("from-interp"));
     }
@@ -644,7 +643,7 @@ mod tests {
             bind_map: HashMap::from([("key".to_string(), "artifact://out.md".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         // bind_paths should contain the registered path, not "interp-val"
         assert!(prepared.bind_paths.contains_key("key"));
         let path = &prepared.bind_paths["key"];
@@ -667,7 +666,9 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let err = prepare_agent(&agent, &reg, "", &fw).await.unwrap_err();
+        let err = prepare_agent(&agent, &reg, &reg, "", &fw)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AgentError::Resolve { .. }));
     }
 
@@ -687,7 +688,7 @@ mod tests {
             )]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "my-agent~3", &fw)
+        let prepared = prepare_agent(&agent, &reg, &reg, "my-agent~3", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.bind_uris[0].1, "artifact://my-agent~3/out.txt");
@@ -713,7 +714,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "my-agent~2", &fw)
+        let prepared = prepare_agent(&agent, &reg, &reg, "my-agent~2", &fw)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("Plan: # Plan"));
@@ -732,7 +733,7 @@ mod tests {
             bind_map: HashMap::from([("result?".to_string(), "artifact://out.md".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert_eq!(prepared.bind_uris[0].0, "result");
         assert!(prepared.bind_uris[0].2); // optional
     }
@@ -757,7 +758,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert_eq!(prepared.model, Some("openai:{variant}".to_string()));
     }
 
@@ -774,7 +775,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert!(prepared.model.is_none());
     }
 
@@ -791,10 +792,9 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let mut prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         prepared.cwd = String::new();
-        prepared.worktree = None;
-        let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
+        let preamble = build_workspace_preamble(&prepared.cwd);
         assert_eq!(preamble, "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR, $GREMLINS_ARTIFACT_DIR");
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(!full.contains("Your working directory is"));
@@ -813,35 +813,12 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let mut prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         prepared.cwd = "/work".to_string();
-        prepared.worktree = Some("/work".to_string());
-        let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
+        let preamble = build_workspace_preamble(&prepared.cwd);
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(full.contains("Your working directory is: /work"));
         assert!(!full.contains("Project worktree:"));
-    }
-
-    #[tokio::test]
-    async fn test_prepare_workspace_preamble_different_worktree() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
-        let agent = Agent {
-            name: "test".to_string(),
-            prompts: vec!["hi".to_string()],
-            options: HashMap::new(),
-            interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
-        };
-        let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
-        prepared.cwd = "/tmp/run".to_string();
-        prepared.worktree = Some("/repo".to_string());
-        let preamble = build_workspace_preamble(&prepared.cwd, prepared.worktree.as_deref());
-        let full = format!("{preamble}\n\n{}", prepared.prompt);
-        assert!(full.contains("Your working directory is: /tmp/run"));
-        assert!(full.contains("Project worktree: /repo"));
     }
 
     #[tokio::test]
@@ -857,7 +834,7 @@ mod tests {
             bind_map: HashMap::from([("{name}".to_string(), "artifact://{name}.md".to_string())]),
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert_eq!(prepared.bind_uris[0].0, "my-agent");
         assert!(prepared.bind_uris[0].1.contains("my-agent.md"));
     }
@@ -879,7 +856,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert_eq!(prepared.prompt, "Line 1\n\nLine 2\n\nLine 3");
     }
 
@@ -900,7 +877,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert!(prepared.prompt.contains("value"));
     }
 
@@ -923,7 +900,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         // {string_k} is substituted; {num_k} is not a string option and remains
         assert!(prepared.prompt.contains("v {num_k}"));
     }
@@ -945,7 +922,7 @@ mod tests {
             ]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert_eq!(prepared.bind_uris.len(), 3);
         assert_eq!(prepared.expected_artifact_paths.len(), 3);
     }
@@ -963,7 +940,7 @@ mod tests {
             bind_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         assert!(prepared.prompt.ends_with("Static prompt"));
     }
 
@@ -1004,13 +981,13 @@ mod tests {
 
     #[test]
     fn test_build_workspace_preamble_both_present() {
-        let p = build_workspace_preamble("/work/dir", Some("/work/dir"));
+        let p = build_workspace_preamble("/work/dir");
         assert!(p.contains("Your working directory is: /work/dir"));
         assert!(!p.contains("Project worktree:"));
 
-        let p2 = build_workspace_preamble("/tmp/run", Some("/repo"));
+        let p2 = build_workspace_preamble("/tmp/run");
         assert!(p2.contains("Your working directory is: /tmp/run"));
-        assert!(p2.contains("Project worktree: /repo"));
+        assert!(!p2.contains("Project worktree:"));
     }
 
     fn agent_with_bind(key: &str, uri: &str) -> Agent {
@@ -1028,10 +1005,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
-        let err = commit_agent(&prepared, &reg, false).await.unwrap_err();
+        let err = commit_agent(&prepared, &reg).await.unwrap_err();
         assert!(matches!(err, AgentError::MissingArtifact { .. }));
         assert!(!reg.is_registered("artifact://out.md").await);
     }
@@ -1041,11 +1018,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
         std::fs::write(&prepared.bind_paths["out"], "").unwrap();
-        assert!(commit_agent(&prepared, &reg, false).await.is_err());
+        assert!(commit_agent(&prepared, &reg).await.is_err());
         assert!(!reg.is_registered("artifact://out.md").await);
     }
 
@@ -1054,10 +1031,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out?", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
-        commit_agent(&prepared, &reg, false).await.unwrap();
+        commit_agent(&prepared, &reg).await.unwrap();
         assert!(!reg.is_registered("artifact://out.md").await);
     }
 
@@ -1075,13 +1052,13 @@ mod tests {
                 ("b".to_string(), "artifact://b.md".to_string()),
             ]),
         };
-        let mut prepared = prepare_agent(&agent, &reg, "", &HashMap::new())
+        let mut prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
         // Pin iteration order so the missing bind is evaluated last.
         prepared.bind_uris.sort_by(|x, y| x.0.cmp(&y.0));
         std::fs::write(&prepared.bind_paths["a"], "content").unwrap();
-        let err = commit_agent(&prepared, &reg, false).await.unwrap_err();
+        let err = commit_agent(&prepared, &reg).await.unwrap_err();
         assert!(matches!(err, AgentError::MissingArtifact { key, .. } if key == "b"));
         // The file that was written is still committed.
         assert!(reg.is_registered("artifact://a.md").await);
@@ -1102,11 +1079,11 @@ mod tests {
                 ("b?".to_string(), "artifact://b.md".to_string()),
             ]),
         };
-        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
         std::fs::write(&prepared.bind_paths["a"], "content").unwrap();
-        commit_agent(&prepared, &reg, false).await.unwrap();
+        commit_agent(&prepared, &reg).await.unwrap();
         assert!(reg.is_registered("artifact://a.md").await);
         assert!(!reg.is_registered("artifact://b.md").await);
     }
@@ -1116,24 +1093,23 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
         std::fs::write(&prepared.bind_paths["out"], "content").unwrap();
-        commit_agent(&prepared, &reg, false).await.unwrap();
+        commit_agent(&prepared, &reg).await.unwrap();
         assert!(reg.is_registered("artifact://out.md").await);
     }
 
     #[tokio::test]
     async fn test_commit_agent_dry_run_succeeds_without_files() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let reg = make_registry(ensure_artifact_dir(&tmp));
+        let reg = crate::artifacts::registry::DryRunArtifactRegistry::new();
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
-        // No file written — dry_run skips the filesystem probe.
-        commit_agent(&prepared, &reg, true).await.unwrap();
+        // No file written — DryRunArtifactRegistry::has_file always returns true.
+        commit_agent(&prepared, &reg).await.unwrap();
         assert!(reg.is_registered("artifact://out.md").await);
     }
 

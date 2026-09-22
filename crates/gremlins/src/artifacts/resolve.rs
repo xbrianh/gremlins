@@ -6,7 +6,28 @@ use thiserror::Error;
 
 use crate::artifacts::registry::{ArtifactRegistry, MissingArtifact};
 
-static CONTENT_RE: LazyLock<Regex> =
+/// Check whether a raw interpolation value is a `content("...")` expression.
+pub(crate) fn is_content_interpolation(raw: &str) -> bool {
+    CONTENT_RE.is_match(raw.trim_end().trim_end_matches('?'))
+}
+
+/// Split an interpolation map into content-style and filepath-style entries.
+pub(crate) fn split_interpolation_map(
+    map: &HashMap<String, String>,
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut content = HashMap::new();
+    let mut filepath = HashMap::new();
+    for (k, v) in map {
+        if is_content_interpolation(v) {
+            content.insert(k.clone(), v.clone());
+        } else {
+            filepath.insert(k.clone(), v.clone());
+        }
+    }
+    (content, filepath)
+}
+
+pub(crate) static CONTENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^content\("([^"]+)"(?:,\s*"([^"]+)")?\)\s*$"#).unwrap());
 
 #[derive(Error, Debug)]

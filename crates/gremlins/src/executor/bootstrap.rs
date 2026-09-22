@@ -388,9 +388,18 @@ async fn run_cli_out(
         stderr: error,
     };
 
+    // cli_out is a simple binding step: bootstrap commands already wrote
+    // their outputs into gremlin.artifact_dir (the main registry's artifact
+    // directory). A localized checkout would not contain those files, so we
+    // use the main registry directly for both preparation and commit.
+    let local = gremlin
+        .registry
+        .as_localized()
+        .ok_or_else(|| failed("registry does not support localized access".to_string()))?;
     let mut prepared = prepare_exec(
         &exec,
         gremlin.registry.as_ref(),
+        local,
         &loop_iter,
         &framework_subs,
     )
@@ -404,7 +413,7 @@ async fn run_cli_out(
     run_shell(&prepared)
         .await
         .map_err(|error| failed(error.to_string()))?;
-    commit_exec(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
+    commit_exec(&prepared, local)
         .await
         .map_err(|error| failed(error.to_string()))?;
 
@@ -776,7 +785,7 @@ mod tests {
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
         // The synthetic exec verifies the bound file exists, so the producer's
-        // output is staged first — exactly as a real cli_out follows its cmds.
+        // output is staged first.
         let uri = Uri::parse("artifact://pr.txt").unwrap();
         let path = gremlin.registry.as_ref().path_for_uri(&uri).await.unwrap();
         std::fs::write(&path, "123").unwrap();

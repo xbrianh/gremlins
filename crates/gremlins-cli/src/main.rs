@@ -796,7 +796,7 @@ async fn land(id: &str) -> Result<(), String> {
     let registry = FileSystemArtifactRegistry::new(artifact_dir.clone());
 
     // Resolve interpolation references.
-    let prepared = prepare_exec(exec, &registry, "", &HashMap::new())
+    let prepared = prepare_exec(exec, &registry, &registry, "", &HashMap::new())
         .await
         .map_err(|e| format!("gremlin {id}: {e}"))?;
 
