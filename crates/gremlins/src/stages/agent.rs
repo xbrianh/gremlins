@@ -842,10 +842,7 @@ mod tests {
             prompts: vec!["{my-agent}".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([(
-                "{name}".to_string(),
-                "artifact://{name}.md".to_string(),
-            )]),
+            bind_map: HashMap::from([("{name}".to_string(), "artifact://{name}.md".to_string())]),
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
         let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
