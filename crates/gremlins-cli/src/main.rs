@@ -847,7 +847,13 @@ async fn validate(definition: &str) -> Result<(), String> {
                 .state
                 .read_bail_info()
                 .and_then(|info| info.get("detail").cloned())
-                .and_then(|v| if v.is_string() { Some(v.as_str().unwrap().to_string()) } else { None })
+                .and_then(|v| {
+                    if v.is_string() {
+                        Some(v.as_str().unwrap().to_string())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_default();
             if !detail.is_empty() {
                 eprintln!("stage {stage}: {detail}");
