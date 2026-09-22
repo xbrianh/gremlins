@@ -254,13 +254,25 @@ pub async fn prepare_agent(
 /// Commit produced artifacts into the registry. Every non-optional bind must
 /// have a non-empty produced file; only produced files are committed. Optional
 /// binds may be absent.
+///
+/// When `dry_run` is true the filesystem probe is skipped — the caller is
+/// running in dry-run mode and no real files exist.
 pub async fn commit_agent(
     prepared: &AgentPrepared,
     artifacts: &dyn ArtifactRegistry,
+    dry_run: bool,
 ) -> Result<(), AgentError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];
-        if artifacts.is_path_produced(path).await {
+        let produced = if dry_run {
+            true
+        } else {
+            tokio::fs::metadata(path)
+                .await
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        };
+        if produced {
             artifacts
                 .commit(uri_str, path)
                 .await
@@ -1019,7 +1031,7 @@ mod tests {
         let prepared = prepare_agent(&agent, &reg, "", &HashMap::new())
             .await
             .unwrap();
-        let err = commit_agent(&prepared, &reg).await.unwrap_err();
+        let err = commit_agent(&prepared, &reg, false).await.unwrap_err();
         assert!(matches!(err, AgentError::MissingArtifact { .. }));
         assert!(!reg.is_registered("artifact://out.md").await);
     }
@@ -1033,7 +1045,7 @@ mod tests {
             .await
             .unwrap();
         std::fs::write(&prepared.bind_paths["out"], "").unwrap();
-        assert!(commit_agent(&prepared, &reg).await.is_err());
+        assert!(commit_agent(&prepared, &reg, false).await.is_err());
         assert!(!reg.is_registered("artifact://out.md").await);
     }
 
@@ -1045,7 +1057,7 @@ mod tests {
         let prepared = prepare_agent(&agent, &reg, "", &HashMap::new())
             .await
             .unwrap();
-        commit_agent(&prepared, &reg).await.unwrap();
+        commit_agent(&prepared, &reg, false).await.unwrap();
         assert!(!reg.is_registered("artifact://out.md").await);
     }
 
@@ -1069,7 +1081,7 @@ mod tests {
         // Pin iteration order so the missing bind is evaluated last.
         prepared.bind_uris.sort_by(|x, y| x.0.cmp(&y.0));
         std::fs::write(&prepared.bind_paths["a"], "content").unwrap();
-        let err = commit_agent(&prepared, &reg).await.unwrap_err();
+        let err = commit_agent(&prepared, &reg, false).await.unwrap_err();
         assert!(matches!(err, AgentError::MissingArtifact { key, .. } if key == "b"));
         // The file that was written is still committed.
         assert!(reg.is_registered("artifact://a.md").await);
@@ -1094,7 +1106,7 @@ mod tests {
             .await
             .unwrap();
         std::fs::write(&prepared.bind_paths["a"], "content").unwrap();
-        commit_agent(&prepared, &reg).await.unwrap();
+        commit_agent(&prepared, &reg, false).await.unwrap();
         assert!(reg.is_registered("artifact://a.md").await);
         assert!(!reg.is_registered("artifact://b.md").await);
     }
@@ -1108,7 +1120,7 @@ mod tests {
             .await
             .unwrap();
         std::fs::write(&prepared.bind_paths["out"], "content").unwrap();
-        commit_agent(&prepared, &reg).await.unwrap();
+        commit_agent(&prepared, &reg, false).await.unwrap();
         assert!(reg.is_registered("artifact://out.md").await);
     }
 

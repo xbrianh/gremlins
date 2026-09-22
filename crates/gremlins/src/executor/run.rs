@@ -348,7 +348,7 @@ async fn run_agent(
             prepared.name,
             gremlin.id.as_str()
         );
-        commit_agent(&prepared, gremlin.registry.as_ref())
+        commit_agent(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
             .await
             .map_err(|error| match error {
                 AgentError::MissingArtifact { .. } => RunError::Bail {
@@ -444,7 +444,7 @@ async fn run_agent(
         },
     })?;
 
-    commit_agent(&prepared, gremlin.registry.as_ref())
+    commit_agent(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
         .await
         .map_err(|error| match error {
             // A declared output that never materialised is the agent's bail.
@@ -509,7 +509,7 @@ async fn run_exec(
             prepared.name,
             gremlin.id.as_str()
         );
-        commit_exec(&prepared, gremlin.registry.as_ref())
+        commit_exec(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
             .await
             .map_err(|error| match error {
                 ExecError::MissingArtifact { .. } => RunError::Bail {
@@ -544,7 +544,7 @@ async fn run_exec(
             })?;
     }
 
-    commit_exec(&prepared, gremlin.registry.as_ref())
+    commit_exec(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
         .await
         .map_err(|error| match error {
             // An unproduced output that is not a bail URI aborts the run.
