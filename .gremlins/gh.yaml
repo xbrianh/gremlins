@@ -24,11 +24,10 @@ bootstrap:
 
 land:
   interpolation:
-    pr_title: content("artifact://pr-title.txt")
     pr_url: content("artifact://pr-url.txt")
   options:
     cmds:
-      - gh pr merge --squash --delete-branch --subject "{pr_title}" "{pr_url}"
+      - gh pr merge --squash --delete-branch "{pr_url}"
       - git fetch origin
       - git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main
 
