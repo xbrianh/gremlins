@@ -526,12 +526,12 @@ stages:
     options:
       cmds: ["./scan > \"{report}\""]
     bind:
-      report: file://session/report
+      report: artifact://report
 
   - name: analyze
     type: agent
     interpolation:
-      report: content("file://session/report")
+      report: content("artifact://report")
     prompt: |
       The scanning report:
       {report}
@@ -540,7 +540,7 @@ stages:
 ```
 
 **Artifact URI schemes:**
-- `file://session/<name>` — Session artifact: a file created under the gremlin's artifact directory
+- `artifact://<name>` — Artifact: a file created under the gremlin's artifact directory
 - `git://ref/<name>` — Git ref name (e.g., `git://ref/main` returns the string `main`)
 - `git://commit/<sha>` — Commit SHA (e.g., `git://commit/abc123def` returns the full SHA)
 - `git://range/<base>..<head>` — Commit range/log between two refs
@@ -550,7 +550,7 @@ stages:
 - `git://range` — Special shorthand: the `exec` stage snapshots HEAD before running and binds the resulting range afterwards
 
 **Artifact binding semantics:**
-- `interpolation:` values are registry key lookups: a URI string (e.g., `file://session/report`), an optional `?default` fallback (e.g., `mykey?fallback`), or a `content("URI")` expression that reads and inlines file contents
+- `interpolation:` values are registry key lookups: a URI string (e.g., `artifact://report`), an optional `?default` fallback (e.g., `mykey?fallback`), or a `content("URI")` expression that reads and inlines file contents
 - `bind:` values are URI strings naming what the stage produces; the bind map key is a local variable name for `{var}` substitution within the same stage's templates (prompts, cmds)
 - After a stage completes, bound artifacts are registered under their URI strings; downstream stages reference those URI strings in their `interpolation:` maps
 - `interpolation:` can be declared in a stage definition and will be merged with call-site `interpolation:` values; `bind:` cannot appear inside a definition
