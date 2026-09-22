@@ -31,7 +31,7 @@ fetch_meta() {
         "false"
     else
         ([$r[] |
-            if .__typename == "StatusContext" then
+            if .typename == "StatusContext" then
                 select(.state == "EXPECTED" or .state == "PENDING")
             else
                 select(.status != "COMPLETED")
@@ -46,7 +46,7 @@ fetch_meta() {
 count_failed() {
     gh pr view "$pr_url" --json statusCheckRollup --jq '
 [.statusCheckRollup // [] | .[] |
-    if .__typename == "StatusContext" then
+    if .typename == "StatusContext" then
         select(.state == "FAILURE" or .state == "ERROR")
     else
         select(.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")

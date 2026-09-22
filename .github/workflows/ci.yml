@@ -18,10 +18,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install bats
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
       - name: Check (fmt + clippy + compile)
         run: make check
-      - name: Test
+      - name: Test (Rust)
         run: make test
+      - name: Test (Overlay Tools)
+        run: make test-overlay-tools
       - name: Validate Gremlin Definitions
         run: make validate-gremlin-definitions
         env:

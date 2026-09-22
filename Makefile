@@ -1,6 +1,6 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc) --output-sync=line
 
-.PHONY: test check fmt fmt-check clippy build release validate-gremlin-definitions autoformat
+.PHONY: test check fmt fmt-check clippy build release validate-gremlin-definitions autoformat test-overlay-tools
 
 # --- Test ---
 
@@ -43,6 +43,11 @@ validate-gremlin-definitions: build
 		echo "validate-gremlin-definitions $$f..."; \
 		./target/debug/gremlins validate "$$f" || exit 1; \
 	done
+
+# --- Overlay Tools ---
+
+test-overlay-tools:
+	bats .gremlins/bin/tests/
 
 # --- Install ---
 
