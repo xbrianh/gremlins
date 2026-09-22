@@ -629,7 +629,7 @@ mod tests {
                 "key".to_string(),
                 r#"content("artifact://interp-val")"#.to_string(),
             )]),
-            bind_map: HashMap::from([("key".to_string(), "file://session/out.md".to_string())]),
+            bind_map: HashMap::from([("key".to_string(), "artifact://out.md".to_string())]),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
@@ -717,7 +717,7 @@ mod tests {
             prompts: vec!["{result}".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("result?".to_string(), "file://session/out.md".to_string())]),
+            bind_map: HashMap::from([("result?".to_string(), "artifact://out.md".to_string())]),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
@@ -842,10 +842,7 @@ mod tests {
             prompts: vec!["{my-agent}".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([(
-                "{name}".to_string(),
-                "file://session/{name}.md".to_string(),
-            )]),
+            bind_map: HashMap::from([("{name}".to_string(), "artifact://{name}.md".to_string())]),
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
         let prepared = prepare_agent(&agent, &reg, "", &fw).await.unwrap();
@@ -930,9 +927,9 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             bind_map: HashMap::from([
-                ("a".to_string(), "file://session/a.md".to_string()),
-                ("b".to_string(), "file://session/b.md".to_string()),
-                ("c".to_string(), "file://session/c.md".to_string()),
+                ("a".to_string(), "artifact://a.md".to_string()),
+                ("b".to_string(), "artifact://b.md".to_string()),
+                ("c".to_string(), "artifact://c.md".to_string()),
             ]),
         };
         let fw = HashMap::new();

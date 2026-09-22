@@ -57,8 +57,8 @@ mod tests {
     #[test]
     fn test_parse_unknown_scheme() {
         // All schemes are now accepted by parse()
-        let uri = Uri::parse("file://session/foo.md").unwrap();
-        assert_eq!(uri.scheme, "file");
+        let uri = Uri::parse("git://example.com/foo.md").unwrap();
+        assert_eq!(uri.scheme, "git");
     }
 
     #[test]
