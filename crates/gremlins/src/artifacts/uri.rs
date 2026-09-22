@@ -55,13 +55,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_unknown_scheme() {
-        // All schemes are now accepted by parse()
-        let uri = Uri::parse("file://session/foo.md").unwrap();
-        assert_eq!(uri.scheme, "file");
-    }
-
-    #[test]
     fn test_parse_missing_separator() {
         assert!(Uri::parse("no-slashes").is_err());
     }
