@@ -172,7 +172,7 @@ pub struct ExecPrepared {
 /// without further registry mutation.
 pub async fn prepare_exec(
     exec: &Exec,
-    artifacts: &impl ArtifactRegistry,
+    artifacts: &dyn ArtifactRegistry,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<ExecPrepared, ExecError> {
@@ -369,7 +369,7 @@ pub fn process_shell_result(
 /// Non-optional artifacts that are absent abort the stage, except bail URIs.
 pub async fn commit_exec(
     prepared: &ExecPrepared,
-    artifacts: &impl ArtifactRegistry,
+    artifacts: &dyn ArtifactRegistry,
 ) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.bind_uris {
         let path = &prepared.bind_paths[key];

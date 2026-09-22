@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Create a GitHub PR from the current branch.
-# Usage: gh_create_pr <base_ref> <pr_title> <pr_body_file> <pr_number_file> <pr_url_file>
+# Usage: gh_create_pr <base_ref> <pr_title> <pr_body_file> <pr_number_file> <pr_url_file> <pr_branch_file>
 #
-# Creates a unique branch name with a random slug, pushes, opens a PR,
-# and writes the PR number and URL to the specified output files.
+# Generates a unique branch name with a random slug, pushes, opens a PR,
+# and writes the PR number, URL, and branch name to the specified output files.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,9 +14,10 @@ pr_title="${2:-}"
 pr_body_file="${3:-}"
 pr_number_file="${4:-}"
 pr_url_file="${5:-}"
+pr_branch_file="${6:-}"
 
-if [ -z "$base_ref" ] || [ -z "$pr_title" ] || [ -z "$pr_body_file" ] || [ -z "$pr_number_file" ] || [ -z "$pr_url_file" ]; then
-    die "Usage: gh_create_pr <base_ref> <pr_title> <pr_body_file> <pr_number_file> <pr_url_file>"
+if [ -z "$base_ref" ] || [ -z "$pr_title" ] || [ -z "$pr_body_file" ] || [ -z "$pr_number_file" ] || [ -z "$pr_url_file" ] || [ -z "$pr_branch_file" ]; then
+    die "Usage: gh_create_pr <base_ref> <pr_title> <pr_body_file> <pr_number_file> <pr_url_file> <pr_branch_file>"
 fi
 
 # Generate a unique branch name with a random 4-char slug.
@@ -34,5 +35,7 @@ URL="$(gh pr create \
 
 printf "%s" "${URL##*/}" > "$pr_number_file"
 printf "%s" "$URL" > "$pr_url_file"
+printf "%s" "$BRANCH" > "$pr_branch_file"
 
 info "PR created: $URL"
+

@@ -18,7 +18,7 @@ pub enum ResolveError {
 }
 
 pub async fn resolve_interpolation_map(
-    artifacts: &impl ArtifactRegistry,
+    artifacts: &(impl ArtifactRegistry + ?Sized),
     interpolation_map: &HashMap<String, String>,
     loop_iter: &str,
 ) -> Result<HashMap<String, String>, ResolveError> {
@@ -34,6 +34,18 @@ pub async fn resolve_interpolation_map(
                 uri_str = uri_str.replace("{loop_iter}", loop_iter);
             }
             let json_path = caps.get(2).map(|m| m.as_str());
+
+            // For optional content(), skip the lookup if the artifact isn't
+            // registered — avoids relying on downcast for MissingArtifact,
+            // which breaks across the async_trait vtable boundary.
+            if optional && !artifacts.is_registered(&uri_str).await {
+                log::debug!(
+                    "resolve: {var:?} = content({uri_str:?})? -> (empty, artifact not registered)"
+                );
+                result.insert(var.clone(), String::new());
+                continue;
+            }
+
             match artifacts.content(&uri_str, json_path).await {
                 Ok(val) => {
                     log::debug!(
@@ -42,14 +54,13 @@ pub async fn resolve_interpolation_map(
                     );
                     result.insert(var.clone(), val);
                 }
-                Err(e) if optional && e.downcast_ref::<MissingArtifact>().is_some() => {
-                    result.insert(var.clone(), String::new());
+                Err(_e) if optional => {
+                    // Shouldn't happen (we already checked is_registered),
+                    // but tolerate it gracefully.
                     log::debug!(
-                        "resolve: {var:?} = content({uri_str:?})? -> (empty, artifact not bound)"
+                        "resolve: {var:?} = content({uri_str:?})? -> (empty, content failed)"
                     );
-                }
-                Err(e) if optional => {
-                    return Err(ResolveError::Other(e));
+                    result.insert(var.clone(), String::new());
                 }
                 Err(e) => {
                     if let Some(ma) = e.downcast_ref::<MissingArtifact>() {

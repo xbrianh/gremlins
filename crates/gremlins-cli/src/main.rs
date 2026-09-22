@@ -10,7 +10,6 @@ use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
-use gremlins::executor::dry_run;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
@@ -721,6 +720,9 @@ async fn land(id: &str) -> Result<(), String> {
     }
     let definition = GremlinDefinition::from_yaml(&definition_path, None)
         .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
+    definition
+        .validate()
+        .map_err(|e| format!("gremlin {id}: invalid definition: {e}"))?;
 
     let land_stage = match &definition.land {
         Some(stage) => stage,
@@ -831,16 +833,43 @@ async fn validate(definition: &str) -> Result<(), String> {
 
     let gremlin_def = GremlinDefinition::from_yaml(&definition_path, None)
         .map_err(|e| format!("invalid definition: {e}"))?;
+    gremlin_def
+        .validate()
+        .map_err(|e| format!("invalid definition: {e}"))?;
 
-    let errors = dry_run::validate_definition(&gremlin_def).await;
+    let mut gremlin = Gremlin::for_dry_run(gremlin_def);
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        for error in &errors {
-            eprintln!("{error}");
+    match gremlin.run().await {
+        Ok(0) => Ok(()),
+        Ok(exit_code) => {
+            let stage = gremlin.state.read_str("stage");
+            let detail = gremlin
+                .state
+                .read_bail_info()
+                .and_then(|info| info.get("detail").cloned())
+                .and_then(|v| {
+                    if v.is_string() {
+                        Some(v.as_str().unwrap().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            if !detail.is_empty() {
+                eprintln!("stage {stage}: {detail}");
+            }
+            Err(format!(
+                "definition validation failed with exit code {exit_code}"
+            ))
         }
-        Err(format!("definition has {} error(s)", errors.len()))
+        Err(gremlins::executor::RunError::StageFailed { stage, message }) => {
+            eprintln!("stage {stage}: {message}");
+            Err("definition validation failed".to_string())
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            Err("definition validation failed".to_string())
+        }
     }
 }
 
@@ -948,6 +977,9 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
     // Load the definition just enough to validate --key args against
     // bootstrap.source.
     let gremlin_def = GremlinDefinition::from_yaml(&definition_path, None)
+        .map_err(|e| format!("invalid definition: {e}"))?;
+    gremlin_def
+        .validate()
         .map_err(|e| format!("invalid definition: {e}"))?;
 
     match &gremlin_def.bootstrap.source {

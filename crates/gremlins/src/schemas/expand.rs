@@ -312,9 +312,7 @@ pub(crate) fn parse_default(raw: &str) -> serde_yaml::Value {
 /// By the time this runs, all bundled recipe call-sites have already been
 /// inlined by `_expand_stage_def`, so the validator only ever sees fully
 /// expanded stages — no recipe-skipping logic is needed.
-pub(crate) fn validate_stage_keys(
-    expanded_yaml: &serde_yaml::Value,
-) -> Result<(), Vec<SchemaError>> {
+pub fn validate_stage_keys(expanded_yaml: &serde_yaml::Value) -> Result<(), Vec<SchemaError>> {
     let mut errors = Vec::new();
 
     // Validate the `land` stage if present
@@ -530,14 +528,7 @@ pub fn parse_definition_file(
     project_root: &Path,
 ) -> Result<serde_yaml::Value, SchemaError> {
     let resolver = BuiltinResolver;
-    let expanded = expand_definition(yaml_path, Some(project_root), &resolver)?;
-
-    // Validate bind: and interpolation: keys are referenced
-    if let Err(errors) = validate_stage_keys(&expanded) {
-        return Err(errors.into_iter().next().unwrap());
-    }
-
-    Ok(expanded)
+    expand_definition(yaml_path, Some(project_root), &resolver)
 }
 
 #[allow(clippy::too_many_arguments)]
