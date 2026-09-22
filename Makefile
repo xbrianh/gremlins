@@ -1,6 +1,6 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc) --output-sync=line
 
-.PHONY: test check fmt fmt-check clippy build release autoformat
+.PHONY: test check fmt fmt-check clippy build release validate autoformat
 
 # --- Test ---
 
@@ -37,6 +37,14 @@ build:
 
 release:
 	cargo build --release
+
+# --- Validate ---
+
+validate: build
+	@for f in .gremlins/*.yaml; do \
+		echo "validate $$f..."; \
+		./target/debug/gremlins validate "$$f" || exit 1; \
+	done
 
 # --- Install ---
 
