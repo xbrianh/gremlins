@@ -558,6 +558,26 @@ mod tests {
         assert!(registry.is_registered("artifact://out.txt").await);
     }
 
+    #[tokio::test]
+    async fn test_commit_exec_dry_run_succeeds_without_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let registry = FileSystemArtifactRegistry::new(artifact_dir);
+
+        let exec = Exec {
+            name: "test".to_string(),
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+        };
+        let fw = HashMap::new();
+        let prepared = prepare_exec(&exec, &registry, "", &fw).await.unwrap();
+        // No file written — dry_run skips the filesystem probe.
+        commit_exec(&prepared, &registry, true).await.unwrap();
+        assert!(registry.is_registered("artifact://out.txt").await);
+    }
+
     #[test]
     fn test_exec_implements_stage_trait() {
         let exec = Exec {
