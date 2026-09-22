@@ -312,9 +312,7 @@ pub(crate) fn parse_default(raw: &str) -> serde_yaml::Value {
 /// By the time this runs, all bundled recipe call-sites have already been
 /// inlined by `_expand_stage_def`, so the validator only ever sees fully
 /// expanded stages — no recipe-skipping logic is needed.
-pub(crate) fn validate_stage_keys(
-    expanded_yaml: &serde_yaml::Value,
-) -> Result<(), Vec<SchemaError>> {
+pub fn validate_stage_keys(expanded_yaml: &serde_yaml::Value) -> Result<(), Vec<SchemaError>> {
     let mut errors = Vec::new();
 
     // Validate the `land` stage if present
@@ -525,16 +523,22 @@ fn collect_stage_text(stage: &serde_yaml::Value, out: &mut String) {
 
 /// Parse a gremlin definition YAML file from disk, expanding includes, stage-definitions,
 /// and prompts. Returns the fully expanded YAML tree.
+///
+/// When `validate_keys` is true, runs [`validate_stage_keys`] on the expanded tree
+/// and returns the first error. When false (the default), skips validation — the
+/// caller is responsible for validating separately.
 pub fn parse_definition_file(
     yaml_path: &Path,
     project_root: &Path,
+    validate_keys: bool,
 ) -> Result<serde_yaml::Value, SchemaError> {
     let resolver = BuiltinResolver;
     let expanded = expand_definition(yaml_path, Some(project_root), &resolver)?;
 
-    // Validate bind: and interpolation: keys are referenced
-    if let Err(errors) = validate_stage_keys(&expanded) {
-        return Err(errors.into_iter().next().unwrap());
+    if validate_keys {
+        if let Err(errors) = validate_stage_keys(&expanded) {
+            return Err(errors.into_iter().next().unwrap());
+        }
     }
 
     Ok(expanded)

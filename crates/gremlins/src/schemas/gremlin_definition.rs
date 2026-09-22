@@ -101,9 +101,15 @@ impl GremlinDefinition {
 
     /// Load and resolve a gremlin definition. `default_client_override` is the CLI
     /// `--client` value; it is consulted only when the YAML declares none.
+    ///
+    /// When `validate` is true, runs semantic validators (duplicate producers,
+    /// unresolved consumers, unused stage keys). When false (the default),
+    /// skips validation — the caller can call [`GremlinDefinition::validate`]
+    /// later.
     pub fn from_yaml(
         path: impl AsRef<Path>,
         default_client_override: Option<&str>,
+        validate: bool,
     ) -> Result<GremlinDefinition, SchemaError> {
         let path = path.as_ref();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -114,7 +120,7 @@ impl GremlinDefinition {
         }
 
         let project_root = project_root_for(&path);
-        let expanded = expand::parse_definition_file(&path, &project_root)?;
+        let expanded = expand::parse_definition_file(&path, &project_root, validate)?;
         let root = expanded
             .as_mapping()
             .ok_or_else(|| SchemaError::YamlNotMapping {
@@ -148,11 +154,11 @@ impl GremlinDefinition {
 
         let land = land_from_yaml(root)?;
 
-        // The validators walk the typed tree: its names are the filled ones,
-        // including nested stages the raw YAML never had named.
-        let nodes: Vec<StageNode> = stages.iter().map(RunnableStage::to_stage_node).collect();
-        loader::check_duplicate_producers(&nodes, &bootstrap.cli_out)?;
-        loader::check_unresolved_consumers(&nodes, &bootstrap.launch_cmds, &bootstrap.cli_out)?;
+        if validate {
+            let nodes: Vec<StageNode> = stages.iter().map(RunnableStage::to_stage_node).collect();
+            loader::check_duplicate_producers(&nodes, &bootstrap.cli_out)?;
+            loader::check_unresolved_consumers(&nodes, &bootstrap.launch_cmds, &bootstrap.cli_out)?;
+        }
 
         let default_client = resolve_default_client(yaml_default_client, default_client_override)?;
 
@@ -165,6 +171,28 @@ impl GremlinDefinition {
             stages,
             land,
         })
+    }
+
+    /// Run all three semantic validators against the already-parsed stage tree.
+    ///
+    /// This lets a caller load without validation then validate later without
+    /// re-parsing the YAML. Note that `validate_stage_keys` operates on the
+    /// expanded YAML tree, not the typed stage tree — it is only run when
+    /// `from_yaml` is called with `validate: true` (which passes
+    /// `validate_keys: true` through to `parse_definition_file`).
+    pub fn validate(&self) -> Result<(), SchemaError> {
+        let nodes: Vec<StageNode> = self
+            .stages
+            .iter()
+            .map(RunnableStage::to_stage_node)
+            .collect();
+        loader::check_duplicate_producers(&nodes, &self.bootstrap.cli_out)?;
+        loader::check_unresolved_consumers(
+            &nodes,
+            &self.bootstrap.launch_cmds,
+            &self.bootstrap.cli_out,
+        )?;
+        Ok(())
     }
 }
 
@@ -335,7 +363,7 @@ stages:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", WITH_CLIENT);
 
-        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None, false).unwrap();
 
         assert_eq!(definition.name, "demo");
         assert!(definition.path.is_absolute());
@@ -355,7 +383,7 @@ stages:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", WITH_CLIENT);
 
-        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None, false).unwrap();
         // Stages without an explicit `client:` carry None — the definition
         // default_client is resolved at runtime by the executor.
         assert_eq!(definition.stages[0].client(), None);
@@ -390,7 +418,7 @@ stages:
 "#,
         );
 
-        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None, false).unwrap();
         assert_eq!(
             definition.stages[0].client(),
             Some(&ClientSpec("local:model".into()))
@@ -405,7 +433,7 @@ stages:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", WITH_CLIENT);
 
-        let definition = GremlinDefinition::from_yaml(&path, Some("cli:model")).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, Some("cli:model"), false).unwrap();
         assert_eq!(definition.default_client, "xai:grok-4");
     }
 
@@ -414,7 +442,7 @@ stages:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", WITHOUT_CLIENT);
 
-        let definition = GremlinDefinition::from_yaml(&path, Some("cli:model")).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, Some("cli:model"), false).unwrap();
         assert_eq!(definition.default_client, "cli:model");
         // Stages without explicit client carry None — resolved at runtime.
         assert_eq!(definition.stages[0].client(), None);
@@ -436,14 +464,14 @@ stages:
     fn config_supplies_the_client_when_nothing_else_does() {
         let (_sandbox, _project, path) =
             definition_needing_a_client(Some(r#"{"default-client": "cfg:model"}"#));
-        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None, false).unwrap();
         assert_eq!(definition.default_client, "cfg:model");
     }
 
     #[test]
     fn a_client_is_required_from_somewhere() {
         let (_sandbox, _project, path) = definition_needing_a_client(None);
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None, false).unwrap_err();
         assert!(
             err.to_string().contains("missing 'default_client'"),
             "{err}"
@@ -481,7 +509,7 @@ stages:
 "#,
         );
 
-        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None, false).unwrap();
         assert_eq!(definition.base_ref, "main");
         assert_eq!(definition.bootstrap.launch_cmds.len(), 1);
 
@@ -495,7 +523,7 @@ stages:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", "default_client: ''\nstages: []\n");
 
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None, false).unwrap_err();
         assert!(
             err.to_string()
                 .contains("default_client must be a non-empty string"),
@@ -512,7 +540,7 @@ stages:
             "default_client: 'xai:grok-4'\nbase_ref: '   '\nstages: []\n",
         );
 
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None, false).unwrap_err();
         assert!(
             err.to_string()
                 .contains("base_ref must be a non-empty string"),
@@ -523,7 +551,8 @@ stages:
     #[test]
     fn missing_file_is_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let err = GremlinDefinition::from_yaml(dir.path().join("absent.yaml"), None).unwrap_err();
+        let err =
+            GremlinDefinition::from_yaml(dir.path().join("absent.yaml"), None, false).unwrap_err();
         assert!(
             err.to_string().contains("definition file not found"),
             "{err}"
@@ -555,7 +584,7 @@ stages:
 "#,
         );
 
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None, true).unwrap_err();
         assert!(
             err.to_string().contains("duplicate artifact producer"),
             "{err}"
@@ -582,7 +611,7 @@ stages:
 "#,
         );
 
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None, true).unwrap_err();
         assert!(
             err.to_string().contains("artifact://never-produced.md"),
             "{err}"
@@ -606,7 +635,7 @@ land:
 "#,
         );
 
-        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None, false).unwrap();
         assert_eq!(definition.land.as_ref().unwrap().name(), "land");
     }
 
@@ -626,7 +655,7 @@ land:
 "#,
         );
 
-        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None, false).unwrap();
         // Land without explicit client carries None — resolved at runtime.
         assert_eq!(definition.land.as_ref().unwrap().client(), None);
         assert_eq!(definition.default_client, "xai:grok-4");
@@ -649,7 +678,7 @@ land:
 "#,
         );
 
-        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, None, false).unwrap();
         assert_eq!(
             definition.land.as_ref().unwrap().client(),
             Some(&ClientSpec("local:model".into()))
@@ -659,7 +688,7 @@ land:
     #[test]
     fn a_blank_override_never_becomes_the_client() {
         let (_sandbox, _project, path) = definition_needing_a_client(None);
-        let err = GremlinDefinition::from_yaml(&path, Some("   ")).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, Some("   "), false).unwrap_err();
         assert!(
             err.to_string().contains("missing 'default_client'"),
             "{err}"
@@ -670,7 +699,7 @@ land:
     fn a_blank_override_falls_through_to_config() {
         let (_sandbox, _project, path) =
             definition_needing_a_client(Some(r#"{"default-client": "cfg:model"}"#));
-        let definition = GremlinDefinition::from_yaml(&path, Some("")).unwrap();
+        let definition = GremlinDefinition::from_yaml(&path, Some(""), false).unwrap();
         assert_eq!(definition.default_client, "cfg:model");
     }
 
@@ -679,7 +708,7 @@ land:
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path(), "demo", "default_client: '   '\nstages: []\n");
 
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None, false).unwrap_err();
         assert!(
             err.to_string()
                 .contains("default_client must be a non-empty string"),
@@ -708,7 +737,7 @@ stages:
 "#,
         );
 
-        let err = GremlinDefinition::from_yaml(&path, None).unwrap_err();
+        let err = GremlinDefinition::from_yaml(&path, None, true).unwrap_err();
         // The unnamed nested stage is auto-named `exec` before validation.
         assert!(err.to_string().contains("stage exec:"), "{err}");
     }
