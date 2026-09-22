@@ -152,12 +152,7 @@ pub(crate) async fn run_parallel(
 
         spawned_ids.push((child_name.clone(), child_id.clone()));
 
-        let (tx, rx) = oneshot::channel::<(
-            String,
-            String,
-            Result<(), RunError>,
-            Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
-        )>();
+        let (tx, rx) = oneshot::channel::<ChildResult>();
 
         let child_name_for_thread = child_name.clone();
         let child_id_for_thread = child_id.clone();
@@ -192,7 +187,7 @@ pub(crate) async fn run_parallel(
                     child_name_for_thread,
                     child_id_for_thread,
                     Err(RunError::Message("cancelled".to_string())),
-                    None,
+                    Some(child_gremlin.registry),
                 ));
                 return;
             }
@@ -467,48 +462,52 @@ struct ChildOutcome {
     child_name: String,
     child_id: String,
     outcome: Result<(), RunError>,
-    /// The child's artifact registry, carried back so dry-run parents can
-    /// merge in-memory artifacts without touching the filesystem.
     child_registry: Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
 }
 
 /// Merge artifacts from a successful child into the parent registry.
+///
+/// Uses [`ArtifactRegistry::merge_registry`] with [`Collision::Ignore`]
+/// and the child name as `key_prefix`. The child's filesystem registry is
+/// constructed from its artifact directory on disk; the file copy inside
+/// `merge_registry` makes merged artifacts survive child cleanup.
 async fn merge_child_artifacts(
     gremlin: &mut Gremlin,
     outcome: &ChildOutcome,
 ) -> Result<(), RunError> {
-    use crate::artifacts::registry::FileSystemArtifactRegistry;
+    use crate::artifacts::registry::{Collision, FileSystemArtifactRegistry};
     use crate::config;
 
-    // Dry-run children use an in-memory registry — merge it directly.
+    // Prefer the in-memory registry the child passed back. This handles
+    // dry-run children (whose DryRunArtifactRegistry never writes files)
+    // and avoids re-reading registry.json from disk for filesystem children.
     if let Some(ref child_registry) = outcome.child_registry {
         gremlin
             .registry
-            .merge_child_keys(&outcome.child_name, child_registry.as_ref())
+            .merge_registry(
+                child_registry.as_ref(),
+                Collision::Ignore,
+                Some(&outcome.child_name),
+            )
             .await
             .map_err(|e| RunError::Message(format!("artifact merge failed: {e}")))?;
         return Ok(());
     }
 
+    // Fallback: construct a FileSystemArtifactRegistry from disk.
     let child_artifact_dir = config::scratch_root(Some(&outcome.child_id)).join("artifacts");
     if !child_artifact_dir.exists() {
         return Ok(());
     }
 
-    // Real run: merge from the child's filesystem registry.
-    let parent_registry = gremlin
-        .registry
-        .as_filesystem_registry()
-        .expect("real runs always have a filesystem registry");
     let child_registry = FileSystemArtifactRegistry::new(child_artifact_dir);
-    let mut key_map = HashMap::new();
-    for key in child_registry.keys().await {
-        let bare = key.strip_prefix("artifact://").unwrap_or(&key);
-        let parent_key = format!("artifact://{}/{}", outcome.child_name, bare);
-        key_map.insert(key.clone(), parent_key);
-    }
-    parent_registry
-        .merge_from(&child_registry, Some(&key_map), true, None)
+    gremlin
+        .registry
+        .merge_registry(
+            &child_registry,
+            Collision::Ignore,
+            Some(&outcome.child_name),
+        )
         .await
         .map_err(|e| RunError::Message(format!("artifact merge failed: {e}")))?;
 
