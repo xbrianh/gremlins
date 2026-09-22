@@ -151,22 +151,9 @@ pub trait ArtifactRegistry: Send + Sync {
                 }
             }
 
-            // Resolve file://session/ URIs against the *source* registry's
-            // artifact directory, not the destination's.
-            let resolved_source = if data_uri.starts_with("file://session/") {
-                if let Some(src_fs) = other.as_filesystem_registry() {
-                    let name = data_uri.strip_prefix("file://session/").unwrap();
-                    src_fs.artifact_dir.join(name).to_string_lossy().to_string()
-                } else {
-                    data_uri.clone()
-                }
-            } else {
-                data_uri.clone()
-            };
-
             let new_path = if is_file_artifact(&data_uri) {
                 let filename = disambiguate_filename(&dest_key, &data_uri);
-                let path = self.copy_artifact_into(&resolved_source, &filename).await?;
+                let path = self.copy_artifact_into(&data_uri, &filename).await?;
                 let commit_err = match self.commit(&dest_key, &path).await {
                     Ok(()) => None,
                     Err(e) => Some(e.to_string()),
@@ -195,12 +182,6 @@ pub trait ArtifactRegistry: Send + Sync {
             }
         }
         Ok(merged)
-    }
-
-    /// Return a reference to the underlying [`FileSystemArtifactRegistry`],
-    /// if this registry is backed by one.
-    fn as_filesystem_registry(&self) -> Option<&FileSystemArtifactRegistry> {
-        None
     }
 
     /// Clone / fork this registry for use by a child gremlin.
@@ -254,7 +235,7 @@ pub fn disambiguate_filename(key: &str, source_path: &str) -> String {
 /// Returns `true` for absolute paths (`/…`) and `file://` URIs.
 /// Returns `false` for non-file URIs (`http://`, `s3://`, `data:`, etc.).
 pub fn is_file_artifact(data_uri: &str) -> bool {
-    data_uri.starts_with('/') || data_uri.starts_with("file://")
+    data_uri.starts_with('/')
 }
 
 // --- FileSystemArtifactRegistry ---
@@ -348,10 +329,7 @@ impl FileSystemArtifactRegistry {
                 uri.scheme,
             );
         }
-        let mut name = uri.path.trim_start_matches('/').to_string();
-        if let Some(rest) = name.strip_prefix("session/") {
-            name = rest.to_string();
-        }
+        let name = uri.path.trim_start_matches('/').to_string();
         let path = self.artifact_dir.join(&name);
         // Ensure artifact_dir exists before canonicalizing
         tokio::fs::create_dir_all(&self.artifact_dir).await?;
@@ -430,10 +408,7 @@ impl FileSystemArtifactRegistry {
         json_path: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let raw = self.data_uri(uri_str).await?;
-        let p = if raw.starts_with("file://session/") {
-            let name = raw.strip_prefix("file://session/").unwrap_or(&raw);
-            self.artifact_dir.join(name)
-        } else if let Some(stripped) = raw.strip_prefix("file://") {
+        let p = if let Some(stripped) = raw.strip_prefix("file://") {
             PathBuf::from(stripped)
         } else {
             PathBuf::from(&raw)
@@ -481,12 +456,7 @@ impl FileSystemArtifactRegistry {
         source_path: &str,
         dest_filename: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let src_path = if source_path.starts_with("file://session/") {
-            let name = source_path
-                .strip_prefix("file://session/")
-                .unwrap_or(source_path);
-            self.artifact_dir.join(name)
-        } else if source_path.starts_with("file://") {
+        let src_path = if source_path.starts_with("file://") {
             PathBuf::from(source_path.strip_prefix("file://").unwrap_or(source_path))
         } else {
             PathBuf::from(source_path)
@@ -586,10 +556,6 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
 
     async fn keys(&self) -> Vec<String> {
         self.read_registry_json().await.into_keys().collect()
-    }
-
-    fn as_filesystem_registry(&self) -> Option<&FileSystemArtifactRegistry> {
-        Some(self)
     }
 
     async fn fork_registry(
