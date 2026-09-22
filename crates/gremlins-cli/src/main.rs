@@ -840,11 +840,8 @@ async fn validate(definition: &str) -> Result<(), String> {
     let mut gremlin = Gremlin::for_dry_run(gremlin_def);
 
     match gremlin.run().await {
-        Ok(_) => Ok(()),
-        Err(gremlins::executor::RunError::Bail { reason }) => {
-            eprintln!("{reason}");
-            Err("definition validation failed: bailed".to_string())
-        }
+        Ok(0) => Ok(()),
+        Ok(exit_code) => Err(format!("definition validation failed with exit code {exit_code}")),
         Err(gremlins::executor::RunError::StageFailed { stage, message }) => {
             eprintln!("stage {stage}: {message}");
             Err("definition validation failed".to_string())

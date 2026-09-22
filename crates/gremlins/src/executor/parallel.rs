@@ -213,7 +213,11 @@ pub(crate) async fn run_parallel(
                 child_name_for_thread,
                 child_id_for_thread,
                 outcome,
-                Some(child_gremlin.registry),
+                if child_gremlin.dry_run {
+                    Some(child_gremlin.registry)
+                } else {
+                    None
+                },
             ));
         });
 
