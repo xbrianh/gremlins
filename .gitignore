@@ -7,7 +7,7 @@ plans/completed/
 
 # Rust
 /target/
-.cargo/
+.cargo*
 *.so
 *.dylib
 *.dSYM/
