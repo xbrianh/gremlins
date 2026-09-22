@@ -235,7 +235,7 @@ pub fn disambiguate_filename(key: &str, source_path: &str) -> String {
 /// Returns `true` for absolute paths (`/…`) and `file://` URIs.
 /// Returns `false` for non-file URIs (`http://`, `s3://`, `data:`, etc.).
 pub fn is_file_artifact(data_uri: &str) -> bool {
-    data_uri.starts_with('/') || data_uri.starts_with("file://")
+    data_uri.starts_with('/')
 }
 
 // --- FileSystemArtifactRegistry ---
