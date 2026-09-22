@@ -48,6 +48,15 @@ pub trait ArtifactRegistry: Send + Sync {
         uri: &Uri,
         content: &str,
     ) -> Result<String, Box<dyn std::error::Error>>;
+    /// Copy a filesystem file into the registry under `uri`.
+    async fn copy_into_registry(
+        &self,
+        uri: &Uri,
+        source: &Path,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let content = tokio::fs::read_to_string(source).await?;
+        self.write_into_registry(uri, &content).await
+    }
     /// Whether the given path was produced by this registry.
     ///
     /// Used by the commit phase to determine whether an output artifact
@@ -80,7 +89,22 @@ pub trait ArtifactRegistry: Send + Sync {
             }
         }
         Ok(merged)
-    }}
+    }
+
+    /// Return a reference to the underlying [`FileSystemArtifactRegistry`],
+    /// if this registry is backed by one.
+    fn as_filesystem_registry(&self) -> Option<&FileSystemArtifactRegistry> {
+        None
+    }
+
+    /// Clone / fork this registry for use by a child gremlin.
+    ///
+    /// The child's artifacts will be stored under `child_artifact_dir`.
+    async fn fork_registry(
+        &self,
+        child_artifact_dir: &Path,
+    ) -> Result<Box<dyn ArtifactRegistry>, Box<dyn std::error::Error>>;
+}
 
 // --- FileSystemArtifactRegistry ---
 
@@ -439,6 +463,14 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
         self.write_into_registry(uri, content).await
     }
 
+    async fn copy_into_registry(
+        &self,
+        uri: &Uri,
+        source: &Path,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.copy_into_registry(uri, source).await
+    }
+
     async fn is_path_produced(&self, path: &str) -> bool {
         tokio::fs::metadata(path)
             .await
@@ -448,6 +480,22 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
 
     async fn keys(&self) -> Vec<String> {
         self.read_registry_json().await.into_keys().collect()
+    }
+
+    fn as_filesystem_registry(&self) -> Option<&FileSystemArtifactRegistry> {
+        Some(self)
+    }
+
+    async fn fork_registry(
+        &self,
+        child_artifact_dir: &Path,
+    ) -> Result<Box<dyn ArtifactRegistry>, Box<dyn std::error::Error>> {
+        FileSystemArtifactRegistry::from_registry_file(
+            &self.registry_path,
+            child_artifact_dir.to_path_buf(),
+        )
+        .await
+        .map(|r| Box::new(r) as Box<dyn ArtifactRegistry>)
     }
 }
 
@@ -564,12 +612,30 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
         Ok(path)
     }
 
+    async fn copy_into_registry(
+        &self,
+        uri: &Uri,
+        _source: &Path,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let key = uri.to_string();
+        let path = Self::sentinel_path(uri);
+        self.produced.lock().unwrap().insert(key, path.clone());
+        Ok(path)
+    }
+
     async fn is_path_produced(&self, _path: &str) -> bool {
         true
     }
 
     async fn keys(&self) -> Vec<String> {
         self.produced.lock().unwrap().keys().cloned().collect()
+    }
+
+    async fn fork_registry(
+        &self,
+        _child_artifact_dir: &Path,
+    ) -> Result<Box<dyn ArtifactRegistry>, Box<dyn std::error::Error>> {
+        Ok(Box::new(self.clone()))
     }
 }
 

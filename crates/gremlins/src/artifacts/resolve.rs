@@ -18,7 +18,7 @@ pub enum ResolveError {
 }
 
 pub async fn resolve_interpolation_map(
-    artifacts: &impl ArtifactRegistry,
+    artifacts: &(impl ArtifactRegistry + ?Sized),
     interpolation_map: &HashMap<String, String>,
     loop_iter: &str,
 ) -> Result<HashMap<String, String>, ResolveError> {

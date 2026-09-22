@@ -86,7 +86,14 @@ pub(crate) async fn run_parallel(
 
     // We use a JoinSet to manage the concurrency bound and cancellation.
     // Each task awaits a oneshot receiver from a worker thread.
-    let mut join_set: JoinSet<(String, String, Result<(), RunError>)> = JoinSet::new();
+    type ChildResult = (
+        String,
+        String,
+        Result<(), RunError>,
+        Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
+    );
+
+    let mut join_set: JoinSet<ChildResult> = JoinSet::new();
     let mut thread_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut spawned_ids: Vec<(String, String)> = Vec::new(); // (child_name, child_id)
     let mut spawned = 0usize;
@@ -145,7 +152,12 @@ pub(crate) async fn run_parallel(
 
         spawned_ids.push((child_name.clone(), child_id.clone()));
 
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel::<(
+            String,
+            String,
+            Result<(), RunError>,
+            Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
+        )>();
 
         let child_name_for_thread = child_name.clone();
         let child_id_for_thread = child_id.clone();
@@ -180,6 +192,7 @@ pub(crate) async fn run_parallel(
                     child_name_for_thread,
                     child_id_for_thread,
                     Err(RunError::Message("cancelled".to_string())),
+                    None,
                 ));
                 return;
             }
@@ -196,7 +209,12 @@ pub(crate) async fn run_parallel(
                 }
             );
 
-            let _ = tx.send((child_name_for_thread, child_id_for_thread, outcome));
+            let _ = tx.send((
+                child_name_for_thread,
+                child_id_for_thread,
+                outcome,
+                Some(child_gremlin.registry),
+            ));
         });
 
         thread_handles.push(handle);
@@ -212,6 +230,7 @@ pub(crate) async fn run_parallel(
                     Err(RunError::Message(format!(
                         "child {child_name_js} thread terminated unexpectedly"
                     ))),
+                    None,
                 ),
             }
         });
@@ -236,7 +255,7 @@ pub(crate) async fn run_parallel(
 
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok((child_name, child_id, outcome)) => {
+            Ok((child_name, child_id, outcome, child_registry)) => {
                 log::debug!(
                     "parallel group {group_name}: child {child_name} completed (outcome={})",
                     match &outcome {
@@ -250,6 +269,7 @@ pub(crate) async fn run_parallel(
                             child_name,
                             child_id,
                             outcome: Ok(()),
+                            child_registry,
                         });
                     }
                     Err(err) => {
@@ -268,12 +288,14 @@ pub(crate) async fn run_parallel(
                                 child_name,
                                 child_id,
                                 outcome: Err(err),
+                                child_registry,
                             });
                         } else {
                             child_results.push(ChildOutcome {
                                 child_name,
                                 child_id,
                                 outcome: Err(err),
+                                child_registry,
                             });
                         }
                     }
@@ -441,6 +463,9 @@ struct ChildOutcome {
     child_name: String,
     child_id: String,
     outcome: Result<(), RunError>,
+    /// The child's artifact registry, carried back so dry-run parents can
+    /// merge in-memory artifacts without touching the filesystem.
+    child_registry: Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
 }
 
 /// Merge artifacts from a successful child into the parent registry.
@@ -451,23 +476,34 @@ async fn merge_child_artifacts(
     use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::config;
 
+    // Dry-run children use an in-memory registry — merge it directly.
+    if let Some(ref child_registry) = outcome.child_registry {
+        gremlin
+            .registry
+            .merge_child_keys(&outcome.child_name, child_registry.as_ref())
+            .await
+            .map_err(|e| RunError::Message(format!("artifact merge failed: {e}")))?;
+        return Ok(());
+    }
+
     let child_artifact_dir = config::scratch_root(Some(&outcome.child_id)).join("artifacts");
     if !child_artifact_dir.exists() {
         return Ok(());
     }
 
+    // Real run: merge from the child's filesystem registry.
+    let parent_registry = gremlin
+        .registry
+        .as_filesystem_registry()
+        .expect("real runs always have a filesystem registry");
     let child_registry = FileSystemArtifactRegistry::new(child_artifact_dir);
-    // Map child artifact keys to parent-scoped keys.
     let mut key_map = HashMap::new();
     for key in child_registry.keys().await {
-        // Strip the artifact:// prefix, prepend the child name.
         let bare = key.strip_prefix("artifact://").unwrap_or(&key);
         let parent_key = format!("artifact://{}/{}", outcome.child_name, bare);
         key_map.insert(key.clone(), parent_key);
     }
-
-    gremlin
-        .registry
+    parent_registry
         .merge_from(&child_registry, Some(&key_map), true, None)
         .await
         .map_err(|e| RunError::Message(format!("artifact merge failed: {e}")))?;
@@ -629,7 +665,9 @@ mod tests {
                 stages: stages.clone(),
                 land: None,
             },
-            registry: crate::artifacts::registry::FileSystemArtifactRegistry::new(artifact_dir),
+            registry: Box::new(crate::artifacts::registry::FileSystemArtifactRegistry::new(
+                artifact_dir,
+            )),
             worktree: None,
             worktree_parent: None,
             project_root: tmp.path().to_path_buf(),
@@ -641,6 +679,7 @@ mod tests {
             client: crate::clients::client::Client::parse(default_client).unwrap(),
             loop_stack: Vec::new(),
             stage_inputs: HashMap::new(),
+            dry_run: false,
         };
         (tmp, gremlin)
     }

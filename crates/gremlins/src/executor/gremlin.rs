@@ -31,11 +31,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::artifacts::registry::FileSystemArtifactRegistry;
+use crate::artifacts::registry::{
+    ArtifactRegistry, DryRunArtifactRegistry, FileSystemArtifactRegistry,
+};
 use crate::artifacts::uri::Uri;
 use crate::clients::client::Client;
 use crate::config;
 use crate::core::{discovery, env_file, git};
+use crate::executor::bootstrap::parse_gremlins_command;
 use crate::executor::state::{self, StateData};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
@@ -129,7 +132,7 @@ pub struct Gremlin {
     /// definition is finally loaded.
     pub client_override: Option<String>,
     pub definition: GremlinDefinition,
-    pub registry: FileSystemArtifactRegistry,
+    pub registry: Box<dyn ArtifactRegistry>,
     pub worktree: Option<PathBuf>,
     pub worktree_parent: Option<PathBuf>,
     pub project_root: PathBuf,
@@ -145,6 +148,7 @@ pub struct Gremlin {
     /// Bootstrap's `bind_artifact` DSL reads from here: a source key that is
     /// absent or empty is an optional source with nothing to bind.
     pub stage_inputs: HashMap<String, String>,
+    pub dry_run: bool,
 }
 
 impl Gremlin {
@@ -365,7 +369,7 @@ impl Gremlin {
             definition_path,
             client_override: None,
             definition,
-            registry: FileSystemArtifactRegistry::new(artifact_dir),
+            registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree,
             worktree_parent: None,
             project_root,
@@ -377,7 +381,82 @@ impl Gremlin {
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
             loop_stack: Vec::new(),
             stage_inputs,
+            dry_run: false,
         })
+    }
+
+    /// Create a dry-run gremlin for validation.
+    ///
+    /// The definition is injected directly (bypassing YAML load and bootstrap).
+    /// The registry is an in-memory [`DryRunArtifactRegistry`] seeded with
+    /// implicit and bootstrap-declared artifacts. No filesystem access, no
+    /// shell commands, no model calls.
+    pub fn for_dry_run(definition: GremlinDefinition) -> Gremlin {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&artifact_dir).ok();
+        std::fs::create_dir_all(&state_dir).ok();
+
+        // Seed the dry-run registry with bootstrap artifacts.
+        let seed_keys = bootstrap_artifact_keys(&definition);
+        let registry = DryRunArtifactRegistry::seeded(seed_keys);
+
+        // Snapshot base_ref before moving definition.
+        let base_ref = definition.base_ref.clone();
+        let definition_path = definition.path.clone();
+
+        // Write a minimal state.json so the run loop's state operations don't crash.
+        let mut state_data = StateData::new(Some("dry-run".to_string()));
+        let mut initial = serde_json::Map::new();
+        initial.insert(
+            "id".to_string(),
+            serde_json::Value::String("dry-run".to_string()),
+        );
+        initial.insert(
+            "status".to_string(),
+            serde_json::Value::String("running".to_string()),
+        );
+        initial.insert(
+            "attempt".to_string(),
+            serde_json::Value::String("dry-run-0001".to_string()),
+        );
+        initial.insert(
+            "stage".to_string(),
+            serde_json::Value::String("starting".to_string()),
+        );
+        initial.insert(
+            "client".to_string(),
+            serde_json::Value::String("cmd:true".to_string()),
+        );
+        initial.insert("pid".to_string(), serde_json::Value::Null);
+        initial.insert("exit_code".to_string(), serde_json::Value::Null);
+        state_data.persist(&state_dir, &initial).ok();
+
+        // Leak the temp dir so it lives as long as the Gremlin.
+        let tmp_path = tmp.keep();
+
+        Gremlin {
+            id: validate_gremlin_id("dry-run").expect("dry-run is a valid id"),
+            state_dir: tmp_path.join("state"),
+            artifact_dir: tmp_path.join("artifacts"),
+            definition_path: Some(definition_path),
+            client_override: None,
+            definition,
+            registry: Box::new(registry),
+            worktree: None,
+            worktree_parent: None,
+            project_root: PathBuf::from("."),
+            base_ref_sha: String::new(),
+            base_ref,
+            resume_from: None,
+            state: state_data,
+            env: HashMap::new(),
+            client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
+            loop_stack: Vec::new(),
+            stage_inputs: HashMap::new(),
+            dry_run: true,
+        }
     }
 
     /// Load the definition, build the registry, create the client, and resolve the
@@ -427,10 +506,11 @@ impl Gremlin {
             self.base_ref.clone()
         };
 
-        let registry = FileSystemArtifactRegistry::new(self.artifact_dir.clone());
-        register_stage_inputs(&registry, &definition.bootstrap, &self.stage_inputs).await;
+        let registry: Box<dyn ArtifactRegistry> =
+            Box::new(FileSystemArtifactRegistry::new(self.artifact_dir.clone()));
+        register_stage_inputs(registry.as_ref(), &definition.bootstrap, &self.stage_inputs).await;
         register_base_sha(
-            &registry,
+            registry.as_ref(),
             self.worktree.as_deref().unwrap_or(&self.project_root),
         )
         .await;
@@ -604,12 +684,11 @@ impl Gremlin {
             log::debug!("fork: no parent worktree — child inherits no worktree");
         }
 
-        let registry = FileSystemArtifactRegistry::from_registry_file(
-            &self.registry.registry_path,
-            child_artifact_dir.clone(),
-        )
-        .await
-        .map_err(|error| RunError::Message(error.to_string()))?;
+        let registry = self
+            .registry
+            .fork_registry(&child_artifact_dir)
+            .await
+            .map_err(|error| RunError::Message(error.to_string()))?;
 
         let parent = state::read_state_json(self.state.state_file.as_deref());
         let mut child = Map::new();
@@ -697,6 +776,7 @@ impl Gremlin {
             // A child inherits the parent's source values: its bootstrap binds
             // the same inputs the parent launched with.
             stage_inputs: self.stage_inputs.clone(),
+            dry_run: self.dry_run,
         })
     }
 
@@ -966,7 +1046,7 @@ fn write_launch_state(
         definition_path: Some(definition_path.to_path_buf()),
         client_override: client_override.map(String::from),
         definition,
-        registry: FileSystemArtifactRegistry::new(artifact_dir.to_path_buf()),
+        registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir.to_path_buf())),
         worktree,
         worktree_parent: worktree_parent.map(Path::to_path_buf),
         project_root: project_root.to_path_buf(),
@@ -978,6 +1058,7 @@ fn write_launch_state(
         client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
         loop_stack: Vec::new(),
         stage_inputs: stage_inputs.clone(),
+        dry_run: false,
     })
 }
 
@@ -991,7 +1072,7 @@ fn write_launch_state(
 /// about, but it must not abort a launch, because the stage that wanted the
 /// artifact will report it precisely.
 async fn register_stage_inputs(
-    registry: &FileSystemArtifactRegistry,
+    registry: &dyn ArtifactRegistry,
     bootstrap: &Bootstrap,
     stage_inputs: &HashMap<String, String>,
 ) {
@@ -1020,7 +1101,7 @@ async fn register_stage_inputs(
 }
 
 /// Record the commit the run started from, once, as `artifact://base_sha`.
-async fn register_base_sha(registry: &FileSystemArtifactRegistry, cwd: &Path) {
+async fn register_base_sha(registry: &dyn ArtifactRegistry, cwd: &Path) {
     if registry.is_registered("artifact://base_sha").await {
         return;
     }
@@ -1242,6 +1323,47 @@ pub fn resolve_env(
     // Re-assert the system variables on top of whatever the script produced.
     env.extend(system);
     Ok(env)
+}
+
+/// Collect artifact keys the bootstrap declares so the dry-run registry can
+/// seed them — stages that consume them will find them.
+fn bootstrap_artifact_keys(definition: &GremlinDefinition) -> Vec<String> {
+    let mut keys: Vec<String> = definition
+        .bootstrap
+        .cli_out
+        .keys()
+        .map(|name| {
+            if name.starts_with("artifact://") {
+                name.clone()
+            } else {
+                format!("artifact://{name}")
+            }
+        })
+        .collect();
+
+    // `launch_cmds` can contain `gremlins:bind_artifact` DSL calls — use the
+    // same parser as the real bootstrap runner so validate agrees with runtime.
+    for cmd in &definition.bootstrap.launch_cmds {
+        if let Some((cmd_name, args)) = parse_gremlins_command(cmd) {
+            if cmd_name == "bind_artifact" && !args.is_empty() {
+                let uri = &args[0];
+                if !uri.is_empty() {
+                    let normalized = if uri.starts_with("artifact://") {
+                        uri.clone()
+                    } else {
+                        format!("artifact://{uri}")
+                    };
+                    keys.push(normalized);
+                }
+            }
+        }
+    }
+
+    // Implicit artifacts always bound at launch.
+    keys.push("artifact://base_sha".to_string());
+    keys.push("artifact://base_ref".to_string());
+
+    keys
 }
 
 #[cfg(test)]
@@ -1588,7 +1710,7 @@ mod tests {
         gremlin.init_runtime().await.unwrap();
         assert_eq!(gremlin.definition.name, "demo");
         assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], "gr-test");
-        assert!(gremlin.registry.artifact_dir.ends_with("artifacts"));
+        assert!(gremlin.artifact_dir.ends_with("artifacts"));
         let raw = read_state(&state_file);
         assert_eq!(raw["client"], "cmd:true");
 
@@ -1871,7 +1993,7 @@ mod tests {
         Gremlin {
             id: validate_gremlin_id(id).unwrap(),
             state_dir,
-            registry: FileSystemArtifactRegistry::new(artifact_dir.clone()),
+            registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir.clone())),
             artifact_dir,
             definition_path: None,
             client_override: None,
@@ -1887,6 +2009,7 @@ mod tests {
             client: Client::parse("cmd:true").unwrap(),
             loop_stack: Vec::new(),
             stage_inputs: HashMap::new(),
+            dry_run: false,
         }
     }
 

@@ -271,11 +271,23 @@ async fn bind_artifact(
         .filter(|path| path.is_file());
 
     let bound = if direct.is_file() {
-        gremlin.registry.copy_into_registry(&uri, direct).await
+        gremlin
+            .registry
+            .as_ref()
+            .copy_into_registry(&uri, direct)
+            .await
     } else if let Some(path) = from_project {
-        gremlin.registry.copy_into_registry(&uri, &path).await
+        gremlin
+            .registry
+            .as_ref()
+            .copy_into_registry(&uri, &path)
+            .await
     } else {
-        gremlin.registry.write_into_registry(&uri, &value).await
+        gremlin
+            .registry
+            .as_ref()
+            .write_into_registry(&uri, &value)
+            .await
     };
 
     bound
@@ -376,9 +388,14 @@ async fn run_cli_out(
         stderr: error,
     };
 
-    let mut prepared = prepare_exec(&exec, &gremlin.registry, &loop_iter, &framework_subs)
-        .await
-        .map_err(|error| failed(error.to_string()))?;
+    let mut prepared = prepare_exec(
+        &exec,
+        gremlin.registry.as_ref(),
+        &loop_iter,
+        &framework_subs,
+    )
+    .await
+    .map_err(|error| failed(error.to_string()))?;
     prepared.cwd = cwd.to_path_buf();
     prepared.artifact_dir = gremlin.artifact_dir.clone();
     prepared.state_dir = gremlin.state_dir.clone();
@@ -387,7 +404,7 @@ async fn run_cli_out(
     run_shell(&prepared)
         .await
         .map_err(|error| failed(error.to_string()))?;
-    commit_exec(&prepared, &gremlin.registry)
+    commit_exec(&prepared, gremlin.registry.as_ref())
         .await
         .map_err(|error| failed(error.to_string()))?;
 
@@ -618,7 +635,7 @@ mod tests {
                 stages: Vec::new(),
                 land: None,
             },
-            registry: FileSystemArtifactRegistry::new(artifact_dir),
+            registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: Some(worktree),
             worktree_parent: None,
             project_root: tmp.path().to_path_buf(),
@@ -630,6 +647,7 @@ mod tests {
             client: Client::parse("cmd:true").unwrap(),
             stage_inputs,
             loop_stack: Vec::new(),
+            dry_run: false,
         };
         (tmp, gremlin)
     }
@@ -662,10 +680,17 @@ mod tests {
 
         run_definition_bootstrap(&mut gremlin).await.unwrap();
 
-        assert!(gremlin.registry.is_registered("artifact://plan.md").await);
+        assert!(
+            gremlin
+                .registry
+                .as_ref()
+                .is_registered("artifact://plan.md")
+                .await
+        );
         assert_eq!(
             gremlin
                 .registry
+                .as_ref()
                 .content("artifact://plan.md", None)
                 .await
                 .unwrap(),
@@ -704,7 +729,13 @@ mod tests {
 
         run_definition_bootstrap(&mut gremlin).await.unwrap();
 
-        assert!(!gremlin.registry.is_registered("artifact://plan.md").await);
+        assert!(
+            !gremlin
+                .registry
+                .as_ref()
+                .is_registered("artifact://plan.md")
+                .await
+        );
     }
 
     #[tokio::test]
@@ -746,12 +777,18 @@ mod tests {
         // The synthetic exec verifies the bound file exists, so the producer's
         // output is staged first — exactly as a real cli_out follows its cmds.
         let uri = Uri::parse("artifact://pr.txt").unwrap();
-        let path = gremlin.registry.path_for_uri(&uri).await.unwrap();
+        let path = gremlin.registry.as_ref().path_for_uri(&uri).await.unwrap();
         std::fs::write(&path, "123").unwrap();
 
         run_definition_bootstrap(&mut gremlin).await.unwrap();
 
-        assert!(gremlin.registry.is_registered("artifact://pr.txt").await);
+        assert!(
+            gremlin
+                .registry
+                .as_ref()
+                .is_registered("artifact://pr.txt")
+                .await
+        );
     }
 
     #[tokio::test]

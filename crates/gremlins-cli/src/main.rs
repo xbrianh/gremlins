@@ -10,7 +10,6 @@ use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
-use gremlins::executor::dry_run;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
@@ -832,15 +831,22 @@ async fn validate(definition: &str) -> Result<(), String> {
     let gremlin_def = GremlinDefinition::from_yaml(&definition_path, None)
         .map_err(|e| format!("invalid definition: {e}"))?;
 
-    let errors = dry_run::validate_definition(&gremlin_def).await;
+    let mut gremlin = Gremlin::for_dry_run(gremlin_def);
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        for error in &errors {
-            eprintln!("{error}");
+    match gremlin.run().await {
+        Ok(_) => Ok(()),
+        Err(gremlins::executor::RunError::Bail { reason }) => {
+            eprintln!("{reason}");
+            Err("definition validation failed: bailed".to_string())
         }
-        Err(format!("definition has {} error(s)", errors.len()))
+        Err(gremlins::executor::RunError::StageFailed { stage, message }) => {
+            eprintln!("stage {stage}: {message}");
+            Err("definition validation failed".to_string())
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            Err("definition validation failed".to_string())
+        }
     }
 }
 
