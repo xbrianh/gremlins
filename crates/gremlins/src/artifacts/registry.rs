@@ -586,7 +586,9 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
     ) -> Result<String, Box<dyn std::error::Error>> {
         let map = self.produced.lock().unwrap();
         let (_, content) = map.get(uri_str).ok_or_else(|| {
-            Box::<dyn std::error::Error>::from(format!("artifact not found: {uri_str}"))
+            Box::new(MissingArtifact {
+                key: uri_str.to_string(),
+            })
         })?;
         Ok(content.clone())
     }
