@@ -491,10 +491,9 @@ impl Gremlin {
         // An unusable client must not abort a run: the state directory, the
         // worktree and the artifacts all have to exist before any stage can
         // run, and failing here would leave the operator with no run at all to
-        // debug. `cmd:true` is the harness's own no-op client — it is what
-        // `config::inject_sentinals` installs so a missing client never fails
-        // structural validation — so a bad spec degrades to a run that does
-        // nothing rather than one that never starts, while the definition's
+        // debug. `cmd:true` is the harness's own no-op client, so a bad spec
+        // degrades to a run that does nothing rather than one that never starts,
+        // while the definition's
         // declared `default_client` stays on record in `state.json`.
         let client = Client::parse(&definition.default_client).unwrap_or_else(|_| {
             Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec")

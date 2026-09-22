@@ -24,3 +24,5 @@ jobs:
         run: make test
       - name: Validate
         run: make validate
+        env:
+          GREMLINS_DEFAULT_CLIENT: cmd:true
