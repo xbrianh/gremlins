@@ -2287,19 +2287,41 @@ mod tests {
     async fn test_run_shell_async_stream_to_file() {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("stream.log");
-        let r = run_shell_async(
-            "echo hello && echo world >&2",
-            None,
-            None,
-            None,
-            Some(&log_path),
-        )
-        .await
-        .unwrap();
+        // Emit marker1, sleep long enough for us to observe it, then emit
+        // marker2.  This verifies that chunks are flushed to disk *during*
+        // execution, not just buffered until the command completes.
+        let cmd = "echo marker1 && sleep 2 && echo marker2";
+        let log_path_clone = log_path.clone();
+        let handle = tokio::spawn(async move {
+            run_shell_async(cmd, None, None, None, Some(&log_path_clone))
+                .await
+                .unwrap()
+        });
+
+        // Wait for marker1 to appear in the log file.
+        let mut saw_marker1 = false;
+        for _ in 0..50 {
+            if let Ok(contents) = std::fs::read_to_string(&log_path) {
+                if contents.contains("marker1") {
+                    saw_marker1 = true;
+                    // marker2 must NOT be visible yet — the command is still
+                    // sleeping.
+                    assert!(
+                        !contents.contains("marker2"),
+                        "marker2 appeared before the command finished"
+                    );
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(saw_marker1, "marker1 never appeared in the stream log");
+
+        let r = handle.await.unwrap();
         assert_eq!(r.returncode, 0);
         let written = std::fs::read_to_string(&log_path).unwrap();
-        assert!(written.contains("hello"));
-        assert!(written.contains("world"));
+        assert!(written.contains("marker1"));
+        assert!(written.contains("marker2"));
     }
 
     // -- pump_prefixed tests --
