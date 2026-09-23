@@ -1,6 +1,8 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 MAKEFLAGS += --output-sync=target
 
+export CARGO_TARGET_DIR := target
+
 .PHONY: test check fmt fmt-check clippy build release validate-gremlin-definitions autoformat test-overlay-tools
 
 # --- Test ---
