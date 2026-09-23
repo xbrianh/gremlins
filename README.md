@@ -3,8 +3,7 @@
 Background coding-agent gremlin definitions that plan, implement, review, and land work
 end-to-end. Given a goal or GitHub issue, a gremlin runs the full
 plan → implement → review-code → address-code cycle unattended, writing
-artifacts to the per-user state directory resolved by
-`platformdirs.user_state_dir("gremlins")` and optionally opening a pull
+artifacts to the per-user state directory and optionally opening a pull
 request. A fleet manager tracks running, stalled, and finished gremlins and
 provides stop / land / close operations.
 
@@ -12,14 +11,6 @@ provides stop / land / close operations.
 shaped by daily use. Expect rough edges — stream timeouts, the occasional
 merge conflict from parallel gremlins, a few stages still finding their
 final shape. Bug reports, ideas, and PRs are all welcome.
-
----
-
-## Using gremlins with a coding assistant
-
-Paste the output of `gremlins prompt-for-assistant` into a fresh Claude Code session (or any compatible assistant) to configure it as a competent gremlins collaborator.
-
-The workflow: you discuss the work with the assistant, it captures discrete units as GitHub issues or plan files, launches gremlins in the background to implement them, and lands each finished gremlin before starting dependent work. You stay at the strategic level — deciding what to build and in what order — while gremlins handle the implementation cycle unattended. The assistant maintains a queue of running, pending, and blocked work and surfaces it on request.
 
 ---
 
@@ -49,7 +40,7 @@ gremlins queue add "cd /path/to/other-repo && gremlins land <id>"
 ```
 
 **State isolation**: each gremlin's state lives under its own directory
-(resolved via `platformdirs.user_state_dir("gremlins")/<id>/`), so two repos
+under the per-user state root, so two repos
 can have running gremlins simultaneously without interference.
 
 ---
@@ -665,7 +656,6 @@ provider:model:k1=v1,k2=v2,...
 xai:grok-4:reasoning=high
 openrouter:deepseek/deepseek-v4-pro:reasoning=high,thinking=deepseek
 openai:gpt-4o-mini:temperature=0.7
-cmd:claude -p --model sonnet
 ```
 
 Params are passed directly to the model backend as additional request
@@ -735,8 +725,8 @@ The `cmd:` backend runs the specified command as a subprocess. It does *not*
 materialize a per-gremlin config dir. Whatever the operator has configured
 for their interactive session is exactly what the subprocess sees:
 
-- **Settings** — the subprocess reads whatever config files it normally would
-  (e.g. `~/.claude/settings.json` for `cmd:claude`). The gremlins-layer
+- **Settings** — the subprocess reads whatever config files it normally would.
+  The gremlins-layer
   `allowed_tools` / `disallowed_tools` block has no effect on `cmd:` runs;
   configure tool permissions via your own settings.
 
