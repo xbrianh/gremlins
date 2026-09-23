@@ -1,5 +1,4 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
-MAKEFLAGS += --output-sync=target
 
 export CARGO_TARGET_DIR := target
 
