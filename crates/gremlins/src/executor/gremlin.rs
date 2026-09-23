@@ -638,6 +638,7 @@ impl Gremlin {
             .join(child_gremlin_id.as_str());
         let child_artifact_dir = child_state_dir.join("artifacts");
         std::fs::create_dir_all(&child_state_dir)?;
+        std::fs::create_dir_all(&child_artifact_dir)?;
 
         log::debug!(
             "fork: child_state_dir={}, child_artifact_dir={}",
