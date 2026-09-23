@@ -1,6 +1,6 @@
 # gremlins — top-level AGENTS
 
-Background orchestration for Claude Code: a gremlin is a detached process that runs a YAML-defined pipeline (plan → implement → review → address → open-PR …) against a goal or GitHub issue, writing artifacts to a per-user state directory.
+Background orchestration for coding agents: a gremlin is a detached process that runs a YAML-defined pipeline (plan → implement → review → address → open-PR …) against a goal or GitHub issue, writing artifacts to a per-user state directory.
 
 Gremlins is an **unopinionated agentic workflow language**: the pipeline YAML is the program, and the harness is only its runtime. The harness keeps injected opinion to a minimum — a thin system prompt carries tool definitions, directory layout, and (for now) some pragmatic guidance like delegation policy. Major behavioral opinions (what to re-check, how to communicate, when to bail) belong in the pipeline's own prompt files, never in harness code or a bundled default.
 
@@ -70,8 +70,8 @@ These values are persisted to `state.json` and read by other writers (the fleet 
 
 ## State and bail bookkeeping
 
-`State.set_stage` writes stage info to `state.json` atomically via `State.patch`.
-`State.write_bail_file` writes `bail_{attempt}.json` to the state dir. When a stage
-detects a recorded bail (via `state.json`), it raises a `Bail` exception.
-Both helpers no-op without `GREMLINS_GREMLIN_ID` and never raise —
+`StateData::set_stage` writes stage info to `state.json` atomically via `StateData::patch`.
+`StateData::write_bail_file` writes `bail_{attempt}.json` to the state dir. When a stage
+detects a recorded bail (via `StateData::read_bail_info`), it returns a bail error.
+Both helpers no-op when the state file is absent and never panic —
 stage / bail bookkeeping must not crash a running gremlin.
