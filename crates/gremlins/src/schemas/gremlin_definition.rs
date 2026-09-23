@@ -111,18 +111,67 @@ impl GremlinDefinition {
 
         let project_root = project_root_for(&path);
         let expanded = expand::parse_definition_file(&path, &project_root)?;
-        let root = expanded
-            .as_mapping()
-            .ok_or_else(|| SchemaError::YamlNotMapping {
-                label: path.display().to_string(),
-                got: format!("{expanded:?}"),
-            })?;
 
         let name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("")
             .to_string();
+
+        Self::from_expanded_value(expanded, path, name, default_client_override)
+    }
+
+    /// Load an already-expanded YAML file directly — no expansion, no project-root
+    /// walk. Used by [`Gremlin::from`] when a hermetic `definition.yaml` exists
+    /// alongside the state directory.
+    ///
+    /// Strips the `__gremlins_expanded__` sentinel if present, but tolerates its
+    /// absence.
+    ///
+    /// [`Gremlin::from`]: crate::executor::gremlin::Gremlin::from
+    pub fn from_expanded_yaml(
+        path: impl AsRef<Path>,
+        default_client_override: Option<&str>,
+    ) -> Result<GremlinDefinition, SchemaError> {
+        let path = path.as_ref();
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if !path.exists() {
+            return Err(SchemaError::DefinitionFileNotFound {
+                path: path.display().to_string(),
+            });
+        }
+
+        let mut expanded = expand::load_yaml_file(&path)?;
+        // Strip the sentinel if present — the file may lack it but still be
+        // fully expanded.
+        if let Some(mapping) = expanded.as_mapping_mut() {
+            mapping.remove("__gremlins_expanded__");
+        }
+
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        Self::from_expanded_value(expanded, path, name, default_client_override)
+    }
+
+    /// Shared extraction: turn an already-expanded YAML [`Value`] into a typed
+    /// [`GremlinDefinition`]. Both [`from_yaml`] and [`from_expanded_yaml`]
+    /// funnel through here once they have the expanded tree.
+    fn from_expanded_value(
+        expanded: Value,
+        path: PathBuf,
+        name: String,
+        default_client_override: Option<&str>,
+    ) -> Result<GremlinDefinition, SchemaError> {
+        let root = expanded
+            .as_mapping()
+            .ok_or_else(|| SchemaError::YamlNotMapping {
+                label: path.display().to_string(),
+                got: format!("{expanded:?}"),
+            })?;
 
         let yaml_default_client = default_client_from_yaml(root)?;
         let base_ref = base_ref_from_yaml(root)?;

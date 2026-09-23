@@ -149,6 +149,9 @@ pub struct Gremlin {
     /// absent or empty is an optional source with nothing to bind.
     pub stage_inputs: HashMap<String, String>,
     pub dry_run: bool,
+    /// When true, `init_runtime` loads the definition via [`GremlinDefinition::from_expanded_yaml`]
+    /// instead of the full expansion path.
+    pub(crate) definition_is_expanded: bool,
 }
 
 impl Gremlin {
@@ -321,7 +324,8 @@ impl Gremlin {
         // run actually used; otherwise fall back to resolving the kind. Either
         // way the path is only recorded here — `init_runtime` reads it.
         let hermetic = state_dir.join("definition.yaml");
-        let definition_path = if hermetic.is_file() {
+        let definition_is_expanded = hermetic.is_file();
+        let definition_path = if definition_is_expanded {
             Some(hermetic)
         } else if !kind.is_empty() {
             resolve_definition_in_project(&kind, &project_root)
@@ -382,6 +386,7 @@ impl Gremlin {
             loop_stack: Vec::new(),
             stage_inputs,
             dry_run: false,
+            definition_is_expanded,
         })
     }
 
@@ -456,6 +461,7 @@ impl Gremlin {
             loop_stack: Vec::new(),
             stage_inputs: HashMap::new(),
             dry_run: true,
+            definition_is_expanded: false,
         }
     }
 
@@ -484,9 +490,13 @@ impl Gremlin {
             )));
         };
 
-        let definition =
+        let definition = if self.definition_is_expanded {
+            GremlinDefinition::from_expanded_yaml(&definition_path, self.client_override.as_deref())
+                .map_err(|error| RunError::Message(error.to_string()))?
+        } else {
             GremlinDefinition::from_yaml(&definition_path, self.client_override.as_deref())
-                .map_err(|error| RunError::Message(error.to_string()))?;
+                .map_err(|error| RunError::Message(error.to_string()))?
+        };
 
         // An unusable client must not abort a run: the state directory, the
         // worktree and the artifacts all have to exist before any stage can
@@ -774,6 +784,7 @@ impl Gremlin {
             // the same inputs the parent launched with.
             stage_inputs: self.stage_inputs.clone(),
             dry_run: self.dry_run,
+            definition_is_expanded: false,
         })
     }
 
@@ -1056,6 +1067,7 @@ fn write_launch_state(
         loop_stack: Vec::new(),
         stage_inputs: stage_inputs.clone(),
         dry_run: false,
+        definition_is_expanded: false,
     })
 }
 
@@ -1973,6 +1985,7 @@ mod tests {
             loop_stack: Vec::new(),
             stage_inputs: HashMap::new(),
             dry_run: false,
+            definition_is_expanded: false,
         }
     }
 
