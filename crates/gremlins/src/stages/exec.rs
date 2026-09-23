@@ -296,6 +296,23 @@ pub async fn prepare_exec(
     })
 }
 
+/// Sanitize a stage name for use as a log filename component.
+///
+/// Replaces path separators, `..`, and other dangerous characters with `_`.
+/// The result is safe to embed in a file path without escaping the parent
+/// directory.
+fn sanitize_log_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' => '_',
+            _ if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' => c,
+            _ => '_',
+        })
+        .collect::<String>()
+        // Collapse ".." sequences that survived individual-char replacement.
+        .replace("..", "__")
+}
+
 /// Phase 2: run the shell commands. Uses only the prepared data; no registry access.
 pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError> {
     if prepared.cmds.is_empty() {
@@ -322,8 +339,62 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         env.insert(k.clone(), v.clone());
     }
 
-    let result =
-        run_shell_async(&joined, Some(&prepared.cwd), Some(&env), prepared.timeout).await?;
+    let log_dir = prepared.state_dir.join("exec_stage_logs");
+    let safe_name = sanitize_log_filename(&prepared.name);
+    let stream_path = log_dir.join(format!("exec-{safe_name}.log"));
+
+    // Defend against path traversal: after sanitization, the resolved path
+    // must still be a child of the log directory.
+    let stream_path_arg: Option<&std::path::Path> = match std::fs::create_dir_all(&log_dir) {
+        Ok(()) => {
+            // Canonicalize the log dir so we can check containment.
+            let canonical_log_dir = log_dir.canonicalize().ok();
+
+            let contained = canonical_log_dir.as_ref().is_some_and(|canon_dir| {
+                // Resolve stream_path. The file may not exist yet, so
+                // canonicalize its parent and join the filename.
+                let resolved = stream_path.canonicalize().ok().unwrap_or_else(|| {
+                    stream_path
+                        .parent()
+                        .and_then(|p| p.canonicalize().ok())
+                        .map(|parent| parent.join(stream_path.file_name().unwrap_or_default()))
+                        .unwrap_or_default()
+                });
+                resolved.starts_with(canon_dir)
+            });
+
+            if !contained {
+                log::warn!(
+                    "exec {}: stream path escapes log dir, skipping stream",
+                    prepared.name
+                );
+                None
+            } else {
+                log::info!(
+                    "exec {}: streaming output to {}",
+                    prepared.name,
+                    stream_path.display()
+                );
+                Some(&stream_path)
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "exec {}: failed to create exec_stage_logs dir: {e}",
+                prepared.name
+            );
+            None
+        }
+    };
+
+    let result = run_shell_async(
+        &joined,
+        Some(&prepared.cwd),
+        Some(&env),
+        prepared.timeout,
+        stream_path_arg,
+    )
+    .await?;
 
     process_shell_result(prepared, result)
 }
@@ -343,19 +414,6 @@ pub fn process_shell_result(
     let raw_output_str = String::from_utf8_lossy(&raw_output).to_string();
     let shell_output = raw_output_str.trim().to_string();
     let shell_rc = result.returncode;
-
-    let log_path = prepared.state_dir.join(format!("exec-{}.log", name));
-    let log_content = if raw_output_str.is_empty() {
-        "(no output)\n".to_string()
-    } else {
-        raw_output_str.clone()
-    };
-    if let Err(e) = std::fs::write(&log_path, &log_content) {
-        log::warn!(
-            "exec {name}: failed to write log to {}: {e}",
-            log_path.display()
-        );
-    }
 
     log::info!(
         "exec {name}: done rc={shell_rc} output_len={}",

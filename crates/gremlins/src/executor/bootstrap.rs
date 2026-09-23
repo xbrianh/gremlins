@@ -77,7 +77,7 @@ pub async fn run_bootstrap(
         cwd.to_string_lossy().into_owned(),
     );
 
-    let result = run_shell_async(&cmds.join(" && "), Some(&cwd), Some(&env), None)
+    let result = run_shell_async(&cmds.join(" && "), Some(&cwd), Some(&env), None, None)
         .await
         .map_err(|error| RunError::BootstrapFailed {
             exit_code: 1,

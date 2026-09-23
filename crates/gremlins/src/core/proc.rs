@@ -453,6 +453,7 @@ pub async fn run_shell_async(
     cwd: Option<&Path>,
     env: Option<&HashMap<String, String>>,
     timeout: Option<f64>,
+    stream_path: Option<&Path>,
 ) -> Result<ProcResult, ProcError> {
     if shell_cmd.is_empty() {
         return Err(ProcError::EmptyCommand);
@@ -499,15 +500,76 @@ pub async fn run_shell_async(
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
 
+    let stream_path_stdout = stream_path.map(|p| p.to_path_buf());
+    let stream_path_stderr = stream_path.map(|p| p.to_path_buf());
+
     let stdout_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf).await;
+        let mut chunk = [0u8; 4096];
+        let mut stream_file = stream_path_stdout.as_ref().and_then(|p| {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+            {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    log::warn!(
+                        "run_shell_async: failed to open stream file {}: {e}",
+                        p.display()
+                    );
+                    None
+                }
+            }
+        });
+        loop {
+            match stdout.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(ref mut f) = stream_file {
+                        let _ = f.write_all(&chunk[..n]);
+                        let _ = f.flush();
+                    }
+                }
+                Err(_) => break,
+            }
+        }
         buf
     });
 
     let stderr_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
+        let mut chunk = [0u8; 4096];
+        let mut stream_file = stream_path_stderr.as_ref().and_then(|p| {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+            {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    log::warn!(
+                        "run_shell_async: failed to open stream file {}: {e}",
+                        p.display()
+                    );
+                    None
+                }
+            }
+        });
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(ref mut f) = stream_file {
+                        let _ = f.write_all(&chunk[..n]);
+                        let _ = f.flush();
+                    }
+                }
+                Err(_) => break,
+            }
+        }
         buf
     });
 
@@ -2131,13 +2193,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_success() {
-        let r = run_shell_async("true", None, None, None).await.unwrap();
+        let r = run_shell_async("true", None, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(r.returncode, 0);
     }
 
     #[tokio::test]
     async fn test_run_shell_async_captures_stdout() {
-        let r = run_shell_async("echo hello", None, None, None)
+        let r = run_shell_async("echo hello", None, None, None, None)
             .await
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "hello");
@@ -2145,7 +2209,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_timeout() {
-        let err = run_shell_async("sleep 10", None, None, Some(0.05))
+        let err = run_shell_async("sleep 10", None, None, Some(0.05), None)
             .await
             .unwrap_err();
         match err {
@@ -2156,7 +2220,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_timeout_kills_grandchildren() {
-        let err = run_shell_async("sleep 60 & sleep 60", None, None, Some(0.1))
+        let err = run_shell_async("sleep 60 & sleep 60", None, None, Some(0.1), None)
             .await
             .unwrap_err();
         match err {
@@ -2172,6 +2236,7 @@ mod tests {
             None,
             None,
             Some(0.2),
+            None,
         )
         .await
         .unwrap_err();
@@ -2185,7 +2250,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_cancel() {
-        let handle = tokio::spawn(async { run_shell_async("sleep 10", None, None, None).await });
+        let handle =
+            tokio::spawn(async { run_shell_async("sleep 10", None, None, None, None).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.abort();
         let result = handle.await;
@@ -2199,6 +2265,7 @@ mod tests {
             None,
             Some(&HashMap::from([("FOO".to_string(), "bar".to_string())])),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2207,11 +2274,54 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_empty_cmd() {
-        let err = run_shell_async("", None, None, None).await.unwrap_err();
+        let err = run_shell_async("", None, None, None, None)
+            .await
+            .unwrap_err();
         match err {
             ProcError::EmptyCommand => {}
             _ => panic!("expected EmptyCommand, got {err}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_async_stream_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("stream.log");
+        // Emit marker1, sleep long enough for us to observe it, then emit
+        // marker2.  This verifies that chunks are flushed to disk *during*
+        // execution, not just buffered until the command completes.
+        let cmd = "echo marker1 && sleep 2 && echo marker2";
+        let log_path_clone = log_path.clone();
+        let handle = tokio::spawn(async move {
+            run_shell_async(cmd, None, None, None, Some(&log_path_clone))
+                .await
+                .unwrap()
+        });
+
+        // Wait for marker1 to appear in the log file.
+        let mut saw_marker1 = false;
+        for _ in 0..50 {
+            if let Ok(contents) = std::fs::read_to_string(&log_path) {
+                if contents.contains("marker1") {
+                    saw_marker1 = true;
+                    // marker2 must NOT be visible yet — the command is still
+                    // sleeping.
+                    assert!(
+                        !contents.contains("marker2"),
+                        "marker2 appeared before the command finished"
+                    );
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(saw_marker1, "marker1 never appeared in the stream log");
+
+        let r = handle.await.unwrap();
+        assert_eq!(r.returncode, 0);
+        let written = std::fs::read_to_string(&log_path).unwrap();
+        assert!(written.contains("marker1"));
+        assert!(written.contains("marker2"));
     }
 
     // -- pump_prefixed tests --
