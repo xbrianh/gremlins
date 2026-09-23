@@ -234,7 +234,7 @@ async fn merge_registry_via_content<D: ArtifactRegistry + Sync + ?Sized>(
 ///
 /// Note: `file://` URIs are intentionally not recognized — they have been
 /// removed from the registry design.
-pub(crate) fn is_file_artifact(data_uri: &str) -> bool {
+fn is_file_artifact(data_uri: &str) -> bool {
     data_uri.starts_with('/')
 }
 
