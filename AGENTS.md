@@ -70,8 +70,8 @@ These values are persisted to `state.json` and read by other writers (the fleet 
 
 ## State and bail bookkeeping
 
-`State::set_stage` writes stage info to `state.json` atomically via `State::patch`.
-`State::write_bail_file` writes `bail_{attempt}.json` to the state dir. When a stage
-detects a recorded bail (via `state.json`), it returns a bail error.
-Both helpers no-op without `GREMLINS_GREMLIN_ID` and never panic —
+`StateData::set_stage` writes stage info to `state.json` atomically via `StateData::patch`.
+`StateData::write_bail_file` writes `bail_{attempt}.json` to the state dir. When a stage
+detects a recorded bail (via `StateData::read_bail_info`), it returns a bail error.
+Both helpers no-op when the state file is absent and never panic —
 stage / bail bookkeeping must not crash a running gremlin.

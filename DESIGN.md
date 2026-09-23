@@ -75,13 +75,13 @@ allow agency and where we refuse to.
   marker-protocol bail reasons are byte-stable strings. They are written to
   `state.json` and read by the launcher, the fleet manager, the rescue
   protocol, and shell hooks. A model rewording any of these would silently
-  break cross-process consumers, so they live in Rust constants
-  (`stages/constants.rs`) and YAML rather than in prompts.
+  break cross-process consumers, so they live in byte-stable convention
+  strings and YAML rather than in prompts.
 - Filesystem and git mechanics. Worktree creation, branch handling, commit
   authorship, PR opening — these are deterministic helpers. The model writes
   *content* (a commit message, a plan, a code change) but does not run `git`
   itself.
-- Bookkeeping. `State::set_stage` and `State::write_bail_file` write atomically
+- Bookkeeping. `StateData::set_stage` and `StateData::write_bail_file` write atomically
   and never panic. A gremlin that crashes mid-stage must leave behind a state
   file the rescue protocol can interpret.
 
@@ -160,8 +160,8 @@ we don't expect a third.
 ### 2.3 Bail as a control-flow channel
 
 A stage can halt the definition by returning a bail error or by calling
-`State::write_bail_file`, which writes a `bail_class` (and optional
-`bail_detail`) to `state.json`.
+`StateData::write_bail_file`, which writes a `class` (and optional
+`detail`) to `bail_{attempt}.json`.
 
 The two routes serve different jobs:
 
@@ -171,8 +171,8 @@ The two routes serve different jobs:
   `reviewer_requested_changes`, `security`, `secrets`, `other`), and
   propagates the error up to halt the definition.
 - **`write_bail_file`** records a *structured*, *persistent* halt reason
-  in `state.json`. Both `bail_class` and `bail_detail` (a one-line human note)
-  live in `state.json` after the process exits. Exec stages can also trigger
+  in `bail_{attempt}.json`. Both `class` and `detail` (a one-line human note)
+  live in that file after the process exits. Exec stages can also trigger
   bail by writing to `artifact://bail`.
 
 The persistence is the point. `bail_class` is read by the rescue
@@ -188,7 +188,7 @@ pairing — write the marker, then return the error — is the pattern. The
 marker outlives the error.
 
 A bail error is returned when a structured bail condition is detected (e.g.,
-when checking `state.json` for a recorded `bail_class` in stages that follow
+when calling `StateData::read_bail_info` in stages that follow
 soft-failure points like `github-address-pull-request-reviews` and
 `github-review-pull-request`, or in the self-healing stages (§2.2) after
 each fixer agent runs). This allows a stage to halt cleanly when an agent
@@ -282,35 +282,24 @@ deterministic-vs-agentic line intact:
   current branch tip. Runs `git worktree prune` first to clear leftovers
   from any previous interrupted run.
 - **`<group>`** (agentic, N concurrent). Runs N agent invocations
-  concurrently via the async runtime, each in its own stage context with
-  its `child_key` and the worktree path from fan-out. Children write
-  `bail_class` and `bail_detail` into `state.json` under
-  `parallel_bails[child_key]`, never into the top-level bail slot, so
-  children cannot see each other's bails. Bail checking with a `child_key`
-  reads only that child's shard.
-- **`<group>-fanin`** (deterministic). Reads `parallel_bails`, applies the
-  block's `error_policy`, promotes a bail to the top-level `bail_class` if
-  warranted, returns a bail error if needed, clears `parallel_bails`, and
-  tears down all per-child worktrees with `git worktree remove --force` +
-  `git worktree prune`. Fan-in is also responsible for cleanup on crash —
-  it runs teardown in a `finally`-style guard so worktrees don't accumulate
-  from aborted runs.
+  concurrently via the async runtime, each in its own forked gremlin with
+  its own `state.json` and worktree. Children cannot see each other's
+  state; each child's outcome (success or error) is collected by fan-in.
+- **`<group>-fanin`** (deterministic). Collects child outcomes from the
+  `JoinSet`, applies the block's `error_policy`, returns a bail error if
+  warranted, merges artifacts from successful children, and tears down all
+  per-child worktrees (best-effort). Cleanup runs after all children are
+  collected; early-exit paths (cancellation, fork failure) may leave
+  worktrees behind.
 
-This decomposition fixes two latent bugs in the prior single-stage
-parallel wrapper:
+Each child runs in its own forked gremlin with its own `state.json`, so
+bail state is naturally isolated per child. The parent collects outcomes
+via the `JoinSet` and applies the error policy in memory — there is no
+shared `parallel_bails` slot and no cross-child bail contamination.
 
-- **Lost bail.** State patching did a read-modify-write without a lock.
-  Concurrent bail writes raced; last writer won. The fix is twofold: state
-  patching now holds an exclusive file lock on a per-`state.json` lock file
-  for the duration of each read-modify-write, and child bails go into
-  `parallel_bails[child_key]` rather than the shared top-level slot.
-- **Bail cross-contamination.** Bail errors are scoped to per-child bails
-  stored in `parallel_bails[child_key]`. A parallel child completing after
-  a sibling bailed would not falsely report itself as bailed because bail
-  detection is child-specific.
-
-Both fixes are backward-compatible: `child_key=None` (the default, used by
-all sequential stages) preserves existing top-level bail semantics.
+State patching holds an exclusive file lock on a per-`state.json` lock
+file for the duration of each read-modify-write. This prevents concurrent
+state writes from racing within a single child's state file.
 
 **Per-block knobs** (declared on the parallel block in the definition YAML):
 
@@ -321,8 +310,7 @@ all sequential stages) preserves existing top-level bail semantics.
   and children that have not yet started are skipped.
 - `error_policy: any` (default). Any bailing child causes the group to bail
   after fan-in. Set to `all` to require every child to bail before the
-  group bails. The top-level `bail_class` is populated from the first
-  bailing child's shard.
+  group bails.
 
 **Worktrees are always-on.** Every parallel child gets its own worktree,
 regardless of whether it mutates. The cost — one full working-tree checkout
@@ -331,10 +319,11 @@ relative to gremlin runtime. Unconditional worktrees remove a flag and a
 code path: read-only and mutating parallel are architecturally identical;
 the only difference is what the children write and what fan-in does with it.
 
-**The merge problem is unsolved.** Fan-in for blocks whose children mutated
-their worktrees returns an unimplemented error. Deciding what to do when N
-agents each produced a different diff — pick the best, merge all,
-cherry-pick — requires a concrete use case before the right shape is clear.
+**The merge problem is unsolved.** Fan-in merges only registered artifacts
+from children; worktree mutations outside bound artifacts are discarded.
+Deciding what to do when N agents each produced a different diff — pick the
+best, merge all, cherry-pick — requires a concrete use case before the
+right shape is clear.
 The current parallel use (review lenses) is read-only; it does not hit this
 path.
 
@@ -449,7 +438,8 @@ The boss reuses the §2 dividing line, applied at a different scale:
   PRs, writing `boss_state.json`, parsing children's `state.json`,
   deciding when the chain has structurally stalled.
 - **Agentic, exactly once per step:** the **handoff agent** (invoked via
-  the `handoff` recipe in `gremlins/recipes/stages/handoff.yaml`). It reads
+  the `handoff` recipe, bundled as
+  `crates/gremlins/src/assets/data/stages/handoff.yaml`). It reads
   the rolling plan, the chain spec, and the diff accumulated on the branch,
   and produces one of three decisions: `next-plan` (here is the plan for
   child N+1), `chain-done` (we are finished), or `bail` (something is
@@ -524,36 +514,32 @@ When a definition contains a `loop` stage and that loop body includes a
 based on the previous PR's branch. No per-definition configuration is
 required.
 
-**The mechanism.** The `github-open-pull-request` stage resolves the PR base
-ref with this fallback chain:
-
-    last_pr_branch(gremlin_id)  →  stage base_ref option  →  state.json base_ref_name  →  "main"
-
-`last_pr_branch` walks the artifact list in reverse and returns the `branch`
-field of the most recent `pr`-type artifact. Because all loop iterations share
-one `gremlin_id` and one `state.json`, every iteration after the first finds
-the previous iteration's PR branch at the head of the artifact list.
+**The mechanism.** The `handoff` recipe reads the previous PR's branch from
+`artifact://pr-branch.txt` and checks out that branch before running the
+next iteration's work. The definition's `base_ref` sets the initial base.
+Because all loop iterations share one `gremlin_id` and one artifact
+registry, every iteration after the first finds the previous iteration's
+PR branch recorded in the registry.
 
 **The invariant.** The PR-opening stage returns an error if the implementation
-branch is empty before appending a PR artifact, so every `pr` artifact in the
-list has a non-empty `branch` field. `last_pr_branch` therefore always returns
-a real branch name, never an empty string that would fall through to `main`.
+branch is empty before appending a PR artifact, so every PR artifact in the
+registry has a non-empty `branch` field.
 
 **What this means in practice.** A boss definition (or any looped gh definition)
-produces a stack of PRs by default. PR #1 targets `main` (or
-`base_ref_name` from state). PR #2 targets PR #1's branch. PR #3 targets
-PR #2's branch, and so on. The artifact list is the authoritative record.
+produces a stack of PRs by default. PR #1 targets `main` (or the
+definition's `base_ref`). PR #2 targets PR #1's branch. PR #3 targets
+PR #2's branch, and so on. The artifact registry is the authoritative record.
 
 **The escape hatch.** Stacking is a consequence of loop iterations sharing
 one `gremlin_id`. To produce side-by-side PRs based on a fixed ref, launch each
 iteration as an independent gremlin rather than as loop iterations in a
-single run — each gets its own `gremlin_id` and an empty artifact list, so
-`last_pr_branch` returns nothing and the PR targets `main` (or whatever
-`base_ref_name` is in that gremlin's state).
+single run — each gets its own `gremlin_id` and an empty artifact registry,
+so the PR targets `main` (or whatever `base_ref` is in that gremlin's
+definition).
 
 Within a looped definition you can also set `base_ref` under the
 `github-open-pull-request` stage's `options:` to control the first-iteration base and
-the fallback when the artifact list is empty, but this does not suppress
+the fallback when the artifact registry is empty, but this does not suppress
 stacking once prior PR artifacts exist.
 
 ## 6. Cost model
@@ -564,8 +550,9 @@ Per-gremlin cost is dominated by two things:
   reads from the worktree. Bounded by §3 — small prompts, scoped agents.
 - **Number of stages × per-stage volume.** Bounded by the definition YAML.
 
-We measure cost per run via token usage accumulated in the `UsageTracker`,
-converted to USD via per-backend pricing tables. That number is the unit we
+We measure cost per run via `cost_usd` reported by the backend (from
+subprocess output for `cmd:` backends, or computed by API backends) and
+token usage accumulated in `state.json`. That number is the unit we
 optimize against.
 
 The cost knobs we *do* use:
@@ -584,8 +571,10 @@ The cost knobs we have *considered and are not using today*:
 
 We did try this.
 
-Session IDs used to be captured from backend responses so a later stage
-could resume the session. The idea was straightforward: if two stages ran
+Session IDs used to be propagated across stages so a later stage could
+resume the session. (Session IDs are still captured and used within a
+single stage for timeout/error retry via `--resume`, but they no longer
+cross stage boundaries.) The idea was straightforward: if two stages ran
 back-to-back, the provider's prompt cache might make the second stage
 cheaper because the first stage had already paid to build context.
 
@@ -623,8 +612,8 @@ this design.
    future fan-out stages still need a cold-start path, because one
    session cannot be resumed into multiple concurrent children.
 
-So the current position is: we removed session ID tracking and are not
-pursuing session-resumption caching in the current implementation. That is
+So the current position is: we removed cross-stage session ID propagation
+and are not pursuing session-resumption caching in the current implementation. That is
 a "not now" decision, not a permanent design taboo.
 
 If we ever reopen it, the bar should be concrete:
