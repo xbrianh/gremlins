@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
-use crate::schemas::bootstrap::Bootstrap;
+use crate::schemas::bootstrap::{Bootstrap, InputSource, InputSources};
 use crate::schemas::error::SchemaError;
 use crate::schemas::gremlin_definition::GremlinDefinition;
 use crate::schemas::loader::{self, StageEntry, StageNode};
@@ -28,6 +28,7 @@ use crate::stages::node::RunnableStage;
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct BootstrapBuilder {
+    source: HashMap<String, InputSource>,
     launch_cmds: Vec<String>,
     cmds: Vec<String>,
     cli_out: HashMap<String, String>,
@@ -82,10 +83,39 @@ impl BootstrapBuilder {
         self
     }
 
+    /// Add a single input source.
+    ///
+    /// Returns an error if the type list is empty or contains an unknown
+    /// type (validated by [`InputSource::new`]).
+    pub fn source(
+        mut self,
+        name: impl Into<String>,
+        types: &[impl ToString],
+        optional: bool,
+    ) -> Result<Self, SchemaError> {
+        let name = name.into();
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let src = InputSource::new(name.clone(), types, optional)?;
+        self.source.insert(name, src);
+        Ok(self)
+    }
+
+    /// Replace the entire source map with pre-validated [`InputSource`]
+    /// values.
+    pub fn sources(mut self, map: HashMap<String, InputSource>) -> Self {
+        self.source = map;
+        self
+    }
+
     /// Consume the builder and produce a [`Bootstrap`].
     pub fn build(self) -> Bootstrap {
+        let source = if self.source.is_empty() {
+            None
+        } else {
+            Some(InputSources::new(self.source))
+        };
         Bootstrap {
-            source: None,
+            source,
             launch_cmds: self.launch_cmds,
             cmds: self.cmds,
             cli_out: self.cli_out,
