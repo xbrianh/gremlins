@@ -392,7 +392,11 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
             prepared.cwd.display(),
             joined
         );
-        let _ = std::fs::write(&stream_path, header);
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stream_path)
+            .and_then(|mut f| f.write_all(header.as_bytes()));
     }
 
     let start = std::time::Instant::now();
@@ -868,5 +872,206 @@ mod tests {
         // Neither marker file must exist.
         assert!(!Path::new("/tmp/gremlins_injection_test_marker").exists());
         assert!(!Path::new("/tmp/gremlins_injection_test_marker2").exists());
+    }
+
+    // --- run_shell header/footer framing ---
+
+    fn make_prepared(name: &str, cmds: Vec<&str>, state_dir: &Path) -> ExecPrepared {
+        ExecPrepared {
+            name: name.to_string(),
+            interpolation_map: HashMap::new(),
+            bind_paths: HashMap::new(),
+            bind_uris: Vec::new(),
+            cmds: cmds.into_iter().map(|s| s.to_string()).collect(),
+            cwd: std::env::current_dir().unwrap(),
+            artifact_dir: state_dir.join("artifacts"),
+            state_dir: state_dir.to_path_buf(),
+            timeout: Some(5.0),
+            env: HashMap::new(),
+            loop_iter: String::new(),
+            substitution_env: HashMap::new(),
+        }
+    }
+
+    fn read_log(state_dir: &Path, name: &str) -> String {
+        let safe = sanitize_log_filename(name);
+        let path = state_dir
+            .join("exec_stage_logs")
+            .join(format!("exec-{safe}.log"));
+        fs::read_to_string(&path).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_writes_header_and_footer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let prepared = make_prepared("hello", vec!["echo UNIQUE_OUTPUT_MARKER"], &state_dir);
+        let result = run_shell(&prepared).await.unwrap();
+        assert_eq!(result.output, "UNIQUE_OUTPUT_MARKER");
+        assert_eq!(result.rc, 0);
+
+        let log = read_log(&state_dir, "hello");
+        assert!(
+            log.contains("=== exec stage: hello ==="),
+            "missing header: {log}"
+        );
+        assert!(log.contains("cwd:"), "missing cwd: {log}");
+        assert!(
+            log.contains("command: echo UNIQUE_OUTPUT_MARKER"),
+            "missing command: {log}"
+        );
+        assert!(
+            log.contains("--- output ---"),
+            "missing output marker: {log}"
+        );
+        assert!(
+            log.contains("UNIQUE_OUTPUT_MARKER"),
+            "missing command output: {log}"
+        );
+        assert!(log.contains("--- exit: 0"), "missing footer: {log}");
+        assert!(log.contains("duration:"), "missing duration: {log}");
+
+        // Verify ordering: header → output marker → command output → footer.
+        // Use the second occurrence of UNIQUE_OUTPUT_MARKER (the actual output,
+        // after the command line which also contains it).
+        let header_pos = log.find("=== exec stage: hello ===").unwrap();
+        let output_marker_pos = log.find("--- output ---").unwrap();
+        let first_output = log.find("UNIQUE_OUTPUT_MARKER").unwrap();
+        let second_output = log[first_output + 1..]
+            .find("UNIQUE_OUTPUT_MARKER")
+            .map(|p| p + first_output + 1);
+        let world_pos = second_output.unwrap_or(first_output);
+        let footer_pos = log.find("--- exit: 0").unwrap();
+        assert!(header_pos < output_marker_pos);
+        assert!(output_marker_pos < world_pos);
+        assert!(world_pos < footer_pos);
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_header_footer_with_no_child_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let prepared = make_prepared("silent", vec!["true"], &state_dir);
+        let result = run_shell(&prepared).await.unwrap();
+        assert_eq!(result.output, "");
+        assert_eq!(result.rc, 0);
+
+        let log = read_log(&state_dir, "silent");
+        assert!(
+            log.contains("=== exec stage: silent ==="),
+            "missing header: {log}"
+        );
+        assert!(log.contains("command: true"), "missing command: {log}");
+        assert!(
+            log.contains("--- output ---"),
+            "missing output marker: {log}"
+        );
+        assert!(log.contains("--- exit: 0"), "missing footer: {log}");
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_footer_shows_nonzero_exit_code() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        // exit 42 is non-zero but we need a bail URI so run_shell doesn't
+        // convert it to an error.
+        let mut prepared = make_prepared("failing", vec!["exit 42"], &state_dir);
+        prepared.bind_uris = vec![("bail".to_string(), BAIL_KEY.to_string(), false)];
+
+        let result = run_shell(&prepared).await.unwrap();
+        assert_eq!(result.rc, 42);
+
+        let log = read_log(&state_dir, "failing");
+        assert!(
+            log.contains("--- exit: 42"),
+            "footer missing exit 42: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_repeated_invocations_append() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let prepared1 = make_prepared("repeat", vec!["echo RUN_ONE"], &state_dir);
+        let prepared2 = make_prepared("repeat", vec!["echo RUN_TWO"], &state_dir);
+        run_shell(&prepared1).await.unwrap();
+        run_shell(&prepared2).await.unwrap();
+
+        let log = read_log(&state_dir, "repeat");
+        // Both runs appear.
+        let first_header = log.find("=== exec stage: repeat ===");
+        let second_header = log.rfind("=== exec stage: repeat ===");
+        assert!(first_header.is_some());
+        assert!(second_header.is_some());
+        assert!(first_header.unwrap() < second_header.unwrap());
+
+        let first_exit = log.find("--- exit: 0");
+        let second_exit = log.rfind("--- exit: 0");
+        assert!(first_exit.is_some());
+        assert!(second_exit.is_some());
+        assert!(first_exit.unwrap() < second_exit.unwrap());
+
+        assert!(log.contains("RUN_ONE"));
+        assert!(log.contains("RUN_TWO"));
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_succeeds_when_log_dir_cannot_be_created() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Create a file where the log directory would be, so create_dir_all fails.
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let log_dir = state_dir.join("exec_stage_logs");
+        fs::write(&log_dir, "block").unwrap(); // file, not dir — create_dir_all will fail
+
+        let prepared = make_prepared("resilient", vec!["echo still-works"], &state_dir);
+        let result = run_shell(&prepared).await.unwrap();
+        assert_eq!(result.output, "still-works");
+        assert_eq!(result.rc, 0);
+        // The log file was never created.
+        let safe = sanitize_log_filename("resilient");
+        let log_path = log_dir.join(format!("exec-{safe}.log"));
+        assert!(!log_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_sanitizes_dangerous_stage_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let prepared = make_prepared("../../../etc/passwd", vec!["echo ok"], &state_dir);
+        let result = run_shell(&prepared).await.unwrap();
+        assert_eq!(result.output, "ok");
+
+        // The log file must be inside exec_stage_logs, not escaped.
+        let log_dir = state_dir.join("exec_stage_logs");
+        let safe = sanitize_log_filename("../../../etc/passwd");
+        let log_path = log_dir.join(format!("exec-{safe}.log"));
+        assert!(log_path.exists());
+        // The path must not escape the log dir.
+        let canon_log_dir = log_dir.canonicalize().unwrap();
+        let canon_log = log_path.canonicalize().unwrap();
+        assert!(canon_log.starts_with(&canon_log_dir));
+    }
+
+    #[test]
+    fn test_sanitize_log_filename_replaces_dangerous_chars() {
+        assert_eq!(sanitize_log_filename("hello"), "hello");
+        assert_eq!(sanitize_log_filename("a/b"), "a_b");
+        assert_eq!(sanitize_log_filename("a\\b"), "a_b");
+        assert_eq!(sanitize_log_filename(".."), "__");
+        assert_eq!(sanitize_log_filename("a..b"), "a__b");
+        assert_eq!(sanitize_log_filename("a\0b"), "a_b");
+        assert_eq!(sanitize_log_filename("hello world"), "hello_world");
+        assert_eq!(sanitize_log_filename("a.b-c_d"), "a.b-c_d");
     }
 }
