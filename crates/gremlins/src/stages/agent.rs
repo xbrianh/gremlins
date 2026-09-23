@@ -46,6 +46,7 @@ impl Agent {
         }
 
         let interpolation_map = string_mapping(d, "interpolation", &name)?;
+        crate::artifacts::resolve::validate_interpolation_map(&interpolation_map, &name)?;
         let bind_map = string_mapping(d, "bind", &name)?;
 
         let options = match d.get("options") {

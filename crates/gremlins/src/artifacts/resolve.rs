@@ -11,6 +11,24 @@ pub(crate) fn is_content_interpolation(raw: &str) -> bool {
     CONTENT_RE.is_match(raw.trim_end().trim_end_matches('?'))
 }
 
+/// Reject `content?("...")` — the `?` must follow the closing paren:
+/// `content("...")?`.  This is a common typo that silently breaks resolution.
+pub(crate) fn validate_interpolation_map(
+    map: &HashMap<String, String>,
+    stage_name: &str,
+) -> Result<(), String> {
+    for (key, raw) in map {
+        let trimmed = raw.trim();
+        if trimmed.starts_with("content?(") {
+            return Err(format!(
+                "stage {stage_name:?}: interpolation.{key}: \
+                 'content?(...)' is not valid; put the '?' after the closing paren: content(\"...\")?"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Split an interpolation map into content-style and filepath-style entries.
 pub(crate) fn split_interpolation_map(
     map: &HashMap<String, String>,
@@ -205,5 +223,29 @@ mod tests {
 
         let result = unwrap_result(resolve_interpolation_map(&reg, &map, "1").await);
         assert_eq!(result.get("var").unwrap(), &path_1);
+    }
+
+    #[test]
+    fn test_validate_content_question_before_paren() {
+        let mut map = HashMap::new();
+        map.insert(
+            "failure_output".to_string(),
+            r#"content?("artifact://loop~1/ci_failure.txt")"#.to_string(),
+        );
+        let err = validate_interpolation_map(&map, "fix").unwrap_err();
+        assert!(
+            err.contains("content?(...)") && err.contains("content(\"...\")?"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_valid_syntax_passes() {
+        let mut map = HashMap::new();
+        map.insert(
+            "failure_output".to_string(),
+            r#"content("artifact://loop~1/ci_failure.txt")?"#.to_string(),
+        );
+        validate_interpolation_map(&map, "fix").unwrap();
     }
 }
