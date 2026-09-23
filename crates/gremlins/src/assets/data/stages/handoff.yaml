@@ -17,10 +17,11 @@ stages:
       - name: handoff-init
         type: exec
         skip_if_exists: "artifact://rolling-plan.md"
+        interpolation:
+          plan: "artifact://plan.md"
         bind:
           rolling_plan: "artifact://rolling-plan.md"
           boss_spec: "artifact://boss-spec.md"
-          plan: "artifact://plan.md"
         options:
           cmds:
             - |
@@ -52,12 +53,12 @@ stages:
           signal: artifact://{loop_iter}/signal.json
           rolling_plan: artifact://rolling-plan.md
           child_plan: artifact://{loop_iter}/child-plan.md?
+          boss_spec: "artifact://boss-spec.md"
         bind:
           bail?: "artifact://{loop_iter}/bail"
           done?: "artifact://{loop_iter}/done"
           rolling_plan_pre: "artifact://rolling-plan-pre-sanitize.md"
           plan: "artifact://plan.md"
-          boss_spec: "artifact://boss-spec.md"
         options:
           cmds:
             - |
@@ -116,7 +117,6 @@ stages:
         type: exec
         interpolation:
           rolling_plan: artifact://rolling-plan.md
-        bind:
           rolling_plan_pre: "artifact://rolling-plan-pre-sanitize.md"
         options:
           cmds:

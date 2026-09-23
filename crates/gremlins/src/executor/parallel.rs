@@ -961,24 +961,42 @@ mod tests {
 
     #[tokio::test]
     async fn child_artifacts_are_merged_into_parent() {
-        // The child runs an exec stage that writes a file. The merge
-        // step copies the child's artifacts into the parent registry.
-        // Because config paths point to the global scratch root in tests,
-        // we verify that the merge does not panic rather than asserting
-        // specific artifact keys.
+        use crate::test_support::EnvGuard;
+
+        // The child runs an exec stage that produces an artifact via
+        // `bind`. After the parallel group succeeds, the parent registry
+        // must contain the merged artifact, prefixed with the child name.
         let yaml = r#"
 - name: group
   parallel:
     - name: writer
       type: exec
+      bind:
+        output: "artifact://out.txt"
       options:
-        cmds: ["echo hello > output.txt"]
+        cmds: ["echo hello > {output}"]
 "#;
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
+
+        // Point config::state_root() at the temp dir so the fallback
+        // path in merge_child_artifacts finds the child's artifact
+        // directory. Without this, config::state_root() returns the
+        // system default and the merge silently skips every child.
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_SANDBOX_ROOT", _tmp.path());
+
         let stage = stages[0].clone();
         let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        // The parent registry must contain the merged artifact.
+        let merged_key = "writer/out.txt";
+        let registered = gremlin
+            .registry
+            .is_registered(&format!("artifact://{merged_key}"))
+            .await;
+        assert!(registered, "parent registry should contain {merged_key}");
     }
 
     // --- Cost aggregation ---
