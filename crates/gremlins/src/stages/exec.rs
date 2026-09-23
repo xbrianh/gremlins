@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -383,6 +384,18 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         }
     };
 
+    // Write header to stream file (best-effort).
+    if stream_path_arg.is_some() {
+        let header = format!(
+            "=== exec stage: {} ===\ncwd: {}\ncommand: {}\n--- output ---\n",
+            prepared.name,
+            prepared.cwd.display(),
+            joined
+        );
+        let _ = std::fs::write(&stream_path, header);
+    }
+
+    let start = std::time::Instant::now();
     let result = run_shell_async(
         &joined,
         Some(&prepared.cwd),
@@ -391,6 +404,20 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         stream_path_arg,
     )
     .await?;
+    let elapsed = start.elapsed();
+
+    // Append footer to stream file (best-effort).
+    if stream_path_arg.is_some() {
+        let footer = format!(
+            "\n--- exit: {} (duration: {:.1}s) ---\n",
+            result.returncode,
+            elapsed.as_secs_f64()
+        );
+        let _ = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&stream_path)
+            .and_then(|mut f| f.write_all(footer.as_bytes()));
+    }
 
     process_shell_result(prepared, result)
 }
