@@ -358,8 +358,8 @@ pub async fn run_definition_bootstrap(gremlin: &mut Gremlin) -> Result<(), RunEr
 ///
 /// `cli_out` stands outside the pipeline stage model — it is a mechanical
 /// binding step that registers files already written by bootstrap commands.
-/// There is no agent to constrain, so we use [`ArtifactRegistry::copy_into_registry`]
-/// on the main registry directly.
+/// The file already lives at the path resolved by `path_for_uri`, so we commit
+/// the binding directly rather than copying the file onto itself.
 async fn run_cli_out(
     gremlin: &mut Gremlin,
     cli_out: &HashMap<String, String>,
@@ -377,8 +377,7 @@ async fn run_cli_out(
             .path_for_uri(&uri)
             .await
             .map_err(|e| failed(e.to_string()))?;
-        let source = Path::new(&path);
-        if !source.exists() {
+        if !Path::new(&path).exists() {
             return Err(failed(format!(
                 "cli_out: artifact {uri_str:?} not found at {path}"
             )));
@@ -386,7 +385,7 @@ async fn run_cli_out(
         gremlin
             .registry
             .as_ref()
-            .copy_into_registry(&uri, source)
+            .commit(&uri.to_string(), &path)
             .await
             .map_err(|e| failed(e.to_string()))?;
     }

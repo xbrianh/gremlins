@@ -346,7 +346,11 @@ async fn run_agent(
     let mut checkout_keys: Vec<String> = Vec::new();
     for raw_uri_str in agent.bind_map.values() {
         let resolved = base::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
-        let resolved = resolved.strip_suffix('?').unwrap_or(&resolved);
+        // Strip optional marker (? or ?fallback).
+        let resolved = match resolved.find('?') {
+            Some(pos) => &resolved[..pos],
+            None => &resolved[..],
+        };
         if !loop_iter.is_empty() {
             let resolved = resolved.replace("{loop_iter}", &loop_iter);
             if resolved.starts_with("artifact://") {
@@ -358,7 +362,10 @@ async fn run_agent(
     }
     for raw in filepath_map.values() {
         let resolved = base::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
-        let resolved = resolved.strip_suffix('?').unwrap_or(&resolved);
+        let resolved = match resolved.find('?') {
+            Some(pos) => &resolved[..pos],
+            None => &resolved[..],
+        };
         if !loop_iter.is_empty() {
             let resolved = resolved.replace("{loop_iter}", &loop_iter);
             if resolved.starts_with("artifact://") {
@@ -434,6 +441,14 @@ async fn run_agent(
 
     std::fs::create_dir_all(local_registry.artifact_dir())?;
 
+    // Clone the gremlin env but override GREMLINS_ARTIFACT_DIR to point at
+    // the localized checkout so the agent cannot bypass the scoped registry.
+    let mut stage_env = gremlin.env.clone();
+    stage_env.insert(
+        "GREMLINS_ARTIFACT_DIR".to_string(),
+        local_registry.artifact_dir().to_string_lossy().to_string(),
+    );
+
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
@@ -452,7 +467,7 @@ async fn run_agent(
         cwd: Some(gremlin.cwd()),
         artifact_dir: Some(local_registry.artifact_dir().to_path_buf()),
         idle_timeout: None,
-        extra_env: Some(gremlin.env.clone()),
+        extra_env: Some(stage_env),
         expected_artifact_paths: prepared
             .expected_artifact_paths
             .iter()
@@ -592,7 +607,11 @@ async fn run_exec(
     let mut checkout_keys: Vec<String> = Vec::new();
     for raw_uri_str in exec.bind_map.values() {
         let resolved = base::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
-        let resolved = resolved.strip_suffix('?').unwrap_or(&resolved);
+        // Strip optional marker (? or ?fallback).
+        let resolved = match resolved.find('?') {
+            Some(pos) => &resolved[..pos],
+            None => &resolved[..],
+        };
         if !loop_iter.is_empty() {
             let resolved = resolved.replace("{loop_iter}", &loop_iter);
             if resolved.starts_with("artifact://") {
@@ -604,7 +623,10 @@ async fn run_exec(
     }
     for raw in filepath_map.values() {
         let resolved = base::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
-        let resolved = resolved.strip_suffix('?').unwrap_or(&resolved);
+        let resolved = match resolved.find('?') {
+            Some(pos) => &resolved[..pos],
+            None => &resolved[..],
+        };
         if !loop_iter.is_empty() {
             let resolved = resolved.replace("{loop_iter}", &loop_iter);
             if resolved.starts_with("artifact://") {

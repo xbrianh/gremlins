@@ -231,6 +231,9 @@ async fn merge_registry_via_content<D: ArtifactRegistry + Sync + ?Sized>(
 ///
 /// Returns `true` for absolute paths (`/…`).
 /// Returns `false` for non-file URIs (`http://`, `s3://`, `data:`, etc.).
+///
+/// Note: `file://` URIs are intentionally not recognized — they have been
+/// removed from the registry design.
 pub(crate) fn is_file_artifact(data_uri: &str) -> bool {
     data_uri.starts_with('/')
 }
@@ -405,11 +408,7 @@ impl FileSystemArtifactRegistry {
         json_path: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let raw = self.data_uri(uri_str).await?;
-        let p = if let Some(stripped) = raw.strip_prefix("file://") {
-            PathBuf::from(stripped)
-        } else {
-            PathBuf::from(&raw)
-        };
+        let p = PathBuf::from(&raw);
         if !p.exists() {
             return Err(Box::new(MissingArtifact {
                 key: uri_str.to_string(),
@@ -462,10 +461,18 @@ impl FileSystemArtifactRegistry {
         key_prefix: Option<&str>,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         // Fast path: both sides are filesystem-backed — copy files directly.
-        if let Some(other_fs) = other
+        // Also try to unwrap a ScopedFileSystemArtifactRegistry (the checkout
+        // wrapper) so that merging from a scoped registry hits the fast path.
+        let fs: Option<&FileSystemArtifactRegistry> = other
             .as_any()
-            .and_then(|a| a.downcast_ref::<FileSystemArtifactRegistry>())
-        {
+            .and_then(|a| {
+                a.downcast_ref::<FileSystemArtifactRegistry>()
+                    .or_else(|| {
+                        a.downcast_ref::<ScopedFileSystemArtifactRegistry>()
+                            .map(|s| &s.inner)
+                    })
+            });
+        if let Some(other_fs) = fs {
             let mut merged = 0usize;
             for key in other_fs.keys().await {
                 let data_uri = other_fs.data_uri(&key).await.unwrap_or_default();
@@ -512,14 +519,10 @@ impl FileSystemArtifactRegistry {
                     }
                 }
 
-                // Resolve source path (strip file:// if present) for file artifacts;
+                // Resolve source path for file artifacts;
                 // register non-file URIs directly.
                 if is_file_artifact(&data_uri) {
-                    let src_path = if data_uri.starts_with("file://") {
-                        PathBuf::from(data_uri.strip_prefix("file://").unwrap_or(&data_uri))
-                    } else {
-                        PathBuf::from(&data_uri)
-                    };
+                    let src_path = PathBuf::from(&data_uri);
 
                     let dest_uri = Uri::parse(&dest_key).map_err(|e| {
                         Box::new(std::io::Error::new(
@@ -586,6 +589,10 @@ impl ScopedFileSystemArtifactRegistry {
 
 #[async_trait::async_trait]
 impl ArtifactRegistry for ScopedFileSystemArtifactRegistry {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
         self.check_key(key).map_err(|e| MissingArtifact {
             key: format!("{key}: {e}"),
@@ -679,11 +686,7 @@ impl FileSystemArtifactRegistry {
 
                 if is_file_artifact(&data_uri) {
                     // Copy the file directly (handles binary artifacts).
-                    let src_path = if data_uri.starts_with("file://") {
-                        PathBuf::from(data_uri.strip_prefix("file://").unwrap_or(&data_uri))
-                    } else {
-                        PathBuf::from(&data_uri)
-                    };
+                    let src_path = PathBuf::from(&data_uri);
                     new_reg.copy_into_registry(&uri, &src_path).await?;
                 } else {
                     // Non-file artifact: read content as string and write.
