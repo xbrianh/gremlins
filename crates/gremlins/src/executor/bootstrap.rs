@@ -584,8 +584,8 @@ mod tests {
         stage_inputs: HashMap<String, String>,
     ) -> (tempfile::TempDir, Gremlin) {
         let tmp = tempfile::tempdir().unwrap();
-        let artifact_dir = tmp.path().join("scratch").join("artifacts");
         let state_dir = tmp.path().join("state").join("gr-test");
+        let artifact_dir = state_dir.join("artifacts");
         let worktree = tmp.path().join("worktree");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();

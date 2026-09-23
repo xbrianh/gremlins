@@ -183,7 +183,7 @@ impl Gremlin {
         let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
 
         let state_dir = config::state_root().join(gremlin_id.as_str());
-        let artifact_dir = config::scratch_root(Some(gremlin_id.as_str())).join("artifacts");
+        let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&state_dir)?;
         std::fs::create_dir_all(&artifact_dir)?;
 
@@ -333,7 +333,7 @@ impl Gremlin {
         // one (the way `definition.path` is read) sees the same string.
         .map(|path| path.canonicalize().unwrap_or(path));
 
-        let artifact_dir = config::scratch_root(Some(gremlin_id.as_str())).join("artifacts");
+        let artifact_dir = state_dir.join("artifacts");
         let state = StateData::new(Some(gremlin_id.as_str().to_string()));
 
         let worktree = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
@@ -517,7 +517,6 @@ impl Gremlin {
         let overlay_dir = self.state_dir.join(config::overlay_dirname());
         let env = resolve_env(
             bootstrap_script(&definition.bootstrap),
-            &self.artifact_dir,
             &self.state_dir,
             self.id.as_str(),
             &self.project_root,
@@ -637,8 +636,7 @@ impl Gremlin {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(child_gremlin_id.as_str());
-        let child_artifact_dir =
-            config::scratch_root(Some(child_gremlin_id.as_str())).join("artifacts");
+        let child_artifact_dir = child_state_dir.join("artifacts");
         std::fs::create_dir_all(&child_state_dir)?;
         std::fs::create_dir_all(&child_artifact_dir)?;
 
@@ -841,7 +839,7 @@ impl Gremlin {
         }
     }
 
-    /// Remove the scratch directory — the parent of `artifact_dir` — best-effort.
+    /// Remove the scratch directory — best-effort.
     fn clean_scratch(&self) {
         let scratch = config::scratch_root(Some(self.id.as_str()));
         if !scratch.is_dir() {
@@ -1219,13 +1217,12 @@ pub fn framework_subs(
     ])
 }
 
-/// The eight harness-owned system variables, built from a gremlin's paths.
+/// The seven harness-owned system variables, built from a gremlin's paths.
 ///
 /// These are both *seeded into* the base the bootstrap script is sourced
 /// against and *re-asserted* on top of the result, so the script can read
 /// them but can never override them.
 pub fn system_env(
-    artifact_dir: &Path,
     state_dir: &Path,
     gremlin_id: &str,
     project_root: &Path,
@@ -1244,14 +1241,7 @@ pub fn system_env(
     } else {
         worktree_path.clone()
     };
-    // `scratch_root(id)` is the artifact dir's parent. When the artifact dir
-    // has no usable parent, fall back to resolving the scratch root outright so
-    // the variable is never empty.
-    let scratch_dir = artifact_dir
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| config::scratch_root(Some(gremlin_id)));
+    let scratch_dir = config::scratch_root(Some(gremlin_id));
 
     let mut vars = HashMap::new();
     vars.insert("GREMLINS_GREMLIN_ID".to_string(), gremlin_id.to_string());
@@ -1264,10 +1254,6 @@ pub fn system_env(
         overlay_dir.to_string_lossy().into_owned(),
     );
     vars.insert("GREMLINS_WORKTREE_PATH".to_string(), worktree_path);
-    vars.insert(
-        "GREMLINS_ARTIFACT_DIR".to_string(),
-        artifact_dir.to_string_lossy().into_owned(),
-    );
     vars.insert("GREMLIN_WORKSPACE_DIR".to_string(), workspace_dir);
     vars.insert(
         "GREMLIN_STATE_DIR".to_string(),
@@ -1288,21 +1274,13 @@ pub fn system_env(
 /// the environment but can never redirect the harness's paths.
 pub fn resolve_env(
     bootstrap_env: Option<&str>,
-    artifact_dir: &Path,
     state_dir: &Path,
     gremlin_id: &str,
     project_root: &Path,
     worktree: Option<&Path>,
     overlay_dir: &Path,
 ) -> Result<HashMap<String, String>, RunError> {
-    let system = system_env(
-        artifact_dir,
-        state_dir,
-        gremlin_id,
-        project_root,
-        worktree,
-        overlay_dir,
-    );
+    let system = system_env(state_dir, gremlin_id, project_root, worktree, overlay_dir);
 
     let mut base: HashMap<String, String> = std::env::vars().collect();
     base.extend(system.clone());
@@ -1411,16 +1389,13 @@ mod tests {
     #[test]
     fn resolve_env_injects_system_vars() {
         let dir = tempfile::tempdir().unwrap();
-        let artifact_dir = dir.path().join("scratch").join("gr-test").join("artifacts");
         let state_dir = dir.path().join("state").join("gr-test");
         let project_root = dir.path().join("project");
         let overlay_dir = state_dir.join(config::overlay_dirname());
-        std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&overlay_dir).unwrap();
 
         let env = resolve_env(
             None,
-            &artifact_dir,
             &state_dir,
             "gr-test",
             &project_root,
@@ -1433,7 +1408,6 @@ mod tests {
         assert_eq!(env["GREMLINS_PROJECT_ROOT"], project_root.to_string_lossy());
         assert_eq!(env["GREMLINS_OVERLAY_DIR"], overlay_dir.to_string_lossy());
         assert_eq!(env["GREMLINS_WORKTREE_PATH"], "");
-        assert_eq!(env["GREMLINS_ARTIFACT_DIR"], artifact_dir.to_string_lossy());
         assert_eq!(
             env["GREMLIN_WORKSPACE_DIR"],
             std::env::current_dir().unwrap().to_string_lossy()
@@ -1441,7 +1415,7 @@ mod tests {
         assert_eq!(env["GREMLIN_STATE_DIR"], state_dir.to_string_lossy());
         assert_eq!(
             env["GREMLINS_SCRATCH_DIR"],
-            artifact_dir.parent().unwrap().to_string_lossy()
+            config::scratch_root(Some("gr-test")).to_string_lossy()
         );
     }
 
@@ -1462,11 +1436,9 @@ mod tests {
     #[test]
     fn resolve_env_sources_and_keeps_system_vars() {
         let dir = tempfile::tempdir().unwrap();
-        let artifact_dir = dir.path().join("scratch").join("gr-test").join("artifacts");
         let state_dir = dir.path().join("state").join("gr-test");
         let project_root = dir.path().join("project");
         let overlay_dir = state_dir.join(config::overlay_dirname());
-        std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&project_root).unwrap();
         std::fs::create_dir_all(&overlay_dir).unwrap();
 
@@ -1478,7 +1450,6 @@ mod tests {
         );
         let env = resolve_env(
             Some(&script),
-            &artifact_dir,
             &state_dir,
             "gr-test",
             &project_root,
@@ -1494,7 +1465,6 @@ mod tests {
         assert_eq!(env["GREMLINS_PROJECT_ROOT"], project_root.to_string_lossy());
         assert_eq!(env["GREMLINS_OVERLAY_DIR"], overlay_dir.to_string_lossy());
         assert_eq!(env["GREMLINS_WORKTREE_PATH"], "");
-        assert_eq!(env["GREMLINS_ARTIFACT_DIR"], artifact_dir.to_string_lossy());
         assert_eq!(
             env["GREMLIN_WORKSPACE_DIR"],
             std::env::current_dir().unwrap().to_string_lossy()
@@ -1502,19 +1472,17 @@ mod tests {
         assert_eq!(env["GREMLIN_STATE_DIR"], state_dir.to_string_lossy());
         assert_eq!(
             env["GREMLINS_SCRATCH_DIR"],
-            artifact_dir.parent().unwrap().to_string_lossy()
+            config::scratch_root(Some("gr-test")).to_string_lossy()
         );
     }
 
     #[test]
     fn resolve_env_lets_the_script_read_system_vars() {
         let dir = tempfile::tempdir().unwrap();
-        let artifact_dir = dir.path().join("scratch").join("gr-test").join("artifacts");
         let state_dir = dir.path().join("state").join("gr-test");
         let project_root = dir.path().join("project");
         let worktree = dir.path().join("wt");
         let overlay_dir = state_dir.join(config::overlay_dirname());
-        std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&project_root).unwrap();
         std::fs::create_dir_all(&overlay_dir).unwrap();
 
@@ -1524,7 +1492,6 @@ mod tests {
                        export GREMLINS_WORKTREE_PATH=/hijacked\n";
         let env = resolve_env(
             Some(script),
-            &artifact_dir,
             &state_dir,
             "gr-test",
             &project_root,
@@ -1541,14 +1508,11 @@ mod tests {
     #[test]
     fn resolve_env_reports_bootstrap_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let artifact_dir = dir.path().join("scratch").join("gr-test").join("artifacts");
         let state_dir = dir.path().join("state").join("gr-test");
-        std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 
         let error = resolve_env(
             Some("exit 3"),
-            &artifact_dir,
             &state_dir,
             "gr-test",
             dir.path(),
@@ -2018,7 +1982,7 @@ mod tests {
             let id = "gr-clean";
             let state_dir = sandbox.join("state").join(id);
             let scratch_dir = sandbox.join("scratch").join(id);
-            let artifact_dir = scratch_dir.join("artifacts");
+            let artifact_dir = state_dir.join("artifacts");
             let worktree = sandbox.join("worktree");
             std::fs::create_dir_all(&artifact_dir).unwrap();
             std::fs::create_dir_all(&state_dir).unwrap();
@@ -2047,7 +2011,7 @@ mod tests {
             let id = "gr-clean-keep";
             let state_dir = sandbox.join("state").join(id);
             let scratch_dir = sandbox.join("scratch").join(id);
-            let artifact_dir = scratch_dir.join("artifacts");
+            let artifact_dir = state_dir.join("artifacts");
             let worktree = sandbox.join("worktree-keep");
             std::fs::create_dir_all(&artifact_dir).unwrap();
             std::fs::create_dir_all(&state_dir).unwrap();
@@ -2078,7 +2042,7 @@ mod tests {
         with_sandbox(None, |sandbox| {
             let id = "gr-clean-nowt";
             let state_dir = sandbox.join("state").join(id);
-            let artifact_dir = sandbox.join("scratch").join(id).join("artifacts");
+            let artifact_dir = state_dir.join("artifacts");
             std::fs::create_dir_all(&state_dir).unwrap();
             std::fs::create_dir_all(&artifact_dir).unwrap();
 
@@ -2094,7 +2058,7 @@ mod tests {
         with_sandbox(None, |sandbox| {
             let id = "gr-clean-nogit";
             let state_dir = sandbox.join("state").join(id);
-            let artifact_dir = sandbox.join("scratch").join(id).join("artifacts");
+            let artifact_dir = state_dir.join("artifacts");
             std::fs::create_dir_all(&state_dir).unwrap();
             std::fs::create_dir_all(&artifact_dir).unwrap();
 
@@ -2144,7 +2108,7 @@ mod tests {
             }
             let id = "gr-clean-stale";
             let state_dir = sandbox.join("state").join(id);
-            let artifact_dir = sandbox.join("scratch").join(id).join("artifacts");
+            let artifact_dir = state_dir.join("artifacts");
             std::fs::create_dir_all(&state_dir).unwrap();
             std::fs::create_dir_all(&artifact_dir).unwrap();
 

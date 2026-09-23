@@ -384,9 +384,8 @@ registry. The checkout is what guarantees that:
 
 1. The stage cannot discover artifacts outside its declared inputs.
 2. The stage cannot read or write files in the main artifact directory.
-3. The `artifact_dir` path injected into the agent's system prompt and
-   `GREMLINS_ARTIFACT_DIR` env var points into the checkout, not the main
-   registry.
+3. The `artifact_dir` path injected into the agent's system prompt points
+   into the checkout, not the main registry.
 
 ### 4.3 Why checkout exists
 

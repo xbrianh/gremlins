@@ -792,7 +792,7 @@ async fn land(id: &str) -> Result<(), String> {
     let overlay_dir = config::project_overlay_dir(&project_root);
 
     // Build a read-only artifact registry from the artifact directory.
-    let artifact_dir = config::scratch_root(Some(id)).join("artifacts");
+    let artifact_dir = state_dir.join("artifacts");
     let registry = FileSystemArtifactRegistry::new(artifact_dir.clone());
 
     // Resolve interpolation references.
@@ -810,7 +810,6 @@ async fn land(id: &str) -> Result<(), String> {
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.extend(system_env(
-        &artifact_dir,
         &state_dir,
         id,
         &project_root,
