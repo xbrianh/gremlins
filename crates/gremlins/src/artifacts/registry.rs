@@ -120,11 +120,6 @@ pub trait ArtifactRegistry: Send + Sync {
         None
     }
 
-    /// Return `self` as a [`LocalizedArtifactRegistry`] if this backend
-    /// supports it. Default returns `None`.
-    fn as_localized(&self) -> Option<&dyn LocalizedArtifactRegistry> {
-        None
-    }
 }
 
 // --- LocalizedArtifactRegistry trait ---
@@ -927,9 +922,6 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
         Some(self)
     }
 
-    fn as_localized(&self) -> Option<&dyn LocalizedArtifactRegistry> {
-        Some(self)
-    }
 }
 
 // --- LocalizedArtifactRegistry impl for FileSystemArtifactRegistry ---
@@ -1166,9 +1158,6 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
         Some(self)
     }
 
-    fn as_localized(&self) -> Option<&dyn LocalizedArtifactRegistry> {
-        Some(self)
-    }
 }
 
 // --- LocalizedArtifactRegistry impl for DryRunArtifactRegistry ---
