@@ -25,6 +25,7 @@ stages:
           sync_timeout: "180"
           cmds:
             - |
+              set -o pipefail
               TMP_OUT="$(dirname "{done}")/ci_await_out"
               TMP_BAIL="$(dirname "{done}")/ci_await_bail"
               if gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2> >(tee "$TMP_BAIL" >&2) | tee "$TMP_OUT"; then
@@ -32,6 +33,7 @@ stages:
                   touch "{done}"
                 fi
               else
+                wait
                 cat "$TMP_BAIL" > "{bail}"
                 exit 2
               fi
@@ -51,6 +53,7 @@ stages:
           poll_interval: "30"
           cmds:
             - |
+              set -o pipefail
               TMP_OUT="$(dirname "{done}")/ci_poll_out"
               TMP_BAIL="$(dirname "{done}")/ci_poll_bail"
               if gh_ci_poll "{pr_url}" {poll_timeout} {poll_interval} 2> >(tee "$TMP_BAIL" >&2) | tee "$TMP_OUT"; then
@@ -59,6 +62,7 @@ stages:
                   touch "{done}"
                 fi
               else
+                wait
                 cat "$TMP_BAIL" > "{bail}"
                 exit 2
               fi
