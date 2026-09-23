@@ -463,15 +463,12 @@ impl FileSystemArtifactRegistry {
         // Fast path: both sides are filesystem-backed — copy files directly.
         // Also try to unwrap a ScopedFileSystemArtifactRegistry (the checkout
         // wrapper) so that merging from a scoped registry hits the fast path.
-        let fs: Option<&FileSystemArtifactRegistry> = other
-            .as_any()
-            .and_then(|a| {
-                a.downcast_ref::<FileSystemArtifactRegistry>()
-                    .or_else(|| {
-                        a.downcast_ref::<ScopedFileSystemArtifactRegistry>()
-                            .map(|s| &s.inner)
-                    })
-            });
+        let fs: Option<&FileSystemArtifactRegistry> = other.as_any().and_then(|a| {
+            a.downcast_ref::<FileSystemArtifactRegistry>().or_else(|| {
+                a.downcast_ref::<ScopedFileSystemArtifactRegistry>()
+                    .map(|s| &s.inner)
+            })
+        });
         if let Some(other_fs) = fs {
             let mut merged = 0usize;
             for key in other_fs.keys().await {
