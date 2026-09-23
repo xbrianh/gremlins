@@ -112,13 +112,7 @@ impl GremlinDefinition {
         let project_root = project_root_for(&path);
         let expanded = expand::parse_definition_file(&path, &project_root)?;
 
-        let name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        Self::from_expanded_value(expanded, path, name, default_client_override)
+        Self::from_expanded_value(expanded, path, default_client_override)
     }
 
     /// Load an already-expanded YAML file directly — no expansion, no project-root
@@ -145,16 +139,10 @@ impl GremlinDefinition {
         // Strip the sentinel if present — the file may lack it but still be
         // fully expanded.
         if let Some(mapping) = expanded.as_mapping_mut() {
-            mapping.remove("__gremlins_expanded__");
+            mapping.remove(Value::from("__gremlins_expanded__"));
         }
 
-        let name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        Self::from_expanded_value(expanded, path, name, default_client_override)
+        Self::from_expanded_value(expanded, path, default_client_override)
     }
 
     /// Shared extraction: turn an already-expanded YAML [`Value`] into a typed
@@ -163,9 +151,14 @@ impl GremlinDefinition {
     fn from_expanded_value(
         expanded: Value,
         path: PathBuf,
-        name: String,
         default_client_override: Option<&str>,
     ) -> Result<GremlinDefinition, SchemaError> {
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("")
+            .to_string();
+
         let root = expanded
             .as_mapping()
             .ok_or_else(|| SchemaError::YamlNotMapping {
