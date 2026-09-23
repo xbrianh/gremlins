@@ -53,7 +53,7 @@ GHMOCK
 
 @test "outputs nothing when there are no failures" {
     create_gh_jq_mock "$FIXTURES/ci_rollup_passed.json"
-    run bash "$SCRIPT" "$PR_URL"
+    run bash -c '"$@" 2>/dev/null' _ "$SCRIPT" "$PR_URL"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

@@ -65,12 +65,16 @@ bail_review_required() {
 
 # --- main ---
 
+info "ci-gate: polling CI checks for ${pr_url} (timeout=${poll_timeout}s, interval=${poll_interval}s)"
 poll_deadline=$(( $(date +%s) + poll_timeout ))
 
 while true; do
+    remaining=$(( poll_deadline - $(date +%s) ))
     meta=$(fetch_meta)
     decision=$(printf '%s' "$meta" | sed -n '1p')
     checks_done=$(printf '%s' "$meta" | sed -n '2p')
+    rollup_len=$(printf '%s' "$meta" | sed -n '3p')
+    info "ci-gate: poll iteration... checks_done=${checks_done} rollup_len=${rollup_len} ${remaining}s remaining"
     bail_review_required "$decision"
 
     if [ "$checks_done" = "true" ]; then

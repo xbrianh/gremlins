@@ -51,3 +51,5 @@ ${_FAILED_FILTER} | .[] |
         || printf '(could not fetch run logs)\n'
     echo "---"
 done
+
+info "ci-gate: failure log collection complete"
