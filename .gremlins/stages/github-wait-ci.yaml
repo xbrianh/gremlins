@@ -77,7 +77,9 @@ stages:
         options:
           timeout: 120
           cmds:
-            - gh_ci_failure_log "{pr_url}" | tee "{ci_log}"
+            - |
+              set -o pipefail
+              gh_ci_failure_log "{pr_url}" | tee "{ci_log}"
 
       - name: fix
         type: agent
@@ -103,4 +105,6 @@ stages:
           fix_head: "artifact://fix-head"
         options:
           cmds:
-            - 'git rev-parse HEAD | tee "{fix_head}"'
+            - |
+              set -o pipefail
+              git rev-parse HEAD | tee "{fix_head}"

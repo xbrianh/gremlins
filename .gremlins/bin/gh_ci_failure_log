@@ -53,7 +53,7 @@ if [ "$FAILED_COUNT" -eq 0 ]; then
     info "ci-gate: no failed checks with run IDs found"
 else
     info "ci-gate: found ${FAILED_COUNT} failed check(s), downloading logs..."
-    printf '%s' "$FAILED_RUN_IDS" | while IFS= read -r run_id; do
+    printf '%s\n' "$FAILED_RUN_IDS" | while IFS= read -r run_id; do
         echo
         echo "--- run $run_id logs ---"
         timeout 30 gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
