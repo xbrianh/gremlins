@@ -453,6 +453,7 @@ pub async fn run_shell_async(
     cwd: Option<&Path>,
     env: Option<&HashMap<String, String>>,
     timeout: Option<f64>,
+    stream_path: Option<&Path>,
 ) -> Result<ProcResult, ProcError> {
     if shell_cmd.is_empty() {
         return Err(ProcError::EmptyCommand);
@@ -499,15 +500,42 @@ pub async fn run_shell_async(
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
 
+    let stream_path_stdout = stream_path.map(|p| p.to_path_buf());
+    let stream_path_stderr = stream_path.map(|p| p.to_path_buf());
+
     let stdout_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf).await;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stdout.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(ref p) = stream_path_stdout {
+                        append_to_stream_file(p, &chunk[..n]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
         buf
     });
 
     let stderr_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(ref p) = stream_path_stderr {
+                        append_to_stream_file(p, &chunk[..n]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
         buf
     });
 
@@ -1195,6 +1223,19 @@ fn emit_prefixed(
 fn append(file: &mut std::fs::File, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.flush()
+}
+
+/// Open `path` in append mode, write `bytes`, and flush. Errors are silently
+/// swallowed — a broken stream log must never fail the child run.
+fn append_to_stream_file(path: &Path, bytes: &[u8]) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(bytes);
+        let _ = file.flush();
+    }
 }
 
 /// Move every complete record out of `pending`, leaving only the unterminated
@@ -2131,13 +2172,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_success() {
-        let r = run_shell_async("true", None, None, None).await.unwrap();
+        let r = run_shell_async("true", None, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(r.returncode, 0);
     }
 
     #[tokio::test]
     async fn test_run_shell_async_captures_stdout() {
-        let r = run_shell_async("echo hello", None, None, None)
+        let r = run_shell_async("echo hello", None, None, None, None)
             .await
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "hello");
@@ -2145,7 +2188,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_timeout() {
-        let err = run_shell_async("sleep 10", None, None, Some(0.05))
+        let err = run_shell_async("sleep 10", None, None, Some(0.05), None)
             .await
             .unwrap_err();
         match err {
@@ -2156,7 +2199,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_timeout_kills_grandchildren() {
-        let err = run_shell_async("sleep 60 & sleep 60", None, None, Some(0.1))
+        let err = run_shell_async("sleep 60 & sleep 60", None, None, Some(0.1), None)
             .await
             .unwrap_err();
         match err {
@@ -2172,6 +2215,7 @@ mod tests {
             None,
             None,
             Some(0.2),
+            None,
         )
         .await
         .unwrap_err();
@@ -2185,7 +2229,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_cancel() {
-        let handle = tokio::spawn(async { run_shell_async("sleep 10", None, None, None).await });
+        let handle =
+            tokio::spawn(async { run_shell_async("sleep 10", None, None, None, None).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.abort();
         let result = handle.await;
@@ -2199,6 +2244,7 @@ mod tests {
             None,
             Some(&HashMap::from([("FOO".to_string(), "bar".to_string())])),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2207,7 +2253,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_empty_cmd() {
-        let err = run_shell_async("", None, None, None).await.unwrap_err();
+        let err = run_shell_async("", None, None, None, None)
+            .await
+            .unwrap_err();
         match err {
             ProcError::EmptyCommand => {}
             _ => panic!("expected EmptyCommand, got {err}"),

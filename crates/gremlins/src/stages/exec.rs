@@ -322,8 +322,31 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         env.insert(k.clone(), v.clone());
     }
 
-    let result =
-        run_shell_async(&joined, Some(&prepared.cwd), Some(&env), prepared.timeout).await?;
+    let stream_path = prepared
+        .state_dir
+        .join("exec_stage_logs")
+        .join(format!("exec-{}.log", prepared.name));
+    if let Err(e) = std::fs::create_dir_all(stream_path.parent().unwrap()) {
+        log::warn!(
+            "exec {}: failed to create exec_stage_logs dir: {e}",
+            prepared.name
+        );
+    } else {
+        log::info!(
+            "exec {}: streaming output to {}",
+            prepared.name,
+            stream_path.display()
+        );
+    }
+
+    let result = run_shell_async(
+        &joined,
+        Some(&prepared.cwd),
+        Some(&env),
+        prepared.timeout,
+        Some(&stream_path),
+    )
+    .await?;
 
     process_shell_result(prepared, result)
 }
@@ -343,19 +366,6 @@ pub fn process_shell_result(
     let raw_output_str = String::from_utf8_lossy(&raw_output).to_string();
     let shell_output = raw_output_str.trim().to_string();
     let shell_rc = result.returncode;
-
-    let log_path = prepared.state_dir.join(format!("exec-{}.log", name));
-    let log_content = if raw_output_str.is_empty() {
-        "(no output)\n".to_string()
-    } else {
-        raw_output_str.clone()
-    };
-    if let Err(e) = std::fs::write(&log_path, &log_content) {
-        log::warn!(
-            "exec {name}: failed to write log to {}: {e}",
-            log_path.display()
-        );
-    }
 
     log::info!(
         "exec {name}: done rc={shell_rc} output_len={}",

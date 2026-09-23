@@ -823,7 +823,7 @@ async fn land(id: &str) -> Result<(), String> {
         env.insert(k.clone(), v.clone());
     }
 
-    let result = run_shell_async(&joined, Some(&cwd), Some(&env), prepared.timeout)
+    let result = run_shell_async(&joined, Some(&cwd), Some(&env), prepared.timeout, None)
         .await
         .map_err(|e| format!("gremlin {id}: land: {e}"))?;
 
