@@ -25,6 +25,8 @@ _FAILED_FILTER='
 ]
 '
 
+info "ci-gate: collecting failure logs for ${pr_url}"
+
 # Print check headers with run URLs.
 gh pr view "$pr_url" --json statusCheckRollup --jq "
 ${_FAILED_FILTER} | .[] |
@@ -40,14 +42,24 @@ ${_FAILED_FILTER} | .[] |
 "
 
 # Download logs for each failed run.
-gh pr view "$pr_url" --json statusCheckRollup --jq "
+FAILED_RUN_IDS=$(gh pr view "$pr_url" --json statusCheckRollup --jq "
 ${_FAILED_FILTER} | .[] |
     (.detailsUrl // .targetUrl // \"\") |
     capture(\"actions/runs/(?<id>[0-9]+)\") | .id
-" | while IFS= read -r run_id; do
-    echo
-    echo "--- run $run_id logs ---"
-    timeout 30 gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
-        || printf '(could not fetch run logs)\n'
-    echo "---"
-done
+")
+FAILED_COUNT=$(printf '%s' "$FAILED_RUN_IDS" | grep -c '[0-9]' || true)
+
+if [ "$FAILED_COUNT" -eq 0 ]; then
+    info "ci-gate: no failed checks with run IDs found"
+else
+    info "ci-gate: found ${FAILED_COUNT} failed check(s), downloading logs..."
+    printf '%s\n' "$FAILED_RUN_IDS" | while IFS= read -r run_id; do
+        echo
+        echo "--- run $run_id logs ---"
+        timeout 30 gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
+            || printf '(could not fetch run logs)\n'
+        echo "---"
+    done
+fi
+
+info "ci-gate: failure log collection complete"

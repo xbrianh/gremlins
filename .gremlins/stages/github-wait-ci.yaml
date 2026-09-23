@@ -25,9 +25,17 @@ stages:
           sync_timeout: "180"
           cmds:
             - |
-              BAIL_MSG=$(gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2>&1) || { printf '%s' "$BAIL_MSG" > "{bail}"; exit 2; }
-              if [ "$(printf '%s' "$BAIL_MSG" | tail -n 1)" = "skipped" ]; then
-                touch "{done}"
+              set -o pipefail
+              TMP_OUT="$(dirname "{done}")/ci_await_out"
+              TMP_BAIL="$(dirname "{done}")/ci_await_bail"
+              if gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2> >(tee "$TMP_BAIL" >&2) | tee "$TMP_OUT"; then
+                if [ "$(tail -n 1 "$TMP_OUT")" = "skipped" ]; then
+                  touch "{done}"
+                fi
+              else
+                wait
+                cat "$TMP_BAIL" > "{bail}"
+                exit 2
               fi
 
       - name: ci-poll
@@ -45,10 +53,18 @@ stages:
           poll_interval: "30"
           cmds:
             - |
-              BAIL_MSG=$(gh_ci_poll "{pr_url}" {poll_timeout} {poll_interval} 2>&1) || { printf '%s' "$BAIL_MSG" > "{bail}"; exit 2; }
-              printf '%s' "$BAIL_MSG" > "{status}"
-              if [ "$(printf '%s' "$BAIL_MSG" | tail -n 1)" = "passed" ]; then
-                touch "{done}"
+              set -o pipefail
+              TMP_OUT="$(dirname "{done}")/ci_poll_out"
+              TMP_BAIL="$(dirname "{done}")/ci_poll_bail"
+              if gh_ci_poll "{pr_url}" {poll_timeout} {poll_interval} 2> >(tee "$TMP_BAIL" >&2) | tee "$TMP_OUT"; then
+                cp "$TMP_OUT" "{status}"
+                if [ "$(tail -n 1 "$TMP_OUT")" = "passed" ]; then
+                  touch "{done}"
+                fi
+              else
+                wait
+                cat "$TMP_BAIL" > "{bail}"
+                exit 2
               fi
 
       - name: ci-failure-log
@@ -61,7 +77,9 @@ stages:
         options:
           timeout: 120
           cmds:
-            - gh_ci_failure_log "{pr_url}" > "{ci_log}"
+            - |
+              set -o pipefail
+              gh_ci_failure_log "{pr_url}" | tee "{ci_log}"
 
       - name: fix
         type: agent
@@ -87,4 +105,6 @@ stages:
           fix_head: "artifact://fix-head"
         options:
           cmds:
-            - 'git rev-parse HEAD > "{fix_head}"'
+            - |
+              set -o pipefail
+              git rev-parse HEAD | tee "{fix_head}"

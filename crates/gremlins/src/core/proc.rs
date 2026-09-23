@@ -464,7 +464,7 @@ pub async fn run_shell_async(
         }
     }
 
-    let mut command = tokio::process::Command::new("sh");
+    let mut command = tokio::process::Command::new("bash");
     command.arg("-c");
     command.arg(shell_cmd);
     command.stdout(std::process::Stdio::piped());

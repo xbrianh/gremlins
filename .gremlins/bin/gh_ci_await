@@ -46,11 +46,14 @@ bail_review_required() {
 
 # --- main ---
 
+info "ci-gate: awaiting CI availability for ${pr_url}"
 if [ -z "$fix_head" ]; then
     # Iteration 1: startup grace — wait for any check-runs to appear
     grace_deadline=$(( $(date +%s) + startup_grace_secs ))
     rollup_len=0
     while true; do
+        remaining=$(( grace_deadline - $(date +%s) ))
+        info "ci-gate: waiting for check-runs to appear... ${remaining}s grace remaining"
         meta=$(fetch_meta)
         decision=$(printf '%s' "$meta" | sed -n '1p')
         rollup_len=$(printf '%s' "$meta" | sed -n '2p')
@@ -65,13 +68,17 @@ if [ -z "$fix_head" ]; then
         printf 'skipped\n'
         exit 0
     fi
+    info "ci-gate: ${rollup_len} check-run(s) found"
 else
     # Post-fix: wait for GitHub to reflect the pushed commit SHA
+    info "ci-gate: waiting for SHA sync (expecting ${fix_head})"
     sync_deadline=$(( $(date +%s) + sync_timeout ))
     while true; do
+        remaining=$(( sync_deadline - $(date +%s) ))
         meta=$(fetch_meta)
         decision=$(printf '%s' "$meta" | sed -n '1p')
         head_oid=$(printf '%s' "$meta" | sed -n '3p')
+        info "ci-gate: SHA sync poll... current=${head_oid} expected=${fix_head} ${remaining}s remaining"
         bail_review_required "$decision"
         if [ "$head_oid" = "$fix_head" ] || git merge-base --is-ancestor "$fix_head" "$head_oid" 2>/dev/null; then
             break
@@ -82,4 +89,5 @@ else
         fi
         sleep "$poll_interval"
     done
+    info "ci-gate: SHA synced successfully"
 fi
