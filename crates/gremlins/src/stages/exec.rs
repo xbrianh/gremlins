@@ -403,23 +403,29 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         prepared.timeout,
         stream_path_arg,
     )
-    .await?;
+    .await;
     let elapsed = start.elapsed();
 
     // Append footer to stream file (best-effort).
     if stream_path_arg.is_some() {
-        let footer = format!(
-            "\n--- exit: {} (duration: {:.1}s) ---\n",
-            result.returncode,
-            elapsed.as_secs_f64()
-        );
+        let footer = match &result {
+            Ok(r) => format!(
+                "\n--- exit: {} (duration: {:.1}s) ---\n",
+                r.returncode,
+                elapsed.as_secs_f64()
+            ),
+            Err(_) => format!(
+                "\n--- exit: error (duration: {:.1}s) ---\n",
+                elapsed.as_secs_f64()
+            ),
+        };
         let _ = std::fs::OpenOptions::new()
             .append(true)
             .open(&stream_path)
             .and_then(|mut f| f.write_all(footer.as_bytes()));
     }
 
-    process_shell_result(prepared, result)
+    process_shell_result(prepared, result?)
 }
 
 /// Post-process a ProcResult into a ShellResult (log writing, bail detection).
