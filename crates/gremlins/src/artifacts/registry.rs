@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -119,7 +118,6 @@ pub trait ArtifactRegistry: Send + Sync {
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         None
     }
-
 }
 
 // --- LocalizedArtifactRegistry trait ---
@@ -132,21 +130,6 @@ pub trait ArtifactRegistry: Send + Sync {
 /// [`ArtifactRegistry`] (supertrait), so artifact lookups work transparently.
 #[async_trait::async_trait]
 pub trait LocalizedArtifactRegistry: ArtifactRegistry {
-    /// Check whether `path` was produced by (i.e. lives under) this registry.
-    fn is_path_produced(&self, path: &Path) -> bool;
-
-    /// Copy a single artifact file into this registry's storage.
-    ///
-    /// `source_path` is the value returned by [`ArtifactRegistry::data_uri`]
-    /// on the source registry. `dest_filename` is already disambiguated by
-    /// the caller (via [`disambiguate_filename`]). Returns the new absolute
-    /// path within this registry.
-    async fn copy_artifact_into(
-        &self,
-        source_path: &str,
-        dest_filename: &str,
-    ) -> Result<String, Box<dyn std::error::Error>>;
-
     /// The artifact storage directory (or sentinel path for dry-run).
     fn artifact_dir(&self) -> &Path;
 
@@ -244,49 +227,10 @@ async fn merge_registry_via_content<D: ArtifactRegistry + Sync + ?Sized>(
     Ok(merged)
 }
 
-/// Derive a deterministic, key-based filename for an artifact.
-///
-/// Sanitises the key for filesystem use and preserves the source file's
-/// extension. A 16-hex-digit hash of the full key is appended as a suffix
-/// to guarantee that distinct keys always produce distinct filenames.
-#[allow(dead_code)]
-pub(crate) fn disambiguate_filename(key: &str, source_path: &str) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    let hash = hasher.finish();
-
-    let mut name = key.replace('/', "_");
-    // Strip leading "artifact:_" prefix for readability.
-    if let Some(rest) = name.strip_prefix("artifact:_") {
-        name = rest.to_string();
-    }
-    // Keep the readable prefix reasonably short.
-    let max_prefix = 40usize;
-    if name.len() > max_prefix {
-        name.truncate(max_prefix);
-    }
-    // Append a hash suffix for injectivity.
-    name.push('_');
-    name.push_str(&format!("{:016x}", hash));
-
-    // Preserve the extension from the source path.
-    let src_ext = std::path::Path::new(source_path)
-        .extension()
-        .map(|e| e.to_string_lossy().to_string());
-    if let Some(ext) = src_ext {
-        if !name.ends_with(&format!(".{}", ext)) {
-            name.push('.');
-            name.push_str(&ext);
-        }
-    }
-    name
-}
-
 /// Whether `data_uri` points to a filesystem path that can be copied.
 ///
-/// Returns `true` for absolute paths (`/…`) and `file://` URIs.
+/// Returns `true` for absolute paths (`/…`).
 /// Returns `false` for non-file URIs (`http://`, `s3://`, `data:`, etc.).
-#[allow(dead_code)]
 pub(crate) fn is_file_artifact(data_uri: &str) -> bool {
     data_uri.starts_with('/')
 }
@@ -503,36 +447,6 @@ impl FileSystemArtifactRegistry {
         self.read_registry_json().await.into_keys().collect()
     }
 
-    /// Copy a single artifact file into this registry's storage.
-    pub async fn copy_artifact_into(
-        &self,
-        source_path: &str,
-        dest_filename: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let src_path = if source_path.starts_with("file://") {
-            PathBuf::from(source_path.strip_prefix("file://").unwrap_or(source_path))
-        } else {
-            PathBuf::from(source_path)
-        };
-
-        let dest_path = self.artifact_dir.join(dest_filename);
-        if let Some(parent) = dest_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::copy(&src_path, &dest_path).await?;
-        Ok(dest_path.to_string_lossy().to_string())
-    }
-
-    /// Check whether `path` lives under this registry's artifact directory.
-    pub fn is_path_produced(&self, path: &Path) -> bool {
-        // Canonicalize both sides so symlinks (e.g. /var → /private/var on
-        // macOS) don't break the prefix check.
-        let canonical_dir =
-            std::fs::canonicalize(&self.artifact_dir).unwrap_or_else(|_| self.artifact_dir.clone());
-        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        canonical_path.starts_with(&canonical_dir)
-    }
-
     /// The artifact storage directory.
     pub fn artifact_dir(&self) -> &Path {
         &self.artifact_dir
@@ -732,20 +646,6 @@ impl ArtifactRegistry for ScopedFileSystemArtifactRegistry {
 
 #[async_trait::async_trait]
 impl LocalizedArtifactRegistry for ScopedFileSystemArtifactRegistry {
-    fn is_path_produced(&self, path: &Path) -> bool {
-        self.inner.is_path_produced(path)
-    }
-
-    async fn copy_artifact_into(
-        &self,
-        source_path: &str,
-        dest_filename: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        self.inner
-            .copy_artifact_into(source_path, dest_filename)
-            .await
-    }
-
     fn artifact_dir(&self) -> &Path {
         self.inner.artifact_dir()
     }
@@ -921,25 +821,12 @@ impl ArtifactRegistry for FileSystemArtifactRegistry {
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
-
 }
 
 // --- LocalizedArtifactRegistry impl for FileSystemArtifactRegistry ---
 
 #[async_trait::async_trait]
 impl LocalizedArtifactRegistry for FileSystemArtifactRegistry {
-    fn is_path_produced(&self, path: &Path) -> bool {
-        self.is_path_produced(path)
-    }
-
-    async fn copy_artifact_into(
-        &self,
-        source_path: &str,
-        dest_filename: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        self.copy_artifact_into(source_path, dest_filename).await
-    }
-
     fn artifact_dir(&self) -> &Path {
         self.artifact_dir()
     }
@@ -1014,24 +901,9 @@ impl DryRunArtifactRegistry {
         }
     }
 
-    /// Check whether `path` matches the dry-run sentinel pattern.
-    pub fn is_path_produced(&self, path: &Path) -> bool {
-        let s = path.to_string_lossy();
-        s.starts_with("/dev/null/dry-run/")
-    }
-
     /// Sentinel artifact directory path.
     pub fn artifact_dir(&self) -> &Path {
         Path::new("/dev/null/dry-run")
-    }
-
-    /// Copy a single artifact into this registry (sentinel path).
-    pub async fn copy_artifact_into(
-        &self,
-        _source_path: &str,
-        dest_filename: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(format!("/dev/null/dry-run/{}", dest_filename))
     }
 
     /// Produce a filtered in-memory registry containing only the given keys.
@@ -1157,25 +1029,12 @@ impl ArtifactRegistry for DryRunArtifactRegistry {
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
-
 }
 
 // --- LocalizedArtifactRegistry impl for DryRunArtifactRegistry ---
 
 #[async_trait::async_trait]
 impl LocalizedArtifactRegistry for DryRunArtifactRegistry {
-    fn is_path_produced(&self, path: &Path) -> bool {
-        self.is_path_produced(path)
-    }
-
-    async fn copy_artifact_into(
-        &self,
-        source_path: &str,
-        dest_filename: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        self.copy_artifact_into(source_path, dest_filename).await
-    }
-
     fn artifact_dir(&self) -> &Path {
         self.artifact_dir()
     }
@@ -1579,39 +1438,6 @@ mod tests {
         assert_eq!(content, "existing");
     }
 
-    // --- disambiguate_filename tests ---
-
-    #[test]
-    fn test_disambiguate_filename_distinct_keys() {
-        let f1 = disambiguate_filename("artifact://a/out.txt", "/some/path/out.txt");
-        let f2 = disambiguate_filename("artifact://b/out.txt", "/some/path/out.txt");
-        assert_ne!(f1, f2);
-        assert!(f1.contains("a"));
-        assert!(f2.contains("b"));
-    }
-
-    #[test]
-    fn test_disambiguate_filename_slash_underscore_collision() {
-        // `artifact://a/b` and `artifact://a_b` must produce distinct
-        // filenames — replacing `/` with `_` is not injective on its own.
-        let f1 = disambiguate_filename("artifact://a/b", "/tmp/out.txt");
-        let f2 = disambiguate_filename("artifact://a_b", "/tmp/out.txt");
-        assert_ne!(f1, f2);
-    }
-
-    #[test]
-    fn test_disambiguate_filename_preserves_extension() {
-        let f = disambiguate_filename("artifact://foo/bar", "/tmp/data.json");
-        assert!(f.ends_with(".json"));
-    }
-
-    #[test]
-    fn test_disambiguate_filename_deterministic() {
-        let f1 = disambiguate_filename("artifact://x/y", "/a/b.txt");
-        let f2 = disambiguate_filename("artifact://x/y", "/a/b.txt");
-        assert_eq!(f1, f2);
-    }
-
     // --- DryRun merge_registry ---
 
     #[tokio::test]
@@ -1756,16 +1582,6 @@ mod tests {
     // --- LocalizedArtifactRegistry tests ---
 
     #[tokio::test]
-    async fn test_filesystem_is_path_produced() {
-        let (_tmp, artifact_dir) = setup();
-        let reg = FileSystemArtifactRegistry::new(artifact_dir.clone());
-        let path = write_file(&reg, "f", "data").await;
-
-        assert!(reg.is_path_produced(Path::new(&path)));
-        assert!(!reg.is_path_produced(Path::new("/some/other/path")));
-    }
-
-    #[tokio::test]
     async fn test_filesystem_artifact_dir() {
         let (_tmp, artifact_dir) = setup();
         let reg = FileSystemArtifactRegistry::new(artifact_dir.clone());
@@ -1773,42 +1589,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dry_run_is_path_produced() {
-        let reg = DryRunArtifactRegistry::new();
-        assert!(reg.is_path_produced(Path::new("/dev/null/dry-run/foo")));
-        assert!(!reg.is_path_produced(Path::new("/real/path")));
-    }
-
-    #[tokio::test]
     async fn test_dry_run_artifact_dir() {
         let reg = DryRunArtifactRegistry::new();
         assert_eq!(reg.artifact_dir(), Path::new("/dev/null/dry-run"));
-    }
-
-    #[tokio::test]
-    async fn test_dry_run_copy_artifact_into() {
-        let reg = DryRunArtifactRegistry::new();
-        let path = reg
-            .copy_artifact_into("/some/source", "dest.txt")
-            .await
-            .unwrap();
-        assert_eq!(path, "/dev/null/dry-run/dest.txt");
-    }
-
-    #[tokio::test]
-    async fn test_filesystem_copy_artifact_into() {
-        let (tmp, artifact_dir) = setup();
-        let src = tmp.path().join("src.txt");
-        fs::write(&src, "hello").unwrap();
-
-        let reg = FileSystemArtifactRegistry::new(artifact_dir);
-        let dest = reg
-            .copy_artifact_into(&src.to_string_lossy(), "dest.txt")
-            .await
-            .unwrap();
-
-        assert!(dest.contains("dest.txt"));
-        assert_eq!(fs::read_to_string(&dest).unwrap(), "hello");
     }
 
     #[tokio::test]

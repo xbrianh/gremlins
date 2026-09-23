@@ -24,12 +24,12 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::artifacts::uri::Uri;
 use crate::core::proc::run_shell_async;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::truncate;
 use crate::executor::RunError;
 use crate::schemas::bootstrap::substitute_bootstrap_vars;
-use crate::artifacts::uri::Uri;
 
 /// `gremlins:<name>(<args>)`, anchored at the start — the DSL marker is a
 /// prefix, never an infix, so a shell line that merely mentions one is not a
