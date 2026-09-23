@@ -1,7 +1,5 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
-ifneq ($(strip $(shell test -t 1 && echo tty)),)
-MAKEFLAGS += --output-sync=line
-endif
+MAKEFLAGS += --output-sync=target
 
 .PHONY: test check fmt fmt-check clippy build release validate-gremlin-definitions autoformat test-overlay-tools
 
