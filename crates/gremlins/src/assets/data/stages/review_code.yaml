@@ -1,9 +1,0 @@
-stages:
-  - name: review-code
-    type: agent
-    interpolation:
-      plan: content("artifact://plan.md")
-    bind:
-      "{name}": "artifact://{name}-{model}.md"
-    prompt:
-      - gremlins:review/recipe.md
