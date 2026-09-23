@@ -1,5 +1,9 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
-MAKEFLAGS += --output-sync=target
+
+# Override CARGO_TARGET_DIR if set to a read-only path
+ifneq ($(CARGO_TARGET_DIR),)
+export CARGO_TARGET_DIR := target
+endif
 
 .PHONY: test check fmt fmt-check clippy build release validate-gremlin-definitions autoformat test-overlay-tools
 
