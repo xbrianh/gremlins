@@ -326,25 +326,32 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         .state_dir
         .join("exec_stage_logs")
         .join(format!("exec-{}.log", prepared.name));
-    if let Err(e) = std::fs::create_dir_all(stream_path.parent().unwrap()) {
-        log::warn!(
-            "exec {}: failed to create exec_stage_logs dir: {e}",
-            prepared.name
-        );
-    } else {
-        log::info!(
-            "exec {}: streaming output to {}",
-            prepared.name,
-            stream_path.display()
-        );
-    }
+
+    let stream_path_arg: Option<&std::path::Path> =
+        match std::fs::create_dir_all(stream_path.parent().unwrap()) {
+            Ok(()) => {
+                log::info!(
+                    "exec {}: streaming output to {}",
+                    prepared.name,
+                    stream_path.display()
+                );
+                Some(&stream_path)
+            }
+            Err(e) => {
+                log::warn!(
+                    "exec {}: failed to create exec_stage_logs dir: {e}",
+                    prepared.name
+                );
+                None
+            }
+        };
 
     let result = run_shell_async(
         &joined,
         Some(&prepared.cwd),
         Some(&env),
         prepared.timeout,
-        Some(&stream_path),
+        stream_path_arg,
     )
     .await?;
 

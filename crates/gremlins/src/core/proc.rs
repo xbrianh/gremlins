@@ -506,13 +506,30 @@ pub async fn run_shell_async(
     let stdout_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
+        let mut stream_file = stream_path_stdout.as_ref().and_then(|p| {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+            {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    log::warn!(
+                        "run_shell_async: failed to open stream file {}: {e}",
+                        p.display()
+                    );
+                    None
+                }
+            }
+        });
         loop {
             match stdout.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
-                    if let Some(ref p) = stream_path_stdout {
-                        append_to_stream_file(p, &chunk[..n]);
+                    if let Some(ref mut f) = stream_file {
+                        let _ = f.write_all(&chunk[..n]);
+                        let _ = f.flush();
                     }
                 }
                 Err(_) => break,
@@ -524,13 +541,30 @@ pub async fn run_shell_async(
     let stderr_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
+        let mut stream_file = stream_path_stderr.as_ref().and_then(|p| {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+            {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    log::warn!(
+                        "run_shell_async: failed to open stream file {}: {e}",
+                        p.display()
+                    );
+                    None
+                }
+            }
+        });
         loop {
             match stderr.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
-                    if let Some(ref p) = stream_path_stderr {
-                        append_to_stream_file(p, &chunk[..n]);
+                    if let Some(ref mut f) = stream_file {
+                        let _ = f.write_all(&chunk[..n]);
+                        let _ = f.flush();
                     }
                 }
                 Err(_) => break,
@@ -1223,19 +1257,6 @@ fn emit_prefixed(
 fn append(file: &mut std::fs::File, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.flush()
-}
-
-/// Open `path` in append mode, write `bytes`, and flush. Errors are silently
-/// swallowed — a broken stream log must never fail the child run.
-fn append_to_stream_file(path: &Path, bytes: &[u8]) {
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = file.write_all(bytes);
-        let _ = file.flush();
-    }
 }
 
 /// Move every complete record out of `pending`, leaving only the unterminated
@@ -2260,6 +2281,25 @@ mod tests {
             ProcError::EmptyCommand => {}
             _ => panic!("expected EmptyCommand, got {err}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_shell_async_stream_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("stream.log");
+        let r = run_shell_async(
+            "echo hello && echo world >&2",
+            None,
+            None,
+            None,
+            Some(&log_path),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.returncode, 0);
+        let written = std::fs::read_to_string(&log_path).unwrap();
+        assert!(written.contains("hello"));
+        assert!(written.contains("world"));
     }
 
     // -- pump_prefixed tests --
