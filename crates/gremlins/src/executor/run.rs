@@ -423,7 +423,7 @@ async fn run_agent(
             })?;
         gremlin
             .registry
-            .merge_registry(local_registry.as_ref(), Collision::Error, None)
+            .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
             .await
             .map_err(|error| RunError::StageFailed {
                 stage: prepared.name.clone(),
@@ -532,7 +532,7 @@ async fn run_agent(
     // Merge the localized registry back into the main registry.
     gremlin
         .registry
-        .merge_registry(local_registry.as_ref(), Collision::Error, None)
+        .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
         .await
         .map_err(|error| RunError::StageFailed {
             stage: prepared.name.clone(),
@@ -669,7 +669,7 @@ async fn run_exec(
             })?;
         gremlin
             .registry
-            .merge_registry(local_registry.as_ref(), Collision::Error, None)
+            .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
             .await
             .map_err(|error| RunError::StageFailed {
                 stage: prepared.name.clone(),
@@ -715,7 +715,7 @@ async fn run_exec(
     // Merge the localized registry back into the main registry.
     gremlin
         .registry
-        .merge_registry(local_registry.as_ref(), Collision::Error, None)
+        .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
         .await
         .map_err(|error| RunError::StageFailed {
             stage: prepared.name.clone(),
