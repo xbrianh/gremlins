@@ -15,6 +15,7 @@ bootstrap:
     - gremlins:bind_artifact("artifact://instructions.txt", instructions)
   env: |
     export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
+    export CARGO_INCREMENTAL=0
     THE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"
     if [ -f "$THE_ENV" ]; then
         source "$THE_ENV"

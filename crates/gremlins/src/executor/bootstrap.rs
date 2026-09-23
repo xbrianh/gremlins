@@ -10,8 +10,8 @@
 //! 2. `bootstrap.launch_cmds` — launch-only commands. An entry that parses as
 //!    a `gremlins:` DSL call runs inline; everything else is a shell command,
 //!    `{var}`-substituted and joined with `&&`.
-//! 3. `bootstrap.cli_out` — artifact bindings computed at launch, run through a
-//!    synthetic [`Exec`] so they share the stage layer's URI and commit rules.
+//! 3. `bootstrap.cli_out` — artifact bindings computed at launch, registered
+//!    directly into the main registry via [`ArtifactRegistry::copy_into_registry`].
 //!
 //! The DSL exists so a launch can *bind* a source value into the registry —
 //! today only `gremlins:bind_artifact(uri, source_key)` — without shelling out
@@ -27,10 +27,9 @@ use regex::Regex;
 use crate::artifacts::uri::Uri;
 use crate::core::proc::run_shell_async;
 use crate::executor::gremlin::Gremlin;
-use crate::executor::run::{loop_iter_of, truncate};
+use crate::executor::run::truncate;
 use crate::executor::RunError;
 use crate::schemas::bootstrap::substitute_bootstrap_vars;
-use crate::stages::exec::{commit_exec, prepare_exec, run_shell, Exec};
 
 /// `gremlins:<name>(<args>)`, anchored at the start — the DSL marker is a
 /// prefix, never an infix, so a shell line that merely mentions one is not a
@@ -349,64 +348,47 @@ pub async fn run_definition_bootstrap(gremlin: &mut Gremlin) -> Result<(), RunEr
 
     if !bootstrap.cli_out.is_empty() {
         log::info!("running {} cli_out binding(s)", bootstrap.cli_out.len());
-        run_cli_out(gremlin, &bootstrap.cli_out, &cwd, &env).await?;
+        run_cli_out(gremlin, &bootstrap.cli_out).await?;
     }
 
     Ok(())
 }
 
-/// Bind `cli_out`'s artifacts through a synthetic `bootstrap` exec stage.
+/// Bind `cli_out`'s artifacts directly into the main registry.
 ///
-/// Routing through the stage layer rather than the registry directly is what
-/// gives launch-time bindings the same URI resolution, optional-bind handling,
-/// and commit verification as any other stage's outputs. The exec has no
-/// commands — it exists only for its `bind` map — so the shell phase is a
-/// no-op and the commit phase does all the work.
+/// `cli_out` stands outside the pipeline stage model — it is a mechanical
+/// binding step that registers files already written by bootstrap commands.
+/// The file already lives at the path resolved by `path_for_uri`, so we commit
+/// the binding directly rather than copying the file onto itself.
 async fn run_cli_out(
     gremlin: &mut Gremlin,
     cli_out: &HashMap<String, String>,
-    cwd: &Path,
-    env: &HashMap<String, String>,
 ) -> Result<(), RunError> {
-    let exec = Exec {
-        name: "bootstrap".to_string(),
-        options: HashMap::new(),
-        interpolation_map: HashMap::new(),
-        bind_map: cli_out.clone(),
-    };
-    let attempt = gremlin.state.read_str("attempt");
-    let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
-    let framework_subs = HashMap::from([
-        ("name".to_string(), exec.name.clone()),
-        ("model".to_string(), gremlin.client.model().to_string()),
-        ("cwd".to_string(), cwd.to_string_lossy().into_owned()),
-        ("base_ref".to_string(), gremlin.base_ref.clone()),
-    ]);
-
     let failed = |error: String| RunError::BootstrapFailed {
         exit_code: 1,
         stderr: error,
     };
 
-    let mut prepared = prepare_exec(
-        &exec,
-        gremlin.registry.as_ref(),
-        &loop_iter,
-        &framework_subs,
-    )
-    .await
-    .map_err(|error| failed(error.to_string()))?;
-    prepared.cwd = cwd.to_path_buf();
-    prepared.artifact_dir = gremlin.artifact_dir.clone();
-    prepared.state_dir = gremlin.state_dir.clone();
-    prepared.env = env.clone();
-
-    run_shell(&prepared)
-        .await
-        .map_err(|error| failed(error.to_string()))?;
-    commit_exec(&prepared, gremlin.registry.as_ref(), gremlin.dry_run)
-        .await
-        .map_err(|error| failed(error.to_string()))?;
+    for uri_str in cli_out.values() {
+        let uri = Uri::parse(uri_str).map_err(|e| failed(e.to_string()))?;
+        let path = gremlin
+            .registry
+            .as_ref()
+            .path_for_uri(&uri)
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+        if !Path::new(&path).exists() {
+            return Err(failed(format!(
+                "cli_out: artifact {uri_str:?} not found at {path}"
+            )));
+        }
+        gremlin
+            .registry
+            .as_ref()
+            .commit(&uri.to_string(), &path)
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+    }
 
     Ok(())
 }
@@ -775,8 +757,7 @@ mod tests {
         };
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
-        // The synthetic exec verifies the bound file exists, so the producer's
-        // output is staged first — exactly as a real cli_out follows its cmds.
+        // run_cli_out verifies the bound file exists, so stage the output first.
         let uri = Uri::parse("artifact://pr.txt").unwrap();
         let path = gremlin.registry.as_ref().path_for_uri(&uri).await.unwrap();
         std::fs::write(&path, "123").unwrap();

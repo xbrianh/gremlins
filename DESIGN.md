@@ -139,7 +139,7 @@ that decide whether to skip — which §2 explicitly forbids.
 
 The cost of this exception:
 
-- §5's "per-stage cost is roughly stable" does not hold for these two.
+- §6's "per-stage cost is roughly stable" does not hold for these two.
   Cost scales with the number of fix attempts and the size of the
   accumulated check output. Per-attempt streams are written to the
   session directory (`stream-verify-N.jsonl`, `verify-attempt-N.log`)
@@ -171,7 +171,7 @@ The two routes serve different jobs:
   live in `state.json` after the process exits.
 
 The persistence is the point. `bail_class` is read by the rescue
-protocol (§4.3), the fleet manager, the boss recovery table, and shell
+protocol (§5.3), the fleet manager, the boss recovery table, and shell
 hooks — exactly the cross-process consumers §2 says we serve with
 byte-stable strings rather than prose. A stage that only raises tells a
 human; a stage that calls `emit_bail` first also tells a *script*.
@@ -255,7 +255,7 @@ means the same prompt scales from a 100-file repo to a 10,000-file repo
 without modification.
 
 The cost of this is a bit of redundant exploration: `implement` re-reads
-files that `plan` already read. We accept that cost (see §5) because the
+files that `plan` already read. We accept that cost (see §6) because the
 alternative — pre-loading the union of files plan touched — would couple
 the stages together, defeat resumption, and bloat the prompt.
 
@@ -343,7 +343,71 @@ explicit:
 - `--resume-from <group>-fanin`: re-aggregate whatever shards exist without
   rerunning workers. The clean win when workers finished but fan-in crashed.
 
-## 4. Boss gremlins and chained workflows
+## 4. The artifact registry
+
+Artifacts are the only communication channel between stages (§3.1). Every
+artifact lives in an **artifact registry** — a key-value store that maps
+artifact URIs (`artifact://plan.md`) to filesystem paths or inline content.
+
+### 4.1 Two views of the registry
+
+The `ArtifactRegistry` trait provides content lookup, URI resolution, and
+registration. Its companion `LocalizedArtifactRegistry` adds filesystem-scoped
+operations — path resolution, file-existence checks, and file copy — that
+require a concrete directory.
+
+The registry has two consumers with different needs:
+
+- **Agent stages** must be constrained. An agent that can see every artifact
+  in the registry can read files it was never meant to see. Section 3 says
+  each agent gets exactly the information it needs and nothing else. To
+  enforce this, agent stages receive a **checkout** — a scoped, temporary
+  registry containing only the stage's declared bind and interpolation keys.
+- **Exec stages** also use a checkout. They run shell commands and need
+  filesystem access to artifacts. The checkout gives them a scoped directory
+  containing only their declared inputs.
+- **Everything else** — bootstrap, `bind_artifact`, the `cli_out` binding
+  step — populates the main registry directly. These are deterministic
+  mechanical operations, not agentic stages. There is no context to
+  constrain.
+
+### 4.2 Checkout as the canonical entry point for stages
+
+`ArtifactRegistry::checkout(&keys)` creates a scoped `LocalizedArtifactRegistry`
+in a temporary directory. For each key:
+
+- If the key is already registered, the artifact file (or content) is copied
+  into the checkout.
+- If the key is not yet registered, an empty placeholder path is created so
+  the stage can write the file. The stage's `commit_agent` / `commit_exec`
+  then registers it.
+
+After the stage completes, `merge_registry` copies the checkout's new
+artifacts back into the main registry. The checkout directory is discarded.
+
+Agent and exec stages **must** use checkout to move objects into the
+registry. The checkout is what guarantees that:
+
+1. The stage cannot discover artifacts outside its declared inputs.
+2. The stage cannot read or write files in the main artifact directory.
+3. The `artifact_dir` path injected into the agent's system prompt and
+   `GREMLINS_ARTIFACT_DIR` env var points into the checkout, not the main
+   registry.
+
+### 4.3 Why checkout exists
+
+It is too difficult to create a registry backend that is not filesystem-backed
+without a checkout mechanism. The alternative — forcing agent and exec stages
+to never touch the filesystem and instead call registry APIs for every read
+and write — is too constraining. Agents already have filesystem tools (Read,
+Write, Edit, Bash); exec stages run arbitrary shell commands. Both need real
+files to work with.
+
+Checkout gives them real files, scoped to exactly what they should see. The
+main registry remains the authoritative store; checkouts are transient
+workspaces.
+
+## 5. Boss gremlins and chained workflows
 
 A single gremlin produces one PR from one plan. Many real tasks don't fit
 that shape — they are sequences of related changes that have to land in
@@ -372,7 +436,7 @@ for fleet status, but it does not pass `--resume-from` when re-spawning a
 boss. If a caller does provide `--resume-from`, `boss_main` logs that the
 flag is being ignored and resumes from the chain cursor in `boss_state.json`.
 
-### 4.1 Where the agency lives
+### 5.1 Where the agency lives
 
 The boss reuses the §2 dividing line, applied at a different scale:
 
@@ -391,7 +455,7 @@ Everything else in the boss loop is plain Python. Notably, the boss does
 child's `state.json`. This is the same byte-stable-strings discipline
 from §2 applied across the parent/child boundary.
 
-### 4.2 Context isolation across the chain
+### 5.2 Context isolation across the chain
 
 Children inherit nothing from each other in-memory. The chain accumulates
 context the same way stages within a single gremlin do (§3): through
@@ -406,7 +470,7 @@ the boss to continue. None of that requires reconstructing in-memory
 context, because there isn't any — every decision is a function of files
 on disk and `state.json` cursors.
 
-### 4.3 The child-bail recovery protocol
+### 5.3 The child-bail recovery protocol
 
 When a child bails, the boss halts and the operator decides what
 happened. There are three operator commands, each writing one
@@ -428,7 +492,7 @@ re-handoffs and spawns a near-duplicate child. This is a deliberate
 design choice: ambiguity at the chain level is surfaced to the operator
 rather than papered over by another model call.
 
-### 4.4 Why a boss isn't just a longer definition
+### 5.4 Why a boss isn't just a longer definition
 
 We could express boss workflows as a single longer YAML definition with
 many `plan → implement → review-code → ...` repetitions. We don't,
@@ -448,7 +512,7 @@ because:
 The boss is the right abstraction precisely because it stays out of the
 child's definition and confines its own agency to one decision per step.
 
-### 4.5 PR stacking in looped definitions
+### 5.5 PR stacking in looped definitions
 
 When a definition contains a `loop` stage and that loop body includes an
 `github-open-pull-request` stage, every PR after the first is automatically based on
@@ -486,7 +550,7 @@ Within a looped definition you can also set `base_ref` under the
 the fallback when the artifact list is empty, but this does not suppress
 stacking once prior PR artifacts exist.
 
-## 5. Cost model
+## 6. Cost model
 
 Per-gremlin cost is dominated by two things:
 
@@ -510,7 +574,7 @@ The cost knobs we *do* use:
 
 The cost knobs we have *considered and are not using today*:
 
-### 5.1 Why session-resumption caching is out for now
+### 6.1 Why session-resumption caching is out for now
 
 We did try this.
 
@@ -571,7 +635,7 @@ If we ever reopen it, the bar should be concrete:
 Until then, the simpler rule wins: stages communicate through explicit
 artifacts, not inherited session history.
 
-### 5.2 What we'd do instead, if cost became a problem
+### 6.2 What we'd do instead, if cost became a problem
 
 Before reaching for session caching we would:
 
@@ -587,7 +651,7 @@ Before reaching for session caching we would:
 
 The discipline is: cost work follows measurement, not intuition.
 
-## 6. What this design is not good at
+## 7. What this design is not good at
 
 Worth stating, so future contributors don't try to bend the system into
 shapes it resists:
