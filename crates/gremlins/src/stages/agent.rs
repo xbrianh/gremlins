@@ -330,7 +330,7 @@ pub(crate) fn build_workspace_preamble(cwd: &str) -> String {
         parts.push(format!("Your working directory is: {cwd}"));
     }
     parts.push(
-        "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR, $GREMLINS_ARTIFACT_DIR"
+        "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR"
             .to_string(),
     );
     parts.join("\n")
@@ -795,7 +795,10 @@ mod tests {
         let mut prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
         prepared.cwd = String::new();
         let preamble = build_workspace_preamble(&prepared.cwd);
-        assert_eq!(preamble, "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR, $GREMLINS_ARTIFACT_DIR");
+        assert_eq!(
+            preamble,
+            "Relevant environment variables: $GREMLINS_WORKTREE_PATH, $GREMLIN_WORKSPACE_DIR"
+        );
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(!full.contains("Your working directory is"));
     }

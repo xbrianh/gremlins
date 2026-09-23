@@ -329,10 +329,6 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
     } else {
         prepared.env.clone()
     };
-    env.insert(
-        "GREMLINS_ARTIFACT_DIR".to_string(),
-        prepared.artifact_dir.to_string_lossy().to_string(),
-    );
     // Merge substitution env vars (GREMLINS_<KEY> → value) into the child
     // shell's environment so {key} tokens resolve verbatim.
     for (k, v) in &prepared.substitution_env {

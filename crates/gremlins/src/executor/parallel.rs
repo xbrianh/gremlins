@@ -495,7 +495,9 @@ async fn merge_child_artifacts(
     }
 
     // Fallback: construct a FileSystemArtifactRegistry from disk.
-    let child_artifact_dir = config::scratch_root(Some(&outcome.child_id)).join("artifacts");
+    let child_artifact_dir = config::state_root()
+        .join(&outcome.child_id)
+        .join("artifacts");
     if !child_artifact_dir.exists() {
         return Ok(());
     }
@@ -637,8 +639,8 @@ mod tests {
         default_client: &str,
     ) -> (tempfile::TempDir, Gremlin) {
         let tmp = tempfile::tempdir().unwrap();
-        let artifact_dir = tmp.path().join("scratch").join("artifacts");
         let state_dir = tmp.path().join("state").join("gr-test");
+        let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 

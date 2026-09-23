@@ -441,13 +441,7 @@ async fn run_agent(
 
     std::fs::create_dir_all(local_registry.artifact_dir())?;
 
-    // Clone the gremlin env but override GREMLINS_ARTIFACT_DIR to point at
-    // the localized checkout so the agent cannot bypass the scoped registry.
-    let mut stage_env = gremlin.env.clone();
-    stage_env.insert(
-        "GREMLINS_ARTIFACT_DIR".to_string(),
-        local_registry.artifact_dir().to_string_lossy().to_string(),
-    );
+    let stage_env = gremlin.env.clone();
 
     let params = RunParams {
         prompt: prepared.user_prompt(),
@@ -1097,8 +1091,8 @@ mod tests {
         default_client: &str,
     ) -> (tempfile::TempDir, Gremlin) {
         let tmp = tempfile::tempdir().unwrap();
-        let artifact_dir = tmp.path().join("scratch").join("artifacts");
         let state_dir = tmp.path().join("state").join("gr-test");
+        let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 

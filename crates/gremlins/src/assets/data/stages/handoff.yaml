@@ -3,11 +3,13 @@ stages:
     body:
       - name: detach-prior-pr
         type: exec
+        bind:
+          pr_branch?: "artifact://pr-branch.txt"
         options:
           cmds:
             - |
-              if [ -f "$GREMLINS_ARTIFACT_DIR/pr-branch.txt" ]; then
-                branch="$(cat "$GREMLINS_ARTIFACT_DIR/pr-branch.txt")"
+              if [ -f "{pr_branch}" ]; then
+                branch="$(cat "{pr_branch}")"
                 if [ -n "$branch" ]; then
                   git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch" && git checkout --detach "origin/$branch"
                 fi
@@ -18,14 +20,15 @@ stages:
         bind:
           rolling_plan: "artifact://rolling-plan.md"
           boss_spec: "artifact://boss-spec.md"
+          plan: "artifact://plan.md"
         options:
           cmds:
             - |
               if [ ! -f "{boss_spec}" ]; then
-                cp "$GREMLINS_ARTIFACT_DIR/plan.md" "{boss_spec}"
+                cp "{plan}" "{boss_spec}"
               fi
               if [ ! -f "{rolling_plan}" ]; then
-                cp "$GREMLINS_ARTIFACT_DIR/plan.md" "{rolling_plan}"
+                cp "{plan}" "{rolling_plan}"
               fi
 
       - name: handoff
@@ -52,13 +55,16 @@ stages:
         bind:
           bail?: "artifact://{loop_iter}/bail"
           done?: "artifact://{loop_iter}/done"
+          rolling_plan_pre: "artifact://rolling-plan-pre-sanitize.md"
+          plan: "artifact://plan.md"
+          boss_spec: "artifact://boss-spec.md"
         options:
           cmds:
             - |
               SIGNAL="{signal}"
               ROLLING="{rolling_plan}"
 
-              cp "$ROLLING" "$GREMLINS_ARTIFACT_DIR/rolling-plan-pre-sanitize.md"
+              cp "$ROLLING" "{rolling_plan_pre}"
 
               if [ ! -f "$SIGNAL" ]; then
                 printf 'signal.json not written by agent' > "{bail}"
@@ -76,10 +82,10 @@ stages:
                       > "{bail}"
                     exit 2
                   fi
-                  cp "$CHILD" "$GREMLINS_ARTIFACT_DIR/plan.md"
+                  cp "$CHILD" "{plan}"
                   ;;
                 chain-done)
-                  cp "$GREMLINS_ARTIFACT_DIR/boss-spec.md" "$GREMLINS_ARTIFACT_DIR/plan.md"
+                  cp "{boss_spec}" "{plan}"
                   printf 'done' > "{done}"
                   ;;
                 bail)
@@ -110,11 +116,13 @@ stages:
         type: exec
         interpolation:
           rolling_plan: artifact://rolling-plan.md
+        bind:
+          rolling_plan_pre: "artifact://rolling-plan-pre-sanitize.md"
         options:
           cmds:
             - |
               ROLLING="{rolling_plan}"
               if [ ! -s "$ROLLING" ]; then
-                cp "$GREMLINS_ARTIFACT_DIR/rolling-plan-pre-sanitize.md" \
+                cp "{rolling_plan_pre}" \
                   "$ROLLING"
               fi
