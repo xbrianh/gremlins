@@ -458,7 +458,7 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
 /// Check whether a key appears in the stage's text as `{KEY}` (not `${KEY}`).
 /// The runtime normalizes hyphens to underscores (and vice versa) during
 /// substitution, so e.g. `{child-plan}` matches a key declared as `child_plan`.
-fn key_referenced_in_text(key_str: &str, text: &str) -> bool {
+pub(crate) fn key_referenced_in_text(key_str: &str, text: &str) -> bool {
     let mut targets = Vec::with_capacity(2);
     targets.push(format!("{{{key_str}}}"));
     if key_str.contains('-') {
