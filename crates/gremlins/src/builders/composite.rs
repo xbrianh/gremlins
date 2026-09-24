@@ -18,8 +18,8 @@ use crate::stages::parallel::{validate_child_names, ErrorPolicy};
 /// use gremlins::builders::*;
 ///
 /// let seq = SequenceBuilder::new("workflow")
-///     .stage(ExecBuilder::new("step-a").cmd("echo a").build())
-///     .stage(ExecBuilder::new("step-b").cmd("echo b").build())
+///     .stage(ExecBuilder::new("step-a").cmd("echo a").build().unwrap())
+///     .stage(ExecBuilder::new("step-b").cmd("echo b").build().unwrap())
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
@@ -72,7 +72,7 @@ impl SequenceBuilder {
     }
 
     /// Consume the builder and produce a [`RunnableStage::Sequence`].
-    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+    pub fn build(mut self) -> Result<RunnableStage, SchemaError> {
         let name = self.name.clone();
 
         if self.body.is_empty() {
@@ -81,6 +81,9 @@ impl SequenceBuilder {
                 msg: "'body' must not be empty".to_string(),
             });
         }
+
+        // Fill names for unnamed children (same as the YAML path).
+        crate::builders::definition::fill_builder_names(&mut self.body);
 
         let mut attrs = StageAttrs::new(self.name);
         attrs.stage_type = "sequence".to_string();
@@ -106,8 +109,8 @@ impl SequenceBuilder {
 /// use gremlins::builders::*;
 ///
 /// let par = ParallelBuilder::new("reviews")
-///     .stage(AgentBuilder::new("review-one").prompt("review").build())
-///     .stage(AgentBuilder::new("review-two").prompt("review").build())
+///     .stage(AgentBuilder::new("review-one").prompt("review").build().unwrap())
+///     .stage(AgentBuilder::new("review-two").prompt("review").build().unwrap())
 ///     .max_concurrent(2)
 ///     .build();
 /// ```
@@ -188,6 +191,15 @@ impl ParallelBuilder {
     pub fn build(mut self) -> Result<RunnableStage, SchemaError> {
         let name = self.name.clone();
 
+        // Reject max_concurrent(0) — YAML rejects it, and the executor
+        // silently treats zero as unlimited.
+        if self.max_concurrent == Some(0) {
+            return Err(SchemaError::Stage {
+                name: name.clone(),
+                msg: "max_concurrent must be >= 1, got 0".to_string(),
+            });
+        }
+
         // Reject nested parallel children.
         for child in &self.body {
             if child.stage_type() == "parallel" {
@@ -237,7 +249,7 @@ impl ParallelBuilder {
 /// let lp = LoopBuilder::new("verify")
 ///     .max_iterations(5)
 ///     .stop_when_exists("artifact://{loop_iter}/done")
-///     .stage(ExecBuilder::new("cmd").cmd("make test").build())
+///     .stage(ExecBuilder::new("cmd").cmd("make test").build().unwrap())
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]

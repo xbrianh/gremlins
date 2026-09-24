@@ -73,9 +73,10 @@ fn substitute_recipe_placeholders(
             }
         }
         serde_yaml::Value::String(s) => {
-            if s == "{{options.cmds}}" {
+            if s.contains("{{options.cmds}}") {
                 if let Some(c) = cmds {
-                    *value = serde_yaml::Value::String(c.join(" ; "));
+                    *value =
+                        serde_yaml::Value::String(s.replace("{{options.cmds}}", &c.join(" && ")));
                 }
             } else if let Some(rest) = s.strip_prefix("{{options.max_iterations | default(") {
                 if let Some(n) = max_iterations {

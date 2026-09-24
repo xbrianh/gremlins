@@ -11,7 +11,9 @@ use crate::stages::node::RunnableStage;
 
 /// Build an [`Exec`] stage.
 ///
-/// Every setter consumes `self` and returns `Self`.  `build()` is infallible.
+/// Every setter consumes `self` and returns `Self`.  `build()` returns
+/// `Result` and may fail on validation errors (interpolation syntax,
+/// framework key collisions).
 ///
 /// # Example
 ///

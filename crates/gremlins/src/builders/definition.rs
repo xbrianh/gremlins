@@ -309,7 +309,8 @@ impl Default for LandBuilder {
 ///         AgentBuilder::new("plan")
 ///             .prompt("write the plan to {plan}")
 ///             .bind("plan", artifact("artifact://plan.md"))
-///             .build(),
+///             .build()
+///             .unwrap(),
 ///     )
 ///     .build()
 ///     .unwrap();
@@ -392,6 +393,41 @@ impl DefinitionBuilder {
     /// Consume the builder, run validators, and produce a
     /// [`GremlinDefinition`].
     pub fn build(mut self) -> Result<GremlinDefinition, SchemaError> {
+        let name = self.name.clone();
+
+        // Reject blank required fields.
+        if self.default_client.is_empty() {
+            return Err(SchemaError::Stage {
+                name: name.clone(),
+                msg: "'default_client' must not be blank".to_string(),
+            });
+        }
+        if self.base_ref.is_empty() {
+            return Err(SchemaError::Stage {
+                name: name.clone(),
+                msg: "'base_ref' must not be blank".to_string(),
+            });
+        }
+
+        // Validate land stage: must be an exec stage named "land".
+        if let Some(ref land) = self.land {
+            if land.stage_type() != "exec" {
+                return Err(SchemaError::Stage {
+                    name: name.clone(),
+                    msg: format!(
+                        "land stage must be an exec stage, got {}",
+                        land.stage_type()
+                    ),
+                });
+            }
+            if land.name() != "land" {
+                return Err(SchemaError::Stage {
+                    name: name.clone(),
+                    msg: format!("land stage must be named 'land', got {:?}", land.name()),
+                });
+            }
+        }
+
         // Run name-filling pass first (same as the YAML path).
         fill_builder_names(&mut self.stages);
 

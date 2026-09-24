@@ -11,13 +11,15 @@
 //!         AgentBuilder::new("plan")
 //!             .prompt("write the plan to {plan}")
 //!             .bind("plan", artifact("artifact://plan.md"))
-//!             .build(),
+//!             .build()
+//!             .unwrap(),
 //!     )
 //!     .stage(
 //!         ExecBuilder::new("run")
 //!             .cmd("cat {plan}")
 //!             .interpolate("plan", content("artifact://plan.md"))
-//!             .build(),
+//!             .build()
+//!             .unwrap(),
 //!     )
 //!     .build()
 //!     .unwrap();
