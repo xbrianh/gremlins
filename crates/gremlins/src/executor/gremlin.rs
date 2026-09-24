@@ -35,6 +35,7 @@ use crate::artifacts::registry::{
     ArtifactRegistry, DryRunArtifactRegistry, FileSystemArtifactRegistry,
 };
 use crate::artifacts::uri::Uri;
+use crate::builders::definition::DefinitionBuilder;
 use crate::clients::client::Client;
 use crate::config;
 use crate::core::{discovery, env_file, git};
@@ -491,10 +492,10 @@ impl Gremlin {
         };
 
         let definition = if self.definition_is_expanded {
-            GremlinDefinition::from_expanded_yaml(&definition_path, self.client_override.as_deref())
+            DefinitionBuilder::from_expanded_yaml(&definition_path, self.client_override.as_deref())
                 .map_err(|error| RunError::Message(error.to_string()))?
         } else {
-            GremlinDefinition::from_yaml(&definition_path, self.client_override.as_deref())
+            DefinitionBuilder::from_yaml(&definition_path, self.client_override.as_deref())
                 .map_err(|error| RunError::Message(error.to_string()))?
         };
 
@@ -576,7 +577,7 @@ impl Gremlin {
     ) -> Result<Gremlin, RunError> {
         let definition = match child_definition_path {
             Some(path) => {
-                GremlinDefinition::from_yaml(path, None).unwrap_or_else(|_| self.definition.clone())
+                DefinitionBuilder::from_yaml(path, None).unwrap_or_else(|_| self.definition.clone())
             }
             None => self.definition.clone(),
         };
