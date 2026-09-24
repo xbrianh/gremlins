@@ -22,6 +22,7 @@ use crate::schemas::error::SchemaError;
 use crate::schemas::loader::{self as schema_loader, StageEntry, StageNode};
 use crate::stages::agent::Agent;
 use crate::stages::composite::{get_client_from_dict, ClientSpec, StageAttrs};
+use crate::stages::constants::FRAMEWORK_KEYS;
 use crate::stages::exec::Exec;
 use crate::stages::parallel::{validate_child_names, ErrorPolicy, ParallelGroup};
 use crate::stages::r#loop::Loop;
@@ -231,6 +232,58 @@ impl RunnableStage {
             RunnableStage::Loop { attrs, .. }
             | RunnableStage::Sequence { attrs, .. }
             | RunnableStage::Parallel { attrs, .. } => attrs.name = name,
+        }
+    }
+
+    /// Serialize this stage (and its children, recursively) to a
+    /// [`serde_yaml::Value`] matching the canonical expanded-YAML shape.
+    pub fn to_yaml(&self) -> Value {
+        match self {
+            RunnableStage::Agent {
+                stage,
+                skip_if_exists,
+                client,
+            } => agent_to_yaml(stage, skip_if_exists, client),
+            RunnableStage::Exec {
+                stage,
+                skip_if_exists,
+                client,
+            } => exec_to_yaml(stage, skip_if_exists, client),
+            RunnableStage::Loop {
+                attrs,
+                max_iterations,
+                stop_when_exists,
+                interval,
+                client,
+                body,
+            } => loop_to_yaml(
+                attrs,
+                *max_iterations,
+                stop_when_exists,
+                *interval,
+                client,
+                body,
+            ),
+            RunnableStage::Sequence {
+                attrs,
+                client,
+                body,
+            } => sequence_to_yaml(attrs, client, body),
+            RunnableStage::Parallel {
+                attrs,
+                max_concurrent,
+                cancel_on_error,
+                error_policy,
+                client,
+                body,
+            } => parallel_to_yaml(
+                attrs,
+                *max_concurrent,
+                *cancel_on_error,
+                *error_policy,
+                client,
+                body,
+            ),
         }
     }
 
@@ -465,6 +518,248 @@ fn yaml_type_name(value: &Value) -> &'static str {
         Value::Mapping(_) => "dict",
         Value::Tagged(_) => "object",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Serialization helpers — build serde_yaml::Value trees
+// ---------------------------------------------------------------------------
+
+/// Omit keys whose value is an empty mapping, an empty sequence, a null, or
+/// an empty string.
+fn is_empty_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(s) => s.is_empty(),
+        Value::Sequence(seq) => seq.is_empty(),
+        Value::Mapping(map) => map.is_empty(),
+        _ => false,
+    }
+}
+
+/// Insert `key` → `value` into `mapping` unless `value` is empty.
+fn insert_if_nonempty(mapping: &mut Mapping, key: &str, value: Value) {
+    if !is_empty_value(&value) {
+        mapping.insert(Value::String(key.to_string()), value);
+    }
+}
+
+/// Insert `key` → `Value::String(value)` unless `value` is empty.
+fn insert_str_if_nonempty(mapping: &mut Mapping, key: &str, value: &str) {
+    if !value.is_empty() {
+        mapping.insert(
+            Value::String(key.to_string()),
+            Value::String(value.to_string()),
+        );
+    }
+}
+
+/// Serialize a `HashMap<String, String>` to a YAML mapping, omitting empty.
+fn string_map_to_yaml(map: &HashMap<String, String>) -> Value {
+    if map.is_empty() {
+        return Value::Mapping(Mapping::new());
+    }
+    let mut out = Mapping::with_capacity(map.len());
+    for (k, v) in map {
+        out.insert(Value::String(k.clone()), Value::String(v.clone()));
+    }
+    Value::Mapping(out)
+}
+
+/// Convert `serde_json::Value` options to a YAML mapping, filtering out
+/// framework-substituted keys (`cwd`, `base_ref`) that the runtime injects.
+fn options_to_yaml(options: &HashMap<String, serde_json::Value>) -> Value {
+    // Filter out keys that the framework substitutes — they're not part of
+    // the user-visible definition. Iterate directly to avoid an intermediate
+    // HashMap allocation.
+    let mut out = Mapping::new();
+    for (k, v) in options
+        .iter()
+        .filter(|(k, _)| !FRAMEWORK_KEYS.contains(k.as_str()))
+    {
+        if let Ok(yaml_val) = serde_yaml::to_value(v) {
+            out.insert(Value::String(k.clone()), yaml_val);
+        }
+    }
+    Value::Mapping(out)
+}
+
+fn client_to_yaml(client: &Option<ClientSpec>) -> Option<Value> {
+    client.as_ref().map(|c| Value::String(c.0.clone()))
+}
+
+fn agent_to_yaml(stage: &Agent, skip_if_exists: &str, client: &Option<ClientSpec>) -> Value {
+    let mut m = Mapping::new();
+    m.insert(
+        Value::String("name".to_string()),
+        Value::String(stage.name.clone()),
+    );
+    m.insert(
+        Value::String("type".to_string()),
+        Value::String("agent".to_string()),
+    );
+    // prompt: omit if empty list (same as what the YAML path accepts)
+    if !stage.prompts.is_empty() {
+        let prompts: Vec<Value> = stage
+            .prompts
+            .iter()
+            .map(|p| Value::String(p.clone()))
+            .collect();
+        m.insert(
+            Value::String("prompt".to_string()),
+            Value::Sequence(prompts),
+        );
+    }
+    insert_if_nonempty(&mut m, "options", options_to_yaml(&stage.options));
+    insert_if_nonempty(
+        &mut m,
+        "interpolation",
+        string_map_to_yaml(&stage.interpolation_map),
+    );
+    insert_if_nonempty(&mut m, "bind", string_map_to_yaml(&stage.bind_map));
+    if let Some(client_val) = client_to_yaml(client) {
+        m.insert(Value::String("client".to_string()), client_val);
+    }
+    insert_str_if_nonempty(&mut m, "skip_if_exists", skip_if_exists);
+    Value::Mapping(m)
+}
+
+fn exec_to_yaml(stage: &Exec, skip_if_exists: &str, client: &Option<ClientSpec>) -> Value {
+    let mut m = Mapping::new();
+    m.insert(
+        Value::String("name".to_string()),
+        Value::String(stage.name.clone()),
+    );
+    m.insert(
+        Value::String("type".to_string()),
+        Value::String("exec".to_string()),
+    );
+    insert_if_nonempty(&mut m, "options", options_to_yaml(&stage.options));
+    insert_if_nonempty(
+        &mut m,
+        "interpolation",
+        string_map_to_yaml(&stage.interpolation_map),
+    );
+    insert_if_nonempty(&mut m, "bind", string_map_to_yaml(&stage.bind_map));
+    if let Some(client_val) = client_to_yaml(client) {
+        m.insert(Value::String("client".to_string()), client_val);
+    }
+    insert_str_if_nonempty(&mut m, "skip_if_exists", skip_if_exists);
+    Value::Mapping(m)
+}
+
+fn loop_to_yaml(
+    attrs: &StageAttrs,
+    max_iterations: u32,
+    stop_when_exists: &Option<String>,
+    interval: Option<f64>,
+    client: &Option<ClientSpec>,
+    body: &[RunnableStage],
+) -> Value {
+    let mut m = Mapping::new();
+    m.insert(
+        Value::String("name".to_string()),
+        Value::String(attrs.name.clone()),
+    );
+    m.insert(
+        Value::String("type".to_string()),
+        Value::String("loop".to_string()),
+    );
+    m.insert(
+        Value::String("max-iterations".to_string()),
+        Value::Number((max_iterations as i64).into()),
+    );
+    if let Some(ref uri) = stop_when_exists {
+        m.insert(
+            Value::String("stop_when_exists".to_string()),
+            Value::String(uri.clone()),
+        );
+    }
+    if let Some(interval_secs) = interval {
+        let mut opts = Mapping::new();
+        opts.insert(
+            Value::String("interval".to_string()),
+            serde_yaml::to_value(interval_secs).unwrap_or(Value::Null),
+        );
+        m.insert(Value::String("options".to_string()), Value::Mapping(opts));
+    }
+    if let Some(client_val) = client_to_yaml(client) {
+        m.insert(Value::String("client".to_string()), client_val);
+    }
+    insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
+    // body: children
+    let children: Vec<Value> = body.iter().map(RunnableStage::to_yaml).collect();
+    m.insert(Value::String("body".to_string()), Value::Sequence(children));
+    Value::Mapping(m)
+}
+
+fn sequence_to_yaml(
+    attrs: &StageAttrs,
+    client: &Option<ClientSpec>,
+    body: &[RunnableStage],
+) -> Value {
+    let mut m = Mapping::new();
+    m.insert(
+        Value::String("name".to_string()),
+        Value::String(attrs.name.clone()),
+    );
+    m.insert(
+        Value::String("type".to_string()),
+        Value::String("sequence".to_string()),
+    );
+    if let Some(client_val) = client_to_yaml(client) {
+        m.insert(Value::String("client".to_string()), client_val);
+    }
+    insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
+    let children: Vec<Value> = body.iter().map(RunnableStage::to_yaml).collect();
+    m.insert(Value::String("body".to_string()), Value::Sequence(children));
+    Value::Mapping(m)
+}
+
+fn parallel_to_yaml(
+    attrs: &StageAttrs,
+    max_concurrent: Option<u32>,
+    cancel_on_error: bool,
+    error_policy: ErrorPolicy,
+    client: &Option<ClientSpec>,
+    body: &[RunnableStage],
+) -> Value {
+    let mut m = Mapping::new();
+    m.insert(
+        Value::String("name".to_string()),
+        Value::String(attrs.name.clone()),
+    );
+    m.insert(
+        Value::String("type".to_string()),
+        Value::String("parallel".to_string()),
+    );
+    if let Some(mc) = max_concurrent {
+        m.insert(
+            Value::String("max_concurrent".to_string()),
+            Value::Number((mc as i64).into()),
+        );
+    }
+    if cancel_on_error {
+        m.insert(
+            Value::String("cancel_on_error".to_string()),
+            Value::Bool(true),
+        );
+    }
+    if error_policy != ErrorPolicy::Any {
+        m.insert(
+            Value::String("error_policy".to_string()),
+            Value::String(error_policy.as_str().to_string()),
+        );
+    }
+    if let Some(client_val) = client_to_yaml(client) {
+        m.insert(Value::String("client".to_string()), client_val);
+    }
+    insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
+    let children: Vec<Value> = body.iter().map(RunnableStage::to_yaml).collect();
+    m.insert(
+        Value::String("parallel".to_string()),
+        Value::Sequence(children),
+    );
+    Value::Mapping(m)
 }
 
 #[cfg(test)]

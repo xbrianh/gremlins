@@ -518,7 +518,7 @@ impl DefinitionBuilder {
             &self.bootstrap.cli_out,
         )?;
 
-        Ok(GremlinDefinition {
+        let definition = GremlinDefinition {
             name: self.name,
             path: self.prompt_dir.unwrap_or_else(|| PathBuf::from(".")),
             default_client: self.default_client,
@@ -527,6 +527,14 @@ impl DefinitionBuilder {
             stages: self.stages,
             land: self.land,
             expanded_yaml: serde_yaml::Value::Null,
+        };
+
+        // Populate expanded_yaml from the typed tree.
+        let expanded_yaml = definition.to_expanded_yaml();
+
+        Ok(GremlinDefinition {
+            expanded_yaml,
+            ..definition
         })
     }
 }
@@ -581,6 +589,7 @@ mod tests {
     use crate::builders::artifacts::{artifact, content};
     use crate::builders::composite::{LoopBuilder, ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
+    use serde_yaml::Value;
 
     #[test]
     fn definition_builder_basic() {
@@ -711,6 +720,48 @@ mod tests {
         let builder = DefinitionBuilder::new("demo", "xai:grok-4");
         let def = GremlinDefinition::from_builder(builder).unwrap();
         assert_eq!(def.name, "demo");
+    }
+
+    #[test]
+    fn builder_populates_expanded_yaml() {
+        let def = DefinitionBuilder::new("demo", "xai:grok-4")
+            .stage(
+                AgentBuilder::new("plan")
+                    .prompt("write the plan to {plan}")
+                    .bind("plan", artifact("artifact://plan.md"))
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("run")
+                    .cmd("cat {plan}")
+                    .interpolate("plan", content("artifact://plan.md"))
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        // expanded_yaml must be populated, not Null.
+        assert!(
+            !def.expanded_yaml.is_null(),
+            "expanded_yaml must be populated by the builder"
+        );
+
+        // It must be a mapping with the sentinel.
+        let mapping = def.expanded_yaml.as_mapping().unwrap();
+        assert_eq!(
+            mapping.get(Value::String("__gremlins_expanded__".to_string())),
+            Some(&Value::Bool(true))
+        );
+
+        // It must contain the stages.
+        let stages = mapping
+            .get(Value::String("stages".to_string()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert_eq!(stages.len(), 2);
     }
 
     // ---- Per-stage builder validation tests ----

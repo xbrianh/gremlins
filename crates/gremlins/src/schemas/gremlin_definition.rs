@@ -222,6 +222,67 @@ impl GremlinDefinition {
         )?;
         Ok(())
     }
+
+    /// Serialize this definition to a [`serde_yaml::Value`] matching the
+    /// canonical expanded-YAML shape that [`from_expanded_yaml`] reads.
+    ///
+    /// The output always includes `__gremlins_expanded__: true` so
+    /// `from_expanded_yaml` recognizes it.
+    ///
+    /// [`from_expanded_yaml`]: GremlinDefinition::from_expanded_yaml
+    pub fn to_expanded_yaml(&self) -> Value {
+        let mut root = Mapping::new();
+
+        // Sentinel — always emitted.
+        root.insert(
+            Value::String("__gremlins_expanded__".to_string()),
+            Value::Bool(true),
+        );
+
+        // default_client — always present.
+        root.insert(
+            Value::String("default_client".to_string()),
+            Value::String(self.default_client.clone()),
+        );
+
+        // base_ref — omit if "current".
+        if self.base_ref != "current" {
+            root.insert(
+                Value::String("base_ref".to_string()),
+                Value::String(self.base_ref.clone()),
+            );
+        }
+
+        // bootstrap — omit entirely if all fields are default/empty.
+        let bootstrap_yaml = bootstrap_to_yaml(&self.bootstrap);
+        if !is_empty_mapping(&bootstrap_yaml) {
+            root.insert(Value::String("bootstrap".to_string()), bootstrap_yaml);
+        }
+
+        // land — omit if None.
+        if let Some(ref land) = self.land {
+            let mut land_val = land.to_yaml();
+            // Ensure name and type are forced to "land"/"exec" for round-trip
+            // safety, matching what land_from_yaml does on parse.
+            if let Value::Mapping(ref mut land_map) = land_val {
+                land_map.insert(
+                    Value::String("name".to_string()),
+                    Value::String("land".to_string()),
+                );
+                land_map.insert(
+                    Value::String("type".to_string()),
+                    Value::String("exec".to_string()),
+                );
+            }
+            root.insert(Value::String("land".to_string()), land_val);
+        }
+
+        // stages
+        let stages: Vec<Value> = self.stages.iter().map(RunnableStage::to_yaml).collect();
+        root.insert(Value::String("stages".to_string()), Value::Sequence(stages));
+
+        Value::Mapping(root)
+    }
 }
 
 /// The project root: the parent of the nearest ancestor `.gremlins` directory,
@@ -334,6 +395,84 @@ fn resolve_default_client(
         .ok()
         .and_then(|cfg| cfg.default_client().map(String::from))
         .ok_or_else(|| SchemaError::Generic(MISSING_DEFAULT_CLIENT.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Serialization helpers for to_expanded_yaml()
+// ---------------------------------------------------------------------------
+
+fn is_empty_mapping(value: &Value) -> bool {
+    match value {
+        Value::Mapping(m) => m.is_empty(),
+        _ => false,
+    }
+}
+
+fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
+    let mut m = Mapping::new();
+
+    if let Some(ref source) = bootstrap.source {
+        let mut src_map = Mapping::with_capacity(source.sources.len());
+        for (name, input_src) in &source.sources {
+            let mut entry = Mapping::new();
+            if input_src.types.len() == 1 {
+                entry.insert(
+                    Value::String("type".to_string()),
+                    Value::String(input_src.types[0].clone()),
+                );
+            } else {
+                let types: Vec<Value> = input_src
+                    .types
+                    .iter()
+                    .map(|t| Value::String(t.clone()))
+                    .collect();
+                entry.insert(Value::String("type".to_string()), Value::Sequence(types));
+            }
+            if input_src.optional {
+                entry.insert(Value::String("optional".to_string()), Value::Bool(true));
+            }
+            src_map.insert(Value::String(name.clone()), Value::Mapping(entry));
+        }
+        m.insert(Value::String("source".to_string()), Value::Mapping(src_map));
+    }
+
+    if !bootstrap.launch_cmds.is_empty() {
+        let cmds: Vec<Value> = bootstrap
+            .launch_cmds
+            .iter()
+            .map(|c| Value::String(c.clone()))
+            .collect();
+        m.insert(
+            Value::String("launch_cmds".to_string()),
+            Value::Sequence(cmds),
+        );
+    }
+
+    if !bootstrap.cmds.is_empty() {
+        let cmds: Vec<Value> = bootstrap
+            .cmds
+            .iter()
+            .map(|c| Value::String(c.clone()))
+            .collect();
+        m.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
+    }
+
+    if !bootstrap.cli_out.is_empty() {
+        let mut cli = Mapping::with_capacity(bootstrap.cli_out.len());
+        for (k, v) in &bootstrap.cli_out {
+            cli.insert(Value::String(k.clone()), Value::String(v.clone()));
+        }
+        m.insert(Value::String("cli_out".to_string()), Value::Mapping(cli));
+    }
+
+    if !bootstrap.env.is_empty() {
+        m.insert(
+            Value::String("env".to_string()),
+            Value::String(bootstrap.env.clone()),
+        );
+    }
+
+    Value::Mapping(m)
 }
 
 #[cfg(test)]
@@ -996,5 +1135,264 @@ stages:
             .map(RunnableStage::stage_type)
             .collect();
         assert_eq!(expanded_types, yaml_types);
+    }
+
+    // ------------------------------------------------------------------
+    // to_expanded_yaml() round-trip tests
+    // ------------------------------------------------------------------
+
+    /// Helper: parse a YAML string via `from_yaml`, serialize it back
+    /// with `to_expanded_yaml()`, then re-parse via `from_expanded_value`
+    /// and assert the two definitions are equivalent.
+    fn round_trip(yaml_body: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(dir.path(), "roundtrip", yaml_body);
+
+        let original = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let serialized = original.to_expanded_yaml();
+
+        // Re-parse via from_expanded_value (private, but accessible in-module).
+        let roundtripped =
+            GremlinDefinition::from_expanded_value(serialized, path.clone(), None).unwrap();
+
+        assert_eq!(roundtripped.name, original.name);
+        assert_eq!(roundtripped.default_client, original.default_client);
+        assert_eq!(roundtripped.base_ref, original.base_ref);
+        assert_eq!(roundtripped.stages.len(), original.stages.len());
+
+        for (a, b) in roundtripped.stages.iter().zip(original.stages.iter()) {
+            assert_eq!(a.name(), b.name());
+            assert_eq!(a.stage_type(), b.stage_type());
+        }
+
+        // Land round-trips.
+        match (&roundtripped.land, &original.land) {
+            (Some(a), Some(b)) => {
+                assert_eq!(a.name(), b.name());
+                assert_eq!(a.stage_type(), b.stage_type());
+            }
+            (None, None) => {}
+            _ => panic!("land mismatch"),
+        }
+
+        // Bootstrap round-trips.
+        assert_eq!(
+            roundtripped.bootstrap.launch_cmds,
+            original.bootstrap.launch_cmds
+        );
+        assert_eq!(roundtripped.bootstrap.cmds, original.bootstrap.cmds);
+        assert_eq!(roundtripped.bootstrap.env, original.bootstrap.env);
+        assert_eq!(roundtripped.bootstrap.cli_out, original.bootstrap.cli_out);
+    }
+
+    #[test]
+    fn round_trip_minimal_agent_and_exec() {
+        round_trip(
+            r#"
+default_client: 'xai:grok-4'
+
+stages:
+  - name: plan
+    type: agent
+    prompt:
+      - "write the plan to {plan}\n"
+    bind:
+      plan: artifact://plan.md
+  - name: run
+    type: exec
+    interpolation:
+      plan: content("artifact://plan.md")
+    options:
+      cmds:
+        - "cat {plan}"
+"#,
+        );
+    }
+
+    #[test]
+    fn round_trip_with_all_composites() {
+        round_trip(
+            r#"
+default_client: 'xai:grok-4'
+
+stages:
+  - name: outer
+    type: sequence
+    body:
+      - name: inner-loop
+        type: loop
+        max-iterations: 3
+        stop_when_exists: artifact://done.txt
+        options:
+          interval: 1.5
+        body:
+          - name: parallel-stuff
+            type: parallel
+            max_concurrent: 2
+            cancel_on_error: true
+            error_policy: all
+            parallel:
+              - name: a
+                type: exec
+                options:
+                  cmds:
+                    - "echo a"
+              - name: b
+                type: exec
+                options:
+                  cmds:
+                    - "echo b"
+"#,
+        );
+    }
+
+    #[test]
+    fn round_trip_with_bootstrap() {
+        round_trip(
+            r#"
+default_client: 'xai:grok-4'
+
+bootstrap:
+  source:
+    my_input:
+      type: string
+      optional: true
+  launch_cmds:
+    - gremlins:bind_artifact("artifact://plan.md", plan)
+  cmds:
+    - echo ready
+  cli_out:
+    plan: artifact://plan.md
+  env:
+    FOO=bar
+
+stages:
+  - name: run
+    type: exec
+    interpolation:
+      plan: content("artifact://plan.md")
+    options:
+      cmds:
+        - "cat {plan}"
+"#,
+        );
+    }
+
+    #[test]
+    fn round_trip_with_land() {
+        round_trip(
+            r#"
+default_client: 'xai:grok-4'
+
+land:
+  interpolation:
+    PR_URL: content("artifact://pr-url")
+  options:
+    cmds:
+      - gh pr merge --squash --delete-branch "{PR_URL}"
+
+stages:
+  - name: plan
+    type: agent
+    prompt:
+      - "create {pr_url}\n"
+    bind:
+      pr_url: artifact://pr-url
+"#,
+        );
+    }
+
+    #[test]
+    fn to_expanded_yaml_emits_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(dir.path(), "sentinel", WITH_CLIENT);
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let yaml = definition.to_expanded_yaml();
+
+        assert_eq!(
+            yaml.get("__gremlins_expanded__"),
+            Some(&Value::Bool(true)),
+            "to_expanded_yaml must emit __gremlins_expanded__: true"
+        );
+    }
+
+    #[test]
+    fn to_expanded_yaml_omits_default_base_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(dir.path(), "base", WITH_CLIENT);
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let yaml = definition.to_expanded_yaml();
+
+        // base_ref defaults to "current" — should be absent from output.
+        assert!(
+            yaml.get("base_ref").is_none(),
+            "base_ref 'current' must be omitted"
+        );
+    }
+
+    #[test]
+    fn to_expanded_yaml_omits_empty_skip_if_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(dir.path(), "skip", WITH_CLIENT);
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let yaml = definition.to_expanded_yaml();
+
+        // None of the stages have skip_if_exists set — the key must be absent.
+        let stages = yaml.get("stages").unwrap().as_sequence().unwrap();
+        for stage in stages {
+            assert!(
+                stage.get("skip_if_exists").is_none(),
+                "skip_if_exists must be omitted when empty"
+            );
+        }
+    }
+
+    #[test]
+    fn to_expanded_yaml_omits_empty_bootstrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(dir.path(), "noboot", WITH_CLIENT);
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let yaml = definition.to_expanded_yaml();
+
+        // No bootstrap in the fixture — key must be absent.
+        assert!(
+            yaml.get("bootstrap").is_none(),
+            "bootstrap must be omitted when all fields are default"
+        );
+    }
+
+    #[test]
+    fn to_expanded_yaml_preserves_empty_bootstrap_source() {
+        // When bootstrap.source is explicitly Some but sources is empty,
+        // we must emit source: {} to preserve the distinction.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(
+            dir.path(),
+            "empty-src",
+            r#"
+default_client: 'xai:grok-4'
+
+bootstrap:
+  source: {}
+
+stages:
+  - name: run
+    type: exec
+    options:
+      cmds:
+        - "echo hi"
+"#,
+        );
+        let definition = GremlinDefinition::from_yaml(&path, None).unwrap();
+        let yaml = definition.to_expanded_yaml();
+
+        let bootstrap = yaml.get("bootstrap").expect("bootstrap must be present");
+        let source = bootstrap
+            .get("source")
+            .expect("source must be present when explicitly set");
+        assert!(
+            source.as_mapping().unwrap().is_empty(),
+            "source must be an empty mapping"
+        );
     }
 }
