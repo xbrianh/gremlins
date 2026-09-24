@@ -150,7 +150,7 @@ pub struct Gremlin {
     /// absent or empty is an optional source with nothing to bind.
     pub stage_inputs: HashMap<String, String>,
     pub dry_run: bool,
-    /// When true, `init_runtime` loads the definition via [`GremlinDefinition::from_expanded_yaml`]
+    /// When true, `init_runtime` loads the definition via [`DefinitionBuilder::from_expanded_yaml`]
     /// instead of the full expansion path.
     pub(crate) definition_is_expanded: bool,
 }
