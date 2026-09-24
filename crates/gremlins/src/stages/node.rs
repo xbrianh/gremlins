@@ -208,6 +208,32 @@ impl RunnableStage {
         }
     }
 
+    /// Build a [`StageEntry`] descriptor for the name-filling pass.
+    pub fn to_stage_entry(&self) -> StageEntry {
+        let name = self.name();
+        StageEntry {
+            name: if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            },
+            auto_name: None,
+            stage_type: Some(self.stage_type().to_string()),
+            is_parallel: self.stage_type() == "parallel",
+        }
+    }
+
+    /// Overwrite the stage's name.
+    pub fn set_name(&mut self, name: String) {
+        match self {
+            RunnableStage::Agent { stage, .. } => stage.name = name,
+            RunnableStage::Exec { stage, .. } => stage.name = name,
+            RunnableStage::Loop { attrs, .. }
+            | RunnableStage::Sequence { attrs, .. }
+            | RunnableStage::Parallel { attrs, .. } => attrs.name = name,
+        }
+    }
+
     /// Flatten this subtree into the schema layer's [`StageNode`] snapshot.
     ///
     /// The producer/consumer validators walk this form. Names are read from the
