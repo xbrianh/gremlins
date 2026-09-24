@@ -2,16 +2,27 @@
 //! [`LandBuilder`].
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use serde_yaml::{Mapping, Value};
+
+use crate::builders::agent::AgentBuilder;
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
+use crate::builders::composite::{LoopBuilder, ParallelBuilder, SequenceBuilder};
+use crate::builders::exec::ExecBuilder;
 use crate::schemas::bootstrap::{Bootstrap, InputSource, InputSources};
 use crate::schemas::error::SchemaError;
+use crate::schemas::expand;
 use crate::schemas::expand::key_referenced_in_text;
-use crate::schemas::gremlin_definition::GremlinDefinition;
+use crate::schemas::gremlin_definition::{
+    base_ref_from_yaml, default_client_from_yaml, project_root_for, resolve_default_client,
+    stages_from_yaml, GremlinDefinition,
+};
 use crate::schemas::loader::{self, StageEntry, StageNode};
+use crate::stages::composite::ClientSpec;
 use crate::stages::constants::FRAMEWORK_KEYS;
 use crate::stages::node::RunnableStage;
+use crate::stages::parallel::ErrorPolicy;
 
 // ---------------------------------------------------------------------------
 // BootstrapBuilder
@@ -580,6 +591,441 @@ pub(crate) fn fill_builder_names(stages: &mut [RunnableStage]) {
             _ => {}
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// DefinitionBuilder::from_yaml — YAML ingestion through builders
+// ---------------------------------------------------------------------------
+
+impl DefinitionBuilder {
+    /// Load a definition from an expanded YAML file, routing every stage
+    /// through the typed builder constructors so builder-level validation
+    /// fires.
+    ///
+    /// `default_client_override` is the CLI `--client` value; consulted only
+    /// when the YAML declares none.
+    pub fn from_yaml(
+        path: impl AsRef<Path>,
+        default_client_override: Option<&str>,
+    ) -> Result<GremlinDefinition, SchemaError> {
+        let path = path.as_ref();
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if !path.exists() {
+            return Err(SchemaError::DefinitionFileNotFound {
+                path: path.display().to_string(),
+            });
+        }
+
+        let project_root = project_root_for(&path);
+        let expanded = expand::parse_definition_file(&path, &project_root)?;
+
+        let root = expanded
+            .as_mapping()
+            .ok_or_else(|| SchemaError::YamlNotMapping {
+                label: path.display().to_string(),
+                got: format!("{expanded:?}"),
+            })?;
+
+        let name = root
+            .get("name")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(String::from))
+            .unwrap_or_default();
+
+        let yaml_default_client = default_client_from_yaml(root)?;
+        let base_ref = base_ref_from_yaml(root)?;
+
+        let raw_stages = stages_from_yaml(root)?;
+
+        // Parse stages through the per-type YAML→builder dispatch.
+        let mut stages: Vec<RunnableStage> = Vec::new();
+        for raw in &raw_stages {
+            let mapping = raw
+                .as_mapping()
+                .ok_or_else(|| SchemaError::Generic("each stage must be a mapping".to_string()))?;
+            stages.push(stage_from_yaml(mapping)?);
+        }
+
+        // Bootstrap.
+        let bootstrap = match root.get("bootstrap") {
+            None | Some(Value::Null) => Bootstrap::default(),
+            Some(value) => Bootstrap::from_yaml(Some(value))?,
+        };
+
+        // Land.
+        let land = if let Some(land_val) = root.get("land").filter(|v| !v.is_null()) {
+            let land_mapping = land_val
+                .as_mapping()
+                .ok_or_else(|| SchemaError::Generic("'land' must be a mapping".to_string()))?;
+            Some(land_from_yaml_builder(land_mapping)?)
+        } else {
+            None
+        };
+
+        let default_client = resolve_default_client(yaml_default_client, default_client_override)?;
+
+        let builder = DefinitionBuilder {
+            name,
+            base_ref,
+            default_client,
+            prompt_dir: path.parent().map(Path::to_path_buf),
+            bootstrap,
+            stages,
+            land,
+        };
+
+        builder.build()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-stage YAML → builder conversion
+// ---------------------------------------------------------------------------
+
+/// Dispatch a single stage mapping to the appropriate per-type builder.
+fn stage_from_yaml(mapping: &Mapping) -> Result<RunnableStage, SchemaError> {
+    let is_parallel = mapping.contains_key("parallel");
+    let name = mapping
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let stage_type = if is_parallel {
+        "parallel"
+    } else {
+        mapping.get("type").and_then(Value::as_str).unwrap_or("")
+    };
+
+    match stage_type {
+        "agent" => agent_from_yaml(mapping, &name),
+        "exec" => exec_from_yaml(mapping, &name),
+        "loop" => loop_from_yaml(mapping, &name),
+        "sequence" => sequence_from_yaml(mapping, &name),
+        "parallel" => parallel_from_yaml(mapping, &name),
+        other => Err(SchemaError::Generic(format!(
+            "stage {name:?}: unknown type {other:?}"
+        ))),
+    }
+}
+
+/// Read a YAML string key, returning `None` when absent or null.
+fn yaml_str(mapping: &Mapping, key: &str) -> Option<String> {
+    mapping
+        .get(key)
+        .filter(|v| !v.is_null())
+        .and_then(Value::as_str)
+        .map(String::from)
+}
+
+/// Read a YAML string→string mapping, returning an empty map when absent.
+fn yaml_string_map(mapping: &Mapping, key: &str) -> Result<HashMap<String, String>, SchemaError> {
+    let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
+        return Ok(HashMap::new());
+    };
+    let map = raw
+        .as_mapping()
+        .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a mapping")))?;
+    let mut result = HashMap::new();
+    for (k, v) in map {
+        let ks = k
+            .as_str()
+            .ok_or_else(|| SchemaError::Generic(format!("'{key}' keys must be strings")))?;
+        let vs = v
+            .as_str()
+            .ok_or_else(|| SchemaError::Generic(format!("'{key}' values must be strings")))?;
+        result.insert(ks.to_string(), vs.to_string());
+    }
+    Ok(result)
+}
+
+/// Read a YAML sequence of strings.
+fn yaml_string_list(mapping: &Mapping, key: &str) -> Result<Vec<String>, SchemaError> {
+    let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let seq = raw
+        .as_sequence()
+        .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a sequence")))?;
+    let mut result = Vec::new();
+    for (i, v) in seq.iter().enumerate() {
+        let s = v
+            .as_str()
+            .ok_or_else(|| SchemaError::Generic(format!("'{key}'[{i}] must be a string")))?;
+        result.push(s.to_string());
+    }
+    Ok(result)
+}
+
+/// Read `options` as a `HashMap<String, serde_json::Value>`.
+fn yaml_options(mapping: &Mapping) -> Result<HashMap<String, serde_json::Value>, SchemaError> {
+    let Some(raw) = mapping.get("options").filter(|v| !v.is_null()) else {
+        return Ok(HashMap::new());
+    };
+    let opts = raw
+        .as_mapping()
+        .ok_or_else(|| SchemaError::Generic("'options' must be a mapping".to_string()))?;
+    let mut result = HashMap::new();
+    for (k, v) in opts {
+        let ks = k
+            .as_str()
+            .ok_or_else(|| SchemaError::Generic("'options' keys must be strings".to_string()))?;
+        let jv = serde_json::to_value(v).map_err(|e| {
+            SchemaError::Generic(format!("'options' value for '{ks}' is not valid: {e}"))
+        })?;
+        result.insert(ks.to_string(), jv);
+    }
+    Ok(result)
+}
+
+/// Read `skip_if_exists` — empty string when absent.
+fn yaml_skip_if_exists(mapping: &Mapping) -> String {
+    yaml_str(mapping, "skip_if_exists").unwrap_or_default()
+}
+
+/// Read `client` — None when absent.
+fn yaml_client(mapping: &Mapping) -> Option<ClientSpec> {
+    yaml_str(mapping, "client").map(ClientSpec)
+}
+
+/// Build an [`AgentBuilder`] from a YAML stage mapping.
+fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+    let prompts = yaml_string_list(mapping, "prompt")?;
+    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
+    let bind_map = yaml_string_map(mapping, "bind")?;
+    let options = yaml_options(mapping)?;
+    let skip_if_exists = yaml_skip_if_exists(mapping);
+    let client = yaml_client(mapping);
+
+    let mut builder = AgentBuilder::new(name);
+    for p in prompts {
+        builder = builder.prompt(p);
+    }
+    for (k, v) in interpolation_map {
+        builder = builder.interpolate(k, InterpolationValue(v));
+    }
+    for (k, v) in bind_map {
+        builder = builder.bind(k, BindTarget(v));
+    }
+    for (k, v) in options {
+        builder = builder.option(k, v);
+    }
+    if !skip_if_exists.is_empty() {
+        builder = builder.skip_if_exists(skip_if_exists);
+    }
+    if let Some(c) = client {
+        builder = builder.client(c.0);
+    }
+
+    builder.build()
+}
+
+/// Build an [`ExecBuilder`] from a YAML stage mapping.
+fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
+    let bind_map = yaml_string_map(mapping, "bind")?;
+    let options = yaml_options(mapping)?;
+    let skip_if_exists = yaml_skip_if_exists(mapping);
+    let client = yaml_client(mapping);
+
+    let mut builder = ExecBuilder::new(name);
+    for (k, v) in interpolation_map {
+        builder = builder.interpolate(k, InterpolationValue(v));
+    }
+    for (k, v) in bind_map {
+        builder = builder.bind(k, BindTarget(v));
+    }
+    for (k, v) in options {
+        builder = builder.option(k, v);
+    }
+    if !skip_if_exists.is_empty() {
+        builder = builder.skip_if_exists(skip_if_exists);
+    }
+    if let Some(c) = client {
+        builder = builder.client(c.0);
+    }
+
+    builder.build()
+}
+
+/// Build a [`LoopBuilder`] from a YAML stage mapping.
+fn loop_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+    let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
+        None => 3u32,
+        Some(v) => {
+            // Try as integer first, then as string.
+            if let Some(n) = v.as_u64().and_then(|n| u32::try_from(n).ok()) {
+                n
+            } else if let Some(s) = v.as_str() {
+                s.parse::<u32>().map_err(|_| {
+                    SchemaError::Generic(format!(
+                        "'max-iterations' must be a positive integer, got {s:?}"
+                    ))
+                })?
+            } else {
+                return Err(SchemaError::Generic(format!(
+                    "'max-iterations' must be a positive integer, got {v:?}"
+                )));
+            }
+        }
+    };
+    let stop_when_exists = yaml_str(mapping, "stop_when_exists");
+    let skip_if_exists = yaml_skip_if_exists(mapping);
+    let client = yaml_client(mapping);
+
+    // Interval from options.interval.
+    let interval = mapping
+        .get("options")
+        .and_then(|v| v.get("interval"))
+        .and_then(|v| v.as_f64());
+
+    // Parse children.
+    let body = yaml_children(mapping, "body")?;
+
+    let mut builder = LoopBuilder::new(name)
+        .max_iterations(max_iterations)
+        .stages(body);
+    if let Some(uri) = stop_when_exists {
+        builder = builder.stop_when_exists(uri);
+    }
+    if let Some(secs) = interval {
+        builder = builder.interval(secs);
+    }
+    if !skip_if_exists.is_empty() {
+        builder = builder.skip_if_exists(skip_if_exists);
+    }
+    if let Some(c) = client {
+        builder = builder.client(c.0);
+    }
+
+    builder.build()
+}
+
+/// Build a [`SequenceBuilder`] from a YAML stage mapping.
+fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+    let skip_if_exists = yaml_skip_if_exists(mapping);
+    let client = yaml_client(mapping);
+    let body = yaml_children(mapping, "body")?;
+
+    let mut builder = SequenceBuilder::new(name).stages(body);
+    if !skip_if_exists.is_empty() {
+        builder = builder.skip_if_exists(skip_if_exists);
+    }
+    if let Some(c) = client {
+        builder = builder.client(c.0);
+    }
+
+    builder.build()
+}
+
+/// Build a [`ParallelBuilder`] from a YAML stage mapping.
+fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+    let max_concurrent = match mapping.get("max_concurrent").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| {
+                    SchemaError::Generic(format!(
+                        "'max_concurrent' must be a positive integer, got {v:?}"
+                    ))
+                })?;
+            Some(n)
+        }
+    };
+    let cancel_on_error = match mapping.get("cancel_on_error").filter(|v| !v.is_null()) {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| {
+            SchemaError::Generic(format!("'cancel_on_error' must be a boolean, got {v:?}"))
+        })?,
+    };
+    let error_policy = match mapping.get("error_policy").filter(|v| !v.is_null()) {
+        None => ErrorPolicy::Any,
+        Some(v) => {
+            let raw = v.as_str().ok_or_else(|| {
+                SchemaError::Generic(format!(
+                    "'error_policy' must be a string (\"any\" or \"all\"), got {v:?}"
+                ))
+            })?;
+            ErrorPolicy::parse(raw).ok_or_else(|| {
+                SchemaError::Generic(format!(
+                    "'error_policy' must be \"any\" or \"all\", got {raw:?}"
+                ))
+            })?
+        }
+    };
+    let skip_if_exists = yaml_skip_if_exists(mapping);
+    let client = yaml_client(mapping);
+
+    // Parallel children live under the `parallel` key, not `body`.
+    let body = yaml_children(mapping, "parallel")?;
+
+    let mut builder = ParallelBuilder::new(name)
+        .stages(body)
+        .cancel_on_error(cancel_on_error)
+        .error_policy(error_policy);
+    if let Some(mc) = max_concurrent {
+        builder = builder.max_concurrent(mc);
+    }
+    if !skip_if_exists.is_empty() {
+        builder = builder.skip_if_exists(skip_if_exists);
+    }
+    if let Some(c) = client {
+        builder = builder.client(c.0);
+    }
+
+    builder.build()
+}
+
+/// Parse children from a composite's `key` ("body" or "parallel") through
+/// the same per-type dispatch.
+fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<RunnableStage>, SchemaError> {
+    let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let seq = raw
+        .as_sequence()
+        .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a sequence")))?;
+    let mut children = Vec::new();
+    for entry in seq {
+        let child_map = entry.as_mapping().ok_or_else(|| {
+            SchemaError::Generic("each child stage must be a mapping".to_string())
+        })?;
+        children.push(stage_from_yaml(child_map)?);
+    }
+    fill_builder_names(&mut children);
+    Ok(children)
+}
+
+/// Build the land stage from its YAML mapping, forcing name=land and
+/// type=exec through [`LandBuilder`].
+fn land_from_yaml_builder(mapping: &Mapping) -> Result<RunnableStage, SchemaError> {
+    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
+    let bind_map = yaml_string_map(mapping, "bind")?;
+    let options = yaml_options(mapping)?;
+    let skip_if_exists = yaml_skip_if_exists(mapping);
+    let client = yaml_client(mapping);
+
+    let mut builder = LandBuilder::new();
+    for (k, v) in interpolation_map {
+        builder = builder.interpolate(k, InterpolationValue(v));
+    }
+    for (k, v) in bind_map {
+        builder = builder.bind(k, BindTarget(v));
+    }
+    for (k, v) in options {
+        builder = builder.option(k, v);
+    }
+    if !skip_if_exists.is_empty() {
+        builder = builder.skip_if_exists(skip_if_exists);
+    }
+    if let Some(c) = client {
+        builder = builder.client(c.0);
+    }
+
+    builder.build()
 }
 
 #[cfg(test)]

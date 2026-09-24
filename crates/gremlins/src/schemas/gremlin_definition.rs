@@ -287,7 +287,7 @@ impl GremlinDefinition {
 
 /// The project root: the parent of the nearest ancestor `.gremlins` directory,
 /// falling back to the definition's own directory.
-fn project_root_for(path: &Path) -> PathBuf {
+pub(crate) fn project_root_for(path: &Path) -> PathBuf {
     let mut current = path.parent();
     while let Some(directory) = current {
         if directory
@@ -306,7 +306,7 @@ fn project_root_for(path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn default_client_from_yaml(root: &Mapping) -> Result<Option<String>, SchemaError> {
+pub(crate) fn default_client_from_yaml(root: &Mapping) -> Result<Option<String>, SchemaError> {
     let Some(value) = root.get("default_client").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
@@ -321,7 +321,7 @@ fn default_client_from_yaml(root: &Mapping) -> Result<Option<String>, SchemaErro
     Ok(Some(client.to_string()))
 }
 
-fn base_ref_from_yaml(root: &Mapping) -> Result<String, SchemaError> {
+pub(crate) fn base_ref_from_yaml(root: &Mapping) -> Result<String, SchemaError> {
     let value = match root.get("base_ref") {
         None | Some(Value::Null) => return Ok("current".to_string()),
         Some(value) => value,
@@ -338,7 +338,7 @@ fn base_ref_from_yaml(root: &Mapping) -> Result<String, SchemaError> {
     Ok(trimmed.to_string())
 }
 
-fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {
+pub(crate) fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {
     match root.get("stages") {
         None | Some(Value::Null) => Ok(Vec::new()),
         Some(Value::Sequence(stages)) => Ok(stages.clone()),
@@ -349,7 +349,7 @@ fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {
 /// Build the `land` stage: the `land` mapping parsed as an exec stage, with the
 /// declared `name` and `type` both forced — it is always an exec stage named
 /// `land`, whatever the mapping declared, which is what the pyext path built.
-fn land_from_yaml(root: &Mapping) -> Result<Option<RunnableStage>, SchemaError> {
+pub(crate) fn land_from_yaml(root: &Mapping) -> Result<Option<RunnableStage>, SchemaError> {
     let Some(value) = root.get("land").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
@@ -376,7 +376,7 @@ fn land_from_yaml(root: &Mapping) -> Result<Option<RunnableStage>, SchemaError> 
     Ok(Some(parsed))
 }
 
-fn resolve_default_client(
+pub(crate) fn resolve_default_client(
     yaml_default: Option<String>,
     override_client: Option<&str>,
 ) -> Result<String, SchemaError> {
