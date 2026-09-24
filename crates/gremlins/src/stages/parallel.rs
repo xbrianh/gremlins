@@ -21,7 +21,7 @@ pub enum ErrorPolicy {
 }
 
 impl ErrorPolicy {
-    fn parse(raw: &str) -> Option<Self> {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
         match raw {
             "any" => Some(ErrorPolicy::Any),
             "all" => Some(ErrorPolicy::All),

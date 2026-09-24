@@ -1,9 +1,10 @@
 //! Builder for [`RunnableStage::Exec`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
 use crate::schemas::error::SchemaError;
+use crate::schemas::expand::key_referenced_in_text;
 use crate::stages::composite::ClientSpec;
 use crate::stages::constants::FRAMEWORK_KEYS;
 use crate::stages::exec::Exec;
@@ -161,6 +162,75 @@ impl ExecBuilder {
             }
         }
 
+        // --- Collision check: keys in both bind: and interpolation: ---
+        {
+            let bind_keys: HashSet<String> = self
+                .bind_map
+                .keys()
+                .filter(|k| !k.contains('{'))
+                .map(|k| k.strip_suffix('?').unwrap_or(k).to_string())
+                .collect();
+            for interp_key in self.interpolation_map.keys() {
+                if interp_key.contains('{') {
+                    continue;
+                }
+                if bind_keys.contains(interp_key.as_str()) {
+                    return Err(SchemaError::Stage {
+                        name: name.clone(),
+                        msg: format!(
+                            "key {interp_key:?} declared in both bind: and interpolation: — a stage cannot both produce and consume the same key"
+                        ),
+                    });
+                }
+            }
+        }
+
+        // --- Unused-key check ---
+        {
+            // Collect all text from cmds
+            let mut text = String::new();
+            if let Some(cmds) = self.options.get("cmds").and_then(|v| v.as_array()) {
+                for cmd in cmds {
+                    if let Some(s) = cmd.as_str() {
+                        text.push_str(s);
+                        text.push('\n');
+                    }
+                }
+            }
+
+            // Check interpolation keys
+            for key in self.interpolation_map.keys() {
+                if key.contains('{') {
+                    continue;
+                }
+                if !key_referenced_in_text(key, &text) {
+                    return Err(SchemaError::Stage {
+                        name: name.clone(),
+                        msg: format!(
+                            "key {key:?} declared in interpolation: is not referenced in any prompt or command"
+                        ),
+                    });
+                }
+            }
+
+            // Check bind keys
+            for key in self.bind_map.keys() {
+                if key.contains('{') {
+                    continue;
+                }
+                let stripped = key.strip_suffix('?').unwrap_or(key);
+                if key_referenced_in_text(stripped, &text) {
+                    continue;
+                }
+                return Err(SchemaError::Stage {
+                    name: name.clone(),
+                    msg: format!(
+                        "key {key:?} declared in bind: is not referenced in any prompt or command"
+                    ),
+                });
+            }
+        }
+
         let stage = Exec {
             name,
             options: self.options,
@@ -172,5 +242,124 @@ impl ExecBuilder {
             skip_if_exists: self.skip_if_exists,
             client: self.client,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builders::artifacts::artifact;
+
+    #[test]
+    fn all_keys_referenced_ok() {
+        ExecBuilder::new("test")
+            .cmd("cat {foo} {bar}")
+            .bind("foo", artifact("artifact://foo.txt"))
+            .interpolate(
+                "bar",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://bar.txt\")",
+                ),
+            )
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn unused_bind_key_error() {
+        let err = ExecBuilder::new("test")
+            .cmd("cat {foo}")
+            .bind("foo", artifact("artifact://foo.txt"))
+            .bind("unused", artifact("artifact://unused.txt"))
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("unused"), "{err}");
+        assert!(err.to_string().contains("bind:"), "{err}");
+    }
+
+    #[test]
+    fn unused_interpolation_key_error() {
+        let err = ExecBuilder::new("test")
+            .cmd("cat {foo}")
+            .interpolate(
+                "foo",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://foo.txt\")",
+                ),
+            )
+            .interpolate(
+                "unused",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://unused.txt\")",
+                ),
+            )
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("unused"), "{err}");
+        assert!(err.to_string().contains("interpolation:"), "{err}");
+    }
+
+    #[test]
+    fn bind_interp_collision_error() {
+        let err = ExecBuilder::new("test")
+            .cmd("cat {shared}")
+            .bind("shared", artifact("artifact://shared.txt"))
+            .interpolate(
+                "shared",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://shared.txt\")",
+                ),
+            )
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("both bind:"), "{err}");
+    }
+
+    #[test]
+    fn optional_bind_collides_with_interp() {
+        let err = ExecBuilder::new("test")
+            .cmd("cat {shared}")
+            .bind("shared?", artifact("artifact://shared.txt"))
+            .interpolate(
+                "shared",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://shared.txt\")",
+                ),
+            )
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("both bind:"), "{err}");
+    }
+
+    #[test]
+    fn optional_bind_referenced_via_stripped_form_ok() {
+        ExecBuilder::new("test")
+            .cmd("cat {foo}")
+            .bind("foo?", artifact("artifact://foo.txt"))
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn hyphen_underscore_normalization_ok() {
+        ExecBuilder::new("test")
+            .cmd("cat {child-plan}")
+            .bind("child_plan", artifact("artifact://plan.txt"))
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn framework_template_key_skipped() {
+        ExecBuilder::new("test")
+            .cmd("echo {model}")
+            .interpolate(
+                "{name}",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://name.txt\")",
+                ),
+            )
+            .build()
+            .unwrap();
     }
 }
