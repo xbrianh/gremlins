@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
+use crate::schemas::error::SchemaError;
 use crate::stages::agent::Agent;
 use crate::stages::composite::ClientSpec;
+use crate::stages::constants::FRAMEWORK_KEYS;
 use crate::stages::node::RunnableStage;
 
 /// Build an [`Agent`] stage.
@@ -118,24 +120,37 @@ impl AgentBuilder {
     }
 
     /// Consume the builder and produce a [`RunnableStage::Agent`].
-    pub fn build(self) -> RunnableStage {
+    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+        let name = self.name.clone();
+
+        crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
+            .map_err(|msg| SchemaError::Stage {
+                name: name.clone(),
+                msg,
+            })?;
+
+        for key in self.options.keys() {
+            if FRAMEWORK_KEYS.contains(key.as_str()) && key != "model" {
+                return Err(SchemaError::Stage {
+                    name: name.clone(),
+                    msg: format!(
+                        "option key {key:?} collides with framework substitution variable"
+                    ),
+                });
+            }
+        }
+
         let stage = Agent {
-            name: self.name,
+            name,
             prompts: self.prompts,
             options: self.options,
             interpolation_map: self.interpolation_map,
             bind_map: self.bind_map,
         };
-        RunnableStage::Agent {
+        Ok(RunnableStage::Agent {
             stage,
             skip_if_exists: self.skip_if_exists,
             client: self.client,
-        }
-    }
-}
-
-impl From<AgentBuilder> for RunnableStage {
-    fn from(b: AgentBuilder) -> Self {
-        b.build()
+        })
     }
 }

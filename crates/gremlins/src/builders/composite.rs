@@ -1,9 +1,10 @@
 //! Builders for composite stages: [`SequenceBuilder`], [`ParallelBuilder`],
 //! [`LoopBuilder`].
 
+use crate::schemas::error::SchemaError;
 use crate::stages::composite::{ClientSpec, StageAttrs};
 use crate::stages::node::RunnableStage;
-use crate::stages::parallel::ErrorPolicy;
+use crate::stages::parallel::{validate_child_names, ErrorPolicy};
 
 // ---------------------------------------------------------------------------
 // SequenceBuilder
@@ -71,22 +72,25 @@ impl SequenceBuilder {
     }
 
     /// Consume the builder and produce a [`RunnableStage::Sequence`].
-    pub fn build(self) -> RunnableStage {
+    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+        let name = self.name.clone();
+
+        if self.body.is_empty() {
+            return Err(SchemaError::Stage {
+                name,
+                msg: "'body' must not be empty".to_string(),
+            });
+        }
+
         let mut attrs = StageAttrs::new(self.name);
         attrs.stage_type = "sequence".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        RunnableStage::Sequence {
+        Ok(RunnableStage::Sequence {
             attrs,
             client: self.client,
             body: self.body,
-        }
-    }
-}
-
-impl From<SequenceBuilder> for RunnableStage {
-    fn from(b: SequenceBuilder) -> Self {
-        b.build()
+        })
     }
 }
 
@@ -181,25 +185,41 @@ impl ParallelBuilder {
     }
 
     /// Consume the builder and produce a [`RunnableStage::Parallel`].
-    pub fn build(self) -> RunnableStage {
+    pub fn build(mut self) -> Result<RunnableStage, SchemaError> {
+        let name = self.name.clone();
+
+        // Reject nested parallel children.
+        for child in &self.body {
+            if child.stage_type() == "parallel" {
+                return Err(SchemaError::Stage {
+                    name: name.clone(),
+                    msg: format!("nested parallel groups are not allowed (stage {name:?})"),
+                });
+            }
+        }
+
+        // Fill names for unnamed children before validating them.
+        crate::builders::definition::fill_builder_names(&mut self.body);
+
+        // Validate child names.
+        let child_names: Vec<String> = self.body.iter().map(|c| c.name().to_string()).collect();
+        validate_child_names(&name, &child_names).map_err(|msg| SchemaError::Stage {
+            name: name.clone(),
+            msg,
+        })?;
+
         let mut attrs = StageAttrs::new(self.name);
         attrs.stage_type = "parallel".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        RunnableStage::Parallel {
+        Ok(RunnableStage::Parallel {
             attrs,
             max_concurrent: self.max_concurrent,
             cancel_on_error: self.cancel_on_error,
             error_policy: self.error_policy,
             client: self.client,
             body: self.body,
-        }
-    }
-}
-
-impl From<ParallelBuilder> for RunnableStage {
-    fn from(b: ParallelBuilder) -> Self {
-        b.build()
+        })
     }
 }
 
@@ -294,19 +314,26 @@ impl LoopBuilder {
     }
 
     /// Consume the builder and produce a [`RunnableStage::Loop`].
-    pub fn build(self) -> RunnableStage {
+    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+        if self.max_iterations < 1 {
+            return Err(SchemaError::Stage {
+                name: self.name.clone(),
+                msg: format!("max_iterations must be >= 1, got {}", self.max_iterations),
+            });
+        }
+
         let mut attrs = StageAttrs::new(self.name);
         attrs.stage_type = "loop".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        RunnableStage::Loop {
+        Ok(RunnableStage::Loop {
             attrs,
             max_iterations: self.max_iterations,
             stop_when_exists: self.stop_when_exists,
             interval: self.interval,
             client: self.client,
             body: self.body,
-        }
+        })
     }
 
     /// Wrap an already-parsed [`RunnableStage::Loop`] into a builder so
@@ -336,11 +363,5 @@ impl LoopBuilder {
                 other.stage_type()
             ),
         }
-    }
-}
-
-impl From<LoopBuilder> for RunnableStage {
-    fn from(b: LoopBuilder) -> Self {
-        b.build()
     }
 }

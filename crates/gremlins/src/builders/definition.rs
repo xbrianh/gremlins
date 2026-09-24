@@ -9,6 +9,7 @@ use crate::schemas::bootstrap::{Bootstrap, InputSource, InputSources};
 use crate::schemas::error::SchemaError;
 use crate::schemas::gremlin_definition::GremlinDefinition;
 use crate::schemas::loader::{self, StageEntry, StageNode};
+use crate::stages::constants::FRAMEWORK_KEYS;
 use crate::stages::node::RunnableStage;
 
 // ---------------------------------------------------------------------------
@@ -248,30 +249,43 @@ impl LandBuilder {
     }
 
     /// Consume the builder and produce a [`RunnableStage::Exec`] named `land`.
-    pub fn build(self) -> RunnableStage {
+    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+        let name = "land".to_string();
+
+        crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
+            .map_err(|msg| SchemaError::Stage {
+                name: name.clone(),
+                msg,
+            })?;
+
+        for key in self.options.keys() {
+            if FRAMEWORK_KEYS.contains(key.as_str()) {
+                return Err(SchemaError::Stage {
+                    name: name.clone(),
+                    msg: format!(
+                        "option key {key:?} collides with framework substitution variable"
+                    ),
+                });
+            }
+        }
+
         let stage = crate::stages::exec::Exec {
-            name: "land".to_string(),
+            name,
             options: self.options,
             interpolation_map: self.interpolation_map,
             bind_map: self.bind_map,
         };
-        RunnableStage::Exec {
+        Ok(RunnableStage::Exec {
             stage,
             skip_if_exists: self.skip_if_exists,
             client: self.client,
-        }
+        })
     }
 }
 
 impl Default for LandBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl From<LandBuilder> for RunnableStage {
-    fn from(b: LandBuilder) -> Self {
-        b.build()
     }
 }
 
@@ -424,12 +438,13 @@ impl GremlinDefinition {
     }
 }
 
-/// Run the name-filling pass over a flat list of stages (non-recursive).
+/// Run the name-filling pass over a flat list of stages, recursing into
+/// composite bodies so every unnamed stage at every depth gets a name.
 ///
 /// Mirrors the YAML path: unnamed stages get auto-generated names based on
 /// their stage type, and duplicate explicit names are disambiguated with
 /// `-N` suffixes.
-fn fill_builder_names(stages: &mut [RunnableStage]) {
+pub(crate) fn fill_builder_names(stages: &mut [RunnableStage]) {
     let mut entries: Vec<StageEntry> = stages.iter().map(|s| s.to_stage_entry()).collect();
     // fill_names is infallible for well-formed stages.
     if loader::fill_names(&mut entries).is_ok() {
@@ -439,6 +454,18 @@ fn fill_builder_names(stages: &mut [RunnableStage]) {
             }
         }
     }
+
+    // Recurse into composite bodies.
+    for stage in stages.iter_mut() {
+        match stage {
+            RunnableStage::Loop { body, .. }
+            | RunnableStage::Sequence { body, .. }
+            | RunnableStage::Parallel { body, .. } => {
+                fill_builder_names(body);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -446,6 +473,7 @@ mod tests {
     use super::*;
     use crate::builders::agent::AgentBuilder;
     use crate::builders::artifacts::{artifact, content};
+    use crate::builders::composite::{LoopBuilder, ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
 
     #[test]
@@ -456,13 +484,15 @@ mod tests {
                 AgentBuilder::new("plan")
                     .prompt("write the plan to {plan}")
                     .bind("plan", artifact("artifact://plan.md"))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .stage(
                 ExecBuilder::new("run")
                     .cmd("cat {plan}")
                     .interpolate("plan", content("artifact://plan.md"))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .unwrap();
@@ -485,13 +515,15 @@ mod tests {
                 AgentBuilder::new("first")
                     .prompt("one {out}")
                     .bind("out", artifact("artifact://shared.md"))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .stage(
                 AgentBuilder::new("second")
                     .prompt("two {out}")
                     .bind("out", artifact("artifact://shared.md"))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .unwrap_err();
@@ -509,7 +541,8 @@ mod tests {
                 ExecBuilder::new("consumer")
                     .cmd("cat {missing}")
                     .interpolate("missing", content("artifact://never-produced.md"))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .unwrap_err();
@@ -528,13 +561,15 @@ mod tests {
                     .prompt("write {plan}")
                     .bind("plan", artifact("artifact://plan.md"))
                     .bind("pr_url", artifact("artifact://pr-url.txt"))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .land(
                 LandBuilder::new()
                     .cmd("gh pr merge --squash \"{pr_url}\"")
                     .interpolate("pr_url", content("artifact://pr-url.txt"))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .unwrap();
@@ -556,7 +591,8 @@ mod tests {
                 ExecBuilder::new("consumer")
                     .cmd("cat {plan}")
                     .interpolate("plan", content("artifact://plan.md"))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .unwrap();
@@ -569,5 +605,202 @@ mod tests {
         let builder = DefinitionBuilder::new("demo", "xai:grok-4");
         let def = GremlinDefinition::from_builder(builder).unwrap();
         assert_eq!(def.name, "demo");
+    }
+
+    // ---- Per-stage builder validation tests ----
+
+    #[test]
+    fn agent_builder_rejects_content_question_before_paren() {
+        let err = AgentBuilder::new("test")
+            .prompt("hi")
+            .interpolate(
+                "out",
+                crate::builders::artifacts::InterpolationValue::from(
+                    r#"content?("artifact://x.txt")"#,
+                ),
+            )
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("content?(...)"), "{err}");
+    }
+
+    #[test]
+    fn agent_builder_rejects_framework_option_key() {
+        let err = AgentBuilder::new("test")
+            .prompt("hi")
+            .option("cwd", "/tmp")
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("collides with framework substitution variable"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn agent_builder_allows_model_option_key() {
+        // Agent exempts "model" from framework-key collision.
+        AgentBuilder::new("test")
+            .prompt("hi")
+            .option("model", "openai:gpt-5")
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn exec_builder_rejects_content_question_before_paren() {
+        let err = ExecBuilder::new("test")
+            .cmd("echo hi")
+            .interpolate(
+                "out",
+                crate::builders::artifacts::InterpolationValue::from(
+                    r#"content?("artifact://x.txt")"#,
+                ),
+            )
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("content?(...)"), "{err}");
+    }
+
+    #[test]
+    fn exec_builder_rejects_framework_option_key() {
+        for key in ["name", "model", "cwd", "base_ref"] {
+            let err = ExecBuilder::new("test")
+                .cmd("echo hi")
+                .option(key, "x")
+                .build()
+                .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("collides with framework substitution variable"),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_builder_rejects_max_iterations_zero() {
+        let err = LoopBuilder::new("test")
+            .max_iterations(0)
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("max_iterations must be >= 1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn loop_builder_accepts_max_iterations_one() {
+        LoopBuilder::new("test").max_iterations(1).build().unwrap();
+    }
+
+    #[test]
+    fn sequence_builder_rejects_empty_body() {
+        let err = SequenceBuilder::new("test").build().unwrap_err();
+        assert!(
+            err.to_string().contains("'body' must not be empty"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parallel_builder_rejects_nested_parallel() {
+        let inner = ParallelBuilder::new("inner")
+            .stage(ExecBuilder::new("cmd").cmd("echo hi").build().unwrap())
+            .build()
+            .unwrap();
+
+        let err = ParallelBuilder::new("outer")
+            .stage(inner)
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("nested parallel groups are not allowed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parallel_builder_disambiguates_duplicate_child_names() {
+        // Name-filling runs before child-name validation, so duplicates
+        // are auto-disambiguated (matching the YAML path).
+        let group = ParallelBuilder::new("group")
+            .stage(ExecBuilder::new("shard").cmd("echo hi").build().unwrap())
+            .stage(ExecBuilder::new("shard").cmd("echo hi").build().unwrap())
+            .build()
+            .unwrap();
+        let body = group.body();
+        assert_eq!(body.len(), 2);
+        assert_eq!(body[0].name(), "shard");
+        assert_eq!(body[1].name(), "shard-2");
+    }
+
+    #[test]
+    fn parallel_builder_rejects_invalid_child_name() {
+        let err = ParallelBuilder::new("group")
+            .stage(ExecBuilder::new("bad/name").cmd("echo hi").build().unwrap())
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid characters for child_id"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn land_builder_rejects_framework_option_key() {
+        let err = LandBuilder::new()
+            .cmd("echo hi")
+            .option("cwd", "/tmp")
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("collides with framework substitution variable"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn land_builder_rejects_content_question_before_paren() {
+        let err = LandBuilder::new()
+            .cmd("echo hi")
+            .interpolate(
+                "out",
+                crate::builders::artifacts::InterpolationValue::from(
+                    r#"content?("artifact://x.txt")"#,
+                ),
+            )
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("content?(...)"), "{err}");
+    }
+
+    #[test]
+    fn fill_builder_names_recurses_into_composites() {
+        // Build a sequence with unnamed children — name-filling should
+        // assign names at every depth.
+        let def = DefinitionBuilder::new("demo", "xai:grok-4")
+            .stage(
+                SequenceBuilder::new("workflow")
+                    .stage(ExecBuilder::new("").cmd("echo one").build().unwrap())
+                    .stage(ExecBuilder::new("").cmd("echo two").build().unwrap())
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        let seq = &def.stages[0];
+        assert_eq!(seq.name(), "workflow");
+        assert_eq!(seq.stage_type(), "sequence");
+        let body = seq.body();
+        assert_eq!(body.len(), 2);
+        // Both unnamed exec children should get auto-filled names.
+        assert_eq!(body[0].name(), "exec");
+        assert_eq!(body[1].name(), "exec-2");
     }
 }

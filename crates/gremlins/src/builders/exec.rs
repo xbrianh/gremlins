@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
+use crate::schemas::error::SchemaError;
 use crate::stages::composite::ClientSpec;
+use crate::stages::constants::FRAMEWORK_KEYS;
 use crate::stages::exec::Exec;
 use crate::stages::node::RunnableStage;
 
@@ -137,23 +139,36 @@ impl ExecBuilder {
     }
 
     /// Consume the builder and produce a [`RunnableStage::Exec`].
-    pub fn build(self) -> RunnableStage {
+    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+        let name = self.name.clone();
+
+        crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
+            .map_err(|msg| SchemaError::Stage {
+                name: name.clone(),
+                msg,
+            })?;
+
+        for key in self.options.keys() {
+            if FRAMEWORK_KEYS.contains(key.as_str()) {
+                return Err(SchemaError::Stage {
+                    name: name.clone(),
+                    msg: format!(
+                        "option key {key:?} collides with framework substitution variable"
+                    ),
+                });
+            }
+        }
+
         let stage = Exec {
-            name: self.name,
+            name,
             options: self.options,
             interpolation_map: self.interpolation_map,
             bind_map: self.bind_map,
         };
-        RunnableStage::Exec {
+        Ok(RunnableStage::Exec {
             stage,
             skip_if_exists: self.skip_if_exists,
             client: self.client,
-        }
-    }
-}
-
-impl From<ExecBuilder> for RunnableStage {
-    fn from(b: ExecBuilder) -> Self {
-        b.build()
+        })
     }
 }

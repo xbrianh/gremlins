@@ -175,7 +175,8 @@ pub fn plan_gh(prompts: Vec<String>) -> Vec<RunnableStage> {
             "plan_issue_number?",
             artifact("artifact://plan-issue-number.txt"),
         )
-        .build();
+        .build()
+        .expect("resolve-plan-source must be valid");
 
     let publish_as_issue = ExecBuilder::new("publish-as-issue")
         .interpolate("plan", "artifact://plan.md")
@@ -185,7 +186,8 @@ pub fn plan_gh(prompts: Vec<String>) -> Vec<RunnableStage> {
             "plan_issue_number",
             artifact("artifact://plan-issue-number.txt"),
         )
-        .build();
+        .build()
+        .expect("publish-as-issue must be valid");
 
     base.push(resolve_plan_source);
     base.push(publish_as_issue);
@@ -227,7 +229,7 @@ mod tests {
             5,
             vec!["fix the tests".to_string()],
         );
-        let stage = lp.build();
+        let stage = lp.build().unwrap();
         assert_eq!(stage.name(), "verify");
         assert_eq!(stage.stage_type(), "loop");
         let body = stage.body();
