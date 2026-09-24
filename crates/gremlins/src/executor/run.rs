@@ -1136,6 +1136,7 @@ mod tests {
             loop_stack: Vec::new(),
             stage_inputs: HashMap::new(),
             dry_run: false,
+            definition_is_expanded: false,
         };
         (tmp, gremlin)
     }

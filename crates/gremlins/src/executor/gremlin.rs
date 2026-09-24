@@ -149,6 +149,9 @@ pub struct Gremlin {
     /// absent or empty is an optional source with nothing to bind.
     pub stage_inputs: HashMap<String, String>,
     pub dry_run: bool,
+    /// When true, `init_runtime` loads the definition via [`GremlinDefinition::from_expanded_yaml`]
+    /// instead of the full expansion path.
+    pub(crate) definition_is_expanded: bool,
 }
 
 impl Gremlin {
@@ -321,7 +324,8 @@ impl Gremlin {
         // run actually used; otherwise fall back to resolving the kind. Either
         // way the path is only recorded here — `init_runtime` reads it.
         let hermetic = state_dir.join("definition.yaml");
-        let definition_path = if hermetic.is_file() {
+        let definition_is_expanded = hermetic.is_file();
+        let definition_path = if definition_is_expanded {
             Some(hermetic)
         } else if !kind.is_empty() {
             resolve_definition_in_project(&kind, &project_root)
@@ -382,6 +386,7 @@ impl Gremlin {
             loop_stack: Vec::new(),
             stage_inputs,
             dry_run: false,
+            definition_is_expanded,
         })
     }
 
@@ -456,6 +461,7 @@ impl Gremlin {
             loop_stack: Vec::new(),
             stage_inputs: HashMap::new(),
             dry_run: true,
+            definition_is_expanded: false,
         }
     }
 
@@ -484,9 +490,13 @@ impl Gremlin {
             )));
         };
 
-        let definition =
+        let definition = if self.definition_is_expanded {
+            GremlinDefinition::from_expanded_yaml(&definition_path, self.client_override.as_deref())
+                .map_err(|error| RunError::Message(error.to_string()))?
+        } else {
             GremlinDefinition::from_yaml(&definition_path, self.client_override.as_deref())
-                .map_err(|error| RunError::Message(error.to_string()))?;
+                .map_err(|error| RunError::Message(error.to_string()))?
+        };
 
         // An unusable client must not abort a run: the state directory, the
         // worktree and the artifacts all have to exist before any stage can
@@ -774,6 +784,7 @@ impl Gremlin {
             // the same inputs the parent launched with.
             stage_inputs: self.stage_inputs.clone(),
             dry_run: self.dry_run,
+            definition_is_expanded: false,
         })
     }
 
@@ -1056,6 +1067,7 @@ fn write_launch_state(
         loop_stack: Vec::new(),
         stage_inputs: stage_inputs.clone(),
         dry_run: false,
+        definition_is_expanded: false,
     })
 }
 
@@ -1973,6 +1985,7 @@ mod tests {
             loop_stack: Vec::new(),
             stage_inputs: HashMap::new(),
             dry_run: false,
+            definition_is_expanded: false,
         }
     }
 
@@ -2148,5 +2161,172 @@ mod tests {
                 "clean should prune git's administrative record"
             );
         });
+    }
+
+    // --- hermetic snapshot resume ---
+
+    /// A minimal expanded definition YAML that an executor test can write
+    /// directly into a state directory.
+    const HERMETIC_DEFINITION: &str = r#"
+__gremlins_expanded__: true
+default_client: 'cmd:true'
+base_ref: main
+stages:
+  - name: run
+    type: exec
+    options:
+      cmds:
+        - "echo hello"
+"#;
+
+    /// Same definition without the sentinel — the direct-load path must
+    /// tolerate its absence.
+    const HERMETIC_DEFINITION_NO_SENTINEL: &str = r#"
+default_client: 'cmd:true'
+base_ref: main
+stages:
+  - name: run
+    type: exec
+    options:
+      cmds:
+        - "echo hello"
+"#;
+
+    fn write_hermetic_state(sandbox: &Path, id: &str, definition_body: &str) -> (PathBuf, PathBuf) {
+        let state_dir = sandbox.join("state").join(id);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let project_root = sandbox.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let definition_path = state_dir.join("definition.yaml");
+        std::fs::write(&definition_path, definition_body).unwrap();
+
+        let state_json = serde_json::json!({
+            "id": id,
+            "kind": "demo",
+            "project_root": project_root.to_string_lossy(),
+            "definition_path": definition_path.to_string_lossy(),
+            "workdir": "",
+            "status": "running",
+            "pid": null,
+            "exit_code": null,
+            "client": "",
+            "attempt": "0001",
+        });
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::to_string_pretty(&state_json).unwrap(),
+        )
+        .unwrap();
+
+        (state_dir, project_root)
+    }
+
+    #[tokio::test]
+    // The env guard holds a plain mutex across the run's awaits; safe because
+    // `#[tokio::test]` drives a current-thread runtime, so no other task can be
+    // scheduled on this thread while the lock is held.
+    #[allow(clippy::await_holding_lock)]
+    async fn from_with_hermetic_snapshot_loads_via_expanded_path() {
+        let mut env = EnvGuard::lock();
+        let sandbox = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
+
+        let (state_dir, project_root) =
+            write_hermetic_state(sandbox.path(), "gr-hermetic", HERMETIC_DEFINITION);
+        assert!(state_dir.join("definition.yaml").is_file());
+
+        let mut gremlin = Gremlin::from("gr-hermetic").unwrap();
+        assert!(
+            gremlin.definition_is_expanded,
+            "definition_is_expanded must be true when definition.yaml exists"
+        );
+        assert_eq!(gremlin.project_root, project_root);
+        assert!(gremlin.definition.is_stub());
+
+        gremlin.init_runtime().await.unwrap();
+
+        assert_eq!(gremlin.definition.name, "definition");
+        assert_eq!(gremlin.definition.default_client, "cmd:true");
+        assert_eq!(gremlin.definition.base_ref, "main");
+        assert_eq!(gremlin.definition.stages.len(), 1);
+        assert_eq!(gremlin.definition.stages[0].name(), "run");
+        assert_eq!(gremlin.definition.stages[0].stage_type(), "exec");
+        // project_root came from state.json, not from a walk.
+        assert_eq!(gremlin.project_root, project_root);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn from_with_hermetic_snapshot_without_sentinel_still_loads() {
+        let mut env = EnvGuard::lock();
+        let sandbox = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
+
+        let (state_dir, _project_root) = write_hermetic_state(
+            sandbox.path(),
+            "gr-hermetic-nosent",
+            HERMETIC_DEFINITION_NO_SENTINEL,
+        );
+        assert!(state_dir.join("definition.yaml").is_file());
+
+        let mut gremlin = Gremlin::from("gr-hermetic-nosent").unwrap();
+        assert!(gremlin.definition_is_expanded);
+
+        gremlin.init_runtime().await.unwrap();
+
+        assert_eq!(gremlin.definition.name, "definition");
+        assert_eq!(gremlin.definition.default_client, "cmd:true");
+        assert_eq!(gremlin.definition.stages.len(), 1);
+        assert_eq!(gremlin.definition.stages[0].name(), "run");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn from_without_hermetic_snapshot_falls_back_to_kind() {
+        if !git_available() {
+            eprintln!(
+                "git is unavailable; skipping from_without_hermetic_snapshot_falls_back_to_kind"
+            );
+            return;
+        }
+        let mut env = EnvGuard::lock();
+        let sandbox = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
+
+        let repo = tempfile::tempdir().unwrap();
+        if !init_repo(repo.path()) {
+            eprintln!("could not prepare a git fixture; skipping");
+            return;
+        }
+        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
+
+        Gremlin::create(
+            "gr-noherm",
+            &definition_path,
+            None,
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut gremlin = Gremlin::from("gr-noherm").unwrap();
+        assert!(
+            !gremlin.definition_is_expanded,
+            "definition_is_expanded must be false when no definition.yaml was written"
+        );
+        assert!(gremlin.definition.is_stub());
+
+        gremlin.init_runtime().await.unwrap();
+
+        assert_eq!(gremlin.definition.name, "demo");
+        assert_eq!(gremlin.definition.default_client, "cmd:true");
+        assert_eq!(gremlin.definition.stages.len(), 0);
     }
 }

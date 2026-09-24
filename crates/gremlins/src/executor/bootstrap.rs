@@ -631,6 +631,7 @@ mod tests {
             stage_inputs,
             loop_stack: Vec::new(),
             dry_run: false,
+            definition_is_expanded: false,
         };
         (tmp, gremlin)
     }

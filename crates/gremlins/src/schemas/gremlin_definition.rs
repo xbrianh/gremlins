@@ -111,18 +111,60 @@ impl GremlinDefinition {
 
         let project_root = project_root_for(&path);
         let expanded = expand::parse_definition_file(&path, &project_root)?;
+
+        Self::from_expanded_value(expanded, path, default_client_override)
+    }
+
+    /// Load an already-expanded YAML file directly — no expansion, no project-root
+    /// walk. Used by [`Gremlin::from`] when a hermetic `definition.yaml` exists
+    /// alongside the state directory.
+    ///
+    /// Strips the `__gremlins_expanded__` sentinel if present, but tolerates its
+    /// absence.
+    ///
+    /// [`Gremlin::from`]: crate::executor::gremlin::Gremlin::from
+    pub fn from_expanded_yaml(
+        path: impl AsRef<Path>,
+        default_client_override: Option<&str>,
+    ) -> Result<GremlinDefinition, SchemaError> {
+        let path = path.as_ref();
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if !path.exists() {
+            return Err(SchemaError::DefinitionFileNotFound {
+                path: path.display().to_string(),
+            });
+        }
+
+        let mut expanded = expand::load_yaml_file(&path)?;
+        // Strip the sentinel if present — the file may lack it but still be
+        // fully expanded.
+        if let Some(mapping) = expanded.as_mapping_mut() {
+            mapping.remove(Value::from("__gremlins_expanded__"));
+        }
+
+        Self::from_expanded_value(expanded, path, default_client_override)
+    }
+
+    /// Shared extraction: turn an already-expanded YAML [`Value`] into a typed
+    /// [`GremlinDefinition`]. Both [`from_yaml`] and [`from_expanded_yaml`]
+    /// funnel through here once they have the expanded tree.
+    fn from_expanded_value(
+        expanded: Value,
+        path: PathBuf,
+        default_client_override: Option<&str>,
+    ) -> Result<GremlinDefinition, SchemaError> {
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("")
+            .to_string();
+
         let root = expanded
             .as_mapping()
             .ok_or_else(|| SchemaError::YamlNotMapping {
                 label: path.display().to_string(),
                 got: format!("{expanded:?}"),
             })?;
-
-        let name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("")
-            .to_string();
 
         let yaml_default_client = default_client_from_yaml(root)?;
         let base_ref = base_ref_from_yaml(root)?;
@@ -837,5 +879,122 @@ stages:
 
         let def = GremlinDefinition::from_yaml(&path, None).unwrap();
         def.validate().unwrap();
+    }
+
+    /// A plain file written directly to disk (no `.gremlins` overlay), for the
+    /// direct-load path, which never walks to a project root.
+    fn write_plain_file(dir: &Path, stem: &str, body: &str) -> PathBuf {
+        let path = dir.join(format!("{stem}.yaml"));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    const EXPANDED_BODY: &str = r#"
+default_client: 'cmd:true'
+base_ref: main
+stages:
+  - name: run
+    type: exec
+    options:
+      cmds:
+        - "echo hello"
+"#;
+
+    const EXPANDED_BODY_WITH_SENTINEL: &str = r#"
+__gremlins_expanded__: true
+default_client: 'cmd:true'
+base_ref: main
+stages:
+  - name: run
+    type: exec
+    options:
+      cmds:
+        - "echo hello"
+"#;
+
+    #[test]
+    fn from_expanded_yaml_loads_with_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_plain_file(dir.path(), "expanded", EXPANDED_BODY_WITH_SENTINEL);
+
+        let definition = GremlinDefinition::from_expanded_yaml(&path, None).unwrap();
+
+        assert_eq!(definition.name, "expanded");
+        assert_eq!(definition.default_client, "cmd:true");
+        assert_eq!(definition.base_ref, "main");
+        assert_eq!(definition.stages.len(), 1);
+        assert_eq!(definition.stages[0].name(), "run");
+        assert_eq!(definition.stages[0].stage_type(), "exec");
+        assert!(
+            definition
+                .expanded_yaml
+                .get("__gremlins_expanded__")
+                .is_none(),
+            "sentinel must be stripped from the stored YAML"
+        );
+    }
+
+    #[test]
+    fn from_expanded_yaml_loads_without_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_plain_file(dir.path(), "expanded", EXPANDED_BODY);
+
+        let definition = GremlinDefinition::from_expanded_yaml(&path, None).unwrap();
+
+        assert_eq!(definition.name, "expanded");
+        assert_eq!(definition.default_client, "cmd:true");
+        assert_eq!(definition.base_ref, "main");
+        assert_eq!(definition.stages.len(), 1);
+        assert_eq!(definition.stages[0].name(), "run");
+        assert_eq!(definition.stages[0].stage_type(), "exec");
+        assert!(
+            definition
+                .expanded_yaml
+                .get("__gremlins_expanded__")
+                .is_none(),
+            "sentinel must be stripped from the stored YAML"
+        );
+    }
+
+    #[test]
+    fn from_expanded_yaml_and_from_yaml_produce_equivalent_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = write_fixture(dir.path(), "demo", WITH_CLIENT);
+        let from_yaml = GremlinDefinition::from_yaml(&source, None).unwrap();
+
+        // The expanded tree from the full path is the direct path's input:
+        // serialize it to a fresh file (same stem so the identity matches) and
+        // load it back without expansion.
+        let expanded_path = dir.path().join("reload").join("demo.yaml");
+        std::fs::create_dir_all(expanded_path.parent().unwrap()).unwrap();
+        let serialized = serde_yaml::to_string(&from_yaml.expanded_yaml).unwrap();
+        std::fs::write(&expanded_path, serialized).unwrap();
+
+        let from_expanded = GremlinDefinition::from_expanded_yaml(&expanded_path, None).unwrap();
+
+        assert_eq!(from_expanded.name, from_yaml.name);
+        assert_eq!(from_expanded.default_client, from_yaml.default_client);
+        assert_eq!(from_expanded.base_ref, from_yaml.base_ref);
+        assert_eq!(from_expanded.stages.len(), from_yaml.stages.len());
+
+        let yaml_names: Vec<&str> = from_yaml.stages.iter().map(RunnableStage::name).collect();
+        let expanded_names: Vec<&str> = from_expanded
+            .stages
+            .iter()
+            .map(RunnableStage::name)
+            .collect();
+        assert_eq!(expanded_names, yaml_names);
+
+        let yaml_types: Vec<&str> = from_yaml
+            .stages
+            .iter()
+            .map(RunnableStage::stage_type)
+            .collect();
+        let expanded_types: Vec<&str> = from_expanded
+            .stages
+            .iter()
+            .map(RunnableStage::stage_type)
+            .collect();
+        assert_eq!(expanded_types, yaml_types);
     }
 }
