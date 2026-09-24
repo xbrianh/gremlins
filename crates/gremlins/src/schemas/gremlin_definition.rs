@@ -105,6 +105,12 @@ impl GremlinDefinition {
             Value::Bool(true),
         );
 
+        // name — always present, so round-trips preserve definition identity.
+        root.insert(
+            Value::String("name".to_string()),
+            Value::String(self.name.clone()),
+        );
+
         // default_client — always present.
         root.insert(
             Value::String("default_client".to_string()),

@@ -22,7 +22,6 @@ use crate::schemas::error::SchemaError;
 use crate::schemas::loader::{self as schema_loader, StageEntry, StageNode};
 use crate::stages::agent::Agent;
 use crate::stages::composite::{get_client_from_dict, ClientSpec, StageAttrs};
-use crate::stages::constants::FRAMEWORK_KEYS;
 use crate::stages::exec::Exec;
 use crate::stages::parallel::{validate_child_names, ErrorPolicy, ParallelGroup};
 use crate::stages::r#loop::Loop;
@@ -568,13 +567,15 @@ fn string_map_to_yaml(map: &HashMap<String, String>) -> Value {
 /// Convert `serde_json::Value` options to a YAML mapping, filtering out
 /// framework-substituted keys (`cwd`, `base_ref`) that the runtime injects.
 fn options_to_yaml(options: &HashMap<String, serde_json::Value>) -> Value {
-    // Filter out keys that the framework substitutes — they're not part of
-    // the user-visible definition. Iterate directly to avoid an intermediate
-    // HashMap allocation.
+    // Filter out keys that the runtime injects at execution time — they're
+    // not part of the user-visible definition. We intentionally do NOT filter
+    // all FRAMEWORK_KEYS here: model is a valid user-facing option for agent
+    // stages, and name is validated out by the builder.
+    // Iterate directly to avoid an intermediate HashMap allocation.
     let mut out = Mapping::new();
     for (k, v) in options
         .iter()
-        .filter(|(k, _)| !FRAMEWORK_KEYS.contains(k.as_str()))
+        .filter(|(k, _)| k.as_str() != "cwd" && k.as_str() != "base_ref")
     {
         if let Ok(yaml_val) = serde_yaml::to_value(v) {
             out.insert(Value::String(k.clone()), yaml_val);
