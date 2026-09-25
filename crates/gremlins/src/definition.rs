@@ -27,7 +27,6 @@ use crate::stages::parallel::ErrorPolicy;
 ///
 /// Used as the payload of [`ExecutorStage::Sequence`] and as the body of
 /// [`ExecutorStage::Loop`].
-#[derive(Debug, Clone)]
 pub struct Sequence {
     pub stages: Vec<ExecutorStage>,
     pub scope: Option<String>,
@@ -39,7 +38,6 @@ pub struct Sequence {
 // ---------------------------------------------------------------------------
 
 /// The next stage (or stages) the executor should run.
-#[derive(Debug, Clone)]
 pub enum ExecutorStage {
     /// Run an agent stage.
     Agent {
@@ -62,16 +60,18 @@ pub enum ExecutorStage {
         cancel_on_error: bool,
         error_policy: ErrorPolicy,
         client: Option<ClientSpec>,
-        body: Vec<ExecutorStage>,
+        children: Vec<Box<dyn GremlinDefinition>>,
+        skip_if_exists: String,
     },
     /// Run a body repeatedly.
     Loop {
         name: String,
-        max_iterations: u32,
+        max_iterations: Option<u32>,
         stop_when_exists: Option<String>,
-        interval: Option<f64>,
+        loop_iter_template: String,
         client: Option<ClientSpec>,
         body: Sequence,
+        skip_if_exists: String,
     },
     /// No more stages — the gremlin is done.
     Done,
@@ -119,8 +119,8 @@ impl ExecutorStage {
             ExecutorStage::Agent { skip_if_exists, .. }
             | ExecutorStage::Exec { skip_if_exists, .. } => skip_if_exists,
             ExecutorStage::Sequence(seq) => &seq.skip_if_exists,
-            ExecutorStage::Parallel { .. } => "",
-            ExecutorStage::Loop { .. } => "",
+            ExecutorStage::Parallel { skip_if_exists, .. }
+            | ExecutorStage::Loop { skip_if_exists, .. } => skip_if_exists,
             ExecutorStage::Done => "",
         }
     }
@@ -156,17 +156,6 @@ pub trait GremlinDefinition: Send {
     ///
     /// Returns `Ok(ExecutorStage::Done)` when the definition has no more stages.
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError>;
-
-    /// Create a child definition scoped to one parallel branch.
-    ///
-    /// Stub — returns `Err(DefinitionError::Message("not implemented"))`.
-    fn with_stages(
-        &self,
-        _parallel: &ExecutorStage,
-        _index: usize,
-    ) -> Result<Box<dyn GremlinDefinition>, DefinitionError> {
-        Err(DefinitionError::Message("not implemented".into()))
-    }
 
     /// Serialize this definition to bytes.
     ///
@@ -214,14 +203,6 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
 
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError> {
         self.as_mut().next_stage().await
-    }
-
-    fn with_stages(
-        &self,
-        parallel: &ExecutorStage,
-        index: usize,
-    ) -> Result<Box<dyn GremlinDefinition>, DefinitionError> {
-        self.as_ref().with_stages(parallel, index)
     }
 
     fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {
@@ -359,10 +340,8 @@ mod tests {
             inner: stub_definition(),
         };
         let result = def.next_stage().await.unwrap();
-        match result {
-            ExecutorStage::Done => {}
-            other => panic!("expected Done, got {other:?}"),
-        }
+        assert!(matches!(&result, ExecutorStage::Done));
+        assert_eq!(result.stage_type(), "done");
     }
 
     #[test]
@@ -463,32 +442,34 @@ mod tests {
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
             client: None,
-            body: vec![],
+            children: vec![],
+            skip_if_exists: "artifact://reviews".into(),
         };
         assert_eq!(stage.name(), "reviews");
         assert_eq!(stage.stage_type(), "parallel");
         assert!(stage.client().is_none());
-        assert_eq!(stage.skip_if_exists(), "");
+        assert_eq!(stage.skip_if_exists(), "artifact://reviews");
     }
 
     #[test]
     fn executor_stage_loop_name() {
         let stage = ExecutorStage::Loop {
             name: "retry".into(),
-            max_iterations: 3,
+            max_iterations: Some(3),
             stop_when_exists: None,
-            interval: None,
+            loop_iter_template: "retry-{n}".into(),
             client: None,
             body: Sequence {
                 stages: vec![],
                 scope: None,
                 skip_if_exists: String::new(),
             },
+            skip_if_exists: "artifact://retry".into(),
         };
         assert_eq!(stage.name(), "retry");
         assert_eq!(stage.stage_type(), "loop");
         assert!(stage.client().is_none());
-        assert_eq!(stage.skip_if_exists(), "");
+        assert_eq!(stage.skip_if_exists(), "artifact://retry");
     }
 
     #[test]
