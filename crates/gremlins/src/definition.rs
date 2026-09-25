@@ -1,4 +1,4 @@
-//! The `GremlinDefinition` trait — the abstraction boundary between the
+//! The `GremlinStageProvider` trait — the abstraction boundary between the
 //! executor run-loop and concrete definition sources (static YAML, Python
 //! plugins, etc.).
 //!
@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
-use crate::schemas::gremlin_definition::GremlinDefinition as ConcreteDefinition;
+use crate::schemas::gremlin_definition::GremlinDefinition;
 use crate::stages::agent::Agent;
 use crate::stages::composite::ClientSpec;
 use crate::stages::exec::Exec;
@@ -61,7 +61,7 @@ pub enum ExecutorStage {
         cancel_on_error: bool,
         error_policy: ErrorPolicy,
         client: Option<ClientSpec>,
-        children: Vec<Box<dyn GremlinDefinition>>,
+        children: Vec<Box<dyn GremlinStageProvider>>,
         skip_if_exists: String,
     },
     /// Run a body repeatedly.
@@ -128,7 +128,7 @@ impl ExecutorStage {
 }
 
 // ---------------------------------------------------------------------------
-// GremlinDefinition trait
+// GremlinStageProvider trait
 // ---------------------------------------------------------------------------
 
 /// The interface every gremlin definition must satisfy.
@@ -137,7 +137,7 @@ impl ExecutorStage {
 /// and may move it across threads. `Sync` is not required — no concurrent
 /// access.
 #[async_trait]
-pub trait GremlinDefinition: Send {
+pub trait GremlinStageProvider: Send {
     /// The definition's identity (the YAML file stem, or equivalent).
     fn name(&self) -> &str;
 
@@ -173,7 +173,7 @@ pub trait GremlinDefinition: Send {
     /// Deserialize a definition from bytes.
     ///
     /// Stub — returns `Err(DefinitionError::Message("not implemented"))`.
-    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinDefinition>, DefinitionError>
+    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinStageProvider>, DefinitionError>
     where
         Self: Sized,
     {
@@ -182,11 +182,11 @@ pub trait GremlinDefinition: Send {
 }
 
 // ---------------------------------------------------------------------------
-// Blanket impl for Box<dyn GremlinDefinition>
+// Blanket impl for Box<dyn GremlinStageProvider>
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl GremlinDefinition for Box<dyn GremlinDefinition> {
+impl GremlinStageProvider for Box<dyn GremlinStageProvider> {
     fn name(&self) -> &str {
         self.as_ref().name()
     }
@@ -219,7 +219,7 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
         self.as_ref().serialize()
     }
 
-    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinDefinition>, DefinitionError>
+    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinStageProvider>, DefinitionError>
     where
         Self: Sized,
     {
@@ -231,7 +231,7 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
 // DefinitionError
 // ---------------------------------------------------------------------------
 
-/// Errors that can arise from [`GremlinDefinition::next_stage`].
+/// Errors that can arise from [`GremlinStageProvider::next_stage`].
 #[derive(Error, Debug)]
 pub enum DefinitionError {
     /// A schema-level problem (missing keys, type mismatches, etc.).
@@ -251,27 +251,27 @@ pub enum DefinitionError {
 // StaticDefinition — newtype bridge over the concrete GremlinDefinition
 // ---------------------------------------------------------------------------
 
-/// A [`GremlinDefinition`] trait implementation that wraps the existing
-/// concrete [`ConcreteDefinition`] struct.
+/// A [`GremlinStageProvider`] trait implementation that wraps the existing
+/// concrete [`GremlinDefinition`] struct.
 ///
 /// All accessors delegate to the inner struct. `next_stage()` walks the
 /// top-level stage list one [`RunnableStage`] at a time, converting each into
 /// an [`ExecutorStage`] via a pure recursive projection.
 #[derive(Debug)]
 pub struct StaticDefinition {
-    pub inner: ConcreteDefinition,
+    pub inner: GremlinDefinition,
     cursor: usize,
 }
 
 impl StaticDefinition {
     /// Create a new cursor-driven definition starting at position 0.
-    pub fn new(inner: ConcreteDefinition) -> Self {
+    pub fn new(inner: GremlinDefinition) -> Self {
         StaticDefinition { inner, cursor: 0 }
     }
 }
 
 #[async_trait]
-impl GremlinDefinition for StaticDefinition {
+impl GremlinStageProvider for StaticDefinition {
     fn name(&self) -> &str {
         &self.inner.name
     }
@@ -315,7 +315,7 @@ impl GremlinDefinition for StaticDefinition {
 // ---------------------------------------------------------------------------
 
 /// Recursively convert one [`RunnableStage`] into an [`ExecutorStage`].
-fn convert_stage(stage: RunnableStage, def: &ConcreteDefinition) -> ExecutorStage {
+fn convert_stage(stage: RunnableStage, def: &GremlinDefinition) -> ExecutorStage {
     match stage {
         RunnableStage::Agent {
             stage,
@@ -382,11 +382,11 @@ fn convert_stage(stage: RunnableStage, def: &ConcreteDefinition) -> ExecutorStag
             client,
             body,
         } => {
-            let children: Vec<Box<dyn GremlinDefinition>> = body
+            let children: Vec<Box<dyn GremlinStageProvider>> = body
                 .into_iter()
                 .map(|child| {
                     Box::new(StaticDefinition::new(def.clone_with_stages(vec![child])))
-                        as Box<dyn GremlinDefinition>
+                        as Box<dyn GremlinStageProvider>
                 })
                 .collect();
             ExecutorStage::Parallel {
@@ -411,8 +411,8 @@ mod tests {
     use super::*;
     use crate::stages::composite::StageAttrs;
 
-    fn stub_definition() -> ConcreteDefinition {
-        ConcreteDefinition::stub()
+    fn stub_definition() -> GremlinDefinition {
+        GremlinDefinition::stub()
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
     fn static_definition_with_real_definition() {
         // Build a minimal but real GremlinDefinition to exercise delegation
         // beyond the stub.
-        let inner = ConcreteDefinition {
+        let inner = GremlinDefinition {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
             default_client: "openai:gpt-4".into(),
@@ -668,9 +668,9 @@ mod tests {
         }
     }
 
-    /// Build a multi-stage ConcreteDefinition from RunnableStage entries.
-    fn definition_with(stages: Vec<RunnableStage>) -> ConcreteDefinition {
-        ConcreteDefinition {
+    /// Build a multi-stage GremlinDefinition from RunnableStage entries.
+    fn definition_with(stages: Vec<RunnableStage>) -> GremlinDefinition {
+        GremlinDefinition {
             name: "test-def".into(),
             path: "/tmp/test.yaml".into(),
             default_client: "openai:gpt-4".into(),
@@ -742,7 +742,7 @@ mod tests {
     #[tokio::test]
     async fn boxed_goto_forwards_to_inner() {
         let def = definition_with(vec![agent_rs("x"), agent_rs("y")]);
-        let mut bx: Box<dyn GremlinDefinition> = Box::new(StaticDefinition::new(def));
+        let mut bx: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(def));
 
         bx.goto("y");
         let s = bx.next_stage().await.unwrap();
@@ -860,7 +860,7 @@ mod tests {
                 assert_eq!(error_policy, ErrorPolicy::All);
                 assert_eq!(client, Some(ClientSpec("openai:gpt-5".into())));
                 assert_eq!(children.len(), 2);
-                // Each child is a StaticDefinition wrapping a ConcreteDefinition
+                // Each child is a StaticDefinition wrapping a GremlinDefinition
                 // that inherits parent metadata (name, default_client, base_ref, bootstrap).
                 for child in &children {
                     assert_eq!(child.name(), "test-def");
@@ -901,19 +901,19 @@ mod tests {
 
     #[tokio::test]
     async fn boxed_definition_delegates_name() {
-        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition::new(stub_definition()));
+        let def: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_definition()));
         assert_eq!(def.name(), "unknown");
     }
 
     #[tokio::test]
     async fn boxed_definition_delegates_land() {
-        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition::new(stub_definition()));
+        let def: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_definition()));
         assert!(def.land().is_none());
     }
 
     #[tokio::test]
     async fn boxed_definition_delegates_next_stage() {
-        let mut def: Box<dyn GremlinDefinition> =
+        let mut def: Box<dyn GremlinStageProvider> =
             Box::new(StaticDefinition::new(stub_definition()));
         let result = def.next_stage().await.unwrap();
         assert!(matches!(result, ExecutorStage::Done));
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn boxed_definition_stub_methods_return_not_implemented() {
-        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition::new(stub_definition()));
+        let def: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_definition()));
         let err = def.serialize().unwrap_err();
         assert!(matches!(err, DefinitionError::Message(m) if m == "not implemented"));
     }
