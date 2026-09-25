@@ -145,3 +145,130 @@ pub(crate) fn with_sandbox<T>(config_json: Option<&str>, body: impl FnOnce(&Sand
     let sandbox = Sandbox::with_config(config_json);
     body(&sandbox)
 }
+
+// ---------------------------------------------------------------------------
+// GitSandbox — isolated git repo + sandbox for executor tests
+// ---------------------------------------------------------------------------
+
+/// A throwaway git repository inside a throwaway sandbox root, wired together
+/// so that [`Gremlin::create`] and [`Gremlin::from`] see a real project with a
+/// `.gremlins/demo.yaml` definition.
+///
+/// The constructor checks for `git` on `PATH` and runs `git init` + commit;
+/// when either fails the fixture is marked skipped and the test should return
+/// early without touching any path.
+pub(crate) struct GitSandbox {
+    _env: EnvGuard,
+    sandbox: tempfile::TempDir,
+    repo: tempfile::TempDir,
+    definition_path: PathBuf,
+    skipped: bool,
+}
+
+impl GitSandbox {
+    /// A sandbox whose `.gremlins/demo.yaml` holds the default
+    /// `default_client: 'cmd:true'` + empty stages.
+    pub(crate) fn new() -> Self {
+        Self::with_definition("default_client: 'cmd:true'\nstages: []\n")
+    }
+
+    /// A sandbox whose `.gremlins/demo.yaml` holds `yaml`.
+    pub(crate) fn with_definition(yaml: &str) -> Self {
+        let mut env = EnvGuard::lock();
+        let sandbox = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
+
+        let repo = tempfile::tempdir().unwrap();
+        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
+        let skipped = !git_available() || !init_repo(repo.path(), yaml);
+
+        GitSandbox {
+            _env: env,
+            sandbox,
+            repo,
+            definition_path,
+            skipped,
+        }
+    }
+
+    /// True when git is unavailable or `init_repo` failed — the test should
+    /// return early.
+    pub(crate) fn is_skipped(&self) -> bool {
+        self.skipped
+    }
+
+    /// The `.gremlins/demo.yaml` inside the repo.
+    pub(crate) fn definition_path(&self) -> &Path {
+        &self.definition_path
+    }
+
+    /// The sandbox root (`GREMLINS_SANDBOX_ROOT`).
+    #[expect(dead_code)]
+    pub(crate) fn sandbox_path(&self) -> &Path {
+        self.sandbox.path()
+    }
+
+    /// The git repository root.
+    pub(crate) fn repo_path(&self) -> &Path {
+        self.repo.path()
+    }
+
+    /// A path inside the sandbox, for asserting where a run put its files.
+    pub(crate) fn join(&self, sub: impl AsRef<Path>) -> PathBuf {
+        self.sandbox.path().join(sub)
+    }
+}
+
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+pub(crate) fn git(root: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .expect("failed to run git")
+}
+
+/// A repository with one commit and a `.gremlins/demo.yaml` holding `yaml`.
+fn init_repo(root: &Path, yaml: &str) -> bool {
+    if !git(root, &["init", "-q"]).status.success() {
+        return false;
+    }
+    let overlay = root.join(".gremlins");
+    if std::fs::create_dir_all(&overlay).is_err() {
+        return false;
+    }
+    if std::fs::write(overlay.join("demo.yaml"), yaml).is_err() {
+        return false;
+    }
+    if !git(root, &["add", "."]).status.success() {
+        return false;
+    }
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    )
+    .status
+    .success()
+}
