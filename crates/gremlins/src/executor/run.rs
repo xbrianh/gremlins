@@ -1067,7 +1067,6 @@ pub(crate) fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path as StdPath;
 
     use crate::artifacts::registry::{DryRunArtifactRegistry, FileSystemArtifactRegistry};
     use crate::artifacts::uri::Uri;
@@ -1076,7 +1075,7 @@ mod tests {
     use crate::schemas::bootstrap::Bootstrap;
     use crate::schemas::gremlin_definition::GremlinDefinition;
     use crate::stages::composite::StageAttrs;
-    use crate::test_support::EnvGuard;
+    use crate::test_support::GitSandbox;
 
     fn parse_stages(yaml: &str) -> Vec<RunnableStage> {
         let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("valid YAML");
@@ -1983,60 +1982,6 @@ mod tests {
 
     // --- git-backed end to end ---
 
-    fn git_available() -> bool {
-        std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    }
-
-    fn git(root: &StdPath, args: &[&str]) -> std::process::Output {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .output()
-            .expect("failed to run git")
-    }
-
-    /// A repository with one commit and the given `.gremlins/demo.yaml`.
-    fn init_repo(root: &StdPath, definition_yaml: &str) -> bool {
-        if !git(root, &["init", "-q"]).status.success() {
-            return false;
-        }
-        let overlay = root.join(".gremlins");
-        if std::fs::create_dir_all(&overlay).is_err() {
-            return false;
-        }
-        if std::fs::write(overlay.join("demo.yaml"), definition_yaml).is_err() {
-            return false;
-        }
-        if !git(root, &["add", "."]).status.success() {
-            return false;
-        }
-        git(
-            root,
-            &[
-                "-c",
-                "user.email=test@example.com",
-                "-c",
-                "user.name=Test",
-                "commit",
-                "-q",
-                "-m",
-                "init",
-            ],
-        )
-        .status
-        .success()
-    }
-
     #[tokio::test]
     // The shared env guard holds a plain `std::sync::Mutex` across the run's
     // awaits. That is safe here: `#[tokio::test]` drives a current-thread
@@ -2045,18 +1990,7 @@ mod tests {
     // being observed half-swapped by another test.
     #[allow(clippy::await_holding_lock)]
     async fn create_then_run_end_to_end() {
-        if !git_available() {
-            eprintln!("git unavailable; skipping create_then_run_end_to_end");
-            return;
-        }
-
-        let mut env = EnvGuard::lock();
-        let sandbox = tempfile::tempdir().unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
-
-        let repo = tempfile::tempdir().unwrap();
-        let prepared = init_repo(
-            repo.path(),
+        let fx = GitSandbox::with_definition(
             "default_client: 'cmd:true'\n\
              stages:\n\
              \x20 - name: solo\n\
@@ -2071,42 +2005,32 @@ mod tests {
              \x20       options:\n\
              \x20         cmds: [\"true\"]\n",
         );
+        if fx.is_skipped() {
+            eprintln!("git unavailable; skipping create_then_run_end_to_end");
+            return;
+        }
 
-        // Everything fallible runs before the env is restored, so a failure
-        // cannot leave the sandbox override behind for another test.
-        let outcome: Result<(i32, Value), String> = if prepared {
-            async {
-                let definition_path = repo.path().join(".gremlins").join("demo.yaml");
-                let mut gremlin = Gremlin::create(
-                    "gr-e2e",
-                    &definition_path,
-                    None,
-                    None,
-                    None,
-                    &HashMap::new(),
-                    false,
-                    None,
-                    None,
-                    None,
-                )
-                .map_err(|error| error.to_string())?;
-                let code = gremlin.run().await.map_err(|error| error.to_string())?;
-                // Read back through the handle's own state dir. The sandbox
-                // override is shared process state, and the pre-existing
-                // config tests clear it for their own duration; the path the
-                // launch actually resolved is the honest one to assert on.
-                let state_file = gremlin.state_dir.join("state.json");
-                let raw =
-                    std::fs::read_to_string(&state_file).map_err(|error| error.to_string())?;
-                let value: Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-                Ok((code, value))
-            }
-            .await
-        } else {
-            Err("could not prepare a git fixture".to_string())
-        };
-
-        let (code, raw) = outcome.unwrap();
+        let mut gremlin = Gremlin::create(
+            "gr-e2e",
+            fx.definition_path(),
+            None,
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let code = gremlin.run().await.unwrap();
+        // Read back through the handle's own state dir. The sandbox
+        // override is shared process state, and the pre-existing
+        // config tests clear it for their own duration; the path the
+        // launch actually resolved is the honest one to assert on.
+        let state_file = gremlin.state_dir.join("state.json");
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(&state_file).unwrap()).unwrap();
         assert_eq!(code, 0);
         assert_eq!(raw["status"], "done");
         assert_eq!(raw["exit_code"], 0);

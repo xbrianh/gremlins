@@ -1360,7 +1360,7 @@ fn bootstrap_artifact_keys(definition: &GremlinDefinition) -> Vec<String> {
 mod tests {
     use super::*;
 
-    use crate::test_support::{with_sandbox, EnvGuard};
+    use crate::test_support::{with_sandbox, EnvGuard, GitSandbox};
 
     #[test]
     fn gremlin_is_send_sync() {
@@ -1564,65 +1564,6 @@ mod tests {
 
     // --- git-backed lifecycle ---
 
-    fn git_available() -> bool {
-        std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    }
-
-    fn git(root: &Path, args: &[&str]) -> std::process::Output {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .output()
-            .expect("failed to run git")
-    }
-
-    /// A repository with one commit and a `.gremlins/demo.yaml` gremlin definition.
-    fn init_repo(root: &Path) -> bool {
-        if !git(root, &["init", "-q"]).status.success() {
-            return false;
-        }
-        let overlay = root.join(".gremlins");
-        if std::fs::create_dir_all(&overlay).is_err() {
-            return false;
-        }
-        if std::fs::write(
-            overlay.join("demo.yaml"),
-            "default_client: 'cmd:true'\nstages: []\n",
-        )
-        .is_err()
-        {
-            return false;
-        }
-        if !git(root, &["add", "."]).status.success() {
-            return false;
-        }
-        git(
-            root,
-            &[
-                "-c",
-                "user.email=test@example.com",
-                "-c",
-                "user.name=Test",
-                "commit",
-                "-q",
-                "-m",
-                "init",
-            ],
-        )
-        .status
-        .success()
-    }
-
     fn read_state(path: &Path) -> Value {
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"))
@@ -1630,21 +1571,15 @@ mod tests {
 
     #[tokio::test]
     async fn create_creates_state_and_worktree() {
-        if !git_available() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
             eprintln!("git is unavailable; skipping create_creates_state_and_worktree");
             return;
         }
-        let sandbox = crate::test_support::Sandbox::with_config(None);
-        let repo = tempfile::tempdir().unwrap();
-        if !init_repo(repo.path()) {
-            eprintln!("could not prepare a git fixture; skipping");
-            return;
-        }
-        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
         let mut gremlin = Gremlin::create(
             "gr-test",
-            &definition_path,
+            fx.definition_path(),
             None,
             None,
             None,
@@ -1659,7 +1594,7 @@ mod tests {
         let worktree = gremlin.worktree.clone().expect("a worktree");
         assert!(worktree.is_dir(), "{worktree:?}");
 
-        let state_file = sandbox.join("state").join("gr-test").join("state.json");
+        let state_file = fx.join("state").join("gr-test").join("state.json");
         assert!(state_file.is_file(), "{state_file:?}");
         let raw = read_state(&state_file);
         assert_eq!(raw["id"], "gr-test");
@@ -1698,21 +1633,15 @@ mod tests {
 
     #[tokio::test]
     async fn create_then_from_roundtrips() {
-        if !git_available() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
             eprintln!("git is unavailable; skipping create_then_from_roundtrips");
             return;
         }
-        let _sandbox = crate::test_support::Sandbox::with_config(None);
-        let repo = tempfile::tempdir().unwrap();
-        if !init_repo(repo.path()) {
-            eprintln!("could not prepare a git fixture; skipping");
-            return;
-        }
-        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
         let mut launched = Gremlin::create(
             "gr-test",
-            &definition_path,
+            fx.definition_path(),
             None,
             None,
             None,
@@ -1739,44 +1668,37 @@ mod tests {
 
     #[test]
     fn from_then_clean_needs_no_run() {
-        if !git_available() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
             eprintln!("git is unavailable; skipping from_then_clean_needs_no_run");
             return;
         }
-        with_sandbox(None, |sandbox| {
-            let repo = tempfile::tempdir().unwrap();
-            if !init_repo(repo.path()) {
-                eprintln!("could not prepare a git fixture; skipping");
-                return;
-            }
-            let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
-            let created = Gremlin::create(
-                "gr-test",
-                &definition_path,
-                None,
-                None,
-                None,
-                &HashMap::new(),
-                false,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-            let worktree = created.worktree.clone().unwrap();
-            drop(created);
+        let created = Gremlin::create(
+            "gr-test",
+            fx.definition_path(),
+            None,
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let worktree = created.worktree.clone().unwrap();
+        drop(created);
 
-            // A handle reconstructed purely for cleanup: no `run`, so the
-            // definition was never loaded, and `clean` must not need it.
-            let handle = Gremlin::from("gr-test").unwrap();
-            assert!(handle.definition.is_stub());
-            handle.clean(true);
+        // A handle reconstructed purely for cleanup: no `run`, so the
+        // definition was never loaded, and `clean` must not need it.
+        let handle = Gremlin::from("gr-test").unwrap();
+        assert!(handle.definition.is_stub());
+        handle.clean(true);
 
-            assert!(!sandbox.join("state").join("gr-test").exists());
-            assert!(!worktree.exists(), "worktree should be gone");
-            assert!(!sandbox.join("scratch").join("gr-test").exists());
-        });
+        assert!(!fx.join("state").join("gr-test").exists());
+        assert!(!worktree.exists(), "worktree should be gone");
+        assert!(!fx.join("scratch").join("gr-test").exists());
     }
 
     #[tokio::test]
@@ -1785,24 +1707,15 @@ mod tests {
     // scheduled on this thread while the lock is held.
     #[allow(clippy::await_holding_lock)]
     async fn from_then_run_triggers_lazy_init() {
-        if !git_available() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
             eprintln!("git is unavailable; skipping from_then_run_triggers_lazy_init");
             return;
         }
-        let mut env = EnvGuard::lock();
-        let sandbox = tempfile::tempdir().unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
-
-        let repo = tempfile::tempdir().unwrap();
-        if !init_repo(repo.path()) {
-            eprintln!("could not prepare a git fixture; skipping");
-            return;
-        }
-        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
         Gremlin::create(
             "gr-test",
-            &definition_path,
+            fx.definition_path(),
             None,
             None,
             None,
@@ -1825,21 +1738,15 @@ mod tests {
 
     #[tokio::test]
     async fn fork_copies_artifacts_and_seeds_child_state() {
-        if !git_available() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
             eprintln!("git is unavailable; skipping fork_copies_artifacts_and_seeds_child_state");
             return;
         }
-        let sandbox = crate::test_support::Sandbox::with_config(None);
-        let repo = tempfile::tempdir().unwrap();
-        if !init_repo(repo.path()) {
-            eprintln!("could not prepare a git fixture; skipping");
-            return;
-        }
-        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
         let parent = Gremlin::create(
             "gr-test",
-            &definition_path,
+            fx.definition_path(),
             None,
             None,
             None,
@@ -1859,7 +1766,7 @@ mod tests {
         assert!(child.artifact_dir.ends_with("artifacts"));
         assert!(child.artifact_dir.join("note.txt").is_file());
 
-        let child_state = sandbox.join("state").join("gr-child").join("state.json");
+        let child_state = fx.join("state").join("gr-child").join("state.json");
         let raw = read_state(&child_state);
         assert_eq!(raw["id"], "gr-child");
         assert_eq!(raw["status"], "running");
@@ -1885,21 +1792,15 @@ mod tests {
 
     #[tokio::test]
     async fn fork_keeps_parent_id_unless_one_is_given() {
-        if !git_available() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
             eprintln!("git is unavailable; skipping fork_keeps_parent_id_unless_one_is_given");
             return;
         }
-        let sandbox = crate::test_support::Sandbox::with_config(None);
-        let repo = tempfile::tempdir().unwrap();
-        if !init_repo(repo.path()) {
-            eprintln!("could not prepare a git fixture; skipping");
-            return;
-        }
-        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
         let parent = Gremlin::create(
             "gr-test",
-            &definition_path,
+            fx.definition_path(),
             None,
             None,
             None,
@@ -1921,11 +1822,11 @@ mod tests {
             .unwrap();
 
         for (child_id, expected) in [("gr-a", ""), ("gr-b", "gr-root")] {
-            let raw = read_state(&sandbox.join("state").join(child_id).join("state.json"));
+            let raw = read_state(&fx.join("state").join(child_id).join("state.json"));
             assert_eq!(raw["parent_id"], expected, "{child_id}");
         }
 
-        let grouped = read_state(&sandbox.join("state").join("gr-b").join("state.json"));
+        let grouped = read_state(&fx.join("state").join("gr-b").join("state.json"));
         assert_eq!(grouped["group_name"], "group");
         assert_eq!(grouped["child_key"], "key");
     }
@@ -2110,58 +2011,55 @@ mod tests {
 
     #[test]
     fn clean_prunes_metadata_for_a_vanished_worktree() {
-        if !git_available() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
             eprintln!("git is unavailable; skipping clean_prunes_metadata_for_a_vanished_worktree");
             return;
         }
-        with_sandbox(None, |sandbox| {
-            let repo = tempfile::tempdir().unwrap();
-            if !init_repo(repo.path()) {
-                eprintln!("could not prepare a git fixture; skipping");
-                return;
-            }
-            let id = "gr-clean-stale";
-            let state_dir = sandbox.join("state").join(id);
-            let artifact_dir = state_dir.join("artifacts");
-            std::fs::create_dir_all(&state_dir).unwrap();
-            std::fs::create_dir_all(&artifact_dir).unwrap();
+        let id = "gr-clean-stale";
+        let state_dir = fx.join("state").join(id);
+        let artifact_dir = state_dir.join("artifacts");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&artifact_dir).unwrap();
 
-            // A registered worktree whose checkout is deleted out from under
-            // git: the directory is gone, the admin record is not. The `clean`
-            // path has to reach git *despite* the missing directory, or the
-            // record outlives every gremlin that could explain it.
-            let worktree = repo.path().join("stale-worktree");
-            let worktree_str = worktree.to_string_lossy().into_owned();
-            assert!(
-                git(repo.path(), &["worktree", "add", "--detach", &worktree_str])
-                    .status
-                    .success(),
-                "worktree add should succeed"
-            );
-            assert_eq!(admin_worktree_entries(repo.path()), 1);
-            std::fs::remove_dir_all(&worktree).unwrap();
-            assert!(!worktree.exists(), "checkout should be gone");
-            assert_eq!(
-                admin_worktree_entries(repo.path()),
-                1,
-                "git should still hold the stale record"
-            );
-
-            test_gremlin(
-                id,
-                state_dir,
-                artifact_dir,
-                Some(worktree.clone()),
-                repo.path().to_path_buf(),
+        // A registered worktree whose checkout is deleted out from under
+        // git: the directory is gone, the admin record is not. The `clean`
+        // path has to reach git *despite* the missing directory, or the
+        // record outlives every gremlin that could explain it.
+        let worktree = fx.repo_path().join("stale-worktree");
+        let worktree_str = worktree.to_string_lossy().into_owned();
+        assert!(
+            crate::test_support::git(
+                fx.repo_path(),
+                &["worktree", "add", "--detach", &worktree_str]
             )
-            .clean(true);
+            .status
+            .success(),
+            "worktree add should succeed"
+        );
+        assert_eq!(admin_worktree_entries(fx.repo_path()), 1);
+        std::fs::remove_dir_all(&worktree).unwrap();
+        assert!(!worktree.exists(), "checkout should be gone");
+        assert_eq!(
+            admin_worktree_entries(fx.repo_path()),
+            1,
+            "git should still hold the stale record"
+        );
 
-            assert_eq!(
-                admin_worktree_entries(repo.path()),
-                0,
-                "clean should prune git's administrative record"
-            );
-        });
+        test_gremlin(
+            id,
+            state_dir,
+            artifact_dir,
+            Some(worktree.clone()),
+            fx.repo_path().to_path_buf(),
+        )
+        .clean(true);
+
+        assert_eq!(
+            admin_worktree_entries(fx.repo_path()),
+            0,
+            "clean should prune git's administrative record"
+        );
     }
 
     // --- hermetic snapshot resume ---
@@ -2286,26 +2184,17 @@ stages:
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn from_without_hermetic_snapshot_falls_back_to_kind() {
-        if !git_available() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
             eprintln!(
                 "git is unavailable; skipping from_without_hermetic_snapshot_falls_back_to_kind"
             );
             return;
         }
-        let mut env = EnvGuard::lock();
-        let sandbox = tempfile::tempdir().unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
-
-        let repo = tempfile::tempdir().unwrap();
-        if !init_repo(repo.path()) {
-            eprintln!("could not prepare a git fixture; skipping");
-            return;
-        }
-        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
 
         Gremlin::create(
             "gr-noherm",
-            &definition_path,
+            fx.definition_path(),
             None,
             None,
             None,
