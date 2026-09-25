@@ -1,16 +1,13 @@
 //! YAML file I/O and the bundled-prompt accessors layered on top of it.
 //!
 //! Definitions, gremlin state, and the persisting side of the launcher all move
-//! YAML around; this module is the single place that knows how. Two invariants
-//! are enforced here and nowhere else:
+//! YAML around; this module is the single place that knows how. One invariant
+//! is enforced here and nowhere else:
 //!
 //! * a *definition-ish* file the caller loads is a mapping — a top-level list or
 //!   scalar is a mistake, not a document, so [`load_yaml_file`] rejects it with
 //!   a named error rather than handing back a value the callers would then
-//!   have to re-check; and
-//! * a bundled prompt is non-empty — an empty `include_str!` means a missing
-//!   asset, and reporting it as a load failure beats letting an empty prompt
-//!   reach a model.
+//!   have to re-check.
 //!
 //! Serialization is deliberately one-directional: [`dump_yaml_text`] renders a
 //! [`Value`] the caller already built, so the full-fidelity number handling it
@@ -19,17 +16,15 @@
 //!
 //! The error type keeps every failure distinguishable so the pyext layer can
 //! raise the exact Python exception the module this replaces raised —
-//! `YamlLoadError` for file problems, `PromptLoadError` for prompt problems.
+//! `YamlLoadError` for file problems.
 
 use std::io;
 use std::path::Path;
 
-/// Failure modes of loading, dumping, and rendering YAML and bundled prompts.
+/// Failure modes of loading, dumping, and rendering YAML.
 ///
-/// Each variant maps to one of the two Python exceptions the module this
-/// replaces defined: the file-and-parse variants surface as `YamlLoadError`,
-/// the prompt variants as `PromptLoadError` (see
-/// `crates/pyext/src/python/utils/yaml_io.rs`).
+/// Each variant maps to the `YamlLoadError` Python exception the module this
+/// replaces defined (see `crates/pyext/src/python/utils/yaml_io.rs`).
 #[derive(Debug, thiserror::Error)]
 pub enum YamlIoError {
     /// The file does not exist.
@@ -61,19 +56,6 @@ pub enum YamlIoError {
     /// The value could not be rendered back to YAML.
     #[error("could not serialize YAML: {detail}")]
     Serialize { detail: String },
-
-    /// No bundled prompt is registered under `name`.
-    #[error("bundled prompt not found: {name}")]
-    PromptNotFound { name: String },
-
-    /// The bundled prompt exists but holds only whitespace.
-    #[error("bundled prompt is empty: {name}")]
-    PromptEmpty { name: String },
-
-    /// Placeholder substitution in a bundled prompt failed: a `{key}` had no
-    /// matching keyword argument, or the template held a stray brace.
-    #[error("render failed for bundled prompt {name}: {detail}")]
-    PromptRender { name: String, detail: String },
 }
 
 /// Read `path` and parse it as a YAML mapping.
