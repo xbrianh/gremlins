@@ -30,12 +30,9 @@ pub mod artifacts;
 pub mod composite;
 pub mod definition;
 pub mod exec;
-pub mod recipes;
-
 // Re-export everything at the module root
 pub use agent::AgentBuilder;
 pub use artifacts::{artifact, content, BindTarget, InterpolationValue};
 pub use composite::{LoopBuilder, ParallelBuilder, SequenceBuilder};
 pub use definition::{BootstrapBuilder, DefinitionBuilder, LandBuilder};
 pub use exec::ExecBuilder;
-pub use recipes::{implement, plan, plan_gh, verify};

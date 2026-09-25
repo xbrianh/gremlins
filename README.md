@@ -140,9 +140,8 @@ definitions work out of the box; a project-local YAML can override any of them.
 
 1. A value with a `.yaml` suffix or more than one path component is loaded
    directly as a filesystem path.
-2. Otherwise `./.gremlins/<name>.yaml` is checked first
-   (project-local override).
-3. Then `gremlins/definitions/<name>.yaml` (bundled) is checked.
+2. Otherwise `./.gremlins/<name>.yaml` is checked
+   (project-local definition).
 
 The definition name is the first non-flag argument to `gremlins launch`. Run `gremlins launch --list` to see all available definition names.
 
@@ -173,7 +172,7 @@ bootstrap:                    # optional; CLI contract and setup commands
     - gremlins:bind_artifact("artifact://plan.md", plan)
   cmds:
     - "cargo build"
-  code-style: gremlins:code_style.md
+  code-style: code_style.md
 
 prompt_dir: ../prompts        # optional; relative to YAML, defaults to the YAML's directory
 
@@ -191,8 +190,8 @@ land:                         # optional; exec stage run by `gremlins land`
       - gh pr merge --squash --delete-branch "{PR_URL}"
 
 stages:
-  - type: gremlins:plan
-    prompt: [code-style, gremlins:plan.md]
+  - type: plan
+    prompt: [code-style, plan.md]
 ```
 
 | Key | Description |
@@ -203,7 +202,7 @@ stages:
 | `bootstrap` | CLI source flags, launch-only commands, per-worktree commands, and `cli_out` artifact bindings. See [Bootstrap block](#bootstrap-block). |
 | `prompts` | Named prompt map. Each key maps to a prompt string or list; referenced by name in stage `prompt:` fields. |
 | `prompt_dir` | Directory that bare-name `prompt:` paths resolve against, relative to the YAML file. Defaults to the YAML's directory. |
-| `stage-definitions` | Named reusable stage patterns. Values can be inline dicts or `gremlins:recipe` references. |
+| `stage-definitions` | Named reusable stage patterns. Values can be inline dicts or names that resolve to YAMLs under `.gremlins/stages/`. |
 | `land` | An `exec` stage run by `gremlins land` (e.g. `gh pr merge`). See [Land block](#land-block). |
 | `stages` | Ordered list of stage entries or parallel groups |
 
@@ -212,9 +211,9 @@ stages:
 | Key | Description |
 |---|---|
 | `name` | Unique stage identifier; used for `resume` targeting |
-| `type` | Stage type — a primitive (`agent`, `exec`, `loop`, `parallel`, `sequence`), a bundled recipe (`gremlins:plan`, `gremlins:implement`, etc.), or a `stage-definitions` key |
+| `type` | Stage type — a primitive (`agent`, `exec`, `loop`, `parallel`, `sequence`), a recipe YAML from `.gremlins/stages/` (`plan`, `implement`, `verify`, etc.), or a `stage-definitions` key |
 | `client` | `provider:model` string; overrides `default_client` for this stage |
-| `prompt` | Path or list of paths. `gremlins:NAME` resolves from the bundled package prompts; a bare `NAME` resolves from the definition's `prompt_dir`. |
+| `prompt` | Path or list of paths. A bare `NAME` resolves from the definition's `prompt_dir`. |
 | `options` | Free-form dict passed to the stage |
 | `skip_if_exists` | Artifact key; if this artifact is verified to exist, skip the stage |
 | `interpolation` | Map of variable names to registry key lookups: URI strings, `content("URI")` expressions, and optional `?default` fallbacks (see [Artifact binding](#artifact-binding)) |
@@ -256,9 +255,9 @@ Clients are specified as `provider:model` inline strings, either at the definiti
 default_client: xai:grok-4     # all stages default to this
 stages:
   - name: plan
-    type: gremlins:plan
+    type: plan
   - name: implement
-    type: gremlins:implement
+    type: implement
     client: openai:gpt-4o      # this stage uses openai instead
 ```
 
@@ -267,23 +266,14 @@ Providers: `openai`, `xai`, `openrouter`, `cmd`. The CLI `--client provider:mode
 ### `prompt:` field
 
 ```yaml
-prompt: gremlins:plan.md                                  # single bundled file
-prompt: [gremlins:code_style.md, plan.md]                 # mix bundled and local; concatenated with \n\n
+prompt: plan.md                                             # single file
+prompt: [code_style.md, plan.md]                            # concatenated with \n\n
 ```
 
-Each entry is one of:
+Each entry resolves relative to the definition's top-level `prompt_dir:`
+(relative to the YAML file; defaults to the YAML's own directory).
 
-- `gremlins:NAME` — resolved from the bundled prompts shipped with the
-  package. Use this for prompts owned by gremlins (`code_style.md`,
-  `plan_gh.md`, etc.).
-- bare `NAME` — resolved from the definition's top-level `prompt_dir:`
-  (relative to the YAML file; defaults to the YAML's own directory). Use
-  this for prompts you author and check in alongside your definition.
-
-Lists are joined with `\n\n` before being passed to the stage. There is
-no search fallback between the two — the prefix is the contract, so a
-custom YAML reads as self-describing about which prompts come from the
-package vs which must be provided locally.
+Lists are joined with `\n\n` before being passed to the stage.
 
 By convention, project-local prompts live in `./.gremlins/prompts/` (a peer
 of `./.gremlins/`, not nested under it) and definitions set
@@ -316,27 +306,25 @@ Five primitive stage types are built into the engine:
 | `parallel` | Fan-out/fan-in: runs `parallel:` children concurrently (up to `max_concurrent`) |
 | `sequence` | Runs `body` stages sequentially using child state |
 
-### Stage types: bundled recipes
+### Stage types: recipes
 
-Everything else is a bundled YAML recipe under `gremlins/recipes/stages/` that the
-preprocessor auto-resolves by type name. Use them as `type: gremlins:<name>` or simply
-as `type: <name>` — the preprocessor checks recipe names when no primitive or
-`stage-definitions:` key matches, so bare `type: review-code`, `type: plan`, etc.
-work without the `gremlins:` prefix.
+Stages provided as YAML recipes under `.gremlins/stages/` that the
+preprocessor auto-resolves by type name. Use them as `type: <name>` —
+the preprocessor checks recipe names when no primitive or
+`stage-definitions:` key matches, so bare `type: plan`, `type: implement`, etc.
+will find the corresponding YAML in `.gremlins/stages/`.
 
 | Recipe type | Recipe file | Description |
 |---|---|---|
-| `gremlins:plan` | `plan.yaml` | Local planning: agent writes `plan.md` + set-description |
-| `gremlins:plan-gh` | `plan_gh.yaml` | GitHub planning: agent writes plan, publishes as issue, sets description |
-| `gremlins:implement` | `implement.yaml` | Implementation: agent + git-commit + progress guard |
-| `gremlins:review-code` | `review_code.yaml` | Code review agent, writes `{name}-{model}.md` |
-| `gremlins:verify` | `verify.yaml` | Run commands, fix loop, bail on exhaustion |
-| `gremlins:handoff` | `handoff.yaml` | Boss-loop chain manager: handoff agent + signal translation + sanitize |
-| `gremlins:github-open-pr` | `github_open_pr.yaml` | Compose PR title/body, push branch, open PR |
-| `gremlins:github-push-to-pr-branch` | `github_push_to_pr_branch.yaml` | Push HEAD to existing PR branch |
-| `gremlins:github-request-copilot-review` | `github_request_copilot_review.yaml` | Add Copilot as PR reviewer |
-| `gremlins:github-wait-copilot` | `github_wait_copilot.yaml` | Poll until Copilot posts a non-pending review |
-| `gremlins:github-wait-ci` | `github_wait_ci.yaml` | Poll CI checks, fix loop, bail on exhaustion or `REVIEW_REQUIRED` |
+| `plan` | `stages/plan.yaml` | Local planning: agent writes `plan.md` + set-description |
+| `plan-gh` | `stages/plan_gh.yaml` | GitHub planning: agent writes plan, publishes as issue, sets description |
+| `implement` | `stages/implement.yaml` | Implementation: agent + git-commit + progress guard |
+| `verify` | `stages/verify.yaml` | Run commands, fix loop, bail on exhaustion |
+| `github-open-pr` | `stages/github_open_pr.yaml` | Compose PR title/body, push branch, open PR |
+| `github-push-to-pr-branch` | `stages/github_push_to_pr_branch.yaml` | Push HEAD to existing PR branch |
+| `github-request-copilot-review` | `stages/github_request_copilot_review.yaml` | Add Copilot as PR reviewer |
+| `github-wait-copilot` | `stages/github_wait_copilot.yaml` | Poll until Copilot posts a non-pending review |
+| `github-wait-ci` | `stages/github_wait_ci.yaml` | Poll CI checks, fix loop, bail on exhaustion or `REVIEW_REQUIRED` |
 
 Recipes with `required-prompt: true` (`plan`, `plan-gh`, `implement`, `verify`, `github-wait-ci`) must receive a `prompt:` at the call site. Recipes with `required-options` (`verify` requires `cmds`) must receive those options.
 
@@ -395,8 +383,8 @@ Wrap sibling stages in a `parallel:` list to run them concurrently:
 default_client: xai:grok-4
 
 stages:
-  - type: gremlins:plan
-    prompt: [code-style, gremlins:plan.md]
+  - type: plan
+    prompt: [code-style, plan.md]
 
   - name: reviews
     parallel:
@@ -443,11 +431,11 @@ overrides the client for the address stage:
 default_client: xai:grok-4
 
 stages:
-  - { type: gremlins:plan,       prompt: [code-style, gremlins:plan.md] }
-  - { type: gremlins:implement,  prompt: [code-style, gremlins:implement_local.md] }
-  - { type: verify,              options: { cmds: ["cargo test"] }, prompt: verify }
+  - { type: plan,       prompt: [code-style, plan.md] }
+  - { type: implement,  prompt: [code-style, implement.md] }
+  - { type: verify,              options: { cmds: ["cargo test"] }, prompt: verify_fix }
   - { type: review-code }
-  - { name: address-code, type: agent, client: openai:gpt-4o, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md], interpolation: {text: review-code} }
+  - { name: address-code, type: agent, client: openai:gpt-4o, prompt: [code-style, address.md, bail_section.md], interpolation: {text: review-code} }
 ```
 
 Add a `prompt:` key to any stage to supply a custom prompt; paths are
@@ -462,8 +450,8 @@ Run two `review-code` passes in parallel, then address both:
 default_client: xai:grok-4
 
 stages:
-  - { type: gremlins:plan, prompt: [code-style, gremlins:plan.md] }
-  - { type: gremlins:implement, prompt: [code-style, gremlins:implement_local.md] }
+  - { type: plan,       prompt: [code-style, plan.md] }
+  - { type: implement,  prompt: [code-style, implement.md] }
 
   - name: reviews
     parallel:
@@ -473,7 +461,7 @@ stages:
         type: review-code
     max_concurrent: 2
 
-  - { name: address-code, type: agent, prompt: [code-style, gremlins:address.md, gremlins:bail_section.md], interpolation: {text: review-code} }
+  - { name: address-code, type: agent, prompt: [code-style, address.md, bail_section.md], interpolation: {text: review-code} }
 ```
 
 ### Stage definitions
@@ -485,14 +473,14 @@ stage-definitions:
   review-base: &review-base
     type: review-code
     client: xai:grok-4
-    prompt: gremlins:code_style.md
+    prompt: code_style.md
 
 stages:
-  - { type: gremlins:plan, prompt: [code-style, gremlins:plan.md] }
-  - { type: gremlins:implement, prompt: [code-style, gremlins:implement_local.md] }
+  - { type: plan, prompt: [code-style, plan.md] }
+  - { type: implement, prompt: [code-style, implement.md] }
   - name: review-detail
     <<: *review-base
-    prompt: [gremlins:code_style.md, detail_review.md]
+    prompt: [code_style.md, detail_review.md]
   - name: review-security
     <<: *review-base
     prompt: security_review.md
@@ -546,29 +534,32 @@ stages:
 - After a stage completes, bound artifacts are registered under their URI strings; downstream stages reference those URI strings in their `interpolation:` maps
 - `interpolation:` can be declared in a stage definition and will be merged with call-site `interpolation:` values; `bind:` cannot appear inside a definition
 
-### Stage definitions and bundled recipes
+### Stage definitions and recipes
 
-Some stage types are not built-in — they are provided as bundled YAML recipes and must be wired in via `stage-definitions:` before use:
+Some stage types are provided as YAML recipes under `.gremlins/stages/` that the
+preprocessor auto-resolves by type name. For custom stages not in that directory,
+wire them via `stage-definitions:`:
 
 ```yaml
 stage-definitions:
-  github-push-to-pr-branch: gremlins:github_push_to_pr_branch
+  github-push-to-pr-branch: github_push_to_pr_branch
 
 stages:
   - { name: push, type: github-push-to-pr-branch }
 ```
 
-`gremlins:NAME` resolves the recipe from the bundled package (`gremlins/recipes/stages/NAME.yaml`). A bare path resolves relative to the definition file.
+A bare name resolves to `.gremlins/stages/<name>.yaml`. If no such file exists,
+the definition's own directory is searched next.
 
-### Bundled definitions
+### Reference definitions
 
-The canonical reference definitions:
+The canonical pipeline definitions ship as examples under `.gremlins/`:
 
-- [`gremlins/definitions/local.yaml`](gremlins/definitions/local.yaml) — `gremlins launch local`
-- [`gremlins/definitions/gh.yaml`](gremlins/definitions/gh.yaml) — `gremlins launch gh`
-- [`gremlins/definitions/gh-terse.yaml`](gremlins/definitions/gh-terse.yaml) — `gremlins launch gh-terse`
-- [`gremlins/definitions/pr-extend.yaml`](gremlins/definitions/pr-extend.yaml) — `gremlins launch pr-extend`
-- [`gremlins/definitions/boss.yaml`](gremlins/definitions/boss.yaml) — `gremlins launch boss`
+- `.gremlins/local.yaml` — `gremlins launch local`
+- `.gremlins/gh.yaml` — `gremlins launch gh`
+
+Copy or reference these in your own `.gremlins/` overlay directory when
+bootstrapping a new project.
 
 ## Error handling and recovery
 

@@ -60,8 +60,8 @@ stage-definitions:
             - git diff --cached --quiet || git commit -m "fix checks"
 
 stages:
-  - { type: gremlins:plan,      prompt: [style_guide.md, plan.md] }
-  - { type: gremlins:implement,  prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
+  - { type: plan,      prompt: [style_guide.md, plan.md] }
+  - { type: implement,  prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
   - { type: check-and-fix }
   - name: compute-diff
     type: exec
