@@ -2,12 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use crate::assets;
 use crate::schemas::error::SchemaError;
 use crate::schemas::prompts;
 use crate::schemas::resolve::BuiltinResolver;
-
-pub const GREMLINS_PREFIX: &str = "gremlins:";
 
 /// Trait for resolving gremlin definition names to file paths.
 /// The pyext layer provides a Python-callback implementation.
@@ -34,22 +31,6 @@ pub(crate) fn load_yaml_file(path: &Path) -> Result<serde_yaml::Value, SchemaErr
         });
     }
     Ok(parsed)
-}
-
-pub(crate) fn load_bundled_recipe(raw_name: &str) -> Result<serde_yaml::Value, SchemaError> {
-    let name = raw_name.replace('-', "_");
-    let yaml_str = assets::RECIPES.get(name.as_str()).ok_or_else(|| {
-        let mut available: Vec<_> = assets::RECIPES.keys().copied().collect();
-        available.sort();
-        SchemaError::BundledRecipeNotFound {
-            name: format!("{GREMLINS_PREFIX}{raw_name}"),
-            available: available.join(", "),
-        }
-    })?;
-    serde_yaml::from_str(yaml_str).map_err(|e| SchemaError::YamlParse {
-        label: format!("gremlins:{raw_name}"),
-        msg: e.to_string(),
-    })
 }
 
 pub(crate) fn resolve_prompt_dir(
@@ -122,38 +103,15 @@ pub(crate) fn parse_stage_definitions(
                     continue;
                 }
                 if let Some(s) = v.as_str() {
-                    if let Some(recipe_name) = s.strip_prefix(GREMLINS_PREFIX) {
-                        if recipe_name.is_empty() {
+                    match load_stage_def_from_dirs(s, project_root.map(|p| p.as_path()))? {
+                        Some(recipe) => {
+                            defs.insert(name.clone(), recipe);
+                        }
+                        None => {
                             return Err(SchemaError::StageDef {
                                 name: name.clone(),
-                                msg: format!("missing name after {GREMLINS_PREFIX:?}"),
+                                msg: format!("must be a dict or file under stages/; tried {s:?}"),
                             });
-                        }
-                        match load_bundled_recipe(recipe_name) {
-                            Ok(recipe) => {
-                                defs.insert(name, recipe);
-                            }
-                            Err(err) => match &err {
-                                SchemaError::BundledRecipeNotFound { .. } => return Err(err),
-                                _ => {
-                                    return Err(SchemaError::StageDef {
-                                        name: name.clone(),
-                                        msg: err.to_string(),
-                                    });
-                                }
-                            },
-                        }
-                    } else {
-                        match load_stage_def_from_dirs(s, project_root.map(|p| p.as_path()))? {
-                            Some(recipe) => {
-                                defs.insert(name.clone(), recipe);
-                            }
-                            None => {
-                                return Err(SchemaError::StageDef {
-                                    name: name.clone(),
-                                    msg: format!("must be a dict, gremlins: reference, or file under stages/; tried {s:?}"),
-                                });
-                            }
                         }
                     }
                 } else if v.is_mapping() {
@@ -698,77 +656,6 @@ fn _expand_entry(
                 resolver,
             );
         }
-        if let Some(recipe_name) = stage_type.strip_prefix(GREMLINS_PREFIX) {
-            if recipe_name.is_empty() {
-                return Err(SchemaError::Generic(format!(
-                    "missing name after {GREMLINS_PREFIX:?}"
-                )));
-            }
-            match load_bundled_recipe(recipe_name) {
-                Ok(recipe_def) => {
-                    let mut direct_defs = stage_defs.clone();
-                    direct_defs.insert(stage_type.to_string(), recipe_def);
-                    return _expand_stage_def(
-                        entry,
-                        stage_type,
-                        &direct_defs,
-                        prompt_dir,
-                        project_root,
-                        chain,
-                        named_prompts,
-                        seen_defs,
-                        resolver,
-                    );
-                }
-                Err(SchemaError::BundledRecipeNotFound { .. }) => {
-                    // Not a bundled recipe — try stage definition directories.
-                    if let Some(recipe) = load_stage_def_from_dirs(recipe_name, Some(project_root))?
-                    {
-                        let mut direct_defs = stage_defs.clone();
-                        direct_defs.insert(stage_type.to_string(), recipe);
-                        return _expand_stage_def(
-                            entry,
-                            stage_type,
-                            &direct_defs,
-                            prompt_dir,
-                            project_root,
-                            chain,
-                            named_prompts,
-                            seen_defs,
-                            resolver,
-                        );
-                    }
-                    // Not found anywhere — raise the original error
-                    return Err(SchemaError::BundledRecipeNotFound {
-                        name: format!("{GREMLINS_PREFIX}{recipe_name}"),
-                        available: assets::RECIPES
-                            .keys()
-                            .copied()
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    });
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        // Auto-resolve bundled stage-definitions by type name
-        let underscored = stage_type.replace('-', "_");
-        if assets::RECIPES.contains_key(underscored.as_str()) {
-            let auto_def = load_bundled_recipe(underscored.as_str())?;
-            let mut auto_defs = stage_defs.clone();
-            auto_defs.insert(stage_type.to_string(), auto_def);
-            return _expand_stage_def(
-                entry,
-                stage_type,
-                &auto_defs,
-                prompt_dir,
-                project_root,
-                chain,
-                named_prompts,
-                seen_defs,
-                resolver,
-            );
-        }
         // Try resolving as gremlin definition name
         let definition_result = resolver.resolve(stage_type, project_root);
         match definition_result {
@@ -1194,7 +1081,15 @@ stages:
 
     #[test]
     fn test_verify_recipe_skip_if_exists_preserves_loop_iter() {
-        let recipe = load_bundled_recipe("verify").unwrap();
+        let recipe = load_yaml_file(
+            std::path::Path::new(
+                &format!(
+                    "{}/../../.gremlins/stages/verify.yaml",
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+            ),
+        )
+        .unwrap();
         let stages = recipe["stages"].as_sequence().unwrap();
         let loop_stage = &stages[0];
         let body = loop_stage["body"].as_sequence().unwrap();

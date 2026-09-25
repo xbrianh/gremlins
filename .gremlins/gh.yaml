@@ -66,7 +66,7 @@ stage-definitions:
 
 stages:
   - { type: plan-gh, prompt: [style_guide.md, plan_gh.md] }
-  - { type: gremlins:implement, prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
+  - { type: implement, prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
   - { type: check-and-fix }
 
   - name: compute-diff
@@ -130,4 +130,4 @@ stages:
     bind:
       review_summary: "artifact://review-summary.md"
   - { type: check-and-fix }
-  - { type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, gremlins:ci_fix.md] }
+  - { type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, ci_fix.md] }

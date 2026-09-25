@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::assets;
 use crate::schemas::error::SchemaError;
-use crate::schemas::expand::GREMLINS_PREFIX;
 
 pub(crate) fn read_prompts(
     prompt_field: &serde_yaml::Value,
@@ -31,21 +29,6 @@ pub(crate) fn read_prompts(
     for p in &raw {
         if let Some(named) = named_prompts.get(p) {
             texts.extend(named.clone());
-        } else if let Some(name) = p.strip_prefix(GREMLINS_PREFIX) {
-            if name.is_empty() {
-                return Err(SchemaError::Generic(format!(
-                    "prompt {p:?} is missing a name after {GREMLINS_PREFIX:?}"
-                )));
-            }
-            // Try bundled prompts first, then fall back to file-system lookup
-            match read_bundled_prompt(name) {
-                Ok(text) => texts.push(text),
-                Err(SchemaError::PromptFileNotFound { .. }) => {
-                    let path = prompt_dir.join(name);
-                    texts.push(read_prompt_file(&path)?);
-                }
-                Err(e) => return Err(e),
-            }
         } else if p.contains('\n') {
             texts.push(p.clone());
         } else {
@@ -68,20 +51,6 @@ pub(crate) fn read_prompts(
     }
 
     Ok(texts)
-}
-
-pub(crate) fn read_bundled_prompt(name: &str) -> Result<String, SchemaError> {
-    let text = assets::PROMPTS
-        .get(name)
-        .ok_or_else(|| SchemaError::PromptFileNotFound {
-            path: name.to_string(),
-        })?;
-    if text.trim().is_empty() {
-        return Err(SchemaError::PromptFileEmpty {
-            path: name.to_string(),
-        });
-    }
-    Ok(text.to_string())
 }
 
 pub(crate) fn read_prompt_file(path: &std::path::PathBuf) -> Result<String, SchemaError> {

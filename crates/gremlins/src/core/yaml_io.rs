@@ -21,11 +21,8 @@
 //! raise the exact Python exception the module this replaces raised —
 //! `YamlLoadError` for file problems, `PromptLoadError` for prompt problems.
 
-use std::collections::HashMap;
 use std::io;
 use std::path::Path;
-
-use crate::assets;
 
 /// Failure modes of loading, dumping, and rendering YAML and bundled prompts.
 ///
@@ -98,81 +95,6 @@ pub fn dump_yaml_text(value: &serde_yaml::Value) -> Result<String, YamlIoError> 
     serde_yaml::to_string(value).map_err(|error| YamlIoError::Serialize {
         detail: error.to_string(),
     })
-}
-
-/// Look up a bundled prompt by name, rejecting a missing or empty asset.
-pub fn load_bundled_prompt(name: &str) -> Result<String, YamlIoError> {
-    let text = assets::PROMPTS
-        .get(name)
-        .ok_or_else(|| YamlIoError::PromptNotFound {
-            name: name.to_string(),
-        })?;
-    if text.trim().is_empty() {
-        return Err(YamlIoError::PromptEmpty {
-            name: name.to_string(),
-        });
-    }
-    Ok(text.to_string())
-}
-
-/// Load a bundled prompt and substitute `{key}` placeholders from `kwargs`.
-///
-/// Substitution is a single left-to-right pass, so a value that happens to
-/// contain braces is copied through verbatim and never re-scanned as template
-/// syntax — the result does not depend on the iteration order of `kwargs`.
-/// This mirrors the `str.format(**kwargs)` the Python module used: a
-/// placeholder with no matching key is a [`YamlIoError::PromptRender`] failure
-/// rather than a silently-kept brace, and `{{` / `}}` are the literal-brace
-/// escapes.
-pub fn render_bundled_prompt(
-    name: &str,
-    kwargs: &HashMap<String, String>,
-) -> Result<String, YamlIoError> {
-    let text = load_bundled_prompt(name)?;
-    render_placeholders(&text, kwargs).map_err(|detail| YamlIoError::PromptRender {
-        name: name.to_string(),
-        detail,
-    })
-}
-
-/// Substitute `{key}` placeholders in a single pass over `text`.
-///
-/// Returns a description of the offending construct on failure so the caller
-/// can name it in the [`YamlIoError::PromptRender`] message.
-fn render_placeholders(text: &str, kwargs: &HashMap<String, String>) -> Result<String, String> {
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' if bytes.get(i + 1) == Some(&b'{') => {
-                out.push('{');
-                i += 2;
-            }
-            b'}' if bytes.get(i + 1) == Some(&b'}') => {
-                out.push('}');
-                i += 2;
-            }
-            b'{' => {
-                let close = text[i + 1..]
-                    .find('}')
-                    .ok_or_else(|| "unmatched '{' in prompt".to_string())?;
-                let key = &text[i + 1..i + 1 + close];
-                let value = kwargs
-                    .get(key)
-                    .ok_or_else(|| format!("missing placeholder {{{key}}}"))?;
-                out.push_str(value);
-                i += close + 2;
-            }
-            b'}' => return Err("single '}' in prompt".to_string()),
-            _ => {
-                let ch = text[i..].chars().next().expect("index is a char boundary");
-                out.push(ch);
-                i += ch.len_utf8();
-            }
-        }
-    }
-    Ok(out)
 }
 
 fn parse_mapping(text: &str, label: &str) -> Result<serde_yaml::Value, YamlIoError> {
@@ -298,62 +220,6 @@ mod tests {
         let text = dump_yaml_text(&value).unwrap();
 
         assert_eq!(yaml(&text), value);
-    }
-
-    #[test]
-    fn prompts_load_and_must_not_be_empty() {
-        assert!(!load_bundled_prompt("analyze.md").unwrap().is_empty());
-        assert!(matches!(
-            load_bundled_prompt("does-not-exist.md").unwrap_err(),
-            YamlIoError::PromptNotFound { .. }
-        ));
-    }
-
-    #[test]
-    fn render_substitutes_each_placeholder() {
-        let kwargs = HashMap::from([
-            ("state_json".to_string(), "{\"a\": 1}".to_string()),
-            ("log_text".to_string(), "hello".to_string()),
-        ]);
-        let rendered = render_bundled_prompt("analyze.md", &kwargs).unwrap();
-
-        assert!(rendered.contains("{\"a\": 1}"));
-        assert!(rendered.contains("hello"));
-        assert!(!rendered.contains("{state_json}"));
-        assert!(!rendered.contains("{log_text}"));
-    }
-
-    #[test]
-    fn render_does_not_rescan_substituted_values() {
-        // A value that itself looks like a placeholder must survive verbatim,
-        // regardless of the order the map yields its entries.
-        let kwargs = HashMap::from([
-            ("a".to_string(), "{b}".to_string()),
-            ("b".to_string(), "clobbered".to_string()),
-        ]);
-
-        assert_eq!(render_placeholders("{a}", &kwargs).unwrap(), "{b}");
-    }
-
-    #[test]
-    fn render_rejects_a_missing_placeholder() {
-        let error = render_bundled_prompt("analyze.md", &HashMap::new()).unwrap_err();
-
-        assert!(matches!(error, YamlIoError::PromptRender { .. }));
-        assert!(error.to_string().contains("missing placeholder"));
-    }
-
-    #[test]
-    fn render_unescapes_doubled_braces() {
-        let rendered = render_placeholders("a {{b}} c", &HashMap::new()).unwrap();
-
-        assert_eq!(rendered, "a {b} c");
-    }
-
-    #[test]
-    fn render_rejects_a_stray_brace() {
-        assert!(render_placeholders("a } b", &HashMap::new()).is_err());
-        assert!(render_placeholders("a { b", &HashMap::new()).is_err());
     }
 
     fn load_labeled(text: &str) -> YamlIoError {

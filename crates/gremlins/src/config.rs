@@ -579,8 +579,7 @@ pub fn project_overlay_dir(project_root: &Path) -> PathBuf {
 }
 
 /// Directories searched for stage-definition .yaml files (e.g. in
-/// ``stage-definitions:`` blocks).  Returns overlay ``stages/`` subdirectory;
-/// bundled recipes live in ``assets::RECIPES`` and are resolved separately.
+/// ``stage-definitions:`` blocks).  Returns overlay ``stages/`` subdirectory.
 pub(crate) fn stage_definition_dirs() -> Vec<PathBuf> {
     let overlay = resolve_project_overlay_dir(None, &project_root());
     vec![overlay.join("stages")]
