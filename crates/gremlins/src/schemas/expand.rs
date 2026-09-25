@@ -656,9 +656,26 @@ fn _expand_entry(
                 resolver,
             );
         }
+        // Try stage definition directories first (e.g. .gremlins/stages/plan.yaml).
+        // This must precede the gremlin-definition lookup so that stage recipes
+        // receive call-site {{prompt}} and {{options}} substitution.
+        if let Some(recipe) = load_stage_def_from_dirs(stage_type, Some(project_root))? {
+            let mut direct_defs = stage_defs.clone();
+            direct_defs.insert(stage_type.to_string(), recipe);
+            return _expand_stage_def(
+                entry,
+                stage_type,
+                &direct_defs,
+                prompt_dir,
+                project_root,
+                chain,
+                named_prompts,
+                seen_defs,
+                resolver,
+            );
+        }
         // Try resolving as gremlin definition name
-        let definition_result = resolver.resolve(stage_type, project_root);
-        match definition_result {
+        match resolver.resolve(stage_type, project_root) {
             Ok(included_path) => {
                 if !chain.contains(&included_path) {
                     let included = _expand(&included_path, project_root, chain, resolver)?;
@@ -670,22 +687,6 @@ fn _expand_entry(
                 }
             }
             Err(SchemaError::DefinitionNotFound { .. }) => {
-                // Not a gremlin definition — try stage definition directories.
-                if let Some(recipe) = load_stage_def_from_dirs(stage_type, Some(project_root))? {
-                    let mut direct_defs = stage_defs.clone();
-                    direct_defs.insert(stage_type.to_string(), recipe);
-                    return _expand_stage_def(
-                        entry,
-                        stage_type,
-                        &direct_defs,
-                        prompt_dir,
-                        project_root,
-                        chain,
-                        named_prompts,
-                        seen_defs,
-                        resolver,
-                    );
-                }
                 // Not found anywhere — fall through to loader validation
             }
             Err(e) => return Err(e),

@@ -78,12 +78,9 @@ pub fn resolve_definition_name_in(
         }
     }
 
-    // Also search .gremlins/stages/ for stage-definition YAMLs.
+    // Stage-definition YAMLs live under .gremlins/stages/ and are resolved
+    // by load_stage_def_from_dirs, not by gremlin-definition resolution.
     let stages_dir = overlay.join("stages");
-    let candidate = stages_dir.join(format!("{}.yaml", name));
-    if candidate.exists() {
-        return Ok(candidate.canonicalize().unwrap_or(candidate));
-    }
 
     let mut names: Vec<String> = Vec::new();
     for d in project_definition_dirs_in(overlay, &project_root) {
@@ -290,15 +287,16 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_definition_name_from_stages_dir() {
+    fn test_resolve_definition_name_skips_stages_dir() {
         let (_env, project) = setup_dirs();
         let stages = project.path().join(".gremlins").join("stages");
         fs::create_dir_all(&stages).unwrap();
         fs::write(stages.join("foo.yaml"), "stages: []").unwrap();
 
-        let result = resolve_definition_name("foo", project.path().to_path_buf()).unwrap();
-        assert!(result.ends_with("foo.yaml"));
-        assert!(result.to_str().unwrap().contains("stages"));
+        // Stage YAMLs under .gremlins/stages/ are resolved by
+        // load_stage_def_from_dirs, not by gremlin-definition resolution.
+        let err = resolve_definition_name("foo", project.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("foo"), "{err}");
     }
 
     #[test]
