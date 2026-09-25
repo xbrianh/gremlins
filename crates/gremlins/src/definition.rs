@@ -3,10 +3,9 @@
 //! plugins, etc.).
 //!
 //! This module defines the trait and the `ExecutorStage` enum the trait
-//! returns.  `StaticDefinition` is a newtype over the existing concrete
-//! [`GremlinDefinition`] that implements the trait with trivial delegation
-//! and a no-op `next_stage` — the cursor state machine will replace that
-//! in a follow-up.
+//! returns.  `StaticDefinition` is a cursor-driven implementation that wraps
+//! the concrete [`GremlinDefinition`] and converts one top-level
+//! [`RunnableStage`] into an [`ExecutorStage`] per `next_stage()` call.
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -17,6 +16,7 @@ use crate::schemas::gremlin_definition::GremlinDefinition as ConcreteDefinition;
 use crate::stages::agent::Agent;
 use crate::stages::composite::ClientSpec;
 use crate::stages::exec::Exec;
+use crate::stages::node::RunnableStage;
 use crate::stages::parallel::ErrorPolicy;
 
 // ---------------------------------------------------------------------------
@@ -28,6 +28,7 @@ use crate::stages::parallel::ErrorPolicy;
 /// Used as the payload of [`ExecutorStage::Sequence`] and as the body of
 /// [`ExecutorStage::Loop`].
 pub struct Sequence {
+    pub name: String,
     pub stages: Vec<ExecutorStage>,
     pub scope: Option<String>,
     pub skip_if_exists: String,
@@ -83,7 +84,7 @@ impl ExecutorStage {
         match self {
             ExecutorStage::Agent { stage, .. } => &stage.name,
             ExecutorStage::Exec { stage, .. } => &stage.name,
-            ExecutorStage::Sequence(seq) => seq.stages.first().map_or("", |s| s.name()),
+            ExecutorStage::Sequence(seq) => &seq.name,
             ExecutorStage::Parallel { name, .. } => name,
             ExecutorStage::Loop { name, .. } => name,
             ExecutorStage::Done => "",
@@ -152,6 +153,11 @@ pub trait GremlinDefinition: Send {
     /// The optional `land` stage — always an exec stage named `land`.
     fn land(&self) -> Option<&ExecutorStage>;
 
+    /// Jump the cursor to a named top-level stage.
+    ///
+    /// If the name is not found, the cursor resets to position 0 (the start).
+    fn goto(&mut self, stage: &str);
+
     /// Return the next stage(s) to run.
     ///
     /// Returns `Ok(ExecutorStage::Done)` when the definition has no more stages.
@@ -201,6 +207,10 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
         self.as_ref().land()
     }
 
+    fn goto(&mut self, stage: &str) {
+        self.as_mut().goto(stage)
+    }
+
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError> {
         self.as_mut().next_stage().await
     }
@@ -244,12 +254,20 @@ pub enum DefinitionError {
 /// A [`GremlinDefinition`] trait implementation that wraps the existing
 /// concrete [`ConcreteDefinition`] struct.
 ///
-/// All accessors delegate to the inner struct. `next_stage()` returns
-/// `Ok(ExecutorStage::Done)` unconditionally — the cursor state machine that
-/// walks the stage list will replace this in a follow-up.
+/// All accessors delegate to the inner struct. `next_stage()` walks the
+/// top-level stage list one [`RunnableStage`] at a time, converting each into
+/// an [`ExecutorStage`] via a pure recursive projection.
 #[derive(Debug)]
 pub struct StaticDefinition {
     pub inner: ConcreteDefinition,
+    cursor: usize,
+}
+
+impl StaticDefinition {
+    /// Create a new cursor-driven definition starting at position 0.
+    pub fn new(inner: ConcreteDefinition) -> Self {
+        StaticDefinition { inner, cursor: 0 }
+    }
 }
 
 #[async_trait]
@@ -274,8 +292,113 @@ impl GremlinDefinition for StaticDefinition {
         None
     }
 
+    fn goto(&mut self, stage: &str) {
+        if let Some(pos) = self.inner.stages.iter().position(|s| s.name() == stage) {
+            self.cursor = pos;
+        } else {
+            self.cursor = 0;
+        }
+    }
+
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError> {
-        Ok(ExecutorStage::Done)
+        if self.cursor >= self.inner.stages.len() {
+            return Ok(ExecutorStage::Done);
+        }
+        let stage = self.inner.stages[self.cursor].clone();
+        self.cursor += 1;
+        Ok(convert_stage(stage, &self.inner))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RunnableStage → ExecutorStage conversion
+// ---------------------------------------------------------------------------
+
+/// Recursively convert one [`RunnableStage`] into an [`ExecutorStage`].
+fn convert_stage(stage: RunnableStage, def: &ConcreteDefinition) -> ExecutorStage {
+    match stage {
+        RunnableStage::Agent {
+            stage,
+            skip_if_exists,
+            client,
+        } => ExecutorStage::Agent {
+            stage,
+            skip_if_exists,
+            client,
+        },
+        RunnableStage::Exec {
+            stage,
+            skip_if_exists,
+            client,
+        } => ExecutorStage::Exec {
+            stage,
+            skip_if_exists,
+            client,
+        },
+        RunnableStage::Sequence {
+            attrs,
+            client: _seq_client,
+            body,
+        } => {
+            let stages: Vec<ExecutorStage> =
+                body.into_iter().map(|s| convert_stage(s, def)).collect();
+            ExecutorStage::Sequence(Sequence {
+                name: attrs.name,
+                stages,
+                scope: None,
+                skip_if_exists: attrs.skip_if_exists,
+            })
+        }
+        RunnableStage::Loop {
+            attrs,
+            max_iterations,
+            stop_when_exists,
+            client,
+            body,
+            ..
+        } => {
+            let stages: Vec<ExecutorStage> =
+                body.into_iter().map(|s| convert_stage(s, def)).collect();
+            ExecutorStage::Loop {
+                name: attrs.name,
+                max_iterations: Some(max_iterations),
+                stop_when_exists,
+                loop_iter_template: "{n}".to_string(),
+                client,
+                body: Sequence {
+                    name: String::new(),
+                    stages,
+                    scope: None,
+                    skip_if_exists: String::new(),
+                },
+                skip_if_exists: attrs.skip_if_exists,
+            }
+        }
+        RunnableStage::Parallel {
+            attrs,
+            max_concurrent,
+            cancel_on_error,
+            error_policy,
+            client,
+            body,
+        } => {
+            let children: Vec<Box<dyn GremlinDefinition>> = body
+                .into_iter()
+                .map(|child| {
+                    Box::new(StaticDefinition::new(def.clone_with_stages(vec![child])))
+                        as Box<dyn GremlinDefinition>
+                })
+                .collect();
+            ExecutorStage::Parallel {
+                name: attrs.name,
+                max_concurrent,
+                cancel_on_error,
+                error_policy,
+                client,
+                children,
+                skip_if_exists: attrs.skip_if_exists,
+            }
+        }
     }
 }
 
@@ -286,6 +409,7 @@ impl GremlinDefinition for StaticDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stages::composite::StageAttrs;
 
     fn stub_definition() -> ConcreteDefinition {
         ConcreteDefinition::stub()
@@ -293,34 +417,26 @@ mod tests {
 
     #[test]
     fn static_definition_delegates_name() {
-        let def = StaticDefinition {
-            inner: stub_definition(),
-        };
+        let def = StaticDefinition::new(stub_definition());
         // stub name is "unknown"
         assert_eq!(def.name(), "unknown");
     }
 
     #[test]
     fn static_definition_delegates_default_client() {
-        let def = StaticDefinition {
-            inner: stub_definition(),
-        };
+        let def = StaticDefinition::new(stub_definition());
         assert_eq!(def.default_client(), "");
     }
 
     #[test]
     fn static_definition_delegates_base_ref() {
-        let def = StaticDefinition {
-            inner: stub_definition(),
-        };
+        let def = StaticDefinition::new(stub_definition());
         assert_eq!(def.base_ref(), "");
     }
 
     #[test]
     fn static_definition_delegates_bootstrap() {
-        let def = StaticDefinition {
-            inner: stub_definition(),
-        };
+        let def = StaticDefinition::new(stub_definition());
         let bs = def.bootstrap();
         assert!(bs.source.is_none());
         assert!(bs.launch_cmds.is_empty());
@@ -328,17 +444,13 @@ mod tests {
 
     #[test]
     fn static_definition_delegates_land_none() {
-        let def = StaticDefinition {
-            inner: stub_definition(),
-        };
+        let def = StaticDefinition::new(stub_definition());
         assert!(def.land().is_none());
     }
 
     #[tokio::test]
     async fn static_definition_next_stage_returns_done() {
-        let mut def = StaticDefinition {
-            inner: stub_definition(),
-        };
+        let mut def = StaticDefinition::new(stub_definition());
         let result = def.next_stage().await.unwrap();
         assert!(matches!(&result, ExecutorStage::Done));
         assert_eq!(result.stage_type(), "done");
@@ -358,7 +470,7 @@ mod tests {
             land: None,
             expanded_yaml: serde_yaml::Value::Null,
         };
-        let def = StaticDefinition { inner };
+        let def = StaticDefinition::new(inner);
         assert_eq!(def.name(), "test-gremlin");
         assert_eq!(def.default_client(), "openai:gpt-4");
         assert_eq!(def.base_ref(), "main");
@@ -413,13 +525,14 @@ mod tests {
     }
 
     #[test]
-    fn executor_stage_sequence_name_returns_first_child() {
+    fn executor_stage_sequence_name_returns_name_field() {
         let seq = ExecutorStage::Sequence(Sequence {
+            name: "my-sequence".into(),
             stages: vec![make_agent("first"), make_exec("second")],
             scope: None,
             skip_if_exists: String::new(),
         });
-        assert_eq!(seq.name(), "first");
+        assert_eq!(seq.name(), "my-sequence");
         assert_eq!(seq.stage_type(), "sequence");
         assert!(seq.client().is_none());
     }
@@ -427,6 +540,7 @@ mod tests {
     #[test]
     fn executor_stage_sequence_name_empty_returns_empty() {
         let seq = ExecutorStage::Sequence(Sequence {
+            name: String::new(),
             stages: vec![],
             scope: None,
             skip_if_exists: String::new(),
@@ -460,6 +574,7 @@ mod tests {
             loop_iter_template: "retry-{n}".into(),
             client: None,
             body: Sequence {
+                name: String::new(),
                 stages: vec![],
                 scope: None,
                 skip_if_exists: String::new(),
@@ -514,6 +629,7 @@ mod tests {
     #[test]
     fn executor_stage_sequence_skip_if_exists() {
         let seq = ExecutorStage::Sequence(Sequence {
+            name: String::new(),
             stages: vec![],
             scope: None,
             skip_if_exists: "artifact://guard".into(),
@@ -521,38 +637,291 @@ mod tests {
         assert_eq!(seq.skip_if_exists(), "artifact://guard");
     }
 
-    // ---- Box<dyn GremlinDefinition> blanket impl tests ----
+    // ---- StaticDefinition cursor / goto / next_stage tests ----
+
+    /// Build a minimal Agent RunnableStage for use in test definitions.
+    fn agent_rs(name: &str) -> RunnableStage {
+        RunnableStage::Agent {
+            stage: Agent {
+                name: name.to_string(),
+                prompts: vec![],
+                options: std::collections::HashMap::new(),
+                interpolation_map: std::collections::HashMap::new(),
+                bind_map: std::collections::HashMap::new(),
+            },
+            skip_if_exists: String::new(),
+            client: None,
+        }
+    }
+
+    /// Build a minimal Exec RunnableStage.
+    fn exec_rs(name: &str) -> RunnableStage {
+        RunnableStage::Exec {
+            stage: Exec {
+                name: name.to_string(),
+                options: std::collections::HashMap::new(),
+                interpolation_map: std::collections::HashMap::new(),
+                bind_map: std::collections::HashMap::new(),
+            },
+            skip_if_exists: String::new(),
+            client: None,
+        }
+    }
+
+    /// Build a multi-stage ConcreteDefinition from RunnableStage entries.
+    fn definition_with(stages: Vec<RunnableStage>) -> ConcreteDefinition {
+        ConcreteDefinition {
+            name: "test-def".into(),
+            path: "/tmp/test.yaml".into(),
+            default_client: "openai:gpt-4".into(),
+            base_ref: "main".into(),
+            bootstrap: Bootstrap::default(),
+            stages,
+            land: None,
+            expanded_yaml: serde_yaml::Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn next_stage_yields_top_level_stages_in_order() {
+        let def = definition_with(vec![
+            agent_rs("first"),
+            exec_rs("second"),
+            agent_rs("third"),
+        ]);
+        let mut sd = StaticDefinition::new(def);
+
+        let s1 = sd.next_stage().await.unwrap();
+        assert_eq!(s1.name(), "first");
+        assert_eq!(s1.stage_type(), "agent");
+
+        let s2 = sd.next_stage().await.unwrap();
+        assert_eq!(s2.name(), "second");
+        assert_eq!(s2.stage_type(), "exec");
+
+        let s3 = sd.next_stage().await.unwrap();
+        assert_eq!(s3.name(), "third");
+        assert_eq!(s3.stage_type(), "agent");
+
+        // Exhausted — Done forever.
+        for _ in 0..3 {
+            let s = sd.next_stage().await.unwrap();
+            assert!(matches!(s, ExecutorStage::Done));
+        }
+    }
+
+    #[tokio::test]
+    async fn goto_jumps_to_existing_stage() {
+        let def = definition_with(vec![agent_rs("alpha"), agent_rs("beta"), agent_rs("gamma")]);
+        let mut sd = StaticDefinition::new(def);
+
+        sd.goto("gamma");
+        let s = sd.next_stage().await.unwrap();
+        assert_eq!(s.name(), "gamma");
+
+        // After exhausting gamma, we get Done.
+        let s = sd.next_stage().await.unwrap();
+        assert!(matches!(s, ExecutorStage::Done));
+    }
+
+    #[tokio::test]
+    async fn goto_unknown_resets_to_zero() {
+        let def = definition_with(vec![agent_rs("alpha"), agent_rs("beta")]);
+        let mut sd = StaticDefinition::new(def);
+
+        // Advance past alpha.
+        let _ = sd.next_stage().await.unwrap();
+        assert_eq!(sd.next_stage().await.unwrap().name(), "beta");
+
+        // Unknown name resets cursor to 0.
+        sd.goto("no-such-stage");
+        let s = sd.next_stage().await.unwrap();
+        assert_eq!(s.name(), "alpha");
+    }
+
+    #[tokio::test]
+    async fn boxed_goto_forwards_to_inner() {
+        let def = definition_with(vec![agent_rs("x"), agent_rs("y")]);
+        let mut bx: Box<dyn GremlinDefinition> = Box::new(StaticDefinition::new(def));
+
+        bx.goto("y");
+        let s = bx.next_stage().await.unwrap();
+        assert_eq!(s.name(), "y");
+    }
+
+    // ---- convert_stage variant tests ----
+
+    #[tokio::test]
+    async fn convert_stage_agent() {
+        let def = definition_with(vec![agent_rs("plan")]);
+        let mut sd = StaticDefinition::new(def);
+        let s = sd.next_stage().await.unwrap();
+        assert!(matches!(s, ExecutorStage::Agent { .. }));
+        assert_eq!(s.name(), "plan");
+        assert_eq!(s.stage_type(), "agent");
+    }
+
+    #[tokio::test]
+    async fn convert_stage_sequence() {
+        let seq = RunnableStage::Sequence {
+            attrs: StageAttrs {
+                name: "outer".into(),
+                skip_if_exists: "artifact://guard".into(),
+                ..StageAttrs::new("outer".into())
+            },
+            client: None,
+            body: vec![agent_rs("inner-a"), exec_rs("inner-b")],
+        };
+        let def = definition_with(vec![seq]);
+        let mut sd = StaticDefinition::new(def);
+        let s = sd.next_stage().await.unwrap();
+        assert_eq!(s.name(), "outer");
+        assert_eq!(s.stage_type(), "sequence");
+        assert_eq!(s.skip_if_exists(), "artifact://guard");
+        match s {
+            ExecutorStage::Sequence(seq) => {
+                assert_eq!(seq.stages.len(), 2);
+                assert_eq!(seq.stages[0].name(), "inner-a");
+                assert_eq!(seq.stages[1].name(), "inner-b");
+                assert!(seq.scope.is_none());
+            }
+            _ => panic!("expected Sequence"),
+        }
+    }
+
+    #[tokio::test]
+    async fn convert_stage_loop() {
+        let lp = RunnableStage::Loop {
+            attrs: StageAttrs {
+                name: "retry".into(),
+                skip_if_exists: "artifact://retry-guard".into(),
+                ..StageAttrs::new("retry".into())
+            },
+            max_iterations: 5,
+            stop_when_exists: Some("artifact://done".into()),
+            interval: None,
+            client: Some(ClientSpec("xai:grok".into())),
+            body: vec![agent_rs("loop-child")],
+        };
+        let def = definition_with(vec![lp]);
+        let mut sd = StaticDefinition::new(def);
+        let s = sd.next_stage().await.unwrap();
+        assert_eq!(s.name(), "retry");
+        assert_eq!(s.stage_type(), "loop");
+        assert_eq!(s.skip_if_exists(), "artifact://retry-guard");
+        match s {
+            ExecutorStage::Loop {
+                max_iterations,
+                stop_when_exists,
+                loop_iter_template,
+                client,
+                body,
+                ..
+            } => {
+                assert_eq!(max_iterations, Some(5));
+                assert_eq!(stop_when_exists.as_deref(), Some("artifact://done"));
+                assert_eq!(loop_iter_template, "{n}");
+                assert_eq!(client, Some(ClientSpec("xai:grok".into())));
+                assert_eq!(body.stages.len(), 1);
+                assert_eq!(body.stages[0].name(), "loop-child");
+                assert!(body.scope.is_none());
+                assert_eq!(body.skip_if_exists, "");
+            }
+            _ => panic!("expected Loop"),
+        }
+    }
+
+    #[tokio::test]
+    async fn convert_stage_parallel_children_inherit_metadata() {
+        let par = RunnableStage::Parallel {
+            attrs: StageAttrs::new("reviews".into()),
+            max_concurrent: Some(4),
+            cancel_on_error: true,
+            error_policy: ErrorPolicy::All,
+            client: Some(ClientSpec("openai:gpt-5".into())),
+            body: vec![agent_rs("rev-a"), agent_rs("rev-b")],
+        };
+        let def = definition_with(vec![par]);
+        let mut sd = StaticDefinition::new(def);
+        let s = sd.next_stage().await.unwrap();
+        assert_eq!(s.name(), "reviews");
+        assert_eq!(s.stage_type(), "parallel");
+        match s {
+            ExecutorStage::Parallel {
+                max_concurrent,
+                cancel_on_error,
+                error_policy,
+                client,
+                children,
+                ..
+            } => {
+                assert_eq!(max_concurrent, Some(4));
+                assert!(cancel_on_error);
+                assert_eq!(error_policy, ErrorPolicy::All);
+                assert_eq!(client, Some(ClientSpec("openai:gpt-5".into())));
+                assert_eq!(children.len(), 2);
+                // Each child is a StaticDefinition wrapping a ConcreteDefinition
+                // that inherits parent metadata (name, default_client, base_ref, bootstrap).
+                for child in &children {
+                    assert_eq!(child.name(), "test-def");
+                    assert_eq!(child.default_client(), "openai:gpt-4");
+                    assert_eq!(child.base_ref(), "main");
+                }
+            }
+            _ => panic!("expected Parallel"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_child_yields_its_own_stage_then_done() {
+        let par = RunnableStage::Parallel {
+            attrs: StageAttrs::new("group".into()),
+            max_concurrent: None,
+            cancel_on_error: false,
+            error_policy: ErrorPolicy::Any,
+            client: None,
+            body: vec![agent_rs("sole-child")],
+        };
+        let def = definition_with(vec![par]);
+        let mut sd = StaticDefinition::new(def);
+        let s = sd.next_stage().await.unwrap();
+        let children = match s {
+            ExecutorStage::Parallel { children, .. } => children,
+            _ => panic!("expected Parallel"),
+        };
+        assert_eq!(children.len(), 1);
+        let mut child = children.into_iter().next().unwrap();
+        let cs = child.next_stage().await.unwrap();
+        assert_eq!(cs.name(), "sole-child");
+        assert!(matches!(
+            child.next_stage().await.unwrap(),
+            ExecutorStage::Done
+        ));
+    }
 
     #[tokio::test]
     async fn boxed_definition_delegates_name() {
-        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition {
-            inner: stub_definition(),
-        });
+        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition::new(stub_definition()));
         assert_eq!(def.name(), "unknown");
     }
 
     #[tokio::test]
     async fn boxed_definition_delegates_land() {
-        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition {
-            inner: stub_definition(),
-        });
+        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition::new(stub_definition()));
         assert!(def.land().is_none());
     }
 
     #[tokio::test]
     async fn boxed_definition_delegates_next_stage() {
-        let mut def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition {
-            inner: stub_definition(),
-        });
+        let mut def: Box<dyn GremlinDefinition> =
+            Box::new(StaticDefinition::new(stub_definition()));
         let result = def.next_stage().await.unwrap();
         assert!(matches!(result, ExecutorStage::Done));
     }
 
     #[test]
     fn boxed_definition_stub_methods_return_not_implemented() {
-        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition {
-            inner: stub_definition(),
-        });
+        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition::new(stub_definition()));
         let err = def.serialize().unwrap_err();
         assert!(matches!(err, DefinitionError::Message(m) if m == "not implemented"));
     }
