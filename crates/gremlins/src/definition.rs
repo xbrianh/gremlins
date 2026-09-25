@@ -2,58 +2,128 @@
 //! executor run-loop and concrete definition sources (static YAML, Python
 //! plugins, etc.).
 //!
-//! This module defines the trait, the transition-state struct the run-loop
-//! passes to `next_stage()`, and the `NextStage` enum the trait returns.
-//! `StaticDefinition` is a newtype over the existing concrete
+//! This module defines the trait and the `ExecutorStage` enum the trait
+//! returns.  `StaticDefinition` is a newtype over the existing concrete
 //! [`GremlinDefinition`] that implements the trait with trivial delegation
 //! and a no-op `next_stage` — the cursor state machine will replace that
 //! in a follow-up.
 
-use std::collections::HashMap;
-
+use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 use crate::schemas::gremlin_definition::GremlinDefinition as ConcreteDefinition;
-use crate::stages::node::RunnableStage;
+use crate::stages::agent::Agent;
+use crate::stages::composite::ClientSpec;
+use crate::stages::exec::Exec;
+use crate::stages::parallel::ErrorPolicy;
 
 // ---------------------------------------------------------------------------
-// TransitionState — what the run-loop feeds into next_stage()
+// Sequence — shared payload for Sequence and Loop variants
 // ---------------------------------------------------------------------------
 
-/// The outcome of the most recently completed stage, passed to
-/// [`GremlinDefinition::next_stage`] so the definition can decide what
-/// to run next.
+/// A sequence of stages with an optional scope and artifact guard.
+///
+/// Used as the payload of [`ExecutorStage::Sequence`] and as the body of
+/// [`ExecutorStage::Loop`].
 #[derive(Debug, Clone)]
-pub struct TransitionState {
-    /// The name of the stage that just finished, if any.
-    pub last_stage: Option<String>,
-    /// Whether the last stage succeeded.
-    pub last_ok: bool,
-    /// The error message from the last stage, if it failed.
-    pub last_error: Option<String>,
-    /// Artifacts produced so far, keyed by URI.
-    pub produced_artifacts: HashMap<String, String>,
+pub struct Sequence {
+    pub stages: Vec<ExecutorStage>,
+    pub scope: Option<String>,
+    pub skip_if_exists: String,
 }
 
 // ---------------------------------------------------------------------------
-// NextStage — what next_stage() returns
+// ExecutorStage — what next_stage() returns
 // ---------------------------------------------------------------------------
 
 /// The next stage (or stages) the executor should run.
-///
-/// `Parallel` is deferred — it requires `Box<dyn GremlinDefinition>` in the
-/// enum, which pulls in object-safety questions best solved in a dedicated
-/// gremlin.
-#[derive(Debug)]
-pub enum NextStage {
-    /// Run a single stage.
-    Single(Box<RunnableStage>),
+#[derive(Debug, Clone)]
+pub enum ExecutorStage {
+    /// Run an agent stage.
+    Agent {
+        stage: Agent,
+        skip_if_exists: String,
+        client: Option<ClientSpec>,
+    },
+    /// Run an exec stage.
+    Exec {
+        stage: Exec,
+        skip_if_exists: String,
+        client: Option<ClientSpec>,
+    },
     /// Run a sequence of stages in order.
-    Sequence(Vec<RunnableStage>),
+    Sequence(Sequence),
+    /// Run children in parallel.
+    Parallel {
+        name: String,
+        max_concurrent: Option<u32>,
+        cancel_on_error: bool,
+        error_policy: ErrorPolicy,
+        client: Option<ClientSpec>,
+        body: Vec<ExecutorStage>,
+    },
+    /// Run a body repeatedly.
+    Loop {
+        name: String,
+        max_iterations: u32,
+        stop_when_exists: Option<String>,
+        interval: Option<f64>,
+        client: Option<ClientSpec>,
+        body: Sequence,
+    },
     /// No more stages — the gremlin is done.
     Done,
+}
+
+impl ExecutorStage {
+    /// The stage's name.
+    pub fn name(&self) -> &str {
+        match self {
+            ExecutorStage::Agent { stage, .. } => &stage.name,
+            ExecutorStage::Exec { stage, .. } => &stage.name,
+            ExecutorStage::Sequence(seq) => seq.stages.first().map_or("", |s| s.name()),
+            ExecutorStage::Parallel { name, .. } => name,
+            ExecutorStage::Loop { name, .. } => name,
+            ExecutorStage::Done => "",
+        }
+    }
+
+    /// The stage's type as a static string.
+    pub fn stage_type(&self) -> &str {
+        match self {
+            ExecutorStage::Agent { .. } => "agent",
+            ExecutorStage::Exec { .. } => "exec",
+            ExecutorStage::Sequence(_) => "sequence",
+            ExecutorStage::Parallel { .. } => "parallel",
+            ExecutorStage::Loop { .. } => "loop",
+            ExecutorStage::Done => "done",
+        }
+    }
+
+    /// The stage's own client, if it declared one.
+    pub fn client(&self) -> Option<&ClientSpec> {
+        match self {
+            ExecutorStage::Agent { client, .. }
+            | ExecutorStage::Exec { client, .. }
+            | ExecutorStage::Parallel { client, .. }
+            | ExecutorStage::Loop { client, .. } => client.as_ref(),
+            ExecutorStage::Sequence(_) | ExecutorStage::Done => None,
+        }
+    }
+
+    /// The artifact guard that makes the stage a conditional producer.
+    pub fn skip_if_exists(&self) -> &str {
+        match self {
+            ExecutorStage::Agent { skip_if_exists, .. }
+            | ExecutorStage::Exec { skip_if_exists, .. } => skip_if_exists,
+            ExecutorStage::Sequence(seq) => &seq.skip_if_exists,
+            ExecutorStage::Parallel { .. } => "",
+            ExecutorStage::Loop { .. } => "",
+            ExecutorStage::Done => "",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +135,7 @@ pub enum NextStage {
 /// `Send` is required because the executor holds one definition per gremlin
 /// and may move it across threads. `Sync` is not required — no concurrent
 /// access.
+#[async_trait]
 pub trait GremlinDefinition: Send {
     /// The definition's identity (the YAML file stem, or equivalent).
     fn name(&self) -> &str;
@@ -79,12 +150,90 @@ pub trait GremlinDefinition: Send {
     fn bootstrap(&self) -> &Bootstrap;
 
     /// The optional `land` stage — always an exec stage named `land`.
-    fn land(&self) -> Option<&RunnableStage>;
+    fn land(&self) -> Option<&ExecutorStage>;
 
-    /// Given the outcome of the last stage, return the next stage(s) to run.
+    /// Return the next stage(s) to run.
     ///
-    /// Returns `Ok(NextStage::Done)` when the definition has no more stages.
-    fn next_stage(&mut self, state: &TransitionState) -> Result<NextStage, DefinitionError>;
+    /// Returns `Ok(ExecutorStage::Done)` when the definition has no more stages.
+    async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError>;
+
+    /// Create a child definition scoped to one parallel branch.
+    ///
+    /// Stub — returns `Err(DefinitionError::Message("not implemented"))`.
+    fn with_stages(
+        &self,
+        _parallel: &ExecutorStage,
+        _index: usize,
+    ) -> Result<Box<dyn GremlinDefinition>, DefinitionError> {
+        Err(DefinitionError::Message("not implemented".into()))
+    }
+
+    /// Serialize this definition to bytes.
+    ///
+    /// Stub — returns `Err(DefinitionError::Message("not implemented"))`.
+    fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {
+        Err(DefinitionError::Message("not implemented".into()))
+    }
+
+    /// Deserialize a definition from bytes.
+    ///
+    /// Stub — returns `Err(DefinitionError::Message("not implemented"))`.
+    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinDefinition>, DefinitionError>
+    where
+        Self: Sized,
+    {
+        Err(DefinitionError::Message("not implemented".into()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blanket impl for Box<dyn GremlinDefinition>
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl GremlinDefinition for Box<dyn GremlinDefinition> {
+    fn name(&self) -> &str {
+        self.as_ref().name()
+    }
+
+    fn default_client(&self) -> &str {
+        self.as_ref().default_client()
+    }
+
+    fn base_ref(&self) -> &str {
+        self.as_ref().base_ref()
+    }
+
+    fn bootstrap(&self) -> &Bootstrap {
+        self.as_ref().bootstrap()
+    }
+
+    fn land(&self) -> Option<&ExecutorStage> {
+        self.as_ref().land()
+    }
+
+    async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError> {
+        self.as_mut().next_stage().await
+    }
+
+    fn with_stages(
+        &self,
+        parallel: &ExecutorStage,
+        index: usize,
+    ) -> Result<Box<dyn GremlinDefinition>, DefinitionError> {
+        self.as_ref().with_stages(parallel, index)
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {
+        self.as_ref().serialize()
+    }
+
+    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinDefinition>, DefinitionError>
+    where
+        Self: Sized,
+    {
+        Err(DefinitionError::Message("not implemented".into()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +246,10 @@ pub enum DefinitionError {
     /// A schema-level problem (missing keys, type mismatches, etc.).
     #[error(transparent)]
     Schema(#[from] SchemaError),
+
+    /// A registry-level problem.
+    #[error("{0}")]
+    Registry(String),
 
     /// A free-form message for definition-specific failures.
     #[error("{0}")]
@@ -111,13 +264,14 @@ pub enum DefinitionError {
 /// concrete [`ConcreteDefinition`] struct.
 ///
 /// All accessors delegate to the inner struct. `next_stage()` returns
-/// `Ok(NextStage::Done)` unconditionally — the cursor state machine that
+/// `Ok(ExecutorStage::Done)` unconditionally — the cursor state machine that
 /// walks the stage list will replace this in a follow-up.
 #[derive(Debug)]
 pub struct StaticDefinition {
     pub inner: ConcreteDefinition,
 }
 
+#[async_trait]
 impl GremlinDefinition for StaticDefinition {
     fn name(&self) -> &str {
         &self.inner.name
@@ -135,12 +289,12 @@ impl GremlinDefinition for StaticDefinition {
         &self.inner.bootstrap
     }
 
-    fn land(&self) -> Option<&RunnableStage> {
-        self.inner.land.as_ref()
+    fn land(&self) -> Option<&ExecutorStage> {
+        None
     }
 
-    fn next_stage(&mut self, _state: &TransitionState) -> Result<NextStage, DefinitionError> {
-        Ok(NextStage::Done)
+    async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError> {
+        Ok(ExecutorStage::Done)
     }
 }
 
@@ -199,20 +353,14 @@ mod tests {
         assert!(def.land().is_none());
     }
 
-    #[test]
-    fn static_definition_next_stage_returns_done() {
+    #[tokio::test]
+    async fn static_definition_next_stage_returns_done() {
         let mut def = StaticDefinition {
             inner: stub_definition(),
         };
-        let state = TransitionState {
-            last_stage: None,
-            last_ok: true,
-            last_error: None,
-            produced_artifacts: HashMap::new(),
-        };
-        let result = def.next_stage(&state).unwrap();
+        let result = def.next_stage().await.unwrap();
         match result {
-            NextStage::Done => {}
+            ExecutorStage::Done => {}
             other => panic!("expected Done, got {other:?}"),
         }
     }
@@ -236,5 +384,209 @@ mod tests {
         assert_eq!(def.default_client(), "openai:gpt-4");
         assert_eq!(def.base_ref(), "main");
         assert!(def.land().is_none());
+    }
+
+    // ---- ExecutorStage method tests ----
+
+    fn make_agent(name: &str) -> ExecutorStage {
+        ExecutorStage::Agent {
+            stage: Agent {
+                name: name.to_string(),
+                prompts: vec![],
+                options: std::collections::HashMap::new(),
+                interpolation_map: std::collections::HashMap::new(),
+                bind_map: std::collections::HashMap::new(),
+            },
+            skip_if_exists: String::new(),
+            client: None,
+        }
+    }
+
+    fn make_exec(name: &str) -> ExecutorStage {
+        ExecutorStage::Exec {
+            stage: Exec {
+                name: name.to_string(),
+                options: std::collections::HashMap::new(),
+                interpolation_map: std::collections::HashMap::new(),
+                bind_map: std::collections::HashMap::new(),
+            },
+            skip_if_exists: String::new(),
+            client: None,
+        }
+    }
+
+    #[test]
+    fn executor_stage_agent_name() {
+        let stage = make_agent("plan");
+        assert_eq!(stage.name(), "plan");
+        assert_eq!(stage.stage_type(), "agent");
+        assert!(stage.client().is_none());
+        assert_eq!(stage.skip_if_exists(), "");
+    }
+
+    #[test]
+    fn executor_stage_exec_name() {
+        let stage = make_exec("build");
+        assert_eq!(stage.name(), "build");
+        assert_eq!(stage.stage_type(), "exec");
+        assert!(stage.client().is_none());
+        assert_eq!(stage.skip_if_exists(), "");
+    }
+
+    #[test]
+    fn executor_stage_sequence_name_returns_first_child() {
+        let seq = ExecutorStage::Sequence(Sequence {
+            stages: vec![make_agent("first"), make_exec("second")],
+            scope: None,
+            skip_if_exists: String::new(),
+        });
+        assert_eq!(seq.name(), "first");
+        assert_eq!(seq.stage_type(), "sequence");
+        assert!(seq.client().is_none());
+    }
+
+    #[test]
+    fn executor_stage_sequence_name_empty_returns_empty() {
+        let seq = ExecutorStage::Sequence(Sequence {
+            stages: vec![],
+            scope: None,
+            skip_if_exists: String::new(),
+        });
+        assert_eq!(seq.name(), "");
+    }
+
+    #[test]
+    fn executor_stage_parallel_name() {
+        let stage = ExecutorStage::Parallel {
+            name: "reviews".into(),
+            max_concurrent: None,
+            cancel_on_error: false,
+            error_policy: ErrorPolicy::Any,
+            client: None,
+            body: vec![],
+        };
+        assert_eq!(stage.name(), "reviews");
+        assert_eq!(stage.stage_type(), "parallel");
+        assert!(stage.client().is_none());
+        assert_eq!(stage.skip_if_exists(), "");
+    }
+
+    #[test]
+    fn executor_stage_loop_name() {
+        let stage = ExecutorStage::Loop {
+            name: "retry".into(),
+            max_iterations: 3,
+            stop_when_exists: None,
+            interval: None,
+            client: None,
+            body: Sequence {
+                stages: vec![],
+                scope: None,
+                skip_if_exists: String::new(),
+            },
+        };
+        assert_eq!(stage.name(), "retry");
+        assert_eq!(stage.stage_type(), "loop");
+        assert!(stage.client().is_none());
+        assert_eq!(stage.skip_if_exists(), "");
+    }
+
+    #[test]
+    fn executor_stage_done() {
+        assert_eq!(ExecutorStage::Done.name(), "");
+        assert_eq!(ExecutorStage::Done.stage_type(), "done");
+        assert!(ExecutorStage::Done.client().is_none());
+        assert_eq!(ExecutorStage::Done.skip_if_exists(), "");
+    }
+
+    #[test]
+    fn executor_stage_client_some() {
+        let stage = ExecutorStage::Agent {
+            stage: Agent {
+                name: "plan".into(),
+                prompts: vec![],
+                options: std::collections::HashMap::new(),
+                interpolation_map: std::collections::HashMap::new(),
+                bind_map: std::collections::HashMap::new(),
+            },
+            skip_if_exists: String::new(),
+            client: Some(ClientSpec("xai:grok-5".into())),
+        };
+        assert_eq!(stage.client(), Some(&ClientSpec("xai:grok-5".into())));
+    }
+
+    #[test]
+    fn executor_stage_skip_if_exists() {
+        let stage = ExecutorStage::Exec {
+            stage: Exec {
+                name: "build".into(),
+                options: std::collections::HashMap::new(),
+                interpolation_map: std::collections::HashMap::new(),
+                bind_map: std::collections::HashMap::new(),
+            },
+            skip_if_exists: "artifact://done".into(),
+            client: None,
+        };
+        assert_eq!(stage.skip_if_exists(), "artifact://done");
+    }
+
+    #[test]
+    fn executor_stage_sequence_skip_if_exists() {
+        let seq = ExecutorStage::Sequence(Sequence {
+            stages: vec![],
+            scope: None,
+            skip_if_exists: "artifact://guard".into(),
+        });
+        assert_eq!(seq.skip_if_exists(), "artifact://guard");
+    }
+
+    // ---- Box<dyn GremlinDefinition> blanket impl tests ----
+
+    #[tokio::test]
+    async fn boxed_definition_delegates_name() {
+        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition {
+            inner: stub_definition(),
+        });
+        assert_eq!(def.name(), "unknown");
+    }
+
+    #[tokio::test]
+    async fn boxed_definition_delegates_land() {
+        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition {
+            inner: stub_definition(),
+        });
+        assert!(def.land().is_none());
+    }
+
+    #[tokio::test]
+    async fn boxed_definition_delegates_next_stage() {
+        let mut def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition {
+            inner: stub_definition(),
+        });
+        let result = def.next_stage().await.unwrap();
+        assert!(matches!(result, ExecutorStage::Done));
+    }
+
+    #[test]
+    fn boxed_definition_stub_methods_return_not_implemented() {
+        let def: Box<dyn GremlinDefinition> = Box::new(StaticDefinition {
+            inner: stub_definition(),
+        });
+        let err = def.serialize().unwrap_err();
+        assert!(matches!(err, DefinitionError::Message(m) if m == "not implemented"));
+    }
+
+    // ---- DefinitionError tests ----
+
+    #[test]
+    fn definition_error_registry_variant() {
+        let err = DefinitionError::Registry("boom".into());
+        assert_eq!(err.to_string(), "boom");
+    }
+
+    #[test]
+    fn definition_error_message_variant() {
+        let err = DefinitionError::Message("nope".into());
+        assert_eq!(err.to_string(), "nope");
     }
 }
