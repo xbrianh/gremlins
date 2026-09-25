@@ -1081,14 +1081,10 @@ stages:
 
     #[test]
     fn test_verify_recipe_skip_if_exists_preserves_loop_iter() {
-        let recipe = load_yaml_file(
-            std::path::Path::new(
-                &format!(
-                    "{}/../../.gremlins/stages/verify.yaml",
-                    env!("CARGO_MANIFEST_DIR")
-                ),
-            ),
-        )
+        let recipe = load_yaml_file(std::path::Path::new(&format!(
+            "{}/../../.gremlins/stages/verify.yaml",
+            env!("CARGO_MANIFEST_DIR")
+        )))
         .unwrap();
         let stages = recipe["stages"].as_sequence().unwrap();
         let loop_stage = &stages[0];
