@@ -18,7 +18,7 @@ use crate::config;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 
-use crate::stages::node::RunnableStage;
+use crate::stages::node::ParsedStage;
 
 /// The message emitted when no layer supplied a default client.
 const MISSING_DEFAULT_CLIENT: &str = "gremlin definition is missing 'default_client' — set a \
@@ -39,9 +39,9 @@ pub struct GremlinDefinition {
     /// Bootstrap commands and input sources.
     pub bootstrap: Bootstrap,
     /// The stage tree, in declaration order.
-    pub stages: Vec<RunnableStage>,
+    pub stages: Vec<ParsedStage>,
     /// The optional `land` stage — always an exec stage named `land`.
-    pub land: Option<RunnableStage>,
+    pub land: Option<ParsedStage>,
     /// The fully expanded YAML tree, kept for round-tripping via
     /// [`to_expanded_yaml`](GremlinDefinition::to_expanded_yaml).
     pub expanded_yaml: Value,
@@ -82,7 +82,7 @@ impl GremlinDefinition {
     /// contains only the child's own stage(s), while inheriting every other
     /// field (name, path, default_client, base_ref, bootstrap, land) from
     /// the parent.
-    pub fn clone_with_stages(&self, stages: Vec<RunnableStage>) -> Self {
+    pub fn clone_with_stages(&self, stages: Vec<ParsedStage>) -> Self {
         GremlinDefinition {
             stages,
             ..self.clone()
@@ -150,7 +150,7 @@ impl GremlinDefinition {
         }
 
         // stages
-        let stages: Vec<Value> = self.stages.iter().map(RunnableStage::to_yaml).collect();
+        let stages: Vec<Value> = self.stages.iter().map(ParsedStage::to_yaml).collect();
         root.insert(Value::String("stages".to_string()), Value::Sequence(stages));
 
         Value::Mapping(root)

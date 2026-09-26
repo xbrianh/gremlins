@@ -1,4 +1,4 @@
-//! Builder for [`RunnableStage::Agent`].
+//! Builder for [`ParsedStage::Agent`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -8,7 +8,7 @@ use crate::schemas::expand::key_referenced_in_text;
 use crate::stages::agent::Agent;
 use crate::stages::composite::ClientSpec;
 use crate::stages::constants::FRAMEWORK_KEYS;
-use crate::stages::node::RunnableStage;
+use crate::stages::node::ParsedStage;
 
 /// Build an [`Agent`] stage.
 ///
@@ -122,8 +122,8 @@ impl AgentBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`RunnableStage::Agent`].
-    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+    /// Consume the builder and produce a [`ParsedStage::Agent`].
+    pub fn build(self) -> Result<ParsedStage, SchemaError> {
         let name = self.name.clone();
 
         crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
@@ -223,7 +223,7 @@ impl AgentBuilder {
             interpolation_map: self.interpolation_map,
             bind_map: self.bind_map,
         };
-        Ok(RunnableStage::Agent {
+        Ok(ParsedStage::Agent {
             stage,
             skip_if_exists: self.skip_if_exists,
             client: self.client,

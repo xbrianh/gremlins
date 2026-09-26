@@ -21,7 +21,7 @@ use crate::schemas::gremlin_definition::{
 use crate::schemas::loader::{self, StageEntry, StageNode};
 use crate::stages::composite::ClientSpec;
 use crate::stages::constants::FRAMEWORK_KEYS;
-use crate::stages::node::RunnableStage;
+use crate::stages::node::ParsedStage;
 use crate::stages::parallel::ErrorPolicy;
 
 // ---------------------------------------------------------------------------
@@ -260,8 +260,8 @@ impl LandBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`RunnableStage::Exec`] named `land`.
-    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+    /// Consume the builder and produce a [`ParsedStage::Exec`] named `land`.
+    pub fn build(self) -> Result<ParsedStage, SchemaError> {
         let name = "land".to_string();
 
         crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
@@ -356,7 +356,7 @@ impl LandBuilder {
             interpolation_map: self.interpolation_map,
             bind_map: self.bind_map,
         };
-        Ok(RunnableStage::Exec {
+        Ok(ParsedStage::Exec {
             stage,
             skip_if_exists: self.skip_if_exists,
             client: self.client,
@@ -403,8 +403,8 @@ pub struct DefinitionBuilder {
     default_client: String,
     prompt_dir: Option<PathBuf>,
     bootstrap: Bootstrap,
-    stages: Vec<RunnableStage>,
-    land: Option<RunnableStage>,
+    stages: Vec<ParsedStage>,
+    land: Option<ParsedStage>,
 }
 
 impl DefinitionBuilder {
@@ -454,19 +454,19 @@ impl DefinitionBuilder {
     }
 
     /// Append a stage.
-    pub fn stage(mut self, stage: RunnableStage) -> Self {
+    pub fn stage(mut self, stage: ParsedStage) -> Self {
         self.stages.push(stage);
         self
     }
 
     /// Append many stages.
-    pub fn stages(mut self, stages: Vec<RunnableStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<ParsedStage>) -> Self {
         self.stages.extend(stages);
         self
     }
 
     /// Set the land stage.
-    pub fn land(mut self, land: RunnableStage) -> Self {
+    pub fn land(mut self, land: ParsedStage) -> Self {
         self.land = Some(land);
         self
     }
@@ -513,11 +513,8 @@ impl DefinitionBuilder {
         fill_builder_names(&mut self.stages);
 
         // Build the node list for validation, including land.
-        let mut nodes: Vec<StageNode> = self
-            .stages
-            .iter()
-            .map(RunnableStage::to_stage_node)
-            .collect();
+        let mut nodes: Vec<StageNode> =
+            self.stages.iter().map(ParsedStage::to_stage_node).collect();
         if let Some(ref land) = self.land {
             nodes.push(land.to_stage_node());
         }
@@ -569,7 +566,7 @@ impl GremlinDefinition {
 /// Mirrors the YAML path: unnamed stages get auto-generated names based on
 /// their stage type, and duplicate explicit names are disambiguated with
 /// `-N` suffixes.
-pub(crate) fn fill_builder_names(stages: &mut [RunnableStage]) {
+pub(crate) fn fill_builder_names(stages: &mut [ParsedStage]) {
     let mut entries: Vec<StageEntry> = stages.iter().map(|s| s.to_stage_entry()).collect();
     // fill_names is infallible for well-formed stages.
     if loader::fill_names(&mut entries).is_ok() {
@@ -583,9 +580,9 @@ pub(crate) fn fill_builder_names(stages: &mut [RunnableStage]) {
     // Recurse into composite bodies.
     for stage in stages.iter_mut() {
         match stage {
-            RunnableStage::Loop { body, .. }
-            | RunnableStage::Sequence { body, .. }
-            | RunnableStage::Parallel { body, .. } => {
+            ParsedStage::Loop { body, .. }
+            | ParsedStage::Sequence { body, .. }
+            | ParsedStage::Parallel { body, .. } => {
                 fill_builder_names(body);
             }
             _ => {}
@@ -679,7 +676,7 @@ impl DefinitionBuilder {
         let raw_stages = stages_from_yaml(root)?;
 
         // Parse stages through the per-type YAML→builder dispatch.
-        let mut stages: Vec<RunnableStage> = Vec::new();
+        let mut stages: Vec<ParsedStage> = Vec::new();
         for raw in &raw_stages {
             let mapping = raw
                 .as_mapping()
@@ -724,7 +721,7 @@ impl DefinitionBuilder {
 // ---------------------------------------------------------------------------
 
 /// Dispatch a single stage mapping to the appropriate per-type builder.
-fn stage_from_yaml(mapping: &Mapping) -> Result<RunnableStage, SchemaError> {
+fn stage_from_yaml(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
     let is_parallel = mapping.contains_key("parallel");
     let name = mapping
         .get("name")
@@ -830,7 +827,7 @@ fn yaml_client(mapping: &Mapping) -> Option<ClientSpec> {
 }
 
 /// Build an [`AgentBuilder`] from a YAML stage mapping.
-fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let prompts = yaml_string_list(mapping, "prompt")?;
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
@@ -862,7 +859,7 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Schem
 }
 
 /// Build an [`ExecBuilder`] from a YAML stage mapping.
-fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
@@ -890,7 +887,7 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Schema
 }
 
 /// Build a [`LoopBuilder`] from a YAML stage mapping.
-fn loop_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn loop_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
         None => 3u32,
         Some(v) => {
@@ -943,7 +940,7 @@ fn loop_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Schema
 }
 
 /// Build a [`SequenceBuilder`] from a YAML stage mapping.
-fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
     let body = yaml_children(mapping, "body")?;
@@ -960,7 +957,7 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Sc
 }
 
 /// Build a [`ParallelBuilder`] from a YAML stage mapping.
-fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let max_concurrent = match mapping.get("max_concurrent").filter(|v| !v.is_null()) {
         None => None,
         Some(v) => {
@@ -1021,7 +1018,7 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Sc
 
 /// Parse children from a composite's `key` ("body" or "parallel") through
 /// the same per-type dispatch.
-fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<RunnableStage>, SchemaError> {
+fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<ParsedStage>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(Vec::new());
     };
@@ -1041,7 +1038,7 @@ fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<RunnableStage>, Sch
 
 /// Build the land stage from its YAML mapping, forcing name=land and
 /// type=exec through [`LandBuilder`].
-fn land_from_yaml_builder(mapping: &Mapping) -> Result<RunnableStage, SchemaError> {
+fn land_from_yaml_builder(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;

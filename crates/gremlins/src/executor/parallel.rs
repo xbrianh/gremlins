@@ -1,6 +1,6 @@
 //! The parallel fan-out / fan-in executor.
 //!
-//! [`run_parallel`] destructures a [`RunnableStage::Parallel`], guards against
+//! [`run_parallel`] destructures a [`ParsedStage::Parallel`], guards against
 //! already-completed groups, spawns one tokio task per child (bounded by a
 //! [`Semaphore`]), collects results from a [`JoinSet`], applies the group's
 //! [`ErrorPolicy`], merges artifacts from successful children into the parent
@@ -8,7 +8,7 @@
 //! costs into the parent.
 //!
 //! Children run as forked gremlins via [`Gremlin::fork_with_stages`], which
-//! accepts a `Vec<RunnableStage>` instead of a child definition path — the child
+//! accepts a `Vec<ParsedStage>` instead of a child definition path — the child
 //! definition inherits parent metadata but runs only the given stages.
 //!
 //! Each child runs on a dedicated [`std::thread`] worker thread (spawned via
@@ -28,17 +28,17 @@ use tokio::task::JoinSet;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 use crate::executor::RunError;
-use crate::stages::node::RunnableStage;
+use crate::stages::node::ParsedStage;
 use crate::stages::parallel::ErrorPolicy;
 
 /// Run a parallel group: fork one child per stage, fan out via [`JoinSet`],
 /// join, and apply the error policy.
 pub(crate) async fn run_parallel(
-    stage: &RunnableStage,
+    stage: &ParsedStage,
     gremlin: &mut Gremlin,
     enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
-    let RunnableStage::Parallel {
+    let ParsedStage::Parallel {
         attrs,
         max_concurrent,
         cancel_on_error,
@@ -628,14 +628,14 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    fn parse_stages(yaml: &str) -> Vec<RunnableStage> {
+    fn parse_stages(yaml: &str) -> Vec<ParsedStage> {
         let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("valid YAML");
         let list = value.as_sequence_mut().expect("a stage list");
-        RunnableStage::parse_stages(list, 0).expect("valid stages")
+        ParsedStage::parse_stages(list, 0).expect("valid stages")
     }
 
     fn test_gremlin(
-        stages: Vec<RunnableStage>,
+        stages: Vec<ParsedStage>,
         default_client: &str,
     ) -> (tempfile::TempDir, Gremlin) {
         let tmp = tempfile::tempdir().unwrap();
@@ -695,7 +695,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_parallel_group_succeeds() {
-        let stage = RunnableStage::Parallel {
+        let stage = ParsedStage::Parallel {
             attrs: StageAttrs::new("empty".to_string()),
             max_concurrent: None,
             cancel_on_error: false,

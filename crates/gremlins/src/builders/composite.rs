@@ -3,14 +3,14 @@
 
 use crate::schemas::error::SchemaError;
 use crate::stages::composite::{ClientSpec, StageAttrs};
-use crate::stages::node::RunnableStage;
+use crate::stages::node::ParsedStage;
 use crate::stages::parallel::{validate_child_names, ErrorPolicy};
 
 // ---------------------------------------------------------------------------
 // SequenceBuilder
 // ---------------------------------------------------------------------------
 
-/// Build a [`RunnableStage::Sequence`].
+/// Build a [`ParsedStage::Sequence`].
 ///
 /// # Example
 ///
@@ -25,7 +25,7 @@ use crate::stages::parallel::{validate_child_names, ErrorPolicy};
 #[derive(Debug, Clone)]
 pub struct SequenceBuilder {
     name: String,
-    body: Vec<RunnableStage>,
+    body: Vec<ParsedStage>,
     skip_if_exists: String,
     client: Option<ClientSpec>,
 }
@@ -48,13 +48,13 @@ impl SequenceBuilder {
     }
 
     /// Append a child stage.
-    pub fn stage(mut self, stage: RunnableStage) -> Self {
+    pub fn stage(mut self, stage: ParsedStage) -> Self {
         self.body.push(stage);
         self
     }
 
     /// Append many child stages.
-    pub fn stages(mut self, stages: Vec<RunnableStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<ParsedStage>) -> Self {
         self.body.extend(stages);
         self
     }
@@ -71,8 +71,8 @@ impl SequenceBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`RunnableStage::Sequence`].
-    pub fn build(mut self) -> Result<RunnableStage, SchemaError> {
+    /// Consume the builder and produce a [`ParsedStage::Sequence`].
+    pub fn build(mut self) -> Result<ParsedStage, SchemaError> {
         let name = self.name.clone();
 
         if self.body.is_empty() {
@@ -89,7 +89,7 @@ impl SequenceBuilder {
         attrs.stage_type = "sequence".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        Ok(RunnableStage::Sequence {
+        Ok(ParsedStage::Sequence {
             attrs,
             client: self.client,
             body: self.body,
@@ -101,7 +101,7 @@ impl SequenceBuilder {
 // ParallelBuilder
 // ---------------------------------------------------------------------------
 
-/// Build a [`RunnableStage::Parallel`].
+/// Build a [`ParsedStage::Parallel`].
 ///
 /// # Example
 ///
@@ -117,7 +117,7 @@ impl SequenceBuilder {
 #[derive(Debug, Clone)]
 pub struct ParallelBuilder {
     name: String,
-    body: Vec<RunnableStage>,
+    body: Vec<ParsedStage>,
     max_concurrent: Option<u32>,
     cancel_on_error: bool,
     error_policy: ErrorPolicy,
@@ -146,13 +146,13 @@ impl ParallelBuilder {
     }
 
     /// Append a child stage.
-    pub fn stage(mut self, stage: RunnableStage) -> Self {
+    pub fn stage(mut self, stage: ParsedStage) -> Self {
         self.body.push(stage);
         self
     }
 
     /// Append many child stages.
-    pub fn stages(mut self, stages: Vec<RunnableStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<ParsedStage>) -> Self {
         self.body.extend(stages);
         self
     }
@@ -187,8 +187,8 @@ impl ParallelBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`RunnableStage::Parallel`].
-    pub fn build(mut self) -> Result<RunnableStage, SchemaError> {
+    /// Consume the builder and produce a [`ParsedStage::Parallel`].
+    pub fn build(mut self) -> Result<ParsedStage, SchemaError> {
         let name = self.name.clone();
 
         // Reject max_concurrent(0) — YAML rejects it, and the executor
@@ -224,7 +224,7 @@ impl ParallelBuilder {
         attrs.stage_type = "parallel".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        Ok(RunnableStage::Parallel {
+        Ok(ParsedStage::Parallel {
             attrs,
             max_concurrent: self.max_concurrent,
             cancel_on_error: self.cancel_on_error,
@@ -239,7 +239,7 @@ impl ParallelBuilder {
 // LoopBuilder
 // ---------------------------------------------------------------------------
 
-/// Build a [`RunnableStage::Loop`].
+/// Build a [`ParsedStage::Loop`].
 ///
 /// # Example
 ///
@@ -255,7 +255,7 @@ impl ParallelBuilder {
 #[derive(Debug, Clone)]
 pub struct LoopBuilder {
     name: String,
-    body: Vec<RunnableStage>,
+    body: Vec<ParsedStage>,
     max_iterations: u32,
     stop_when_exists: Option<String>,
     interval: Option<f64>,
@@ -284,13 +284,13 @@ impl LoopBuilder {
     }
 
     /// Append a child stage.
-    pub fn stage(mut self, stage: RunnableStage) -> Self {
+    pub fn stage(mut self, stage: ParsedStage) -> Self {
         self.body.push(stage);
         self
     }
 
     /// Append many child stages.
-    pub fn stages(mut self, stages: Vec<RunnableStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<ParsedStage>) -> Self {
         self.body.extend(stages);
         self
     }
@@ -325,8 +325,8 @@ impl LoopBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`RunnableStage::Loop`].
-    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+    /// Consume the builder and produce a [`ParsedStage::Loop`].
+    pub fn build(self) -> Result<ParsedStage, SchemaError> {
         if self.max_iterations < 1 {
             return Err(SchemaError::Stage {
                 name: self.name.clone(),
@@ -338,7 +338,7 @@ impl LoopBuilder {
         attrs.stage_type = "loop".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        Ok(RunnableStage::Loop {
+        Ok(ParsedStage::Loop {
             attrs,
             max_iterations: self.max_iterations,
             stop_when_exists: self.stop_when_exists,
@@ -348,13 +348,13 @@ impl LoopBuilder {
         })
     }
 
-    /// Wrap an already-parsed [`RunnableStage::Loop`] into a builder so
+    /// Wrap an already-parsed [`ParsedStage::Loop`] into a builder so
     /// callers can override fields before calling [`build`].
     ///
-    /// Panics if `stage` is not a [`RunnableStage::Loop`].
-    pub fn from_parsed(stage: RunnableStage) -> Self {
+    /// Panics if `stage` is not a [`ParsedStage::Loop`].
+    pub fn from_parsed(stage: ParsedStage) -> Self {
         match stage {
-            RunnableStage::Loop {
+            ParsedStage::Loop {
                 attrs,
                 max_iterations,
                 stop_when_exists,

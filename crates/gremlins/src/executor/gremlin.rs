@@ -44,7 +44,7 @@ use crate::executor::state::{self, StateData};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::gremlin_definition::GremlinDefinition;
-use crate::stages::node::RunnableStage;
+use crate::stages::node::ParsedStage;
 
 /// State keys that describe *this* run's live execution and must never leak
 /// into a forked child, which starts its own from scratch.
@@ -604,7 +604,7 @@ impl Gremlin {
         parent_id: &str,
         group_name: &str,
         child_key: &str,
-        stages: Vec<RunnableStage>,
+        stages: Vec<ParsedStage>,
     ) -> Result<Gremlin, RunError> {
         log::debug!(
             "fork_with_stages: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}, stage_count={}",
@@ -878,7 +878,7 @@ impl Gremlin {
     }
 
     /// The framework substitution variables for `stage`.
-    pub fn framework_subs(&self, stage: &RunnableStage) -> HashMap<String, String> {
+    pub fn framework_subs(&self, stage: &ParsedStage) -> HashMap<String, String> {
         framework_subs(
             stage,
             &self.cwd().to_string_lossy(),
@@ -1217,7 +1217,7 @@ fn bootstrap_script(bootstrap: &Bootstrap) -> Option<&str> {
 
 /// Runtime-owned substitution vars. Stages must not assemble these themselves.
 pub fn framework_subs(
-    stage: &RunnableStage,
+    stage: &ParsedStage,
     cwd: &str,
     model: &str,
     base_ref: &str,
@@ -1543,7 +1543,7 @@ mod tests {
 
     #[test]
     fn framework_subs_carries_the_four_vars() {
-        let stage = RunnableStage::Exec {
+        let stage = ParsedStage::Exec {
             stage: crate::stages::exec::Exec {
                 name: "plan".to_string(),
                 options: HashMap::new(),

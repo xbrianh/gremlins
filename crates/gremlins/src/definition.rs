@@ -5,7 +5,7 @@
 //! This module defines the trait and the `ExecutorStage` enum the trait
 //! returns.  `StaticDefinition` is a cursor-driven implementation that wraps
 //! the concrete [`GremlinDefinition`] and converts one top-level
-//! [`RunnableStage`] into an [`ExecutorStage`] per `next_stage()` call.
+//! [`ParsedStage`] into an [`ExecutorStage`] per `next_stage()` call.
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -16,7 +16,7 @@ use crate::schemas::gremlin_definition::GremlinDefinition;
 use crate::stages::agent::Agent;
 use crate::stages::composite::ClientSpec;
 use crate::stages::exec::Exec;
-use crate::stages::node::RunnableStage;
+use crate::stages::node::ParsedStage;
 use crate::stages::parallel::ErrorPolicy;
 
 // ---------------------------------------------------------------------------
@@ -39,6 +39,8 @@ pub struct Sequence {
 // ---------------------------------------------------------------------------
 
 /// The next stage (or stages) the executor should run.
+///
+/// Converted from [`ParsedStage`] by [`convert_stage`].
 pub enum ExecutorStage {
     /// Run an agent stage.
     Agent {
@@ -255,7 +257,7 @@ pub enum DefinitionError {
 /// concrete [`GremlinDefinition`] struct.
 ///
 /// All accessors delegate to the inner struct. `next_stage()` walks the
-/// top-level stage list one [`RunnableStage`] at a time, converting each into
+/// top-level stage list one [`ParsedStage`] at a time, converting each into
 /// an [`ExecutorStage`] via a pure recursive projection.
 #[derive(Debug)]
 pub struct StaticDefinition {
@@ -311,13 +313,13 @@ impl GremlinStageProvider for StaticDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// RunnableStage → ExecutorStage conversion
+// ParsedStage → ExecutorStage conversion
 // ---------------------------------------------------------------------------
 
-/// Recursively convert one [`RunnableStage`] into an [`ExecutorStage`].
-fn convert_stage(stage: RunnableStage, def: &GremlinDefinition) -> ExecutorStage {
+/// Recursively convert one [`ParsedStage`] into an [`ExecutorStage`].
+fn convert_stage(stage: ParsedStage, def: &GremlinDefinition) -> ExecutorStage {
     match stage {
-        RunnableStage::Agent {
+        ParsedStage::Agent {
             stage,
             skip_if_exists,
             client,
@@ -326,7 +328,7 @@ fn convert_stage(stage: RunnableStage, def: &GremlinDefinition) -> ExecutorStage
             skip_if_exists,
             client,
         },
-        RunnableStage::Exec {
+        ParsedStage::Exec {
             stage,
             skip_if_exists,
             client,
@@ -335,7 +337,7 @@ fn convert_stage(stage: RunnableStage, def: &GremlinDefinition) -> ExecutorStage
             skip_if_exists,
             client,
         },
-        RunnableStage::Sequence {
+        ParsedStage::Sequence {
             attrs,
             client: _seq_client,
             body,
@@ -349,7 +351,7 @@ fn convert_stage(stage: RunnableStage, def: &GremlinDefinition) -> ExecutorStage
                 skip_if_exists: attrs.skip_if_exists,
             })
         }
-        RunnableStage::Loop {
+        ParsedStage::Loop {
             attrs,
             max_iterations,
             stop_when_exists,
@@ -374,7 +376,7 @@ fn convert_stage(stage: RunnableStage, def: &GremlinDefinition) -> ExecutorStage
                 skip_if_exists: attrs.skip_if_exists,
             }
         }
-        RunnableStage::Parallel {
+        ParsedStage::Parallel {
             attrs,
             max_concurrent,
             cancel_on_error,
@@ -639,9 +641,9 @@ mod tests {
 
     // ---- StaticDefinition cursor / goto / next_stage tests ----
 
-    /// Build a minimal Agent RunnableStage for use in test definitions.
-    fn agent_rs(name: &str) -> RunnableStage {
-        RunnableStage::Agent {
+    /// Build a minimal Agent ParsedStage for use in test definitions.
+    fn parsed_agent(name: &str) -> ParsedStage {
+        ParsedStage::Agent {
             stage: Agent {
                 name: name.to_string(),
                 prompts: vec![],
@@ -654,9 +656,9 @@ mod tests {
         }
     }
 
-    /// Build a minimal Exec RunnableStage.
-    fn exec_rs(name: &str) -> RunnableStage {
-        RunnableStage::Exec {
+    /// Build a minimal Exec ParsedStage.
+    fn parsed_exec(name: &str) -> ParsedStage {
+        ParsedStage::Exec {
             stage: Exec {
                 name: name.to_string(),
                 options: std::collections::HashMap::new(),
@@ -668,8 +670,8 @@ mod tests {
         }
     }
 
-    /// Build a multi-stage GremlinDefinition from RunnableStage entries.
-    fn definition_with(stages: Vec<RunnableStage>) -> GremlinDefinition {
+    /// Build a multi-stage GremlinDefinition from ParsedStage entries.
+    fn definition_with(stages: Vec<ParsedStage>) -> GremlinDefinition {
         GremlinDefinition {
             name: "test-def".into(),
             path: "/tmp/test.yaml".into(),
@@ -685,9 +687,9 @@ mod tests {
     #[tokio::test]
     async fn next_stage_yields_top_level_stages_in_order() {
         let def = definition_with(vec![
-            agent_rs("first"),
-            exec_rs("second"),
-            agent_rs("third"),
+            parsed_agent("first"),
+            parsed_exec("second"),
+            parsed_agent("third"),
         ]);
         let mut sd = StaticDefinition::new(def);
 
@@ -712,7 +714,11 @@ mod tests {
 
     #[tokio::test]
     async fn goto_jumps_to_existing_stage() {
-        let def = definition_with(vec![agent_rs("alpha"), agent_rs("beta"), agent_rs("gamma")]);
+        let def = definition_with(vec![
+            parsed_agent("alpha"),
+            parsed_agent("beta"),
+            parsed_agent("gamma"),
+        ]);
         let mut sd = StaticDefinition::new(def);
 
         sd.goto("gamma");
@@ -726,7 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn goto_unknown_resets_to_zero() {
-        let def = definition_with(vec![agent_rs("alpha"), agent_rs("beta")]);
+        let def = definition_with(vec![parsed_agent("alpha"), parsed_agent("beta")]);
         let mut sd = StaticDefinition::new(def);
 
         // Advance past alpha.
@@ -741,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn boxed_goto_forwards_to_inner() {
-        let def = definition_with(vec![agent_rs("x"), agent_rs("y")]);
+        let def = definition_with(vec![parsed_agent("x"), parsed_agent("y")]);
         let mut bx: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(def));
 
         bx.goto("y");
@@ -753,7 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn convert_stage_agent() {
-        let def = definition_with(vec![agent_rs("plan")]);
+        let def = definition_with(vec![parsed_agent("plan")]);
         let mut sd = StaticDefinition::new(def);
         let s = sd.next_stage().await.unwrap();
         assert!(matches!(s, ExecutorStage::Agent { .. }));
@@ -763,14 +769,14 @@ mod tests {
 
     #[tokio::test]
     async fn convert_stage_sequence() {
-        let seq = RunnableStage::Sequence {
+        let seq = ParsedStage::Sequence {
             attrs: StageAttrs {
                 name: "outer".into(),
                 skip_if_exists: "artifact://guard".into(),
                 ..StageAttrs::new("outer".into())
             },
             client: None,
-            body: vec![agent_rs("inner-a"), exec_rs("inner-b")],
+            body: vec![parsed_agent("inner-a"), parsed_exec("inner-b")],
         };
         let def = definition_with(vec![seq]);
         let mut sd = StaticDefinition::new(def);
@@ -791,7 +797,7 @@ mod tests {
 
     #[tokio::test]
     async fn convert_stage_loop() {
-        let lp = RunnableStage::Loop {
+        let lp = ParsedStage::Loop {
             attrs: StageAttrs {
                 name: "retry".into(),
                 skip_if_exists: "artifact://retry-guard".into(),
@@ -801,7 +807,7 @@ mod tests {
             stop_when_exists: Some("artifact://done".into()),
             interval: None,
             client: Some(ClientSpec("xai:grok".into())),
-            body: vec![agent_rs("loop-child")],
+            body: vec![parsed_agent("loop-child")],
         };
         let def = definition_with(vec![lp]);
         let mut sd = StaticDefinition::new(def);
@@ -833,13 +839,13 @@ mod tests {
 
     #[tokio::test]
     async fn convert_stage_parallel_children_inherit_metadata() {
-        let par = RunnableStage::Parallel {
+        let par = ParsedStage::Parallel {
             attrs: StageAttrs::new("reviews".into()),
             max_concurrent: Some(4),
             cancel_on_error: true,
             error_policy: ErrorPolicy::All,
             client: Some(ClientSpec("openai:gpt-5".into())),
-            body: vec![agent_rs("rev-a"), agent_rs("rev-b")],
+            body: vec![parsed_agent("rev-a"), parsed_agent("rev-b")],
         };
         let def = definition_with(vec![par]);
         let mut sd = StaticDefinition::new(def);
@@ -874,13 +880,13 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_child_yields_its_own_stage_then_done() {
-        let par = RunnableStage::Parallel {
+        let par = ParsedStage::Parallel {
             attrs: StageAttrs::new("group".into()),
             max_concurrent: None,
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
             client: None,
-            body: vec![agent_rs("sole-child")],
+            body: vec![parsed_agent("sole-child")],
         };
         let def = definition_with(vec![par]);
         let mut sd = StaticDefinition::new(def);

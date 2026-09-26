@@ -29,7 +29,7 @@ use crate::stages::agent::{check_bail, commit_agent, prepare_agent, AgentError};
 use crate::stages::base;
 use crate::stages::constants::BAIL_KEY;
 use crate::stages::exec::{commit_exec, prepare_exec, run_shell, ExecError};
-use crate::stages::node::RunnableStage;
+use crate::stages::node::ParsedStage;
 
 // ---------------------------------------------------------------------------
 // Scope bookkeeping
@@ -163,10 +163,7 @@ async fn is_registered_uri(registry: &dyn ArtifactRegistry, key: &str) -> bool {
 }
 
 /// Run one top-level stage.
-pub(crate) async fn run_stage(
-    stage: &RunnableStage,
-    gremlin: &mut Gremlin,
-) -> Result<(), RunError> {
+pub(crate) async fn run_stage(stage: &ParsedStage, gremlin: &mut Gremlin) -> Result<(), RunError> {
     run_stage_scoped(stage, gremlin, "", None).await
 }
 
@@ -176,7 +173,7 @@ pub(crate) async fn run_stage(
 /// Python `StageRunner.__call__` did: a live guard artifact means the stage has
 /// already produced its output, so the whole subtree is a no-op.
 async fn run_stage_scoped(
-    stage: &RunnableStage,
+    stage: &ParsedStage,
     gremlin: &mut Gremlin,
     scope: &str,
     enclosing_client: Option<&str>,
@@ -199,14 +196,14 @@ async fn run_stage_scoped(
     }
 
     match stage {
-        RunnableStage::Agent { .. } => run_agent(stage, gremlin, enclosing_client).await,
-        RunnableStage::Exec { .. } => run_exec(stage, gremlin, enclosing_client).await,
-        RunnableStage::Sequence { .. } => {
+        ParsedStage::Agent { .. } => run_agent(stage, gremlin, enclosing_client).await,
+        ParsedStage::Exec { .. } => run_exec(stage, gremlin, enclosing_client).await,
+        ParsedStage::Sequence { .. } => {
             log::debug!("stage '{}': entering sequence", stage.name());
             run_sequence(stage, gremlin, scope, enclosing_client).await
         }
-        RunnableStage::Loop { .. } => run_loop(stage, gremlin, enclosing_client).await,
-        RunnableStage::Parallel { .. } => {
+        ParsedStage::Loop { .. } => run_loop(stage, gremlin, enclosing_client).await,
+        ParsedStage::Parallel { .. } => {
             log::debug!("dispatching stage '{}' to run_parallel", stage.name());
             run_parallel(stage, gremlin, enclosing_client).await
         }
@@ -219,7 +216,7 @@ async fn run_stage_scoped(
 /// 3. `default-client-by-stage` from global config (exact → longest prefix)
 /// 4. The definition's `default_client`
 fn resolve_client_spec(
-    stage: &RunnableStage,
+    stage: &ParsedStage,
     gremlin: &Gremlin,
     enclosing_client: Option<&str>,
 ) -> String {
@@ -273,7 +270,7 @@ fn resolve_client_spec(
 /// already-constructed client handle is reused to avoid building a second
 /// backend for the same spec.
 fn resolve_client(
-    stage: &RunnableStage,
+    stage: &ParsedStage,
     gremlin: &Gremlin,
     enclosing_client: Option<&str>,
 ) -> Result<Client, RunError> {
@@ -293,11 +290,11 @@ fn resolve_client(
 // ---------------------------------------------------------------------------
 
 async fn run_agent(
-    node: &RunnableStage,
+    node: &ParsedStage,
     gremlin: &mut Gremlin,
     enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
-    let RunnableStage::Agent { stage: agent, .. } = node else {
+    let ParsedStage::Agent { stage: agent, .. } = node else {
         unreachable!("run_agent is only called for agent stages")
     };
 
@@ -556,11 +553,11 @@ async fn run_agent(
 // ---------------------------------------------------------------------------
 
 async fn run_exec(
-    node: &RunnableStage,
+    node: &ParsedStage,
     gremlin: &mut Gremlin,
     _enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
-    let RunnableStage::Exec { stage: exec, .. } = node else {
+    let ParsedStage::Exec { stage: exec, .. } = node else {
         unreachable!("run_exec is only called for exec stages")
     };
 
@@ -751,12 +748,12 @@ async fn run_exec(
 /// re-enters the sequence and picks up where it stopped; the tracking is
 /// cleared once the whole body has run, since the sequence is then spent.
 async fn run_sequence(
-    node: &RunnableStage,
+    node: &ParsedStage,
     gremlin: &mut Gremlin,
     scope: &str,
     enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
-    let RunnableStage::Sequence {
+    let ParsedStage::Sequence {
         attrs,
         body,
         client,
@@ -810,11 +807,11 @@ async fn run_sequence(
 /// `outer~1~inner~2`; the enclosing scope is bookkeeping for `done_children`,
 /// not part of the iteration substitution.
 async fn run_loop(
-    node: &RunnableStage,
+    node: &ParsedStage,
     gremlin: &mut Gremlin,
     enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
-    let RunnableStage::Loop {
+    let ParsedStage::Loop {
         attrs,
         max_iterations,
         stop_when_exists,
@@ -1077,16 +1074,16 @@ mod tests {
     use crate::stages::composite::StageAttrs;
     use crate::test_support::GitSandbox;
 
-    fn parse_stages(yaml: &str) -> Vec<RunnableStage> {
+    fn parse_stages(yaml: &str) -> Vec<ParsedStage> {
         let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("valid YAML");
         let list = value.as_sequence_mut().expect("a stage list");
-        RunnableStage::parse_stages(list, 0).expect("valid stages")
+        ParsedStage::parse_stages(list, 0).expect("valid stages")
     }
 
     /// A gremlin with no git, no worktree, and a seeded state directory: the
     /// smallest thing `run_stage` needs to dispatch a stage.
     fn test_gremlin(
-        stages: Vec<RunnableStage>,
+        stages: Vec<ParsedStage>,
         default_client: &str,
     ) -> (tempfile::TempDir, Gremlin) {
         let tmp = tempfile::tempdir().unwrap();
@@ -1701,7 +1698,7 @@ mod tests {
     async fn zero_iteration_loop_bails() {
         // `Loop::with_dict` refuses a zero budget, but the parsed node may still
         // carry one; the runner must report exhaustion rather than succeed.
-        let stage = RunnableStage::Loop {
+        let stage = ParsedStage::Loop {
             attrs: {
                 let mut attrs = StageAttrs::new("poll".to_string());
                 attrs.stage_type = "loop".to_string();

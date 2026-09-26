@@ -15,7 +15,7 @@ use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
 use gremlins::stages::exec::prepare_exec;
-use gremlins::stages::node::RunnableStage;
+use gremlins::stages::node::ParsedStage;
 use serde_json::{Map, Value};
 
 mod spawn;
@@ -751,9 +751,9 @@ async fn land(id: &str) -> Result<(), String> {
         }
     };
 
-    // Extract the Exec from the RunnableStage::Exec variant.
+    // Extract the Exec from the ParsedStage::Exec variant.
     let exec = match land_stage {
-        RunnableStage::Exec { stage, .. } => stage,
+        ParsedStage::Exec { stage, .. } => stage,
         _ => {
             return Err(format!(
                 "gremlin {id}: land stage is not an exec (internal error)"
