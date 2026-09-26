@@ -168,7 +168,7 @@ pub trait GremlinDefinition: Send + Sync {
     fn bootstrap(&self) -> &Bootstrap;
 
     /// The optional `land` stage — always an exec stage named `land`.
-    fn land(&self) -> Option<&ExecutorStage>;
+    fn land(&self) -> Option<ExecutorStage>;
 
     /// Whether the cursor is at position 0 (a fresh start, not a resume).
     fn is_at_start(&self) -> bool;
@@ -245,7 +245,7 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
         self.as_ref().bootstrap()
     }
 
-    fn land(&self) -> Option<&ExecutorStage> {
+    fn land(&self) -> Option<ExecutorStage> {
         self.as_ref().land()
     }
 
@@ -599,8 +599,8 @@ impl GremlinDefinition for StaticDefinition {
         &self.bootstrap
     }
 
-    fn land(&self) -> Option<&ExecutorStage> {
-        None
+    fn land(&self) -> Option<ExecutorStage> {
+        self.land.clone().map(|stage| self.convert_stage(stage))
     }
 
     fn is_at_start(&self) -> bool {
@@ -868,6 +868,43 @@ mod tests {
     fn static_definition_delegates_land_none() {
         let def = stub_definition();
         assert!(def.land().is_none());
+    }
+
+    #[test]
+    fn static_definition_land_returns_some_when_populated() {
+        let def = StaticDefinition {
+            name: "test-gremlin".into(),
+            path: "/tmp/test.yaml".into(),
+            default_client: "openai:gpt-4".into(),
+            base_ref: "main".into(),
+            bootstrap: Bootstrap::default(),
+            stages: vec![],
+            land: Some(parsed_exec("land")),
+            expanded_yaml: serde_yaml::Value::Null,
+            cursor: 0,
+        };
+        let land = def.land().expect("land is populated");
+        assert_eq!(land.name(), "land");
+        assert_eq!(land.stage_type(), "exec");
+    }
+
+    #[test]
+    fn boxed_definition_delegates_land_some() {
+        let def = StaticDefinition {
+            name: "test-gremlin".into(),
+            path: "/tmp/test.yaml".into(),
+            default_client: "openai:gpt-4".into(),
+            base_ref: "main".into(),
+            bootstrap: Bootstrap::default(),
+            stages: vec![],
+            land: Some(parsed_exec("land")),
+            expanded_yaml: serde_yaml::Value::Null,
+            cursor: 0,
+        };
+        let boxed: Box<dyn GremlinDefinition> = Box::new(def);
+        let land = boxed.land().expect("land is populated");
+        assert_eq!(land.name(), "land");
+        assert_eq!(land.stage_type(), "exec");
     }
 
     #[tokio::test]
