@@ -20,7 +20,7 @@ use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
 use crate::config;
-use crate::definition::{ExecutorStage, GremlinStageProvider};
+use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::bootstrap::run_definition_bootstrap;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::parallel::run_parallel;
@@ -1064,11 +1064,10 @@ mod tests {
     use crate::artifacts::registry::{DryRunArtifactRegistry, FileSystemArtifactRegistry};
     use crate::artifacts::uri::Uri;
     use crate::builders::definition::DefinitionBuilder;
-    use crate::definition::{ExecutorStage, GremlinStageProvider, Sequence, StaticDefinition};
+    use crate::definition::{ExecutorStage, GremlinDefinition, Sequence, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::schemas::gremlin_definition::GremlinDefinition;
     use crate::stages::node::ParsedStage;
     use crate::test_support::GitSandbox;
 
@@ -1109,16 +1108,16 @@ mod tests {
         let mut state_data = StateData::new(Some("gr-test".to_string()));
         state_data.state_file = Some(state_dir.join("state.json"));
 
-        let definition = GremlinDefinition {
-            name: "test".to_string(),
-            path: PathBuf::from("test.yaml"),
-            default_client: default_client.to_string(),
-            base_ref: "main".to_string(),
+        let definition = StaticDefinition::new(
+            "test".to_string(),
+            PathBuf::from("test.yaml"),
+            default_client.to_string(),
+            "main".to_string(),
             bootstrap,
             stages,
-            land: None,
-            expanded_yaml: serde_yaml::Value::Null,
-        };
+            None,
+            serde_yaml::Value::Null,
+        );
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
@@ -1126,7 +1125,7 @@ mod tests {
             artifact_dir: artifact_dir.clone(),
             definition_path: None,
             client_override: None,
-            definition: Box::new(StaticDefinition::new(definition)),
+            definition: Box::new(definition),
             registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: None,
             worktree_parent: None,

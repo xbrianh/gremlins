@@ -1,20 +1,21 @@
-//! The `GremlinStageProvider` trait — the abstraction boundary between the
+//! The `GremlinDefinition` trait — the abstraction boundary between the
 //! executor run-loop and concrete definition sources (static YAML, Python
 //! plugins, etc.).
 //!
 //! This module defines the trait and the `ExecutorStage` enum the trait
-//! returns.  `StaticDefinition` is a cursor-driven implementation that wraps
-//! the concrete [`GremlinDefinition`] and converts one top-level
-//! [`ParsedStage`] into an [`ExecutorStage`] per `next_stage()` call.
+//! returns.  `StaticDefinition` is a cursor-driven implementation that owns
+//! the definition data directly and converts one top-level [`ParsedStage`]
+//! into an [`ExecutorStage`] per `next_stage()` call.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use serde_yaml::{Mapping, Value};
 use thiserror::Error;
 
+use crate::config;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
-use crate::schemas::gremlin_definition::GremlinDefinition;
 use crate::stages::agent::Agent;
 use crate::stages::composite::ClientSpec;
 use crate::stages::exec::Exec;
@@ -22,11 +23,24 @@ use crate::stages::node::ParsedStage;
 use crate::stages::parallel::ErrorPolicy;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// The message emitted when no layer supplied a default client.
+const MISSING_DEFAULT_CLIENT: &str = "gremlin definition is missing 'default_client' — set a \
+     'default_client' in the definition YAML, pass --client on the command line, or set \
+     'default-client' in config.json";
+
+/// The name a not-yet-loaded definition carries. [`Gremlin::init_runtime`]
+/// treats it as "nothing loaded yet", so it must never be a real definition's
+/// name — the builder derives that from the YAML file stem.
+pub const UNLOADED_NAME: &str = "unknown";
+
+// ---------------------------------------------------------------------------
 // Sequence — shared payload for Sequence and Loop variants
 // ---------------------------------------------------------------------------
 
 /// A sequence of stages with an optional scope and artifact guard.
-///
 /// Used as the payload of [`ExecutorStage::Sequence`] and as the body of
 /// [`ExecutorStage::Loop`].
 pub struct Sequence {
@@ -42,8 +56,7 @@ pub struct Sequence {
 // ---------------------------------------------------------------------------
 
 /// The next stage (or stages) the executor should run.
-///
-/// Converted from [`ParsedStage`] by [`convert_stage`].
+/// Converted from [`ParsedStage`] by [`StaticDefinition::convert_stage`].
 pub enum ExecutorStage {
     /// Run an agent stage.
     Agent {
@@ -66,7 +79,7 @@ pub enum ExecutorStage {
         cancel_on_error: bool,
         error_policy: ErrorPolicy,
         client: Option<ClientSpec>,
-        children: Vec<Box<dyn GremlinStageProvider>>,
+        children: Vec<Box<dyn GremlinDefinition>>,
         skip_if_exists: String,
     },
     /// Run a body repeatedly.
@@ -135,15 +148,14 @@ impl ExecutorStage {
 }
 
 // ---------------------------------------------------------------------------
-// GremlinStageProvider trait
+// GremlinDefinition trait
 // ---------------------------------------------------------------------------
 
 /// The interface every gremlin definition must satisfy.
-///
 /// `Send + Sync` is required because the executor holds one definition per gremlin
 /// and may move it across threads.
 #[async_trait]
-pub trait GremlinStageProvider: Send + Sync {
+pub trait GremlinDefinition: Send + Sync {
     /// The definition's identity (the YAML file stem, or equivalent).
     fn name(&self) -> &str;
 
@@ -173,7 +185,7 @@ pub trait GremlinStageProvider: Send + Sync {
     fn with_client(&mut self, client: &str);
 
     /// Clone this provider into a new heap-allocated box.
-    fn clone_box(&self) -> Box<dyn GremlinStageProvider>;
+    fn clone_box(&self) -> Box<dyn GremlinDefinition>;
 
     /// The name of the first stage in this provider, for child identification
     /// in parallel groups. Defaults to [`Self::name`].
@@ -204,7 +216,7 @@ pub trait GremlinStageProvider: Send + Sync {
     /// Deserialize a definition from bytes.
     ///
     /// Stub — returns `Err(DefinitionError::Message("not implemented"))`.
-    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinStageProvider>, DefinitionError>
+    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinDefinition>, DefinitionError>
     where
         Self: Sized,
     {
@@ -213,11 +225,11 @@ pub trait GremlinStageProvider: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Blanket impl for Box<dyn GremlinStageProvider>
+// Blanket impl for Box<dyn GremlinDefinition>
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl GremlinStageProvider for Box<dyn GremlinStageProvider> {
+impl GremlinDefinition for Box<dyn GremlinDefinition> {
     fn name(&self) -> &str {
         self.as_ref().name()
     }
@@ -250,7 +262,7 @@ impl GremlinStageProvider for Box<dyn GremlinStageProvider> {
         self.as_mut().with_client(client)
     }
 
-    fn clone_box(&self) -> Box<dyn GremlinStageProvider> {
+    fn clone_box(&self) -> Box<dyn GremlinDefinition> {
         self.as_ref().clone_box()
     }
 
@@ -274,7 +286,7 @@ impl GremlinStageProvider for Box<dyn GremlinStageProvider> {
         self.as_ref().serialize()
     }
 
-    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinStageProvider>, DefinitionError>
+    fn deserialize(_data: &[u8]) -> Result<Box<dyn GremlinDefinition>, DefinitionError>
     where
         Self: Sized,
     {
@@ -286,7 +298,7 @@ impl GremlinStageProvider for Box<dyn GremlinStageProvider> {
 // DefinitionError
 // ---------------------------------------------------------------------------
 
-/// Errors that can arise from [`GremlinStageProvider::next_stage`].
+/// Errors that can arise from [`GremlinDefinition::next_stage`].
 #[derive(Error, Debug)]
 pub enum DefinitionError {
     /// A schema-level problem (missing keys, type mismatches, etc.).
@@ -303,67 +315,290 @@ pub enum DefinitionError {
 }
 
 // ---------------------------------------------------------------------------
-// StaticDefinition — newtype bridge over the concrete GremlinDefinition
+// StaticDefinition — the canonical GremlinDefinition implementation
 // ---------------------------------------------------------------------------
 
-/// A [`GremlinStageProvider`] trait implementation that wraps the existing
-/// concrete [`GremlinDefinition`] struct.
+/// A [`GremlinDefinition`] trait implementation that owns the definition
+/// data directly.
 ///
-/// All accessors delegate to the inner struct. `next_stage()` walks the
-/// top-level stage list one [`ParsedStage`] at a time, converting each into
-/// an [`ExecutorStage`] via a pure recursive projection.
-#[derive(Debug)]
+/// All accessors read the struct fields. `next_stage()` walks the top-level
+/// stage list one [`ParsedStage`] at a time, converting each into an
+/// [`ExecutorStage`] via a pure recursive projection.
+#[derive(Debug, Clone)]
 pub struct StaticDefinition {
-    pub inner: GremlinDefinition,
+    /// The definition's identity: the YAML file stem.
+    pub name: String,
+    /// Where the definition was loaded from, canonicalised where possible.
+    pub path: PathBuf,
+    /// Every stage runs with this client unless it declares its own.
+    pub default_client: String,
+    /// The git ref the worktree branches from.
+    pub base_ref: String,
+    /// Bootstrap commands and input sources.
+    pub bootstrap: Bootstrap,
+    /// The stage tree, in declaration order.
+    pub stages: Vec<ParsedStage>,
+    /// The optional `land` stage — always an exec stage named `land`.
+    pub land: Option<ParsedStage>,
+    /// The fully expanded YAML tree, kept for round-tripping via
+    /// [`to_expanded_yaml`](StaticDefinition::to_expanded_yaml).
+    pub expanded_yaml: Value,
     cursor: usize,
 }
 
 impl StaticDefinition {
     /// Create a new cursor-driven definition starting at position 0.
-    pub fn new(inner: GremlinDefinition) -> Self {
-        StaticDefinition { inner, cursor: 0 }
-    }
-
-    /// A stub definition — the "not initialized yet" marker.
-    pub fn stub() -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: String,
+        path: PathBuf,
+        default_client: String,
+        base_ref: String,
+        bootstrap: Bootstrap,
+        stages: Vec<ParsedStage>,
+        land: Option<ParsedStage>,
+        expanded_yaml: Value,
+    ) -> Self {
         StaticDefinition {
-            inner: GremlinDefinition::stub(),
+            name,
+            path,
+            default_client,
+            base_ref,
+            bootstrap,
+            stages,
+            land,
+            expanded_yaml,
             cursor: 0,
         }
     }
 
-    /// Whether the inner definition is the stub.
+    /// A placeholder carrying no identity: the value a [`Gremlin`] holds until
+    /// [`Gremlin::init_runtime`] reads the real YAML.
+    ///
+    /// [`Gremlin`]: crate::executor::gremlin::Gremlin
+    /// [`Gremlin::init_runtime`]: crate::executor::gremlin::Gremlin::init_runtime
+    pub fn stub() -> StaticDefinition {
+        StaticDefinition {
+            name: UNLOADED_NAME.to_string(),
+            path: PathBuf::from("."),
+            default_client: String::new(),
+            base_ref: String::new(),
+            bootstrap: Bootstrap::default(),
+            stages: Vec::new(),
+            land: None,
+            expanded_yaml: Value::Null,
+            cursor: 0,
+        }
+    }
+
+    /// Whether this definition is the [`StaticDefinition::stub`] rather than a loaded one.
     pub fn is_stub(&self) -> bool {
-        self.inner.is_stub()
+        self.name.is_empty() || self.name == UNLOADED_NAME
+    }
+
+    /// Clone this definition, replacing its stage list with `stages`.
+    ///
+    /// Used by the parallel executor to give each child a definition that
+    /// contains only the child's own stage(s), while inheriting every other
+    /// field (name, path, default_client, base_ref, bootstrap, land) from
+    /// the parent.
+    pub fn clone_with_stages(&self, stages: Vec<ParsedStage>) -> Self {
+        StaticDefinition {
+            stages,
+            cursor: 0,
+            ..self.clone()
+        }
+    }
+
+    /// Serialize this definition to a [`serde_yaml::Value`] matching the
+    /// canonical expanded-YAML shape.
+    ///
+    /// The output always includes `__gremlins_expanded__: true` so
+    /// [`DefinitionBuilder::from_expanded_yaml`] recognizes it.
+    ///
+    /// [`DefinitionBuilder::from_expanded_yaml`]: crate::builders::DefinitionBuilder::from_expanded_yaml
+    pub fn to_expanded_yaml(&self) -> Value {
+        let mut root = Mapping::new();
+
+        // Sentinel — always emitted.
+        root.insert(
+            Value::String("__gremlins_expanded__".to_string()),
+            Value::Bool(true),
+        );
+
+        // name — always present, so round-trips preserve definition identity.
+        root.insert(
+            Value::String("name".to_string()),
+            Value::String(self.name.clone()),
+        );
+
+        // default_client — always present.
+        root.insert(
+            Value::String("default_client".to_string()),
+            Value::String(self.default_client.clone()),
+        );
+
+        // base_ref — omit if "current".
+        if self.base_ref != "current" {
+            root.insert(
+                Value::String("base_ref".to_string()),
+                Value::String(self.base_ref.clone()),
+            );
+        }
+
+        // bootstrap — omit entirely if all fields are default/empty.
+        let bootstrap_yaml = bootstrap_to_yaml(&self.bootstrap);
+        if !is_empty_mapping(&bootstrap_yaml) {
+            root.insert(Value::String("bootstrap".to_string()), bootstrap_yaml);
+        }
+
+        // land — omit if None.
+        if let Some(ref land) = self.land {
+            let mut land_val = land.to_yaml();
+            // Ensure name and type are forced to "land"/"exec" for round-trip
+            // safety, matching what the builder does on parse.
+            if let Value::Mapping(ref mut land_map) = land_val {
+                land_map.insert(
+                    Value::String("name".to_string()),
+                    Value::String("land".to_string()),
+                );
+                land_map.insert(
+                    Value::String("type".to_string()),
+                    Value::String("exec".to_string()),
+                );
+            }
+            root.insert(Value::String("land".to_string()), land_val);
+        }
+
+        // stages
+        let stages: Vec<Value> = self.stages.iter().map(ParsedStage::to_yaml).collect();
+        root.insert(Value::String("stages".to_string()), Value::Sequence(stages));
+
+        Value::Mapping(root)
     }
 
     /// Deserialize a definition from bytes, returning an owned
     /// [`StaticDefinition`] so callers can call [`goto`](Self::goto) and
-    /// extract [`inner`](Self::inner) before handing it to the executor.
+    /// extract fields before handing it to the executor.
     pub fn deserialize_owned(data: &[u8]) -> Result<Self, DefinitionError> {
         let definition =
             crate::builders::definition::DefinitionBuilder::from_expanded_bytes(data, None)
                 .map_err(|e| DefinitionError::Message(e.to_string()))?;
-        Ok(StaticDefinition::new(definition))
+        Ok(definition)
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage conversion
+    // -----------------------------------------------------------------------
+
+    /// Recursively convert one [`ParsedStage`] into an [`ExecutorStage`].
+    pub(crate) fn convert_stage(&self, stage: ParsedStage) -> ExecutorStage {
+        match stage {
+            ParsedStage::Agent {
+                stage,
+                skip_if_exists,
+                client,
+            } => ExecutorStage::Agent {
+                stage,
+                skip_if_exists,
+                client,
+            },
+            ParsedStage::Exec {
+                stage,
+                skip_if_exists,
+                client,
+            } => ExecutorStage::Exec {
+                stage,
+                skip_if_exists,
+                client,
+            },
+            ParsedStage::Sequence {
+                attrs,
+                client: seq_client,
+                body,
+            } => {
+                let stages: Vec<ExecutorStage> =
+                    body.into_iter().map(|s| self.convert_stage(s)).collect();
+                ExecutorStage::Sequence(Sequence {
+                    name: attrs.name,
+                    stages,
+                    scope: None,
+                    skip_if_exists: attrs.skip_if_exists,
+                    client: seq_client,
+                })
+            }
+            ParsedStage::Loop {
+                attrs,
+                max_iterations,
+                stop_when_exists,
+                interval,
+                client,
+                body,
+                ..
+            } => {
+                let stages: Vec<ExecutorStage> =
+                    body.into_iter().map(|s| self.convert_stage(s)).collect();
+                ExecutorStage::Loop {
+                    name: attrs.name,
+                    max_iterations: Some(max_iterations),
+                    stop_when_exists,
+                    interval,
+                    loop_iter_template: "{n}".to_string(),
+                    client,
+                    body: Sequence {
+                        name: String::new(),
+                        stages,
+                        scope: None,
+                        skip_if_exists: String::new(),
+                        client: None,
+                    },
+                    skip_if_exists: attrs.skip_if_exists,
+                }
+            }
+            ParsedStage::Parallel {
+                attrs,
+                max_concurrent,
+                cancel_on_error,
+                error_policy,
+                client,
+                body,
+            } => {
+                let children: Vec<Box<dyn GremlinDefinition>> = body
+                    .into_iter()
+                    .map(|child| {
+                        Box::new(self.clone_with_stages(vec![child])) as Box<dyn GremlinDefinition>
+                    })
+                    .collect();
+                ExecutorStage::Parallel {
+                    name: attrs.name,
+                    max_concurrent,
+                    cancel_on_error,
+                    error_policy,
+                    client,
+                    children,
+                    skip_if_exists: attrs.skip_if_exists,
+                }
+            }
+        }
     }
 }
 
 #[async_trait]
-impl GremlinStageProvider for StaticDefinition {
+impl GremlinDefinition for StaticDefinition {
     fn name(&self) -> &str {
-        &self.inner.name
+        &self.name
     }
 
     fn default_client(&self) -> &str {
-        &self.inner.default_client
+        &self.default_client
     }
 
     fn base_ref(&self) -> &str {
-        &self.inner.base_ref
+        &self.base_ref
     }
 
     fn bootstrap(&self) -> &Bootstrap {
-        &self.inner.bootstrap
+        &self.bootstrap
     }
 
     fn land(&self) -> Option<&ExecutorStage> {
@@ -375,34 +610,27 @@ impl GremlinStageProvider for StaticDefinition {
     }
 
     fn is_stub(&self) -> bool {
-        self.inner.is_stub()
+        self.name.is_empty() || self.name == UNLOADED_NAME
     }
 
     fn with_client(&mut self, client: &str) {
-        self.inner.default_client = client.to_string();
+        self.default_client = client.to_string();
     }
 
-    fn clone_box(&self) -> Box<dyn GremlinStageProvider> {
-        Box::new(StaticDefinition {
-            inner: self.inner.clone(),
-            cursor: self.cursor,
-        })
+    fn clone_box(&self) -> Box<dyn GremlinDefinition> {
+        Box::new(self.clone())
     }
 
     fn first_stage_name(&self) -> &str {
-        self.inner
-            .stages
-            .first()
-            .map(|s| s.name())
-            .unwrap_or(&self.inner.name)
+        self.stages.first().map(|s| s.name()).unwrap_or(&self.name)
     }
 
     fn path(&self) -> &Path {
-        &self.inner.path
+        &self.path
     }
 
     fn goto(&mut self, stage: &str) {
-        if let Some(pos) = self.inner.stages.iter().position(|s| s.name() == stage) {
+        if let Some(pos) = self.stages.iter().position(|s| s.name() == stage) {
             self.cursor = pos;
         } else {
             self.cursor = 0;
@@ -410,124 +638,192 @@ impl GremlinStageProvider for StaticDefinition {
     }
 
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError> {
-        if self.cursor >= self.inner.stages.len() {
+        if self.cursor >= self.stages.len() {
             return Ok(ExecutorStage::Done);
         }
-        let stage = self.inner.stages[self.cursor].clone();
+        let stage = self.stages[self.cursor].clone();
         self.cursor += 1;
-        Ok(convert_stage(stage, &self.inner))
+        Ok(self.convert_stage(stage))
     }
 
     fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {
-        let yaml = self.inner.to_expanded_yaml();
+        let yaml = self.to_expanded_yaml();
         serde_yaml::to_string(&yaml)
             .map(|s| s.into_bytes())
             .map_err(|e| DefinitionError::Message(format!("failed to serialize definition: {e}")))
     }
 
-    fn deserialize(data: &[u8]) -> Result<Box<dyn GremlinStageProvider>, DefinitionError>
+    fn deserialize(data: &[u8]) -> Result<Box<dyn GremlinDefinition>, DefinitionError>
     where
         Self: Sized,
     {
         StaticDefinition::deserialize_owned(data)
-            .map(|sd| Box::new(sd) as Box<dyn GremlinStageProvider>)
+            .map(|sd| Box::new(sd) as Box<dyn GremlinDefinition>)
     }
 }
 
 // ---------------------------------------------------------------------------
-// ParsedStage → ExecutorStage conversion
+// Helper functions (moved from schemas/gremlin_definition.rs)
 // ---------------------------------------------------------------------------
 
-/// Recursively convert one [`ParsedStage`] into an [`ExecutorStage`].
-pub(crate) fn convert_stage(stage: ParsedStage, def: &GremlinDefinition) -> ExecutorStage {
-    match stage {
-        ParsedStage::Agent {
-            stage,
-            skip_if_exists,
-            client,
-        } => ExecutorStage::Agent {
-            stage,
-            skip_if_exists,
-            client,
-        },
-        ParsedStage::Exec {
-            stage,
-            skip_if_exists,
-            client,
-        } => ExecutorStage::Exec {
-            stage,
-            skip_if_exists,
-            client,
-        },
-        ParsedStage::Sequence {
-            attrs,
-            client: seq_client,
-            body,
-        } => {
-            let stages: Vec<ExecutorStage> =
-                body.into_iter().map(|s| convert_stage(s, def)).collect();
-            ExecutorStage::Sequence(Sequence {
-                name: attrs.name,
-                stages,
-                scope: None,
-                skip_if_exists: attrs.skip_if_exists,
-                client: seq_client,
-            })
-        }
-        ParsedStage::Loop {
-            attrs,
-            max_iterations,
-            stop_when_exists,
-            interval,
-            client,
-            body,
-            ..
-        } => {
-            let stages: Vec<ExecutorStage> =
-                body.into_iter().map(|s| convert_stage(s, def)).collect();
-            ExecutorStage::Loop {
-                name: attrs.name,
-                max_iterations: Some(max_iterations),
-                stop_when_exists,
-                interval,
-                loop_iter_template: "{n}".to_string(),
-                client,
-                body: Sequence {
-                    name: String::new(),
-                    stages,
-                    scope: None,
-                    skip_if_exists: String::new(),
-                    client: None,
-                },
-                skip_if_exists: attrs.skip_if_exists,
+/// The project root: the parent of the nearest ancestor `.gremlins` directory,
+/// falling back to the definition's own directory.
+pub(crate) fn project_root_for(path: &Path) -> PathBuf {
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        if directory
+            .file_name()
+            .is_some_and(|name| name == config::overlay_dirname())
+        {
+            if let Some(parent) = directory.parent() {
+                return parent.to_path_buf();
             }
+            break;
         }
-        ParsedStage::Parallel {
-            attrs,
-            max_concurrent,
-            cancel_on_error,
-            error_policy,
-            client,
-            body,
-        } => {
-            let children: Vec<Box<dyn GremlinStageProvider>> = body
-                .into_iter()
-                .map(|child| {
-                    Box::new(StaticDefinition::new(def.clone_with_stages(vec![child])))
-                        as Box<dyn GremlinStageProvider>
-                })
-                .collect();
-            ExecutorStage::Parallel {
-                name: attrs.name,
-                max_concurrent,
-                cancel_on_error,
-                error_policy,
-                client,
-                children,
-                skip_if_exists: attrs.skip_if_exists,
-            }
-        }
+        current = directory.parent();
     }
+    path.parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub(crate) fn default_client_from_yaml(root: &Mapping) -> Result<Option<String>, SchemaError> {
+    let Some(value) = root.get("default_client").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let client = value
+        .as_str()
+        .ok_or_else(|| SchemaError::Generic("default_client must be a string".to_string()))?;
+    if client.trim().is_empty() {
+        return Err(SchemaError::Generic(
+            "default_client must be a non-empty string".to_string(),
+        ));
+    }
+    Ok(Some(client.to_string()))
+}
+
+pub(crate) fn base_ref_from_yaml(root: &Mapping) -> Result<String, SchemaError> {
+    let value = match root.get("base_ref") {
+        None | Some(Value::Null) => return Ok("current".to_string()),
+        Some(value) => value,
+    };
+    let base_ref = value
+        .as_str()
+        .ok_or_else(|| SchemaError::Generic("base_ref must be a string".to_string()))?;
+    let trimmed = base_ref.trim();
+    if trimmed.is_empty() {
+        return Err(SchemaError::Generic(
+            "base_ref must be a non-empty string".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+pub(crate) fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {
+    match root.get("stages") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Sequence(stages)) => Ok(stages.clone()),
+        Some(_) => Err(SchemaError::Generic("'stages' must be a list".to_string())),
+    }
+}
+
+pub(crate) fn resolve_default_client(
+    yaml_default: Option<String>,
+    override_client: Option<&str>,
+) -> Result<String, SchemaError> {
+    if let Some(client) = yaml_default {
+        return Ok(client);
+    }
+    // A blank `--client` is no client at all: skip it rather than resolve to an
+    // unusable empty spec.
+    if let Some(client) = override_client
+        .map(str::trim)
+        .filter(|client| !client.is_empty())
+    {
+        return Ok(client.to_string());
+    }
+    config::global_config()
+        .ok()
+        .and_then(|cfg| cfg.default_client().map(String::from))
+        .ok_or_else(|| SchemaError::Generic(MISSING_DEFAULT_CLIENT.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Serialization helpers for to_expanded_yaml()
+// ---------------------------------------------------------------------------
+
+fn is_empty_mapping(value: &Value) -> bool {
+    match value {
+        Value::Mapping(m) => m.is_empty(),
+        _ => false,
+    }
+}
+
+fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
+    let mut m = Mapping::new();
+
+    if let Some(ref source) = bootstrap.source {
+        let mut src_map = Mapping::with_capacity(source.sources.len());
+        for (name, input_src) in &source.sources {
+            let mut entry = Mapping::new();
+            if input_src.types.len() == 1 {
+                entry.insert(
+                    Value::String("type".to_string()),
+                    Value::String(input_src.types[0].clone()),
+                );
+            } else {
+                let types: Vec<Value> = input_src
+                    .types
+                    .iter()
+                    .map(|t| Value::String(t.clone()))
+                    .collect();
+                entry.insert(Value::String("type".to_string()), Value::Sequence(types));
+            }
+            if input_src.optional {
+                entry.insert(Value::String("optional".to_string()), Value::Bool(true));
+            }
+            src_map.insert(Value::String(name.clone()), Value::Mapping(entry));
+        }
+        m.insert(Value::String("source".to_string()), Value::Mapping(src_map));
+    }
+
+    if !bootstrap.launch_cmds.is_empty() {
+        let cmds: Vec<Value> = bootstrap
+            .launch_cmds
+            .iter()
+            .map(|c| Value::String(c.clone()))
+            .collect();
+        m.insert(
+            Value::String("launch_cmds".to_string()),
+            Value::Sequence(cmds),
+        );
+    }
+
+    if !bootstrap.cmds.is_empty() {
+        let cmds: Vec<Value> = bootstrap
+            .cmds
+            .iter()
+            .map(|c| Value::String(c.clone()))
+            .collect();
+        m.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
+    }
+
+    if !bootstrap.cli_out.is_empty() {
+        let mut cli = Mapping::with_capacity(bootstrap.cli_out.len());
+        for (k, v) in &bootstrap.cli_out {
+            cli.insert(Value::String(k.clone()), Value::String(v.clone()));
+        }
+        m.insert(Value::String("cli_out".to_string()), Value::Mapping(cli));
+    }
+
+    if !bootstrap.env.is_empty() {
+        m.insert(
+            Value::String("env".to_string()),
+            Value::String(bootstrap.env.clone()),
+        );
+    }
+
+    Value::Mapping(m)
 }
 
 // ---------------------------------------------------------------------------
@@ -539,32 +835,32 @@ mod tests {
     use super::*;
     use crate::stages::composite::StageAttrs;
 
-    fn stub_definition() -> GremlinDefinition {
-        GremlinDefinition::stub()
+    fn stub_definition() -> StaticDefinition {
+        StaticDefinition::stub()
     }
 
     #[test]
     fn static_definition_delegates_name() {
-        let def = StaticDefinition::new(stub_definition());
+        let def = stub_definition();
         // stub name is "unknown"
         assert_eq!(def.name(), "unknown");
     }
 
     #[test]
     fn static_definition_delegates_default_client() {
-        let def = StaticDefinition::new(stub_definition());
+        let def = stub_definition();
         assert_eq!(def.default_client(), "");
     }
 
     #[test]
     fn static_definition_delegates_base_ref() {
-        let def = StaticDefinition::new(stub_definition());
+        let def = stub_definition();
         assert_eq!(def.base_ref(), "");
     }
 
     #[test]
     fn static_definition_delegates_bootstrap() {
-        let def = StaticDefinition::new(stub_definition());
+        let def = stub_definition();
         let bs = def.bootstrap();
         assert!(bs.source.is_none());
         assert!(bs.launch_cmds.is_empty());
@@ -572,13 +868,13 @@ mod tests {
 
     #[test]
     fn static_definition_delegates_land_none() {
-        let def = StaticDefinition::new(stub_definition());
+        let def = stub_definition();
         assert!(def.land().is_none());
     }
 
     #[tokio::test]
     async fn static_definition_next_stage_returns_done() {
-        let mut def = StaticDefinition::new(stub_definition());
+        let mut def = stub_definition();
         let result = def.next_stage().await.unwrap();
         assert!(matches!(&result, ExecutorStage::Done));
         assert_eq!(result.stage_type(), "done");
@@ -586,9 +882,9 @@ mod tests {
 
     #[test]
     fn static_definition_with_real_definition() {
-        // Build a minimal but real GremlinDefinition to exercise delegation
+        // Build a minimal but real StaticDefinition to exercise delegation
         // beyond the stub.
-        let inner = GremlinDefinition {
+        let def = StaticDefinition {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
             default_client: "openai:gpt-4".into(),
@@ -597,8 +893,8 @@ mod tests {
             stages: vec![],
             land: None,
             expanded_yaml: serde_yaml::Value::Null,
+            cursor: 0,
         };
-        let def = StaticDefinition::new(inner);
         assert_eq!(def.name(), "test-gremlin");
         assert_eq!(def.default_client(), "openai:gpt-4");
         assert_eq!(def.base_ref(), "main");
@@ -801,9 +1097,9 @@ mod tests {
         }
     }
 
-    /// Build a multi-stage GremlinDefinition from ParsedStage entries.
-    fn definition_with(stages: Vec<ParsedStage>) -> GremlinDefinition {
-        GremlinDefinition {
+    /// Build a multi-stage StaticDefinition from ParsedStage entries.
+    fn definition_with(stages: Vec<ParsedStage>) -> StaticDefinition {
+        StaticDefinition {
             name: "test-def".into(),
             path: "/tmp/test.yaml".into(),
             default_client: "openai:gpt-4".into(),
@@ -812,6 +1108,7 @@ mod tests {
             stages,
             land: None,
             expanded_yaml: serde_yaml::Value::Null,
+            cursor: 0,
         }
     }
 
@@ -822,7 +1119,7 @@ mod tests {
             parsed_exec("second"),
             parsed_agent("third"),
         ]);
-        let mut sd = StaticDefinition::new(def);
+        let mut sd = def;
 
         let s1 = sd.next_stage().await.unwrap();
         assert_eq!(s1.name(), "first");
@@ -850,7 +1147,7 @@ mod tests {
             parsed_agent("beta"),
             parsed_agent("gamma"),
         ]);
-        let mut sd = StaticDefinition::new(def);
+        let mut sd = def;
 
         sd.goto("gamma");
         let s = sd.next_stage().await.unwrap();
@@ -864,7 +1161,7 @@ mod tests {
     #[tokio::test]
     async fn goto_unknown_resets_to_zero() {
         let def = definition_with(vec![parsed_agent("alpha"), parsed_agent("beta")]);
-        let mut sd = StaticDefinition::new(def);
+        let mut sd = def;
 
         // Advance past alpha.
         let _ = sd.next_stage().await.unwrap();
@@ -879,7 +1176,7 @@ mod tests {
     #[tokio::test]
     async fn boxed_goto_forwards_to_inner() {
         let def = definition_with(vec![parsed_agent("x"), parsed_agent("y")]);
-        let mut bx: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(def));
+        let mut bx: Box<dyn GremlinDefinition> = Box::new(def);
 
         bx.goto("y");
         let s = bx.next_stage().await.unwrap();
@@ -891,7 +1188,7 @@ mod tests {
     #[tokio::test]
     async fn convert_stage_agent() {
         let def = definition_with(vec![parsed_agent("plan")]);
-        let mut sd = StaticDefinition::new(def);
+        let mut sd = def;
         let s = sd.next_stage().await.unwrap();
         assert!(matches!(s, ExecutorStage::Agent { .. }));
         assert_eq!(s.name(), "plan");
@@ -910,7 +1207,7 @@ mod tests {
             body: vec![parsed_agent("inner-a"), parsed_exec("inner-b")],
         };
         let def = definition_with(vec![seq]);
-        let mut sd = StaticDefinition::new(def);
+        let mut sd = def;
         let s = sd.next_stage().await.unwrap();
         assert_eq!(s.name(), "outer");
         assert_eq!(s.stage_type(), "sequence");
@@ -941,7 +1238,7 @@ mod tests {
             body: vec![parsed_agent("loop-child")],
         };
         let def = definition_with(vec![lp]);
-        let mut sd = StaticDefinition::new(def);
+        let mut sd = def;
         let s = sd.next_stage().await.unwrap();
         assert_eq!(s.name(), "retry");
         assert_eq!(s.stage_type(), "loop");
@@ -979,7 +1276,7 @@ mod tests {
             body: vec![parsed_agent("rev-a"), parsed_agent("rev-b")],
         };
         let def = definition_with(vec![par]);
-        let mut sd = StaticDefinition::new(def);
+        let mut sd = def;
         let s = sd.next_stage().await.unwrap();
         assert_eq!(s.name(), "reviews");
         assert_eq!(s.stage_type(), "parallel");
@@ -997,8 +1294,8 @@ mod tests {
                 assert_eq!(error_policy, ErrorPolicy::All);
                 assert_eq!(client, Some(ClientSpec("openai:gpt-5".into())));
                 assert_eq!(children.len(), 2);
-                // Each child is a StaticDefinition wrapping a GremlinDefinition
-                // that inherits parent metadata (name, default_client, base_ref, bootstrap).
+                // Each child is a StaticDefinition that inherits parent metadata
+                // (name, default_client, base_ref, bootstrap).
                 for child in &children {
                     assert_eq!(child.name(), "test-def");
                     assert_eq!(child.default_client(), "openai:gpt-4");
@@ -1020,7 +1317,7 @@ mod tests {
             body: vec![parsed_agent("sole-child")],
         };
         let def = definition_with(vec![par]);
-        let mut sd = StaticDefinition::new(def);
+        let mut sd = def;
         let s = sd.next_stage().await.unwrap();
         let children = match s {
             ExecutorStage::Parallel { children, .. } => children,
@@ -1038,20 +1335,19 @@ mod tests {
 
     #[tokio::test]
     async fn boxed_definition_delegates_name() {
-        let def: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_definition()));
+        let def: Box<dyn GremlinDefinition> = Box::new(stub_definition());
         assert_eq!(def.name(), "unknown");
     }
 
     #[tokio::test]
     async fn boxed_definition_delegates_land() {
-        let def: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_definition()));
+        let def: Box<dyn GremlinDefinition> = Box::new(stub_definition());
         assert!(def.land().is_none());
     }
 
     #[tokio::test]
     async fn boxed_definition_delegates_next_stage() {
-        let mut def: Box<dyn GremlinStageProvider> =
-            Box::new(StaticDefinition::new(stub_definition()));
+        let mut def: Box<dyn GremlinDefinition> = Box::new(stub_definition());
         let result = def.next_stage().await.unwrap();
         assert!(matches!(result, ExecutorStage::Done));
     }
@@ -1060,12 +1356,12 @@ mod tests {
     async fn boxed_definition_serialize_roundtrips() {
         // Build a real definition with stages, bootstrap, and land so the
         // round-trip validates more than just scalar metadata.
-        let inner = definition_with(vec![
+        let def = definition_with(vec![
             parsed_agent("greet"),
             parsed_exec("build"),
             parsed_agent("farewell"),
         ]);
-        let def: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(inner));
+        let def: Box<dyn GremlinDefinition> = Box::new(def);
         let bytes = def.serialize().unwrap();
         assert!(!bytes.is_empty());
         // Round-trip: deserialize and verify it's a valid definition.

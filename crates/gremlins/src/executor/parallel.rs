@@ -8,7 +8,7 @@
 //! costs into the parent.
 //!
 //! Children run as forked gremlins via [`Gremlin::fork`], which takes a
-//! [`GremlinStageProvider`] and optional `effective_client` for client
+//! [`GremlinDefinition`] and optional `effective_client` for client
 //! inheritance.
 //!
 //! Each child runs on a dedicated [`std::thread`] worker thread (spawned via
@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
-use crate::definition::{ExecutorStage, GremlinStageProvider};
+use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 use crate::executor::RunError;
@@ -613,26 +613,25 @@ fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::definition::{convert_stage, ExecutorStage, StaticDefinition};
+    use crate::definition::{ExecutorStage, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::schemas::gremlin_definition::GremlinDefinition;
     use crate::stages::node::ParsedStage;
 
     /// Convert the first parsed stage to an ExecutorStage for dispatch.
     fn first_executor_stage(stages: &[ParsedStage]) -> ExecutorStage {
-        let def = GremlinDefinition {
-            name: "test".to_string(),
-            path: PathBuf::from("test.yaml"),
-            default_client: "cmd:true".to_string(),
-            base_ref: "main".to_string(),
-            bootstrap: Bootstrap::default(),
-            stages: vec![],
-            land: None,
-            expanded_yaml: serde_yaml::Value::Null,
-        };
-        convert_stage(stages[0].clone(), &def)
+        let def = StaticDefinition::new(
+            "test".to_string(),
+            PathBuf::from("test.yaml"),
+            "cmd:true".to_string(),
+            "main".to_string(),
+            Bootstrap::default(),
+            vec![],
+            None,
+            serde_yaml::Value::Null,
+        );
+        def.convert_stage(stages[0].clone())
     }
     use crate::stages::parallel::ErrorPolicy;
     use std::collections::HashMap;
@@ -671,16 +670,16 @@ mod tests {
             artifact_dir: artifact_dir.clone(),
             definition_path: None,
             client_override: None,
-            definition: Box::new(StaticDefinition::new(GremlinDefinition {
-                name: "test".to_string(),
-                path: PathBuf::from("test.yaml"),
-                default_client: default_client.to_string(),
-                base_ref: "main".to_string(),
-                bootstrap: Bootstrap::default(),
-                stages: stages.clone(),
-                land: None,
-                expanded_yaml: serde_yaml::Value::Null,
-            })),
+            definition: Box::new(StaticDefinition::new(
+                "test".to_string(),
+                PathBuf::from("test.yaml"),
+                default_client.to_string(),
+                "main".to_string(),
+                Bootstrap::default(),
+                stages.clone(),
+                None,
+                serde_yaml::Value::Null,
+            )),
             registry: Box::new(crate::artifacts::registry::FileSystemArtifactRegistry::new(
                 artifact_dir,
             )),

@@ -39,12 +39,11 @@ use crate::builders::definition::DefinitionBuilder;
 use crate::clients::client::Client;
 use crate::config;
 use crate::core::{discovery, env_file, git};
-use crate::definition::{GremlinStageProvider, StaticDefinition};
+use crate::definition::{GremlinDefinition, StaticDefinition};
 use crate::executor::bootstrap::parse_gremlins_command;
 use crate::executor::state::{self, StateData};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
-use crate::schemas::gremlin_definition::GremlinDefinition;
 
 /// State keys that describe *this* run's live execution and must never leak
 /// into a forked child, which starts its own from scratch.
@@ -132,7 +131,7 @@ pub struct Gremlin {
     /// The CLI `--client` value this run was launched with, replayed when the
     /// definition is finally loaded.
     pub client_override: Option<String>,
-    pub definition: Box<dyn GremlinStageProvider>,
+    pub definition: Box<dyn GremlinDefinition>,
     pub registry: Box<dyn ArtifactRegistry>,
     pub worktree: Option<PathBuf>,
     pub worktree_parent: Option<PathBuf>,
@@ -174,7 +173,7 @@ impl Gremlin {
     pub fn init(
         definition_name: &str,
         definition_path: &Path,
-        _definition: &GremlinDefinition,
+        _definition: &StaticDefinition,
         stage_inputs: &HashMap<String, String>,
         client_override: Option<&str>,
         worktree_parent: Option<&Path>,
@@ -331,9 +330,9 @@ impl Gremlin {
 
             // Point at the original definition so init_runtime loads it
             // from source and then writes the hermetic snapshot.
-            let mut stub_def = GremlinDefinition::stub();
-            stub_def.path = PathBuf::from(&definition_path_str);
-            let stub: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_def));
+            let mut stub = StaticDefinition::stub();
+            stub.path = PathBuf::from(&definition_path_str);
+            let stub: Box<dyn GremlinDefinition> = Box::new(stub);
 
             Ok(Gremlin {
                 id: gremlin_id,
@@ -481,11 +480,11 @@ impl Gremlin {
 
         // The stub keeps the resolved path so `definition.path` still names
         // the definition the run used, even though its stages are not loaded.
-        let mut stub_def = GremlinDefinition::stub();
+        let mut stub = StaticDefinition::stub();
         if let Some(path) = &definition_path {
-            stub_def.path = path.clone();
+            stub.path = path.clone();
         }
-        let definition: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_def));
+        let definition: Box<dyn GremlinDefinition> = Box::new(stub);
 
         Ok(Gremlin {
             id: gremlin_id,
@@ -516,7 +515,7 @@ impl Gremlin {
     /// The registry is an in-memory [`DryRunArtifactRegistry`] seeded with
     /// implicit and bootstrap-declared artifacts. No filesystem access, no
     /// shell commands, no model calls.
-    pub fn for_dry_run(definition: GremlinDefinition) -> Gremlin {
+    pub fn for_dry_run(definition: StaticDefinition) -> Gremlin {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         let state_dir = tmp.path().join("state");
@@ -528,8 +527,8 @@ impl Gremlin {
         let registry = DryRunArtifactRegistry::seeded(seed_keys);
 
         // Snapshot base_ref before moving definition.
-        let base_ref = definition.base_ref.clone();
-        let definition_path = definition.path.clone();
+        let base_ref = definition.base_ref().to_string();
+        let definition_path = definition.path().to_path_buf();
 
         // Write a minimal state.json so the run loop's state operations don't crash.
         let mut state_data = StateData::new(Some("dry-run".to_string()));
@@ -567,7 +566,7 @@ impl Gremlin {
             artifact_dir: tmp_path.join("artifacts"),
             definition_path: Some(definition_path),
             client_override: None,
-            definition: Box::new(StaticDefinition::new(definition)),
+            definition: Box::new(definition),
             registry: Box::new(registry),
             worktree: None,
             worktree_parent: None,
@@ -615,7 +614,7 @@ impl Gremlin {
             )));
         };
 
-        let definition = if self.definition_is_expanded {
+        let mut definition = if self.definition_is_expanded {
             DefinitionBuilder::from_expanded_yaml(&definition_path, self.client_override.as_deref())
                 .map_err(|error| RunError::Message(error.to_string()))?
         } else {
@@ -627,7 +626,7 @@ impl Gremlin {
         // that calls run() gets one — resume, fork, and fresh launch alike.
         let hermetic = self.state_dir.join("definition.yaml");
         if !hermetic.exists() {
-            let yaml_bytes = crate::definition::StaticDefinition::new(definition.clone())
+            let yaml_bytes = definition
                 .serialize()
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
             std::fs::write(&hermetic, &yaml_bytes)
@@ -672,11 +671,10 @@ impl Gremlin {
 
         // Nothing below this line can fail, so this is the commit point.
         let default_client = definition.default_client.clone();
-        let mut sd = StaticDefinition::new(definition);
         if let Some(name) = resume_from {
-            sd.goto(name);
+            definition.goto(name);
         }
-        self.definition = Box::new(sd);
+        self.definition = Box::new(definition);
         self.client = client;
         self.base_ref = base_ref;
         self.registry = registry;
@@ -708,7 +706,7 @@ impl Gremlin {
     /// `None` to inherit the parent's persisted `definition_path`.
     ///
     /// When `effective_client` is `Some`, the child's provider is mutated via
-    /// [`GremlinStageProvider::with_client`] so `default_client()` reflects
+    /// [`GremlinDefinition::with_client`] so `default_client()` reflects
     /// the override.
     #[allow(clippy::too_many_arguments)]
     pub async fn fork(
@@ -718,7 +716,7 @@ impl Gremlin {
         group_name: &str,
         child_key: &str,
         child_definition_path: Option<&Path>,
-        child_provider: Box<dyn GremlinStageProvider>,
+        child_provider: Box<dyn GremlinDefinition>,
         effective_client: Option<&str>,
     ) -> Result<Gremlin, RunError> {
         log::debug!(
@@ -1264,7 +1262,7 @@ pub fn resolve_env(
 
 /// Collect artifact keys the bootstrap declares so the dry-run registry can
 /// seed them — stages that consume them will find them.
-fn bootstrap_artifact_keys(definition: &GremlinDefinition) -> Vec<String> {
+fn bootstrap_artifact_keys(definition: &StaticDefinition) -> Vec<String> {
     let mut keys: Vec<String> = definition
         .bootstrap
         .cli_out
@@ -1696,8 +1694,7 @@ mod tests {
         std::fs::write(parent.artifact_dir.join("note.txt"), "hello").unwrap();
 
         let child_def = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
-        let child_provider: Box<dyn GremlinStageProvider> =
-            Box::new(StaticDefinition::new(child_def));
+        let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
         let child = parent
             .fork("gr-child", "", "", "", None, child_provider, None)
             .await
@@ -1756,15 +1753,13 @@ mod tests {
         // back to whatever the parent state carries (usually the parent's
         // own parent, or nothing at all), never to the parent's own id.
         let child_def_a = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
-        let child_provider_a: Box<dyn GremlinStageProvider> =
-            Box::new(StaticDefinition::new(child_def_a));
+        let child_provider_a: Box<dyn GremlinDefinition> = Box::new(child_def_a);
         parent
             .fork("gr-a", "", "", "", None, child_provider_a, None)
             .await
             .unwrap();
         let child_def_b = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
-        let child_provider_b: Box<dyn GremlinStageProvider> =
-            Box::new(StaticDefinition::new(child_def_b));
+        let child_provider_b: Box<dyn GremlinDefinition> = Box::new(child_def_b);
         parent
             .fork(
                 "gr-b",

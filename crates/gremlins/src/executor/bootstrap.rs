@@ -409,7 +409,6 @@ mod tests {
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::schemas::gremlin_definition::GremlinDefinition;
 
     // --- DSL parsing ---
 
@@ -609,16 +608,16 @@ mod tests {
             artifact_dir: artifact_dir.clone(),
             definition_path: None,
             client_override: None,
-            definition: Box::new(StaticDefinition::new(GremlinDefinition {
-                name: "test".to_string(),
-                path: PathBuf::from("test.yaml"),
-                default_client: "cmd:true".to_string(),
-                base_ref: "main".to_string(),
+            definition: Box::new(StaticDefinition::new(
+                "test".to_string(),
+                PathBuf::from("test.yaml"),
+                "cmd:true".to_string(),
+                "main".to_string(),
                 bootstrap,
-                stages: Vec::new(),
-                land: None,
-                expanded_yaml: serde_yaml::Value::Null,
-            })),
+                Vec::new(),
+                None,
+                serde_yaml::Value::Null,
+            )),
             registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: Some(worktree),
             worktree_parent: None,

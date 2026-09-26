@@ -1,4 +1,4 @@
-//! Builder for [`GremlinDefinition`], plus [`BootstrapBuilder`] and
+//! Builder for [`StaticDefinition`], plus [`BootstrapBuilder`] and
 //! [`LandBuilder`].
 
 use std::collections::{HashMap, HashSet};
@@ -10,14 +10,14 @@ use crate::builders::agent::AgentBuilder;
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
 use crate::builders::composite::{LoopBuilder, ParallelBuilder, SequenceBuilder};
 use crate::builders::exec::ExecBuilder;
+use crate::definition::{
+    base_ref_from_yaml, default_client_from_yaml, project_root_for, resolve_default_client,
+    stages_from_yaml, StaticDefinition,
+};
 use crate::schemas::bootstrap::{Bootstrap, InputSource, InputSources};
 use crate::schemas::error::SchemaError;
 use crate::schemas::expand;
 use crate::schemas::expand::key_referenced_in_text;
-use crate::schemas::gremlin_definition::{
-    base_ref_from_yaml, default_client_from_yaml, project_root_for, resolve_default_client,
-    stages_from_yaml, GremlinDefinition,
-};
 use crate::schemas::loader::{self, StageEntry, StageNode};
 use crate::stages::composite::ClientSpec;
 use crate::stages::constants::FRAMEWORK_KEYS;
@@ -374,10 +374,10 @@ impl Default for LandBuilder {
 // DefinitionBuilder
 // ---------------------------------------------------------------------------
 
-/// Build a [`GremlinDefinition`].
+/// Build a [`StaticDefinition`].
 ///
 /// `build()` runs the existing validators (`check_duplicate_producers`,
-/// `check_unresolved_consumers`) and returns `Result<GremlinDefinition,
+/// `check_unresolved_consumers`) and returns `Result<StaticDefinition,
 /// SchemaError>`.
 ///
 /// # Example
@@ -472,8 +472,8 @@ impl DefinitionBuilder {
     }
 
     /// Consume the builder, run validators, and produce a
-    /// [`GremlinDefinition`].
-    pub fn build(mut self) -> Result<GremlinDefinition, SchemaError> {
+    /// [`StaticDefinition`].
+    pub fn build(mut self) -> Result<StaticDefinition, SchemaError> {
         let name = self.name.clone();
 
         // Reject blank required fields.
@@ -526,33 +526,33 @@ impl DefinitionBuilder {
             &self.bootstrap.cli_out,
         )?;
 
-        let definition = GremlinDefinition {
-            name: self.name,
-            path: self.prompt_dir.unwrap_or_else(|| PathBuf::from(".")),
-            default_client: self.default_client,
-            base_ref: self.base_ref,
-            bootstrap: self.bootstrap,
-            stages: self.stages,
-            land: self.land,
-            expanded_yaml: serde_yaml::Value::Null,
-        };
+        let path = self.prompt_dir.unwrap_or_else(|| PathBuf::from("."));
+
+        let mut definition = StaticDefinition::new(
+            self.name,
+            path,
+            self.default_client,
+            self.base_ref,
+            self.bootstrap,
+            self.stages,
+            self.land,
+            serde_yaml::Value::Null,
+        );
 
         // Populate expanded_yaml from the typed tree.
         let expanded_yaml = definition.to_expanded_yaml();
+        definition.expanded_yaml = expanded_yaml;
 
-        Ok(GremlinDefinition {
-            expanded_yaml,
-            ..definition
-        })
+        Ok(definition)
     }
 }
 
 // ---------------------------------------------------------------------------
-// GremlinDefinition::from_builder
+// StaticDefinition::from_builder
 // ---------------------------------------------------------------------------
 
-impl GremlinDefinition {
-    /// Construct a [`GremlinDefinition`] from a [`DefinitionBuilder`].
+impl StaticDefinition {
+    /// Construct a [`StaticDefinition`] from a [`DefinitionBuilder`].
     ///
     /// This is the entry point called by [`DefinitionBuilder::build`].
     pub fn from_builder(builder: DefinitionBuilder) -> Result<Self, SchemaError> {
@@ -604,7 +604,7 @@ impl DefinitionBuilder {
     pub fn from_yaml(
         path: impl AsRef<Path>,
         default_client_override: Option<&str>,
-    ) -> Result<GremlinDefinition, SchemaError> {
+    ) -> Result<StaticDefinition, SchemaError> {
         let path = path.as_ref();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !path.exists() {
@@ -628,7 +628,7 @@ impl DefinitionBuilder {
     pub fn from_expanded_yaml(
         path: impl AsRef<Path>,
         default_client_override: Option<&str>,
-    ) -> Result<GremlinDefinition, SchemaError> {
+    ) -> Result<StaticDefinition, SchemaError> {
         let path = path.as_ref();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !path.exists() {
@@ -658,7 +658,7 @@ impl DefinitionBuilder {
     pub fn from_expanded_bytes(
         data: &[u8],
         default_client_override: Option<&str>,
-    ) -> Result<GremlinDefinition, SchemaError> {
+    ) -> Result<StaticDefinition, SchemaError> {
         let mut expanded: Value = serde_yaml::from_slice(data)
             .map_err(|e| SchemaError::Generic(format!("failed to parse definition YAML: {e}")))?;
         if let Some(mapping) = expanded.as_mapping_mut() {
@@ -675,14 +675,14 @@ impl DefinitionBuilder {
     }
 
     /// Shared extraction: turn an already-expanded YAML [`Value`] into a
-    /// [`GremlinDefinition`] via the builder path. Both [`from_yaml`] and
+    /// [`StaticDefinition`] via the builder path. Both [`from_yaml`] and
     /// [`from_expanded_yaml`] funnel through here once they have the
     /// expanded tree.
     fn from_expanded_value(
         expanded: Value,
         path: &Path,
         default_client_override: Option<&str>,
-    ) -> Result<GremlinDefinition, SchemaError> {
+    ) -> Result<StaticDefinition, SchemaError> {
         let root = expanded
             .as_mapping()
             .ok_or_else(|| SchemaError::YamlNotMapping {
@@ -1228,7 +1228,7 @@ mod tests {
     #[test]
     fn from_builder_entry_point() {
         let builder = DefinitionBuilder::new("demo", "xai:grok-4");
-        let def = GremlinDefinition::from_builder(builder).unwrap();
+        let def = StaticDefinition::from_builder(builder).unwrap();
         assert_eq!(def.name, "demo");
     }
 
