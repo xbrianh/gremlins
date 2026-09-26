@@ -7,9 +7,9 @@
 //! registry, cleans up child worktrees (best-effort), and aggregates child
 //! costs into the parent.
 //!
-//! Children run as forked gremlins via [`Gremlin::fork_with_stages`], which
-//! accepts a `Vec<ParsedStage>` instead of a child definition path — the child
-//! definition inherits parent metadata but runs only the given stages.
+//! Children run as forked gremlins via [`Gremlin::fork`], which takes a
+//! [`GremlinStageProvider`] and optional `effective_client` for client
+//! inheritance.
 //!
 //! Each child runs on a dedicated [`std::thread`] worker thread (spawned via
 //! [`std::thread::spawn`]) with its own single-threaded tokio runtime.
@@ -99,24 +99,16 @@ pub(crate) async fn run_parallel(
     let mut spawned = 0usize;
 
     for child in children {
-        // Extract stages from the child provider. For StaticDefinition
-        // (the only provider today), this is a direct downcast. For
-        // non-static providers, as_definition() returns None — Phase 5
-        // will add serialization-based forking.
-        let child_name = child.name().to_string();
-        let child_stages = match child.as_definition() {
-            Some(def) => def.stages.clone(),
-            None => {
-                return Err(RunError::Message(format!(
-                    "parallel group {group_name}: child {child_name} is not a static definition and cannot be forked yet"
-                )));
-            }
-        };
+        // Resolve the effective client for this parallel group (must come
+        // first so it can be baked into the child provider).
+        let enclosing_spec =
+            enclosing_client.map(|c| crate::stages::composite::ClientSpec(c.to_string()));
+        let effective_client: Option<&str> = client
+            .as_ref()
+            .or(enclosing_spec.as_ref())
+            .map(|c| c.0.as_str());
 
-        let child_name = child_stages
-            .first()
-            .map(|s| s.name().to_string())
-            .unwrap_or(child_name);
+        let child_name = child.first_stage_name().to_string();
 
         // Skip children already marked done.
         if done.contains(&child_name) {
@@ -131,34 +123,20 @@ pub(crate) async fn run_parallel(
         log::debug!(
             "parallel group {group_name}: forking child {child_name} (child_id={child_id})"
         );
+
         // Fork the child gremlin (before spawning), so the
         // worker thread only has to call `run()`.
         let mut child_gremlin = gremlin
-            .fork_with_stages(
+            .fork(
                 &child_id,
                 &parent_id,
                 &group_name_owned,
                 &child_name,
-                child_stages,
+                None,
+                child.clone_box(),
+                effective_client,
             )
             .await?;
-
-        // Resolve the effective client for this parallel group:
-        // 1. The group's own `client:` always wins.
-        // 2. Otherwise, the enclosing client from the parent sequence/loop.
-        let enclosing_spec =
-            enclosing_client.map(|c| crate::stages::composite::ClientSpec(c.to_string()));
-        let effective_client = client.as_ref().or(enclosing_spec.as_ref());
-        if let Some(c) = &effective_client {
-            // The definition default is what `resolve_client_spec` step 4
-            // falls back to.
-            child_gremlin.definition.set_default_client(&c.0);
-            // Also set the client handle directly on the child, so
-            // `resolve_client`'s early return (when the spec equals the
-            // definition default) picks up the right backend.
-            child_gremlin.client = crate::clients::client::Client::parse(&c.0)
-                .unwrap_or_else(|_| child_gremlin.client.clone());
-        }
 
         log::debug!(
             "parallel group {group_name}: child {child_name} forked (state_dir={}, artifact_dir={})",
@@ -452,7 +430,7 @@ pub(crate) async fn run_parallel(
     );
     //
     // Iterate over *all* spawned children — not just those that reported a
-    // result — so worktrees created during `fork_with_stages` for cancelled
+    // result — so worktrees created during `fork` for cancelled
     // or otherwise missing tasks are still cleaned up.
     //
     // On success the child is spent: `clean(true)` drops its worktree, its
@@ -535,7 +513,7 @@ async fn merge_child_artifacts(
 /// Aggregate token usage and subprocess cost from a child into the parent.
 fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
     // Derive the child state path from the parent's state directory, matching
-    // the layout `fork_with_stages` uses (`state_dir.parent() / child_id`).
+    // the layout `fork` uses (`state_dir.parent() / child_id`).
     let parent_state_root = gremlin
         .state_dir
         .parent()
@@ -594,7 +572,7 @@ fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &st
     use crate::core::git;
 
     // Derive the child state path from the parent's state directory, matching
-    // the layout `fork_with_stages` uses.
+    // the layout `fork` uses.
     let parent_state_root = gremlin
         .state_dir
         .parent()
@@ -644,7 +622,16 @@ mod tests {
 
     /// Convert the first parsed stage to an ExecutorStage for dispatch.
     fn first_executor_stage(stages: &[ParsedStage]) -> ExecutorStage {
-        let def = crate::schemas::gremlin_definition::GremlinDefinition::stub();
+        let def = GremlinDefinition {
+            name: "test".to_string(),
+            path: PathBuf::from("test.yaml"),
+            default_client: "cmd:true".to_string(),
+            base_ref: "main".to_string(),
+            bootstrap: Bootstrap::default(),
+            stages: vec![],
+            land: None,
+            expanded_yaml: serde_yaml::Value::Null,
+        };
         convert_stage(stages[0].clone(), &def)
     }
     use crate::stages::parallel::ErrorPolicy;
@@ -705,7 +692,7 @@ mod tests {
             state: state_data,
             env: HashMap::new(),
             client: crate::clients::client::Client::parse(default_client).unwrap(),
-            loop_stack: Vec::new(),
+            loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
             definition_is_expanded: false,

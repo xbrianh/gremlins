@@ -165,17 +165,21 @@ pub trait GremlinStageProvider: Send + Sync {
     /// Whether this definition is a stub (not yet loaded).
     fn is_stub(&self) -> bool;
 
-    /// Transitional: return a reference to the inner [`GremlinDefinition`]
-    /// for fork operations. Returns `None` for non-static providers.
-    fn as_definition(&self) -> Option<&GremlinDefinition> {
-        None
+    /// Bake an overriding client spec into this provider so that
+    /// [`default_client`](Self::default_client) returns it.
+    ///
+    /// Called by [`Gremlin::fork`](crate::executor::gremlin::Gremlin::fork)
+    /// when an effective client propagates from an enclosing group.
+    fn with_client(&mut self, client: &str);
+
+    /// Clone this provider into a new heap-allocated box.
+    fn clone_box(&self) -> Box<dyn GremlinStageProvider>;
+
+    /// The name of the first stage in this provider, for child identification
+    /// in parallel groups. Defaults to [`Self::name`].
+    fn first_stage_name(&self) -> &str {
+        self.name()
     }
-
-    /// Transitional: set the default client on the inner definition.
-    fn set_default_client(&mut self, _client: &str) {}
-
-    /// Transitional: set the bootstrap on the inner definition.
-    fn set_bootstrap(&mut self, _bootstrap: Bootstrap) {}
 
     /// The filesystem path the definition was loaded from.
     fn path(&self) -> &Path;
@@ -242,16 +246,16 @@ impl GremlinStageProvider for Box<dyn GremlinStageProvider> {
         self.as_ref().is_stub()
     }
 
-    fn as_definition(&self) -> Option<&GremlinDefinition> {
-        self.as_ref().as_definition()
+    fn with_client(&mut self, client: &str) {
+        self.as_mut().with_client(client)
     }
 
-    fn set_default_client(&mut self, client: &str) {
-        self.as_mut().set_default_client(client)
+    fn clone_box(&self) -> Box<dyn GremlinStageProvider> {
+        self.as_ref().clone_box()
     }
 
-    fn set_bootstrap(&mut self, bootstrap: Bootstrap) {
-        self.as_mut().set_bootstrap(bootstrap)
+    fn first_stage_name(&self) -> &str {
+        self.as_ref().first_stage_name()
     }
 
     fn path(&self) -> &Path {
@@ -374,16 +378,23 @@ impl GremlinStageProvider for StaticDefinition {
         self.inner.is_stub()
     }
 
-    fn as_definition(&self) -> Option<&GremlinDefinition> {
-        Some(&self.inner)
-    }
-
-    fn set_default_client(&mut self, client: &str) {
+    fn with_client(&mut self, client: &str) {
         self.inner.default_client = client.to_string();
     }
 
-    fn set_bootstrap(&mut self, bootstrap: Bootstrap) {
-        self.inner.bootstrap = bootstrap;
+    fn clone_box(&self) -> Box<dyn GremlinStageProvider> {
+        Box::new(StaticDefinition {
+            inner: self.inner.clone(),
+            cursor: self.cursor,
+        })
+    }
+
+    fn first_stage_name(&self) -> &str {
+        self.inner
+            .stages
+            .first()
+            .map(|s| s.name())
+            .unwrap_or(&self.inner.name)
     }
 
     fn path(&self) -> &Path {

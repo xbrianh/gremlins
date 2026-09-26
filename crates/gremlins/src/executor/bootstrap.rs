@@ -629,7 +629,7 @@ mod tests {
             env: std::env::vars().collect(),
             client: Client::parse("cmd:true").unwrap(),
             stage_inputs,
-            loop_stack: Vec::new(),
+            loop_iter: "1".to_string(),
             dry_run: false,
             definition_is_expanded: false,
         };

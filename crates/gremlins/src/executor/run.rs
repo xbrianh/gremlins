@@ -45,31 +45,6 @@ pub(crate) fn stage_key(scope: &str, name: &str) -> String {
     }
 }
 
-/// The `~`-joined loop iteration key (`loop~2`), or `"1"` outside any loop.
-///
-/// Nested loops join their frames with the same separator
-/// (`outer~1~inner~2`), which is what the stage layer substitutes into
-/// `{loop_iter}` URIs.
-///
-/// When `attempt` is non-empty it is appended as a final segment, so each
-/// attempt's per-iteration artifacts get distinct keys and a resumed run
-/// never collides with a previous attempt's artifacts.
-pub(crate) fn loop_iter_of(stack: &[(String, u32)], attempt: Option<&str>) -> String {
-    let base = if stack.is_empty() {
-        "1".to_string()
-    } else {
-        stack
-            .iter()
-            .map(|(name, iteration)| format!("{name}~{iteration}"))
-            .collect::<Vec<_>>()
-            .join("~")
-    };
-    match attempt {
-        Some(token) if !token.is_empty() => format!("{base}~{token}"),
-        _ => base,
-    }
-}
-
 /// `None` for an empty string, else the string itself.
 fn non_empty(text: &str) -> Option<String> {
     if text.is_empty() {
@@ -181,8 +156,8 @@ async fn run_stage_scoped(
     scope: &str,
     enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
-    let attempt = gremlin.state.read_str("attempt");
-    let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
+    let _attempt = gremlin.state.read_str("attempt");
+    let loop_iter = gremlin.loop_iter.clone();
     let skip = stage.skip_if_exists();
     log::debug!(
         "stage '{}' (gremlin={}): entering (type={}, scope={scope:?}, skip_if_exists={skip:?})",
@@ -309,8 +284,8 @@ async fn run_agent(
 
     let client = resolve_client(node, gremlin, enclosing_client)?;
     let framework_subs = gremlin.framework_subs(&agent.name);
-    let attempt = gremlin.state.read_str("attempt");
-    let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
+    let _attempt = gremlin.state.read_str("attempt");
+    let loop_iter = gremlin.loop_iter.clone();
 
     log::debug!(
         "agent stage '{}' (gremlin={}): preparing (client={})",
@@ -576,8 +551,8 @@ async fn run_exec(
     };
 
     let framework_subs = gremlin.framework_subs(&exec.name);
-    let attempt = gremlin.state.read_str("attempt");
-    let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
+    let _attempt = gremlin.state.read_str("attempt");
+    let loop_iter = gremlin.loop_iter.clone();
 
     log::debug!(
         "exec stage '{}' (gremlin={}): preparing",
@@ -828,6 +803,7 @@ async fn run_loop(
         max_iterations,
         stop_when_exists,
         interval,
+        loop_iter_template,
         client,
         body,
         ..
@@ -838,16 +814,15 @@ async fn run_loop(
     let max_iterations = max_iterations.unwrap_or(0);
     let enclosing_client = client.as_ref().map(|c| c.0.as_str()).or(enclosing_client);
 
-    gremlin.loop_stack.push((name.clone(), 0));
+    // Save the current loop_iter so nested loops compose correctly.
+    let saved_loop_iter = gremlin.loop_iter.clone();
 
     let mut outcome: Result<(), RunError> = Ok(());
     let mut stopped = false;
     'iterations: for iteration in 1..=max_iterations {
-        if let Some(top) = gremlin.loop_stack.last_mut() {
-            top.1 = iteration;
-        }
-        let attempt = gremlin.state.read_str("attempt");
-        let loop_iter = loop_iter_of(&gremlin.loop_stack, Some(&attempt));
+        gremlin.loop_iter = loop_iter_template.replace("{n}", &iteration.to_string());
+        let _attempt = gremlin.state.read_str("attempt");
+        let loop_iter = gremlin.loop_iter.clone();
         // Reset tracking left by an earlier partial iteration.
         gremlin.state.clear_done(&loop_iter);
 
@@ -898,7 +873,8 @@ async fn run_loop(
             tokio::time::sleep(std::time::Duration::from_secs_f64(seconds.max(0.0))).await;
         }
     }
-    gremlin.loop_stack.pop();
+    // Restore the saved loop_iter so nested loops compose.
+    gremlin.loop_iter = saved_loop_iter;
 
     // Running the whole budget without meeting a stop condition *is* the
     // failure the loop reports. A zero-iteration budget never enters the range,
@@ -1108,6 +1084,14 @@ mod tests {
         stages: Vec<ParsedStage>,
         default_client: &str,
     ) -> (tempfile::TempDir, Gremlin) {
+        test_gremlin_with_bootstrap(stages, default_client, Bootstrap::default())
+    }
+
+    fn test_gremlin_with_bootstrap(
+        stages: Vec<ParsedStage>,
+        default_client: &str,
+        bootstrap: Bootstrap,
+    ) -> (tempfile::TempDir, Gremlin) {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().join("state").join("gr-test");
         let artifact_dir = state_dir.join("artifacts");
@@ -1130,7 +1114,7 @@ mod tests {
             path: PathBuf::from("test.yaml"),
             default_client: default_client.to_string(),
             base_ref: "main".to_string(),
-            bootstrap: Bootstrap::default(),
+            bootstrap,
             stages,
             land: None,
             expanded_yaml: serde_yaml::Value::Null,
@@ -1152,7 +1136,7 @@ mod tests {
             state: state_data,
             env: HashMap::new(),
             client: Client::parse(default_client).unwrap(),
-            loop_stack: Vec::new(),
+            loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
             definition_is_expanded: false,
@@ -1185,19 +1169,9 @@ mod tests {
     }
 
     #[test]
-    fn loop_iter_joins_the_stack() {
-        assert_eq!(loop_iter_of(&[], None), "1");
-        assert_eq!(loop_iter_of(&[("loop".to_string(), 2)], None), "loop~2");
-        assert_eq!(
-            loop_iter_of(&[("outer".to_string(), 1), ("inner".to_string(), 3)], None),
-            "outer~1~inner~3"
-        );
-        // With an attempt token, it is appended as a final segment.
-        assert_eq!(
-            loop_iter_of(&[("loop".to_string(), 2)], Some("abc123")),
-            "loop~2~abc123"
-        );
-        assert_eq!(loop_iter_of(&[], Some("abc123")), "1~abc123");
+    fn loop_iter_defaults_to_one() {
+        let (_tmp, gremlin) = test_gremlin(vec![], "cmd:true");
+        assert_eq!(gremlin.loop_iter, "1");
     }
 
     #[test]
@@ -1566,8 +1540,8 @@ mod tests {
 
         let stage = take_first_stage(&mut gremlin).await;
         assert!(run_stage(&stage, &mut gremlin).await.is_ok());
-        // The frame is popped on the stop path too.
-        assert!(gremlin.loop_stack.is_empty());
+        // The loop_iter is reset on the stop path too.
+        assert_eq!(gremlin.loop_iter, "1");
     }
 
     #[tokio::test]
@@ -1591,7 +1565,7 @@ mod tests {
             }
             other => panic!("expected Bail, got {other:?}"),
         }
-        assert!(gremlin.loop_stack.is_empty());
+        assert_eq!(gremlin.loop_iter, "1");
     }
 
     #[tokio::test]
@@ -1621,7 +1595,7 @@ mod tests {
             gremlin
                 .registry
                 .as_ref()
-                .is_registered("artifact://poll~1~test-0001/bail")
+                .is_registered("artifact://1/bail")
                 .await
         );
     }
@@ -1683,7 +1657,7 @@ mod tests {
             gremlin
                 .registry
                 .as_ref()
-                .is_registered("artifact://poll~1~test-0001/bail")
+                .is_registered("artifact://1/bail")
                 .await
         );
     }
@@ -1717,7 +1691,7 @@ mod tests {
             gremlin
                 .registry
                 .as_ref()
-                .is_registered("artifact://outer~1~inner~1~test-0001/bail")
+                .is_registered("artifact://1/bail")
                 .await
         );
     }
@@ -1750,7 +1724,7 @@ mod tests {
             }
             other => panic!("expected Bail, got {other:?}"),
         }
-        assert!(gremlin.loop_stack.is_empty());
+        assert_eq!(gremlin.loop_iter, "1");
     }
 
     // --- parallel ---
@@ -1933,14 +1907,17 @@ mod tests {
   options:
     cmds: ["touch never.marker"]
 "#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let (tmp, mut gremlin) = test_gremlin_with_bootstrap(
+            parse_stages(yaml),
+            "cmd:true",
+            Bootstrap {
+                cmds: vec!["exit 5".to_string()],
+                ..Default::default()
+            },
+        );
         let worktree = tmp.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
-        gremlin.definition.set_bootstrap(Bootstrap {
-            cmds: vec!["exit 5".to_string()],
-            ..Default::default()
-        });
         let state_dir = tmp.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
@@ -1970,14 +1947,17 @@ mod tests {
   options:
     cmds: ["cat marker.txt > read.txt"]
 "#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let (tmp, mut gremlin) = test_gremlin_with_bootstrap(
+            parse_stages(yaml),
+            "cmd:true",
+            Bootstrap {
+                cmds: vec!["echo prepared > marker.txt".to_string()],
+                ..Default::default()
+            },
+        );
         let worktree = tmp.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
-        gremlin.definition.set_bootstrap(Bootstrap {
-            cmds: vec!["echo prepared > marker.txt".to_string()],
-            ..Default::default()
-        });
 
         // The stage `cat`s a file only the bootstrap wrote: a non-zero exit
         // here would mean the ordering was wrong.
@@ -1994,14 +1974,17 @@ mod tests {
   options:
     cmds: ["true"]
 "#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let (tmp, mut gremlin) = test_gremlin_with_bootstrap(
+            parse_stages(yaml),
+            "cmd:true",
+            Bootstrap {
+                cmds: vec!["touch bootstrap.marker".to_string()],
+                ..Default::default()
+            },
+        );
         let worktree = tmp.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
-        gremlin.definition.set_bootstrap(Bootstrap {
-            cmds: vec!["touch bootstrap.marker".to_string()],
-            ..Default::default()
-        });
 
         assert_eq!(gremlin.run(Some("only")).await.unwrap(), 0);
         assert!(!worktree.join("bootstrap.marker").exists());

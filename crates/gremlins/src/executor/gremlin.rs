@@ -45,7 +45,6 @@ use crate::executor::state::{self, StateData};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::gremlin_definition::GremlinDefinition;
-use crate::stages::node::ParsedStage;
 
 /// State keys that describe *this* run's live execution and must never leak
 /// into a forked child, which starts its own from scratch.
@@ -143,7 +142,7 @@ pub struct Gremlin {
     pub state: StateData,
     pub env: HashMap<String, String>,
     pub client: Client,
-    pub loop_stack: Vec<(String, u32)>,
+    pub loop_iter: String,
     /// The CLI/source values this run was launched with, keyed by source name.
     ///
     /// Bootstrap's `bind_artifact` DSL reads from here: a source key that is
@@ -353,7 +352,7 @@ impl Gremlin {
                 env: HashMap::new(),
                 client: Client::parse("cmd:true")
                     .expect("'cmd:true' is always a valid client spec"),
-                loop_stack: Vec::new(),
+                loop_iter: "1".to_string(),
                 stage_inputs: stage_inputs.clone(),
                 dry_run: false,
                 definition_is_expanded: false,
@@ -504,7 +503,7 @@ impl Gremlin {
             state,
             env: HashMap::new(),
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
-            loop_stack: Vec::new(),
+            loop_iter: "1".to_string(),
             stage_inputs,
             dry_run: false,
             definition_is_expanded,
@@ -578,7 +577,7 @@ impl Gremlin {
             state: state_data,
             env: HashMap::new(),
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
-            loop_stack: Vec::new(),
+            loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: true,
             definition_is_expanded: false,
@@ -707,6 +706,11 @@ impl Gremlin {
     ///
     /// `child_definition_path` is the branch's hermetic `definition.yaml`; pass
     /// `None` to inherit the parent's persisted `definition_path`.
+    ///
+    /// When `effective_client` is `Some`, the child's provider is mutated via
+    /// [`GremlinStageProvider::with_client`] so `default_client()` reflects
+    /// the override.
+    #[allow(clippy::too_many_arguments)]
     pub async fn fork(
         &self,
         child_id: &str,
@@ -714,85 +718,26 @@ impl Gremlin {
         group_name: &str,
         child_key: &str,
         child_definition_path: Option<&Path>,
-    ) -> Result<Gremlin, RunError> {
-        let definition = match child_definition_path {
-            Some(path) => DefinitionBuilder::from_yaml(path, None).unwrap_or_else(|_| {
-                self.definition
-                    .as_definition()
-                    .cloned()
-                    .unwrap_or_else(GremlinDefinition::stub)
-            }),
-            None => self
-                .definition
-                .as_definition()
-                .cloned()
-                .unwrap_or_else(GremlinDefinition::stub),
-        };
-        self.fork_child(
-            child_id,
-            parent_id,
-            group_name,
-            child_key,
-            child_definition_path,
-            definition,
-        )
-        .await
-    }
-
-    /// Fork a child gremlin that runs only the given `stages`.
-    ///
-    /// Like [`Gremlin::fork`], but instead of loading a child definition from
-    /// disk, the child inherits the parent's definition metadata and runs only
-    /// the provided stage list. Used by the parallel executor so each child
-    /// runs exactly one stage without needing a separate definition file.
-    pub async fn fork_with_stages(
-        &self,
-        child_id: &str,
-        parent_id: &str,
-        group_name: &str,
-        child_key: &str,
-        stages: Vec<ParsedStage>,
-    ) -> Result<Gremlin, RunError> {
-        log::debug!(
-            "fork_with_stages: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}, stage_count={}",
-            stages.len()
-        );
-        let parent_def = self
-            .definition
-            .as_definition()
-            .cloned()
-            .unwrap_or_else(GremlinDefinition::stub);
-        let mut definition = parent_def.clone_with_stages(stages);
-        // launch_cmds and cli_out belong to the parent's initial launch;
-        // children inherit the artifacts via the registry copy in `fork_child`.
-        // cmds (worktree setup) still runs — each child has its own worktree.
-        definition.bootstrap.launch_cmds.clear();
-        definition.bootstrap.cli_out.clear();
-        self.fork_child(child_id, parent_id, group_name, child_key, None, definition)
-            .await
-    }
-
-    /// The shared body of [`Gremlin::fork`] and [`Gremlin::fork_with_stages`].
-    ///
-    /// Owns the whole fork sequence — id validation, child directory
-    /// derivation and creation, artifact copy, worktree branching, registry
-    /// rebuild, child-state seeding, and the state/log write — for a child
-    /// whose `definition` the caller has already resolved. `child_definition_path`
-    /// is the branch's hermetic `definition.yaml`, recorded in the child state
-    /// when present and otherwise inherited from the parent's persisted path.
-    async fn fork_child(
-        &self,
-        child_id: &str,
-        parent_id: &str,
-        group_name: &str,
-        child_key: &str,
-        child_definition_path: Option<&Path>,
-        definition: GremlinDefinition,
+        child_provider: Box<dyn GremlinStageProvider>,
+        effective_client: Option<&str>,
     ) -> Result<Gremlin, RunError> {
         log::debug!(
             "fork: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}"
         );
         let child_gremlin_id = validate_gremlin_id(child_id).map_err(RunError::Message)?;
+
+        // Allow effective_client mutation via with_client.
+        let mut child_provider = child_provider;
+
+        let client = if let Some(client_spec) = effective_client {
+            let client = Client::parse(client_spec).map_err(|e| {
+                RunError::Message(format!("invalid client spec '{client_spec}': {e}"))
+            })?;
+            child_provider.with_client(client_spec);
+            client
+        } else {
+            self.client.clone()
+        };
 
         let child_state_dir = self
             .state_dir
@@ -909,8 +854,8 @@ impl Gremlin {
 
         log::debug!(
             "fork: child {child_id} ready (provider={}, model={} — shares client with parent {parent_id})",
-            self.client.provider(),
-            self.client.model(),
+            client.provider(),
+            client.model(),
         );
 
         Ok(Gremlin {
@@ -921,7 +866,7 @@ impl Gremlin {
                 .map(Path::to_path_buf)
                 .or_else(|| self.definition_path.clone()),
             client_override: self.client_override.clone(),
-            definition: Box::new(StaticDefinition::new(definition)),
+            definition: child_provider,
             registry,
             worktree: child_worktree,
             worktree_parent: self.worktree_parent.clone(),
@@ -930,8 +875,8 @@ impl Gremlin {
             base_ref: self.base_ref.clone(),
             state: StateData::new(Some(child_id.to_string())),
             env: self.env.clone(),
-            client: self.client.clone(),
-            loop_stack: Vec::new(),
+            client,
+            loop_iter: "1".to_string(),
             // A child inherits the parent's source values: its bootstrap binds
             // the same inputs the parent launched with.
             stage_inputs: self.stage_inputs.clone(),
@@ -1750,7 +1695,13 @@ mod tests {
 
         std::fs::write(parent.artifact_dir.join("note.txt"), "hello").unwrap();
 
-        let child = parent.fork("gr-child", "", "", "", None).await.unwrap();
+        let child_def = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let child_provider: Box<dyn GremlinStageProvider> =
+            Box::new(StaticDefinition::new(child_def));
+        let child = parent
+            .fork("gr-child", "", "", "", None, child_provider, None)
+            .await
+            .unwrap();
 
         assert_ne!(child.artifact_dir, parent.artifact_dir);
         assert!(child.artifact_dir.ends_with("artifacts"));
@@ -1804,9 +1755,26 @@ mod tests {
         // Mirrors the reference implementation: an empty argument falls
         // back to whatever the parent state carries (usually the parent's
         // own parent, or nothing at all), never to the parent's own id.
-        parent.fork("gr-a", "", "", "", None).await.unwrap();
+        let child_def_a = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let child_provider_a: Box<dyn GremlinStageProvider> =
+            Box::new(StaticDefinition::new(child_def_a));
         parent
-            .fork("gr-b", "gr-root", "group", "key", None)
+            .fork("gr-a", "", "", "", None, child_provider_a, None)
+            .await
+            .unwrap();
+        let child_def_b = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let child_provider_b: Box<dyn GremlinStageProvider> =
+            Box::new(StaticDefinition::new(child_def_b));
+        parent
+            .fork(
+                "gr-b",
+                "gr-root",
+                "group",
+                "key",
+                None,
+                child_provider_b,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1872,7 +1840,7 @@ mod tests {
             state: StateData::new(Some(id.to_string())),
             env: HashMap::new(),
             client: Client::parse("cmd:true").unwrap(),
-            loop_stack: Vec::new(),
+            loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
             definition_is_expanded: false,
