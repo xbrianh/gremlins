@@ -270,6 +270,16 @@ impl StaticDefinition {
     pub fn new(inner: GremlinDefinition) -> Self {
         StaticDefinition { inner, cursor: 0 }
     }
+
+    /// Deserialize a definition from bytes, returning an owned
+    /// [`StaticDefinition`] so callers can call [`goto`](Self::goto) and
+    /// extract [`inner`](Self::inner) before handing it to the executor.
+    pub fn deserialize_owned(data: &[u8]) -> Result<Self, DefinitionError> {
+        let definition =
+            crate::builders::definition::DefinitionBuilder::from_expanded_bytes(data, None)
+                .map_err(|e| DefinitionError::Message(e.to_string()))?;
+        Ok(StaticDefinition::new(definition))
+    }
 }
 
 #[async_trait]
@@ -309,6 +319,21 @@ impl GremlinStageProvider for StaticDefinition {
         let stage = self.inner.stages[self.cursor].clone();
         self.cursor += 1;
         Ok(convert_stage(stage, &self.inner))
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {
+        let yaml = self.inner.to_expanded_yaml();
+        serde_yaml::to_string(&yaml)
+            .map(|s| s.into_bytes())
+            .map_err(|e| DefinitionError::Message(format!("failed to serialize definition: {e}")))
+    }
+
+    fn deserialize(data: &[u8]) -> Result<Box<dyn GremlinStageProvider>, DefinitionError>
+    where
+        Self: Sized,
+    {
+        StaticDefinition::deserialize_owned(data)
+            .map(|sd| Box::new(sd) as Box<dyn GremlinStageProvider>)
     }
 }
 
@@ -925,11 +950,34 @@ mod tests {
         assert!(matches!(result, ExecutorStage::Done));
     }
 
-    #[test]
-    fn boxed_definition_stub_methods_return_not_implemented() {
-        let def: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_definition()));
-        let err = def.serialize().unwrap_err();
-        assert!(matches!(err, DefinitionError::Message(m) if m == "not implemented"));
+    #[tokio::test]
+    async fn boxed_definition_serialize_roundtrips() {
+        // Build a real definition with stages, bootstrap, and land so the
+        // round-trip validates more than just scalar metadata.
+        let inner = definition_with(vec![
+            parsed_agent("greet"),
+            parsed_exec("build"),
+            parsed_agent("farewell"),
+        ]);
+        let def: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(inner));
+        let bytes = def.serialize().unwrap();
+        assert!(!bytes.is_empty());
+        // Round-trip: deserialize and verify it's a valid definition.
+        let mut deserialized = StaticDefinition::deserialize(&bytes).unwrap();
+        assert_eq!(deserialized.name(), "test-def");
+        assert_eq!(deserialized.default_client(), "openai:gpt-4");
+        assert_eq!(deserialized.base_ref(), "main");
+        // Stage traversal: all three stages must survive the round-trip.
+        let mut stage_names: Vec<String> = Vec::new();
+        loop {
+            match deserialized.next_stage().await.unwrap() {
+                ExecutorStage::Agent { stage, .. } => stage_names.push(stage.name),
+                ExecutorStage::Exec { stage, .. } => stage_names.push(stage.name),
+                ExecutorStage::Done => break,
+                _ => {}
+            }
+        }
+        assert_eq!(stage_names, vec!["greet", "build", "farewell"]);
     }
 
     // ---- DefinitionError tests ----

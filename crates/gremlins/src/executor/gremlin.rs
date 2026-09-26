@@ -39,6 +39,7 @@ use crate::builders::definition::DefinitionBuilder;
 use crate::clients::client::Client;
 use crate::config;
 use crate::core::{discovery, env_file, git};
+use crate::definition::GremlinStageProvider;
 use crate::executor::bootstrap::parse_gremlins_command;
 use crate::executor::state::{self, StateData};
 use crate::executor::RunError;
@@ -175,7 +176,7 @@ impl Gremlin {
     pub fn init(
         definition_name: &str,
         definition_path: &Path,
-        definition: &GremlinDefinition,
+        _definition: &GremlinDefinition,
         stage_inputs: &HashMap<String, String>,
         client_override: Option<&str>,
         worktree_parent: Option<&Path>,
@@ -330,12 +331,10 @@ impl Gremlin {
 
             stage_overlay(project_root, &state_dir);
 
-            let hermetic_path = state_dir
-                .canonicalize()
-                .unwrap_or_else(|_| state_dir.clone())
-                .join("definition.yaml");
+            // Point at the original definition so init_runtime loads it
+            // from source and then writes the hermetic snapshot.
             let stub = GremlinDefinition {
-                path: hermetic_path.clone(),
+                path: definition_path_str.clone().into(),
                 ..GremlinDefinition::stub()
             };
 
@@ -343,7 +342,7 @@ impl Gremlin {
                 id: gremlin_id,
                 state_dir: state_dir.to_path_buf(),
                 artifact_dir: artifact_dir.to_path_buf(),
-                definition_path: Some(hermetic_path),
+                definition_path: Some(PathBuf::from(&definition_path_str)),
                 client_override: client_override.map(String::from),
                 definition: stub,
                 registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir.to_path_buf())),
@@ -360,7 +359,7 @@ impl Gremlin {
                 loop_stack: Vec::new(),
                 stage_inputs: stage_inputs.clone(),
                 dry_run: false,
-                definition_is_expanded: true,
+                definition_is_expanded: false,
             })
         };
 
@@ -378,16 +377,7 @@ impl Gremlin {
             }
         };
 
-        // 5. Write the hermetic definition.yaml snapshot.
-        let hermetic = gremlin.state_dir.join("definition.yaml");
-        let yaml_str = serde_yaml::to_string(&definition.to_expanded_yaml())
-            .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
-        std::fs::write(&hermetic, yaml_str).map_err(|e| {
-            cleanup_worktree();
-            RunError::Message(format!("failed to snapshot definition: {e}"))
-        })?;
-
-        // 6. Create an empty log file.
+        // 5. Create an empty log file.
         let log_path = gremlin.state_dir.join("log");
         std::fs::write(&log_path, "").map_err(|e| {
             cleanup_worktree();
@@ -631,6 +621,17 @@ impl Gremlin {
             DefinitionBuilder::from_yaml(&definition_path, self.client_override.as_deref())
                 .map_err(|error| RunError::Message(error.to_string()))?
         };
+
+        // Write the hermetic definition.yaml snapshot so every entry point
+        // that calls run() gets one — resume, fork, and fresh launch alike.
+        let hermetic = self.state_dir.join("definition.yaml");
+        if !hermetic.exists() {
+            let yaml_bytes = crate::definition::StaticDefinition::new(definition.clone())
+                .serialize()
+                .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
+            std::fs::write(&hermetic, &yaml_bytes)
+                .map_err(|e| RunError::Message(format!("failed to snapshot definition: {e}")))?;
+        }
 
         // An unusable client must not abort a run: the state directory, the
         // worktree and the artifacts all have to exist before any stage can

@@ -11,6 +11,7 @@ use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
+use gremlins::definition::GremlinStageProvider;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
@@ -1173,8 +1174,20 @@ async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> 
         }
     })?;
 
-    // Set the resume point when the caller provided one.
+    // When resuming, reconstruct the definition from the hermetic snapshot
+    // and position it at the recorded stage via goto so the executor sees a
+    // definition that starts at the right place.
     if let Some(stage) = resume_from {
+        let definition_path = gremlin.state_dir.join("definition.yaml");
+        let bytes = std::fs::read(&definition_path)
+            .map_err(|e| format!("gremlin {id}: failed to read definition snapshot: {e}"))?;
+        let mut sd = gremlins::definition::StaticDefinition::deserialize_owned(&bytes)
+            .map_err(|e| format!("gremlin {id}: failed to deserialize definition: {e}"))?;
+        sd.goto(stage);
+        // Replace the stub definition with the deserialized one so the run
+        // loop sees the real stages. resume_from still tells it where to
+        // start (removed in Phase 4 when the run loop switches to next_stage).
+        gremlin.definition = sd.inner;
         gremlin.resume_from = Some(stage.to_string());
     }
 

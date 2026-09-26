@@ -641,10 +641,37 @@ impl DefinitionBuilder {
         // Strip the sentinel if present — the file may lack it but still be
         // fully expanded.
         if let Some(mapping) = expanded.as_mapping_mut() {
-            mapping.remove(Value::from("__gremlins_expanded__"));
+            let sentinel = Value::from("__gremlins_expanded__");
+            mapping.remove(&sentinel);
         }
 
         Self::from_expanded_value(expanded, &path, default_client_override)
+    }
+
+    /// Parse already-expanded YAML bytes directly — no file I/O, no
+    /// project-root walk. Used by [`StaticDefinition::deserialize`] so the
+    /// round-trip doesn't need an intermediate temp file.
+    ///
+    /// Strips the `__gremlins_expanded__` sentinel if present, but tolerates
+    /// its absence. Passes through the same validation pipeline as
+    /// [`from_expanded_yaml`](Self::from_expanded_yaml).
+    pub fn from_expanded_bytes(
+        data: &[u8],
+        default_client_override: Option<&str>,
+    ) -> Result<GremlinDefinition, SchemaError> {
+        let mut expanded: Value = serde_yaml::from_slice(data)
+            .map_err(|e| SchemaError::Generic(format!("failed to parse definition YAML: {e}")))?;
+        if let Some(mapping) = expanded.as_mapping_mut() {
+            let sentinel = Value::from("__gremlins_expanded__");
+            mapping.remove(&sentinel);
+        }
+        // Use a stable label so error messages are meaningful even though
+        // there is no real file path.
+        Self::from_expanded_value(
+            expanded,
+            Path::new("definition.yaml"),
+            default_client_override,
+        )
     }
 
     /// Shared extraction: turn an already-expanded YAML [`Value`] into a
