@@ -7,6 +7,8 @@
 //! the concrete [`GremlinDefinition`] and converts one top-level
 //! [`ParsedStage`] into an [`ExecutorStage`] per `next_stage()` call.
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -32,6 +34,7 @@ pub struct Sequence {
     pub stages: Vec<ExecutorStage>,
     pub scope: Option<String>,
     pub skip_if_exists: String,
+    pub client: Option<ClientSpec>,
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +74,7 @@ pub enum ExecutorStage {
         name: String,
         max_iterations: Option<u32>,
         stop_when_exists: Option<String>,
+        interval: Option<f64>,
         loop_iter_template: String,
         client: Option<ClientSpec>,
         body: Sequence,
@@ -112,7 +116,8 @@ impl ExecutorStage {
             | ExecutorStage::Exec { client, .. }
             | ExecutorStage::Parallel { client, .. }
             | ExecutorStage::Loop { client, .. } => client.as_ref(),
-            ExecutorStage::Sequence(_) | ExecutorStage::Done => None,
+            ExecutorStage::Sequence(seq) => seq.client.as_ref(),
+            ExecutorStage::Done => None,
         }
     }
 
@@ -135,11 +140,10 @@ impl ExecutorStage {
 
 /// The interface every gremlin definition must satisfy.
 ///
-/// `Send` is required because the executor holds one definition per gremlin
-/// and may move it across threads. `Sync` is not required — no concurrent
-/// access.
+/// `Send + Sync` is required because the executor holds one definition per gremlin
+/// and may move it across threads.
 #[async_trait]
-pub trait GremlinStageProvider: Send {
+pub trait GremlinStageProvider: Send + Sync {
     /// The definition's identity (the YAML file stem, or equivalent).
     fn name(&self) -> &str;
 
@@ -154,6 +158,27 @@ pub trait GremlinStageProvider: Send {
 
     /// The optional `land` stage — always an exec stage named `land`.
     fn land(&self) -> Option<&ExecutorStage>;
+
+    /// Whether the cursor is at position 0 (a fresh start, not a resume).
+    fn is_at_start(&self) -> bool;
+
+    /// Whether this definition is a stub (not yet loaded).
+    fn is_stub(&self) -> bool;
+
+    /// Transitional: return a reference to the inner [`GremlinDefinition`]
+    /// for fork operations. Returns `None` for non-static providers.
+    fn as_definition(&self) -> Option<&GremlinDefinition> {
+        None
+    }
+
+    /// Transitional: set the default client on the inner definition.
+    fn set_default_client(&mut self, _client: &str) {}
+
+    /// Transitional: set the bootstrap on the inner definition.
+    fn set_bootstrap(&mut self, _bootstrap: Bootstrap) {}
+
+    /// The filesystem path the definition was loaded from.
+    fn path(&self) -> &Path;
 
     /// Jump the cursor to a named top-level stage.
     ///
@@ -207,6 +232,30 @@ impl GremlinStageProvider for Box<dyn GremlinStageProvider> {
 
     fn land(&self) -> Option<&ExecutorStage> {
         self.as_ref().land()
+    }
+
+    fn is_at_start(&self) -> bool {
+        self.as_ref().is_at_start()
+    }
+
+    fn is_stub(&self) -> bool {
+        self.as_ref().is_stub()
+    }
+
+    fn as_definition(&self) -> Option<&GremlinDefinition> {
+        self.as_ref().as_definition()
+    }
+
+    fn set_default_client(&mut self, client: &str) {
+        self.as_mut().set_default_client(client)
+    }
+
+    fn set_bootstrap(&mut self, bootstrap: Bootstrap) {
+        self.as_mut().set_bootstrap(bootstrap)
+    }
+
+    fn path(&self) -> &Path {
+        self.as_ref().path()
     }
 
     fn goto(&mut self, stage: &str) {
@@ -271,6 +320,19 @@ impl StaticDefinition {
         StaticDefinition { inner, cursor: 0 }
     }
 
+    /// A stub definition — the "not initialized yet" marker.
+    pub fn stub() -> Self {
+        StaticDefinition {
+            inner: GremlinDefinition::stub(),
+            cursor: 0,
+        }
+    }
+
+    /// Whether the inner definition is the stub.
+    pub fn is_stub(&self) -> bool {
+        self.inner.is_stub()
+    }
+
     /// Deserialize a definition from bytes, returning an owned
     /// [`StaticDefinition`] so callers can call [`goto`](Self::goto) and
     /// extract [`inner`](Self::inner) before handing it to the executor.
@@ -302,6 +364,30 @@ impl GremlinStageProvider for StaticDefinition {
 
     fn land(&self) -> Option<&ExecutorStage> {
         None
+    }
+
+    fn is_at_start(&self) -> bool {
+        self.cursor == 0
+    }
+
+    fn is_stub(&self) -> bool {
+        self.inner.is_stub()
+    }
+
+    fn as_definition(&self) -> Option<&GremlinDefinition> {
+        Some(&self.inner)
+    }
+
+    fn set_default_client(&mut self, client: &str) {
+        self.inner.default_client = client.to_string();
+    }
+
+    fn set_bootstrap(&mut self, bootstrap: Bootstrap) {
+        self.inner.bootstrap = bootstrap;
+    }
+
+    fn path(&self) -> &Path {
+        &self.inner.path
     }
 
     fn goto(&mut self, stage: &str) {
@@ -342,7 +428,7 @@ impl GremlinStageProvider for StaticDefinition {
 // ---------------------------------------------------------------------------
 
 /// Recursively convert one [`ParsedStage`] into an [`ExecutorStage`].
-fn convert_stage(stage: ParsedStage, def: &GremlinDefinition) -> ExecutorStage {
+pub(crate) fn convert_stage(stage: ParsedStage, def: &GremlinDefinition) -> ExecutorStage {
     match stage {
         ParsedStage::Agent {
             stage,
@@ -364,7 +450,7 @@ fn convert_stage(stage: ParsedStage, def: &GremlinDefinition) -> ExecutorStage {
         },
         ParsedStage::Sequence {
             attrs,
-            client: _seq_client,
+            client: seq_client,
             body,
         } => {
             let stages: Vec<ExecutorStage> =
@@ -374,12 +460,14 @@ fn convert_stage(stage: ParsedStage, def: &GremlinDefinition) -> ExecutorStage {
                 stages,
                 scope: None,
                 skip_if_exists: attrs.skip_if_exists,
+                client: seq_client,
             })
         }
         ParsedStage::Loop {
             attrs,
             max_iterations,
             stop_when_exists,
+            interval,
             client,
             body,
             ..
@@ -390,6 +478,7 @@ fn convert_stage(stage: ParsedStage, def: &GremlinDefinition) -> ExecutorStage {
                 name: attrs.name,
                 max_iterations: Some(max_iterations),
                 stop_when_exists,
+                interval,
                 loop_iter_template: "{n}".to_string(),
                 client,
                 body: Sequence {
@@ -397,6 +486,7 @@ fn convert_stage(stage: ParsedStage, def: &GremlinDefinition) -> ExecutorStage {
                     stages,
                     scope: None,
                     skip_if_exists: String::new(),
+                    client: None,
                 },
                 skip_if_exists: attrs.skip_if_exists,
             }
@@ -558,6 +648,7 @@ mod tests {
             stages: vec![make_agent("first"), make_exec("second")],
             scope: None,
             skip_if_exists: String::new(),
+            client: None,
         });
         assert_eq!(seq.name(), "my-sequence");
         assert_eq!(seq.stage_type(), "sequence");
@@ -571,6 +662,7 @@ mod tests {
             stages: vec![],
             scope: None,
             skip_if_exists: String::new(),
+            client: None,
         });
         assert_eq!(seq.name(), "");
     }
@@ -598,6 +690,7 @@ mod tests {
             name: "retry".into(),
             max_iterations: Some(3),
             stop_when_exists: None,
+            interval: None,
             loop_iter_template: "retry-{n}".into(),
             client: None,
             body: Sequence {
@@ -605,6 +698,7 @@ mod tests {
                 stages: vec![],
                 scope: None,
                 skip_if_exists: String::new(),
+                client: None,
             },
             skip_if_exists: "artifact://retry".into(),
         };
@@ -660,6 +754,7 @@ mod tests {
             stages: vec![],
             scope: None,
             skip_if_exists: "artifact://guard".into(),
+            client: None,
         });
         assert_eq!(seq.skip_if_exists(), "artifact://guard");
     }

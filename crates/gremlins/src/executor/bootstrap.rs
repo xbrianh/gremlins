@@ -309,7 +309,7 @@ async fn bind_artifact(
 pub async fn run_definition_bootstrap(gremlin: &mut Gremlin) -> Result<(), RunError> {
     // Snapshot the bootstrap block: the DSL step borrows `gremlin` mutably for
     // its registry, so the commands cannot stay borrowed from the definition.
-    let bootstrap = gremlin.definition.bootstrap.clone();
+    let bootstrap = gremlin.definition.bootstrap().clone();
     let cwd = gremlin.cwd();
     let env = gremlin.env.clone();
 
@@ -405,6 +405,7 @@ mod tests {
 
     use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::clients::client::Client;
+    use crate::definition::StaticDefinition;
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
@@ -608,7 +609,7 @@ mod tests {
             artifact_dir: artifact_dir.clone(),
             definition_path: None,
             client_override: None,
-            definition: GremlinDefinition {
+            definition: Box::new(StaticDefinition::new(GremlinDefinition {
                 name: "test".to_string(),
                 path: PathBuf::from("test.yaml"),
                 default_client: "cmd:true".to_string(),
@@ -617,14 +618,13 @@ mod tests {
                 stages: Vec::new(),
                 land: None,
                 expanded_yaml: serde_yaml::Value::Null,
-            },
+            })),
             registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: Some(worktree),
             worktree_parent: None,
             project_root: tmp.path().to_path_buf(),
             base_ref_sha: String::new(),
             base_ref: "main".to_string(),
-            resume_from: None,
             state: state_data,
             env: std::env::vars().collect(),
             client: Client::parse("cmd:true").unwrap(),

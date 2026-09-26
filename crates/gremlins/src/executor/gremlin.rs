@@ -39,7 +39,7 @@ use crate::builders::definition::DefinitionBuilder;
 use crate::clients::client::Client;
 use crate::config;
 use crate::core::{discovery, env_file, git};
-use crate::definition::GremlinStageProvider;
+use crate::definition::{GremlinStageProvider, StaticDefinition};
 use crate::executor::bootstrap::parse_gremlins_command;
 use crate::executor::state::{self, StateData};
 use crate::executor::RunError;
@@ -133,14 +133,13 @@ pub struct Gremlin {
     /// The CLI `--client` value this run was launched with, replayed when the
     /// definition is finally loaded.
     pub client_override: Option<String>,
-    pub definition: GremlinDefinition,
+    pub definition: Box<dyn GremlinStageProvider>,
     pub registry: Box<dyn ArtifactRegistry>,
     pub worktree: Option<PathBuf>,
     pub worktree_parent: Option<PathBuf>,
     pub project_root: PathBuf,
     pub base_ref_sha: String,
     pub base_ref: String,
-    pub resume_from: Option<String>,
     pub state: StateData,
     pub env: HashMap<String, String>,
     pub client: Client,
@@ -333,10 +332,9 @@ impl Gremlin {
 
             // Point at the original definition so init_runtime loads it
             // from source and then writes the hermetic snapshot.
-            let stub = GremlinDefinition {
-                path: definition_path_str.clone().into(),
-                ..GremlinDefinition::stub()
-            };
+            let mut stub_def = GremlinDefinition::stub();
+            stub_def.path = PathBuf::from(&definition_path_str);
+            let stub: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_def));
 
             Ok(Gremlin {
                 id: gremlin_id,
@@ -351,7 +349,6 @@ impl Gremlin {
                 project_root: project_root.to_path_buf(),
                 base_ref_sha,
                 base_ref: base_ref.to_string(),
-                resume_from: None,
                 state,
                 env: HashMap::new(),
                 client: Client::parse("cmd:true")
@@ -485,10 +482,11 @@ impl Gremlin {
 
         // The stub keeps the resolved path so `definition.path` still names
         // the definition the run used, even though its stages are not loaded.
-        let mut definition = GremlinDefinition::stub();
+        let mut stub_def = GremlinDefinition::stub();
         if let Some(path) = &definition_path {
-            definition.path = path.clone();
+            stub_def.path = path.clone();
         }
+        let definition: Box<dyn GremlinStageProvider> = Box::new(StaticDefinition::new(stub_def));
 
         Ok(Gremlin {
             id: gremlin_id,
@@ -503,7 +501,6 @@ impl Gremlin {
             project_root,
             base_ref_sha,
             base_ref,
-            resume_from: None,
             state,
             env: HashMap::new(),
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
@@ -571,14 +568,13 @@ impl Gremlin {
             artifact_dir: tmp_path.join("artifacts"),
             definition_path: Some(definition_path),
             client_override: None,
-            definition,
+            definition: Box::new(StaticDefinition::new(definition)),
             registry: Box::new(registry),
             worktree: None,
             worktree_parent: None,
             project_root: PathBuf::from("."),
             base_ref_sha: String::new(),
             base_ref,
-            resume_from: None,
             state: state_data,
             env: HashMap::new(),
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
@@ -603,7 +599,13 @@ impl Gremlin {
     /// handle a stub, and a retry — `resume` re-entering the run loop after a
     /// transient bootstrap failure — starts the whole sequence over instead of
     /// finding a half-built runtime it believes is finished.
-    pub(crate) async fn init_runtime(&mut self) -> Result<(), RunError> {
+    pub(crate) async fn init_runtime(&mut self, resume_from: Option<&str>) -> Result<(), RunError> {
+        // Apply goto before checking is_stub — a resume must position the
+        // cursor even when the definition is already loaded (e.g. test
+        // helpers that pre-seed a real definition).
+        if let Some(name) = resume_from {
+            self.definition.goto(name);
+        }
         if !self.definition.is_stub() {
             return Ok(());
         }
@@ -671,7 +673,11 @@ impl Gremlin {
 
         // Nothing below this line can fail, so this is the commit point.
         let default_client = definition.default_client.clone();
-        self.definition = definition;
+        let mut sd = StaticDefinition::new(definition);
+        if let Some(name) = resume_from {
+            sd.goto(name);
+        }
+        self.definition = Box::new(sd);
         self.client = client;
         self.base_ref = base_ref;
         self.registry = registry;
@@ -710,10 +716,17 @@ impl Gremlin {
         child_definition_path: Option<&Path>,
     ) -> Result<Gremlin, RunError> {
         let definition = match child_definition_path {
-            Some(path) => {
-                DefinitionBuilder::from_yaml(path, None).unwrap_or_else(|_| self.definition.clone())
-            }
-            None => self.definition.clone(),
+            Some(path) => DefinitionBuilder::from_yaml(path, None).unwrap_or_else(|_| {
+                self.definition
+                    .as_definition()
+                    .cloned()
+                    .unwrap_or_else(GremlinDefinition::stub)
+            }),
+            None => self
+                .definition
+                .as_definition()
+                .cloned()
+                .unwrap_or_else(GremlinDefinition::stub),
         };
         self.fork_child(
             child_id,
@@ -744,7 +757,12 @@ impl Gremlin {
             "fork_with_stages: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}, stage_count={}",
             stages.len()
         );
-        let mut definition = self.definition.clone_with_stages(stages);
+        let parent_def = self
+            .definition
+            .as_definition()
+            .cloned()
+            .unwrap_or_else(GremlinDefinition::stub);
+        let mut definition = parent_def.clone_with_stages(stages);
         // launch_cmds and cli_out belong to the parent's initial launch;
         // children inherit the artifacts via the registry copy in `fork_child`.
         // cmds (worktree setup) still runs — each child has its own worktree.
@@ -903,14 +921,13 @@ impl Gremlin {
                 .map(Path::to_path_buf)
                 .or_else(|| self.definition_path.clone()),
             client_override: self.client_override.clone(),
-            definition,
+            definition: Box::new(StaticDefinition::new(definition)),
             registry,
             worktree: child_worktree,
             worktree_parent: self.worktree_parent.clone(),
             project_root: self.project_root.clone(),
             base_ref_sha: child_worktree_base,
             base_ref: self.base_ref.clone(),
-            resume_from: None,
             state: StateData::new(Some(child_id.to_string())),
             env: self.env.clone(),
             client: self.client.clone(),
@@ -1011,10 +1028,10 @@ impl Gremlin {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
-    /// The framework substitution variables for `stage`.
-    pub fn framework_subs(&self, stage: &ParsedStage) -> HashMap<String, String> {
+    /// The framework substitution variables for a stage.
+    pub fn framework_subs(&self, stage_name: &str) -> HashMap<String, String> {
         framework_subs(
-            stage,
+            stage_name,
             &self.cwd().to_string_lossy(),
             self.client.model(),
             &self.base_ref,
@@ -1202,13 +1219,13 @@ fn bootstrap_script(bootstrap: &Bootstrap) -> Option<&str> {
 
 /// Runtime-owned substitution vars. Stages must not assemble these themselves.
 pub fn framework_subs(
-    stage: &ParsedStage,
+    stage_name: &str,
     cwd: &str,
     model: &str,
     base_ref: &str,
 ) -> HashMap<String, String> {
     HashMap::from([
-        ("name".to_string(), stage.name().to_string()),
+        ("name".to_string(), stage_name.to_string()),
         ("model".to_string(), model.to_string()),
         ("cwd".to_string(), cwd.to_string()),
         ("base_ref".to_string(), base_ref.to_string()),
@@ -1528,18 +1545,7 @@ mod tests {
 
     #[test]
     fn framework_subs_carries_the_four_vars() {
-        let stage = ParsedStage::Exec {
-            stage: crate::stages::exec::Exec {
-                name: "plan".to_string(),
-                options: HashMap::new(),
-                interpolation_map: HashMap::new(),
-                bind_map: HashMap::new(),
-            },
-            skip_if_exists: String::new(),
-            client: None,
-        };
-
-        let subs = framework_subs(&stage, "/w", "xai:grok-4", "main");
+        let subs = framework_subs("plan", "/w", "xai:grok-4", "main");
         assert_eq!(subs.len(), 4);
         assert_eq!(subs["name"], "plan");
         assert_eq!(subs["cwd"], "/w");
@@ -1602,17 +1608,17 @@ mod tests {
         assert_eq!(base, gremlin.base_ref_sha);
 
         // Lazy init is what fills in the runtime fields.
-        gremlin.init_runtime().await.unwrap();
-        assert_eq!(gremlin.definition.name, "demo");
+        gremlin.init_runtime(None).await.unwrap();
+        assert_eq!(gremlin.definition.name(), "demo");
         assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], gremlin.id.as_str());
         assert!(gremlin.artifact_dir.ends_with("artifacts"));
         let raw = read_state(&state_file);
         assert_eq!(raw["client"], "cmd:true");
 
         // Idempotent: a second call is a no-op, not a re-parse.
-        let path_before = gremlin.definition.path.clone();
-        gremlin.init_runtime().await.unwrap();
-        assert_eq!(gremlin.definition.path, path_before);
+        let path_before = gremlin.definition.path().to_path_buf();
+        gremlin.init_runtime(None).await.unwrap();
+        assert_eq!(gremlin.definition.path(), path_before);
     }
 
     #[tokio::test]
@@ -1644,9 +1650,9 @@ mod tests {
         assert_eq!(opened.worktree, launched.worktree);
         assert_eq!(opened.definition_path, launched.definition_path);
 
-        launched.init_runtime().await.unwrap();
-        opened.init_runtime().await.unwrap();
-        assert_eq!(opened.definition.name, launched.definition.name);
+        launched.init_runtime(None).await.unwrap();
+        opened.init_runtime(None).await.unwrap();
+        assert_eq!(opened.definition.name(), launched.definition.name());
         assert_eq!(opened.env["GREMLINS_GREMLIN_ID"], id);
     }
 
@@ -1717,8 +1723,8 @@ mod tests {
 
         // The resume path: reconstruct cheaply, then drive the run. The
         // definition must have been loaded by the time `run` returns.
-        assert_eq!(handle.run().await.unwrap(), 0);
-        assert_eq!(handle.definition.name, "demo");
+        assert_eq!(handle.run(None).await.unwrap(), 0);
+        assert_eq!(handle.definition.name(), "demo");
     }
 
     #[tokio::test]
@@ -1857,13 +1863,12 @@ mod tests {
             artifact_dir,
             definition_path: None,
             client_override: None,
-            definition: GremlinDefinition::stub(),
+            definition: Box::new(StaticDefinition::stub()),
             worktree,
             worktree_parent: None,
             project_root,
             base_ref_sha: String::new(),
             base_ref: String::new(),
-            resume_from: None,
             state: StateData::new(Some(id.to_string())),
             env: HashMap::new(),
             client: Client::parse("cmd:true").unwrap(),
@@ -2127,16 +2132,22 @@ stages:
         assert_eq!(gremlin.project_root, project_root);
         assert!(gremlin.definition.is_stub());
 
-        gremlin.init_runtime().await.unwrap();
+        gremlin.init_runtime(None).await.unwrap();
 
-        assert_eq!(gremlin.definition.name, "definition");
-        assert_eq!(gremlin.definition.default_client, "cmd:true");
-        assert_eq!(gremlin.definition.base_ref, "main");
-        assert_eq!(gremlin.definition.stages.len(), 1);
-        assert_eq!(gremlin.definition.stages[0].name(), "run");
-        assert_eq!(gremlin.definition.stages[0].stage_type(), "exec");
+        assert_eq!(gremlin.definition.name(), "definition");
+        assert_eq!(gremlin.definition.default_client(), "cmd:true");
+        assert_eq!(gremlin.definition.base_ref(), "main");
         // project_root came from state.json, not from a walk.
         assert_eq!(gremlin.project_root, project_root);
+
+        // Verify stages via next_stage.
+        let stage = gremlin.definition.next_stage().await.unwrap();
+        assert_eq!(stage.name(), "run");
+        assert_eq!(stage.stage_type(), "exec");
+        assert!(matches!(
+            gremlin.definition.next_stage().await.unwrap(),
+            crate::definition::ExecutorStage::Done
+        ));
     }
 
     #[tokio::test]
@@ -2156,12 +2167,16 @@ stages:
         let mut gremlin = Gremlin::from("gr-hermetic-nosent").unwrap();
         assert!(gremlin.definition_is_expanded);
 
-        gremlin.init_runtime().await.unwrap();
+        gremlin.init_runtime(None).await.unwrap();
 
-        assert_eq!(gremlin.definition.name, "definition");
-        assert_eq!(gremlin.definition.default_client, "cmd:true");
-        assert_eq!(gremlin.definition.stages.len(), 1);
-        assert_eq!(gremlin.definition.stages[0].name(), "run");
+        assert_eq!(gremlin.definition.name(), "definition");
+        assert_eq!(gremlin.definition.default_client(), "cmd:true");
+        let stage = gremlin.definition.next_stage().await.unwrap();
+        assert_eq!(stage.name(), "run");
+        assert!(matches!(
+            gremlin.definition.next_stage().await.unwrap(),
+            crate::definition::ExecutorStage::Done
+        ));
     }
 
     #[tokio::test]
@@ -2205,10 +2220,14 @@ stages:
         );
         assert!(gremlin.definition.is_stub());
 
-        gremlin.init_runtime().await.unwrap();
+        gremlin.init_runtime(None).await.unwrap();
 
-        assert_eq!(gremlin.definition.name, "demo");
-        assert_eq!(gremlin.definition.default_client, "cmd:true");
-        assert_eq!(gremlin.definition.stages.len(), 0);
+        assert_eq!(gremlin.definition.name(), "demo");
+        assert_eq!(gremlin.definition.default_client(), "cmd:true");
+        // Verify no stages via next_stage.
+        assert!(matches!(
+            gremlin.definition.next_stage().await.unwrap(),
+            crate::definition::ExecutorStage::Done
+        ));
     }
 }
