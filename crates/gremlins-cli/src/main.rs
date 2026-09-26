@@ -1025,9 +1025,6 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         .and_then(|s| s.to_str())
         .unwrap_or("gremlin");
 
-    // Generate a gremlin id, re-rolling if the state directory already exists.
-    let gremlin_id = generate_id(definition_name)?;
-
     // Resolve the definition's base_ref so the worktree branches from the
     // configured branch/tag rather than always from HEAD.
     let base_ref = gremlin_def.base_ref.clone();
@@ -1049,15 +1046,14 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         Some(base_ref_sha.as_str())
     };
 
-    // Create the gremlin: state dir, worktree, initial state.json.
-    let gremlin = Gremlin::create(
-        &gremlin_id,
+    // Create the gremlin: id generation, state dir, worktree, state.json,
+    // hermetic definition.yaml, and empty log — all owned by the library.
+    let gremlin = Gremlin::init(
+        definition_name,
         &definition_path,
-        None,
-        None,
-        None,
+        &gremlin_def,
         &stage_inputs,
-        false,
+        None,
         None,
         base_ref_opt,
         base_ref_sha_opt,
@@ -1080,22 +1076,10 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         gremlin.state.patch(&[], &outer);
     }
 
-    // Snapshot the fully expanded definition YAML into the state directory so
-    // the run is hermetic — all prompts, stage-definitions, and recipes are
-    // inlined, making the snapshot independent of the original project.
-    let hermetic = gremlin.state_dir.join("definition.yaml");
-    let yaml_str = serde_yaml::to_string(&gremlin_def.to_expanded_yaml())
-        .map_err(|e| format!("failed to serialize definition: {e}"))?;
-    fs::write(&hermetic, yaml_str).map_err(|e| format!("failed to snapshot definition: {e}"))?;
-
-    // Create an empty log file that the child will append to.
-    let log_path = gremlin.state_dir.join("log");
-    fs::write(&log_path, "").map_err(|e| format!("failed to create log: {e}"))?;
-
     // Spawn the child process.
-    spawn::spawn_gremlin(&gremlin_id, None)?;
+    spawn::spawn_gremlin(gremlin.id.as_str(), None)?;
 
-    println!("{gremlin_id}");
+    println!("{}", gremlin.id);
     Ok(())
 }
 
@@ -1162,28 +1146,6 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
         map.insert(key.to_string(), value);
     }
     Ok(map)
-}
-
-/// Generate a "<definition_name>-<4-hex>" id that does not collide with an
-/// existing state directory.
-///
-/// The directory is atomically reserved via `create_dir` so concurrent
-/// launches cannot land on the same id.  If creation fails because the
-/// directory already exists, the loop re-rolls.
-fn generate_id(name: &str) -> Result<String, String> {
-    let state_root = config::state_root();
-    loop {
-        let hex = state::token_hex(2); // 4 hex chars
-        let id = format!("{name}-{hex}");
-        if state_root.join(&id).exists() {
-            continue;
-        }
-        match std::fs::create_dir(state_root.join(&id)) {
-            Ok(()) => return Ok(id),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("failed to create state dir: {e}")),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

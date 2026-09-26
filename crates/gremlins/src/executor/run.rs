@@ -1067,6 +1067,7 @@ mod tests {
 
     use crate::artifacts::registry::{DryRunArtifactRegistry, FileSystemArtifactRegistry};
     use crate::artifacts::uri::Uri;
+    use crate::builders::definition::DefinitionBuilder;
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
@@ -2007,14 +2008,13 @@ mod tests {
             return;
         }
 
-        let mut gremlin = Gremlin::create(
+        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let mut gremlin = Gremlin::init(
             "gr-e2e",
             fx.definition_path(),
-            None,
-            None,
-            None,
+            &definition,
             &HashMap::new(),
-            false,
+            None,
             None,
             None,
             None,
