@@ -88,7 +88,6 @@ pub enum ExecutorStage {
         max_iterations: Option<u32>,
         stop_when_exists: Option<String>,
         interval: Option<f64>,
-        loop_iter_template: String,
         client: Option<ClientSpec>,
         body: Sequence,
         skip_if_exists: String,
@@ -543,7 +542,6 @@ impl StaticDefinition {
                     max_iterations: Some(max_iterations),
                     stop_when_exists,
                     interval,
-                    loop_iter_template: "{n}".to_string(),
                     client,
                     body: Sequence {
                         name: String::new(),
@@ -998,7 +996,6 @@ mod tests {
             max_iterations: Some(3),
             stop_when_exists: None,
             interval: None,
-            loop_iter_template: "retry-{n}".into(),
             client: None,
             body: Sequence {
                 name: String::new(),
@@ -1247,14 +1244,12 @@ mod tests {
             ExecutorStage::Loop {
                 max_iterations,
                 stop_when_exists,
-                loop_iter_template,
                 client,
                 body,
                 ..
             } => {
                 assert_eq!(max_iterations, Some(5));
                 assert_eq!(stop_when_exists.as_deref(), Some("artifact://done"));
-                assert_eq!(loop_iter_template, "{n}");
                 assert_eq!(client, Some(ClientSpec("xai:grok".into())));
                 assert_eq!(body.stages.len(), 1);
                 assert_eq!(body.stages[0].name(), "loop-child");

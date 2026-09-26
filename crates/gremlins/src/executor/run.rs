@@ -803,7 +803,6 @@ async fn run_loop(
         max_iterations,
         stop_when_exists,
         interval,
-        loop_iter_template,
         client,
         body,
         ..
@@ -820,7 +819,7 @@ async fn run_loop(
     let mut outcome: Result<(), RunError> = Ok(());
     let mut stopped = false;
     'iterations: for iteration in 1..=max_iterations {
-        gremlin.loop_iter = loop_iter_template.replace("{n}", &iteration.to_string());
+        gremlin.loop_iter = iteration.to_string();
         let _attempt = gremlin.state.read_str("attempt");
         let loop_iter = gremlin.loop_iter.clone();
         // Reset tracking left by an earlier partial iteration.
@@ -1704,7 +1703,6 @@ mod tests {
             max_iterations: Some(0),
             stop_when_exists: None,
             interval: None,
-            loop_iter_template: "{n}".to_string(),
             client: None,
             body: Sequence {
                 name: String::new(),
