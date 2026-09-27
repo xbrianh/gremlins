@@ -328,17 +328,28 @@ impl Gremlin {
 
             stage_overlay(project_root, &state_dir);
 
-            // Point at the original definition so init_runtime loads it
-            // from source and then writes the hermetic snapshot.
+            // Write the hermetic definition.yaml snapshot now, before we
+            // return the handle, so the spawned child always sees the
+            // definition as it was at launch time — no TOCTTOU window.
+            let hermetic = state_dir.join("definition.yaml");
+            let yaml_bytes = _definition
+                .serialize()
+                .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
+            std::fs::write(&hermetic, &yaml_bytes)
+                .map_err(|e| RunError::Message(format!("failed to write hermetic definition: {e}")))?;
+            let hermetic = hermetic.canonicalize().unwrap_or(hermetic);
+
+            // Point the stub at the hermetic snapshot so init_runtime
+            // loads from it rather than reparsing the original source.
             let mut stub = StaticDefinition::stub();
-            stub.path = PathBuf::from(&definition_path_str);
+            stub.path = hermetic.clone();
             let stub: Box<dyn GremlinDefinition> = Box::new(stub);
 
             Ok(Gremlin {
                 id: gremlin_id,
                 state_dir: state_dir.to_path_buf(),
                 artifact_dir: artifact_dir.to_path_buf(),
-                definition_path: Some(PathBuf::from(&definition_path_str)),
+                definition_path: Some(hermetic),
                 client_override: client_override.map(String::from),
                 definition: stub,
                 registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir.to_path_buf())),
@@ -354,7 +365,7 @@ impl Gremlin {
                 loop_iter: "1".to_string(),
                 stage_inputs: stage_inputs.clone(),
                 dry_run: false,
-                definition_is_expanded: false,
+                definition_is_expanded: true,
             })
         };
 

@@ -399,12 +399,14 @@ impl StaticDefinition {
     ///
     /// Used by the parallel executor to give each child a definition that
     /// contains only the child's own stage(s), while inheriting every other
-    /// field (name, path, default_client, base_ref, bootstrap, land) from
-    /// the parent.
+    /// field (name, path, default_client, base_ref, bootstrap) from the
+    /// parent. `land` is cleared so parallel children never duplicate the
+    /// parent's land side effects.
     pub(crate) fn clone_with_stages(&self, stages: Vec<ParsedStage>) -> Self {
         StaticDefinition {
             stages,
             cursor: 0,
+            land: None,
             ..self.clone()
         }
     }
