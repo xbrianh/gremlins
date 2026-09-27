@@ -948,9 +948,26 @@ impl Gremlin {
 
             self.state.set_stage(stage.name(), None, "");
 
-            // A fresh attempt per stage is what lets the failure that follows be
-            // recorded: `write_bail_file` is a no-op without one.
-            let attempt = format!("{}-{}", stage.name(), state::token_hex(4));
+            // Reuse the existing attempt on resume so that artifact scopes —
+            // and therefore done markers in run_parallel — are stable across
+            // retries. A fresh token is generated only when the state has no
+            // prior attempt for this stage.
+            //
+            // Stale bail files from the previous run are removed when the
+            // attempt is reused so that read_bail_info (checked after the
+            // stage runs) does not spuriously flag the resumed run as bailed.
+            let existing_attempt = self.state.read_str("attempt");
+            let attempt = if existing_attempt.starts_with(&format!("{}-", stage.name())) {
+                if let Some(ref sf) = self.state.state_file {
+                    if let Some(parent) = sf.parent() {
+                        let bail_path = parent.join(format!("bail_{existing_attempt}.json"));
+                        let _ = std::fs::remove_file(&bail_path);
+                    }
+                }
+                existing_attempt
+            } else {
+                format!("{}-{}", stage.name(), state::token_hex(4))
+            };
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String(attempt.clone()));
             self.state.patch(&[], &fields);
@@ -1819,6 +1836,93 @@ mod tests {
         assert!(!tmp.path().join("first.marker").exists());
         assert!(tmp.path().join("second.marker").exists());
         assert!(tmp.path().join("third.marker").exists());
+    }
+
+    #[tokio::test]
+    async fn run_resume_reuses_attempt_so_parallel_done_markers_are_stable() {
+        // A parallel group with one successful child and one failing child.
+        // On the first run the group fails (ErrorPolicy::Any). On resume, the
+        // successful child must be skipped because its done marker persisted
+        // under the original (now-reused) attempt scope.
+        let yaml = r#"
+- name: group
+  parallel:
+    - name: good
+      type: exec
+      options:
+        cmds: ["true"]
+    - name: bad
+      type: exec
+      options:
+        cmds: ["false"]
+"#;
+        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let state_dir = tmp.path().join("state").join("gr-test");
+
+        // First run: group fails because "bad" exits non-zero.
+        match gremlin.run(None).await {
+            Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "bad"),
+            other => panic!("expected StageFailed, got {other:?}"),
+        }
+        let state_after: Value =
+            serde_json::from_str(&std::fs::read_to_string(state_dir.join("state.json")).unwrap())
+                .unwrap();
+        let first_attempt = state_after["attempt"].as_str().unwrap().to_string();
+        assert!(
+            first_attempt.starts_with("group-"),
+            "unexpected attempt: {first_attempt}"
+        );
+        assert_eq!(state_after["status"], "stopped");
+
+        // The successful child "good" has a done marker in the registry. The
+        // scope embeds the attempt, so the marker URI is e.g.
+        // artifact://1~group-xxxx/group/done/good.
+        let scope = stage_key(
+            &format!("1~{first_attempt}"),
+            "group",
+        );
+        let good_done_uri = format!("artifact://{scope}/done/good");
+        assert!(
+            gremlin.registry.as_ref().is_registered(&good_done_uri).await,
+            "good child should be marked done at {good_done_uri}"
+        );
+
+        // Clear terminal markers so run() treats this as a resumable run.
+        // `finished` file and `exit_code` must be removed; `status` reset.
+        let finished = state_dir.join("finished");
+        if finished.exists() {
+            std::fs::remove_file(&finished).unwrap();
+        }
+        let bail_path = state_dir.join(format!("bail_{first_attempt}.json"));
+        if bail_path.exists() {
+            std::fs::remove_file(&bail_path).unwrap();
+        }
+        let mut fields = serde_json::Map::new();
+        fields.insert("status".into(), Value::String("running".to_string()));
+        gremlin.state.patch(&["exit_code".to_string()], &fields);
+
+        // Resume: "bad" fails again, but the attempt is reused so "good" is
+        // skipped rather than re-run.
+        match gremlin.run(Some("group")).await {
+            Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "bad"),
+            other => panic!("expected StageFailed on resume, got {other:?}"),
+        }
+
+        let state_final: Value =
+            serde_json::from_str(&std::fs::read_to_string(state_dir.join("state.json")).unwrap())
+                .unwrap();
+        let second_attempt = state_final["attempt"].as_str().unwrap();
+        assert_eq!(
+            second_attempt, first_attempt,
+            "attempt was regenerated on resume: {first_attempt} vs {second_attempt}"
+        );
+
+        // The good child's done marker must still be present under the
+        // original scope — confirming it was skipped, not overwritten.
+        assert!(
+            gremlin.registry.as_ref().is_registered(&good_done_uri).await,
+            "good child done marker should survive resume at {good_done_uri}"
+        );
     }
 
     #[tokio::test]
