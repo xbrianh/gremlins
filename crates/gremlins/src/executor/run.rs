@@ -1877,13 +1877,14 @@ mod tests {
         // The successful child "good" has a done marker in the registry. The
         // scope embeds the attempt, so the marker URI is e.g.
         // artifact://1~group-xxxx/group/done/good.
-        let scope = stage_key(
-            &format!("1~{first_attempt}"),
-            "group",
-        );
+        let scope = stage_key(&format!("1~{first_attempt}"), "group");
         let good_done_uri = format!("artifact://{scope}/done/good");
         assert!(
-            gremlin.registry.as_ref().is_registered(&good_done_uri).await,
+            gremlin
+                .registry
+                .as_ref()
+                .is_registered(&good_done_uri)
+                .await,
             "good child should be marked done at {good_done_uri}"
         );
 
@@ -1920,7 +1921,11 @@ mod tests {
         // The good child's done marker must still be present under the
         // original scope — confirming it was skipped, not overwritten.
         assert!(
-            gremlin.registry.as_ref().is_registered(&good_done_uri).await,
+            gremlin
+                .registry
+                .as_ref()
+                .is_registered(&good_done_uri)
+                .await,
             "good child done marker should survive resume at {good_done_uri}"
         );
     }
