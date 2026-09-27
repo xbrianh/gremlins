@@ -65,8 +65,8 @@ stage-definitions:
             - git diff --cached --quiet || git commit -m "fix checks"
 
 stages:
-  - { type: plan-gh, prompt: [style_guide.md, plan_gh.md] }
-  - { type: implement, prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
+  - { name: plan, type: plan-gh, prompt: [style_guide.md, plan_gh.md] }
+  - { name: implement, type: implement, prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
   - { name: verify-implementation, type: check-and-fix }
 
   - name: compute-diff
@@ -109,9 +109,9 @@ stages:
       address_summary: "artifact://address-summary.md"
 
   - { name: verify-address-fixes, type: check-and-fix }
-  - { type: github-open-pr }
-  - { type: github-request-copilot-review }
-  - { type: github-wait-copilot }
+  - { name: open-pr, type: github-open-pr }
+  - { name: request-copilot-review, type: github-request-copilot-review }
+  - { name: wait-for-copilot, type: github-wait-copilot }
   - name: gather-github-review-content
     type: exec
     interpolation:
@@ -130,4 +130,4 @@ stages:
     bind:
       review_summary: "artifact://review-summary.md"
   - { name: verify-github-review-fixes, type: check-and-fix }
-  - { type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, ci_fix.md] }
+  - { name: wait-for-ci, type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, ci_fix.md] }
