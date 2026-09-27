@@ -335,8 +335,9 @@ impl Gremlin {
             let yaml_bytes = _definition
                 .serialize()
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
-            std::fs::write(&hermetic, &yaml_bytes)
-                .map_err(|e| RunError::Message(format!("failed to write hermetic definition: {e}")))?;
+            std::fs::write(&hermetic, &yaml_bytes).map_err(|e| {
+                RunError::Message(format!("failed to write hermetic definition: {e}"))
+            })?;
             let hermetic = hermetic.canonicalize().unwrap_or(hermetic);
 
             // Point the stub at the hermetic snapshot so init_runtime
