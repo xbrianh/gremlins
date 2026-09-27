@@ -5,7 +5,7 @@
 //! scoped dispatcher below carries the two pieces of bookkeeping the Python
 //! executor kept around every stage — the artifact guard (`skip_if_exists`)
 //! checked before dispatch, and the scope key (`a/b`, `loop~2`) a stage is
-//! tracked under for `done_children` and bail lookups.
+//! tracked under for bail lookups.
 //!
 //! This is sequencing only. Parallel groups are a later milestone and say so
 //! rather than pretending to fan out.
@@ -731,11 +731,12 @@ async fn run_exec(
 // Sequence
 // ---------------------------------------------------------------------------
 
-/// Run a sequence's children in order, skipping those already marked done.
+/// Run a sequence's children in order.
 ///
-/// `done_children` is keyed by the sequence's own scope, so a resumed run
-/// re-enters the sequence and picks up where it stopped; the tracking is
-/// cleared once the whole body has run, since the sequence is then spent.
+/// The sequence always runs every child in declaration order; the
+/// `skip_if_exists` guard on individual stages handles the optimization case.
+/// On resume, `goto` already positions execution at the correct top-level
+/// stage.
 async fn run_sequence(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
@@ -753,15 +754,10 @@ async fn run_sequence(
         .or(enclosing_client);
 
     let key = stage_key(scope, &seq.name);
-    let done = gremlin.state.done_for(&key);
     for child in &seq.stages {
-        if done.contains(child.name()) {
-            continue;
-        }
         // Boxed: the dispatcher recurses through composites, and an unboxed
         // recursive `async fn` future would have no finite size.
         Box::pin(run_stage_scoped(child, gremlin, &key, enclosing_client)).await?;
-        gremlin.state.mark_done(&key, child.name());
 
         // A bail — scoped to the sequence or written for the run as a whole —
         // ends the body, and the sequence reports it: falling through to `Ok`
@@ -772,11 +768,9 @@ async fn run_sequence(
             let reason = bail_reason_for(gremlin.registry.as_ref(), &key, &gremlin.state)
                 .await
                 .unwrap_or_default();
-            gremlin.state.clear_done(&key);
             return Err(RunError::Bail { reason });
         }
     }
-    gremlin.state.clear_done(&key);
     Ok(())
 }
 
@@ -791,8 +785,7 @@ async fn run_sequence(
 /// later stage would inherit a stale `{loop_iter}`.
 ///
 /// The frame carries the loop's own name, so nested loops read
-/// `outer~1~inner~2`; the enclosing scope is bookkeeping for `done_children`,
-/// not part of the iteration substitution.
+/// `outer~1~inner~2`.
 async fn run_loop(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
@@ -829,8 +822,6 @@ async fn run_loop(
             }
         };
         let loop_iter = gremlin.loop_iter.clone();
-        // Reset tracking left by an earlier partial iteration.
-        gremlin.state.clear_done(&loop_iter);
 
         log::info!("loop {name}: iteration {iteration}/{max_iterations} starting");
 
@@ -1415,7 +1406,7 @@ mod tests {
     // --- sequence ---
 
     #[tokio::test]
-    async fn sequence_runs_children_and_clears_done_tracking() {
+    async fn sequence_runs_children_in_order() {
         let yaml = r#"
 - name: seq
   type: sequence
@@ -1434,32 +1425,6 @@ mod tests {
 
         run_stage(&stage, &mut gremlin).await.unwrap();
         assert!(tmp.path().join("one.marker").exists());
-        assert!(tmp.path().join("two.marker").exists());
-        // The sequence is spent, so its tracking must not survive it.
-        assert!(gremlin.state.done_for("seq").is_empty());
-    }
-
-    #[tokio::test]
-    async fn sequence_skips_children_already_marked_done() {
-        let yaml = r#"
-- name: seq
-  type: sequence
-  body:
-    - name: one
-      type: exec
-      options:
-        cmds: ["echo one > one.marker"]
-    - name: two
-      type: exec
-      options:
-        cmds: ["echo two > two.marker"]
-"#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        gremlin.state.mark_done("seq", "one");
-
-        let stage = take_first_stage(&mut gremlin).await;
-        run_stage(&stage, &mut gremlin).await.unwrap();
-        assert!(!tmp.path().join("one.marker").exists());
         assert!(tmp.path().join("two.marker").exists());
     }
 
@@ -1509,7 +1474,6 @@ mod tests {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
             other => panic!("expected Bail, got {other:?}"),
         }
-        assert!(gremlin.state.done_for("seq").is_empty());
     }
 
     #[tokio::test]
@@ -1676,7 +1640,7 @@ mod tests {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
             other => panic!("expected Bail, got {other:?}"),
         }
-        // The enclosing sequence scopes `done_children`, not the iteration key.
+        // The iteration key scopes the bail artifact, not the enclosing sequence.
         assert!(
             gremlin
                 .registry

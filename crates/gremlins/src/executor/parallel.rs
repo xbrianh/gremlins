@@ -25,11 +25,32 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
+use crate::artifacts::registry::ArtifactRegistry;
+use crate::artifacts::uri::Uri;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
+use crate::executor::run::stage_key;
 use crate::executor::state;
 use crate::executor::RunError;
 use crate::stages::parallel::ErrorPolicy;
+
+/// The registry URI marking `child_name` as done under `scope`.
+fn done_uri(scope: &str, child_name: &str) -> String {
+    format!("artifact://{scope}/done/{child_name}")
+}
+
+/// Record `child_name` as done under `scope` in the artifact registry.
+async fn mark_child_done(registry: &dyn ArtifactRegistry, scope: &str, child_name: &str) {
+    let uri_str = done_uri(scope, child_name);
+    match Uri::parse(&uri_str) {
+        Ok(uri) => {
+            if let Err(e) = registry.write_into_registry(&uri, "").await {
+                log::warn!("parallel group: failed to mark {child_name} done at {uri_str}: {e}");
+            }
+        }
+        Err(e) => log::warn!("parallel group: invalid done URI {uri_str}: {e}"),
+    }
+}
 
 /// Run a parallel group: fork one child per stage, fan out via [`JoinSet`],
 /// join, and apply the error policy.
@@ -59,9 +80,22 @@ pub(crate) async fn run_parallel(
 
     // --- Resumption guard ---
     //
-    // A group is fully complete when every child is in `done_for`. The check
-    // is against `total_children`, not the number of successful children.
-    let done = gremlin.state.done_for(group_name);
+    // A group is fully complete when every child has a done artifact under
+    // `artifact://<scope>/done/<child>`. The scope bakes in the loop iteration
+    // and attempt token, so markers are naturally distinct per attempt. The
+    // check is against `total_children`, not the number of successful children.
+    let scope = stage_key(&gremlin.loop_iter, group_name);
+    let mut done: HashSet<String> = HashSet::new();
+    for child in children {
+        let child_name = child.first_stage_name().to_string();
+        if gremlin
+            .registry
+            .is_registered(&done_uri(&scope, &child_name))
+            .await
+        {
+            done.insert(child_name);
+        }
+    }
     if done.len() == total_children && total_children > 0 {
         log::info!(
             "parallel group {group_name}: all {total_children} children already done — skipping"
@@ -234,7 +268,6 @@ pub(crate) async fn run_parallel(
 
     if spawned == 0 {
         // Every child was already done — the group is complete.
-        gremlin.state.clear_done(group_name);
         return Ok(());
     }
 
@@ -269,7 +302,7 @@ pub(crate) async fn run_parallel(
                         if *cancel_on_error && first_error.is_none() {
                             // Save the error for the group result. The child
                             // still gets its real outcome recorded so
-                            // downstream merge / mark_done can correctly
+                            // downstream merge / done-marking can correctly
                             // classify it as failed.
                             first_error = Some(RunError::StageFailed {
                                 stage: child_name.clone(),
@@ -342,7 +375,7 @@ pub(crate) async fn run_parallel(
             failed_names.insert(outcome.child_name.clone());
             // Take the error out for policy evaluation. The outcome is
             // replaced with Ok(()) but `failed_names` tracks the truth —
-            // downstream merge / mark_done consult `failed_names`, not
+            // downstream merge / done-marking consult `failed_names`, not
             // `outcome.outcome`.
             let err = std::mem::replace(&mut outcome.outcome, Ok(())).unwrap_err();
             real_errors.push(err);
@@ -409,18 +442,13 @@ pub(crate) async fn run_parallel(
 
     // --- Mark children done ---
     //
-    // This writes the *parent's* state, so it must run before the cleanup below
-    // starts removing directories; keeping the order this way means no step can
-    // ever consult a child's state directory after it is gone.
+    // Done markers live in the artifact registry, scoped to this attempt, so
+    // they never collide with a later run. Failed children are not marked;
+    // successful ones stay marked so a resume re-forks only the failures.
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
-            gremlin.state.mark_done(group_name, &outcome.child_name);
+            mark_child_done(gremlin.registry.as_ref(), &scope, &outcome.child_name).await;
         }
-    }
-
-    // If all children succeeded, clear the done tracking.
-    if group_error.is_none() {
-        gremlin.state.clear_done(group_name);
     }
 
     // --- Clean up child worktrees (best-effort) ---
@@ -908,15 +936,29 @@ mod tests {
         let stages = parse_stages(yaml);
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
-        // Mark child "a" as already done.
-        gremlin.state.mark_done("group", "a");
+        // Mark child "a" as already done in the registry.
+        let scope = stage_key(&gremlin.loop_iter, "group");
+        mark_child_done(gremlin.registry.as_ref(), &scope, "a").await;
 
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
-        // After success, done tracking is cleared.
-        assert!(gremlin.state.done_for("group").is_empty());
+        // Child "a" was skipped; both children are now marked done.
+        assert!(
+            gremlin
+                .registry
+                .as_ref()
+                .is_registered(&done_uri(&scope, "a"))
+                .await
+        );
+        assert!(
+            gremlin
+                .registry
+                .as_ref()
+                .is_registered(&done_uri(&scope, "b"))
+                .await
+        );
     }
 
     #[tokio::test]
@@ -937,8 +979,9 @@ mod tests {
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
         // Mark both children done — the group is fully complete.
-        gremlin.state.mark_done("group", "a");
-        gremlin.state.mark_done("group", "b");
+        let scope = stage_key(&gremlin.loop_iter, "group");
+        mark_child_done(gremlin.registry.as_ref(), &scope, "a").await;
+        mark_child_done(gremlin.registry.as_ref(), &scope, "b").await;
 
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;

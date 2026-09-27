@@ -2,10 +2,10 @@
 //!
 //! Every `state.json` mutation goes through [`write_state`] or [`locked_update`],
 //! both of which hold the flock. Reads ([`read_str`], [`read_field`], [`get_field`],
-//! [`done_for`], [`read_bail_info`]) are lock-free snapshot reads, safe because
+//! [`read_bail_info`]) are lock-free snapshot reads, safe because
 //! every mutation is rename-atomic.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -487,76 +487,6 @@ impl StateData {
         });
     }
 
-    pub fn done_for(&self, path: &str) -> HashSet<String> {
-        let Some(sf) = self.sf() else {
-            return HashSet::new();
-        };
-        if !sf.exists() {
-            return HashSet::new();
-        }
-        read_state_json(Some(&sf))
-            .get("done_children")
-            .and_then(|v| v.as_object())
-            .and_then(|o| o.get(path))
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    pub fn mark_done(&self, path: &str, child_name: &str) {
-        if self.gremlin_id.as_deref().unwrap_or("").is_empty() || path.is_empty() {
-            return;
-        }
-        let Some(sf) = self.sf() else { return };
-        if !sf.exists() {
-            return;
-        }
-        let path = path.to_string();
-        let child_name = child_name.to_string();
-        let _ = locked_update(&sf, move |data| {
-            let mut dc = data
-                .get("done_children")
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
-            let mut existing: Vec<Value> = dc
-                .get(&path)
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default();
-            if !existing.iter().any(|v| v.as_str() == Some(&child_name)) {
-                existing.push(Value::String(child_name));
-            }
-            dc.insert(path, Value::Array(existing));
-            data.insert("done_children".into(), Value::Object(dc));
-        });
-    }
-
-    pub fn clear_done(&self, path: &str) {
-        if self.gremlin_id.as_deref().unwrap_or("").is_empty() || path.is_empty() {
-            return;
-        }
-        let Some(sf) = self.sf() else { return };
-        if !sf.exists() {
-            return;
-        }
-        let path = path.to_string();
-        let _ = locked_update(&sf, move |data| {
-            let mut dc = data
-                .get("done_children")
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
-            dc.remove(&path);
-            if dc.is_empty() {
-                data.remove("done_children");
-            } else {
-                data.insert("done_children".into(), Value::Object(dc));
-            }
-        });
-    }
-
     pub fn add_subprocess_cost(&self, amount: f64) {
         if amount == 0.0 || !amount.is_finite() || amount < 0.0 {
             return;
@@ -934,23 +864,6 @@ mod tests {
         let usage = raw.get("token_usage").unwrap().as_object().unwrap();
         assert_eq!(usage.get("prompt_tokens").unwrap(), 8);
         assert_eq!(usage.get("turns").unwrap(), 2);
-    }
-
-    #[test]
-    fn done_lifecycle() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        assert!(d.done_for("p/seq").is_empty());
-        d.mark_done("p/seq", "a");
-        d.mark_done("p/seq", "a");
-        d.mark_done("p/seq", "b");
-        let done = d.done_for("p/seq");
-        assert_eq!(done.len(), 2);
-        assert!(done.contains("a") && done.contains("b"));
-        d.clear_done("p/seq");
-        assert!(d.done_for("p/seq").is_empty());
-        assert!(!read_state_json(Some(&sf)).contains_key("done_children"));
     }
 
     #[test]
