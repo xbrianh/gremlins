@@ -38,31 +38,7 @@ stage-definitions:
   github-request-copilot-review: github-request-copilot-review
   github-wait-copilot: github-wait-copilot
   github-wait-ci: github-wait-ci
-  check-and-fix:
-    type: sequence
-    body:
-      - name: format
-        type: exec
-        options:
-          timeout: 300
-          cmds:
-            - make autoformat || true
-            - git add -A
-            - git diff --cached --quiet || git commit -m 'format'
-
-      - name: verify
-        type: verify
-        options:
-          cmds:
-            - "make -j8 check && make -j8 test"
-          max_iterations: 7
-        prompt: [style_guide.md, dev-env-howto.md, verify_fix.md]
-      - name: commit
-        type: exec
-        options:
-          cmds:
-            - git add -A
-            - git diff --cached --quiet || git commit -m "fix checks"
+  check-and-fix: check-and-fix
 
 stages:
   - { name: plan, type: plan-gh, prompt: [style_guide.md, plan_gh.md] }
