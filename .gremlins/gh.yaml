@@ -67,7 +67,7 @@ stage-definitions:
 stages:
   - { type: plan-gh, prompt: [style_guide.md, plan_gh.md] }
   - { type: implement, prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
-  - { type: check-and-fix }
+  - { name: verify-implementation, type: check-and-fix }
 
   - name: compute-diff
     type: exec
@@ -108,7 +108,7 @@ stages:
     bind:
       address_summary: "artifact://address-summary.md"
 
-  - { type: check-and-fix }
+  - { name: verify-address-fixes, type: check-and-fix }
   - { type: github-open-pr }
   - { type: github-request-copilot-review }
   - { type: github-wait-copilot }
@@ -129,5 +129,5 @@ stages:
     prompt: [style_guide.md, dev-env-howto.md, github_address_pull_request_reviews.md]
     bind:
       review_summary: "artifact://review-summary.md"
-  - { type: check-and-fix }
+  - { name: verify-github-review-fixes, type: check-and-fix }
   - { type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, ci_fix.md] }
