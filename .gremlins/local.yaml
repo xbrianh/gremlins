@@ -60,9 +60,9 @@ stage-definitions:
             - git diff --cached --quiet || git commit -m "fix checks"
 
 stages:
-  - { type: plan,      prompt: [style_guide.md, plan.md] }
-  - { type: implement,  prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
-  - { type: check-and-fix }
+  - { name: plan, type: plan, prompt: [style_guide.md, plan.md] }
+  - { name: implement, type: implement, prompt: [task-guide.md, style_guide.md, dev-env-howto.md, implement.md] }
+  - { name: verify-implementation, type: check-and-fix }
   - name: compute-diff
     type: exec
     interpolation:
@@ -99,7 +99,7 @@ stages:
       review_two: content("artifact://review-two.md")
     bind:
       address_summary: "artifact://address-summary.md"
-  - { type: check-and-fix }
+  - { name: verify-address-fixes, type: check-and-fix }
   - name: commit-message
     type: agent
     prompt: [commit_message.md]
