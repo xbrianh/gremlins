@@ -336,9 +336,9 @@ pub struct StaticDefinition {
     /// Bootstrap commands and input sources.
     pub bootstrap: Bootstrap,
     /// The stage tree, in declaration order.
-    pub stages: Vec<ParsedStage>,
+    pub(crate) stages: Vec<ParsedStage>,
     /// The optional `land` stage — always an exec stage named `land`.
-    pub land: Option<ParsedStage>,
+    pub(crate) land: Option<ParsedStage>,
     /// The fully expanded YAML tree, kept for round-tripping via
     /// [`to_expanded_yaml`](StaticDefinition::to_expanded_yaml).
     pub expanded_yaml: Value,
@@ -401,7 +401,7 @@ impl StaticDefinition {
     /// contains only the child's own stage(s), while inheriting every other
     /// field (name, path, default_client, base_ref, bootstrap, land) from
     /// the parent.
-    pub fn clone_with_stages(&self, stages: Vec<ParsedStage>) -> Self {
+    pub(crate) fn clone_with_stages(&self, stages: Vec<ParsedStage>) -> Self {
         StaticDefinition {
             stages,
             cursor: 0,

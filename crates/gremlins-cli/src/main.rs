@@ -11,11 +11,11 @@ use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
+use gremlins::definition::{ExecutorStage, GremlinDefinition};
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
 use gremlins::stages::exec::prepare_exec;
-use gremlins::stages::node::ParsedStage;
 use serde_json::{Map, Value};
 
 mod spawn;
@@ -744,20 +744,16 @@ async fn land(id: &str) -> Result<(), String> {
     let definition = DefinitionBuilder::from_expanded_yaml(&definition_path, None)
         .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
 
-    let land_stage = match &definition.land {
-        Some(stage) => stage,
-        None => {
-            return Err(format!("gremlin {id}: definition has no land block"));
-        }
-    };
-
-    // Extract the Exec from the ParsedStage::Exec variant.
-    let exec = match land_stage {
-        ParsedStage::Exec { stage, .. } => stage,
-        _ => {
+    // Extract the Exec from the land stage.
+    let exec = match definition.land() {
+        Some(ExecutorStage::Exec { stage, .. }) => stage,
+        Some(_) => {
             return Err(format!(
                 "gremlin {id}: land stage is not an exec (internal error)"
             ));
+        }
+        None => {
+            return Err(format!("gremlin {id}: definition has no land block"));
         }
     };
 
@@ -792,7 +788,7 @@ async fn land(id: &str) -> Result<(), String> {
     let registry = FileSystemArtifactRegistry::new(artifact_dir.clone());
 
     // Resolve interpolation references.
-    let prepared = prepare_exec(exec, &registry, &registry, "", &HashMap::new())
+    let prepared = prepare_exec(&exec, &registry, &registry, "", &HashMap::new())
         .await
         .map_err(|e| format!("gremlin {id}: {e}"))?;
 
