@@ -912,12 +912,12 @@ impl Gremlin {
         // prepare, and a resumed run's was prepared by the attempt that made
         // the worktree.
         let bootstrap = self.definition.bootstrap();
+        let is_fork = !self.state.read_str("parent_id").is_empty();
         let has_bootstrap = !bootstrap.cmds.is_empty()
-            || !bootstrap.launch_cmds.is_empty()
-            || !bootstrap.cli_out.is_empty();
+            || (!is_fork && (!bootstrap.launch_cmds.is_empty() || !bootstrap.cli_out.is_empty()));
         let first_start = self.worktree.is_some() && resume_from.is_none();
         if first_start && has_bootstrap {
-            if let Err(error) = run_definition_bootstrap(self).await {
+            if let Err(error) = run_definition_bootstrap(self, is_fork).await {
                 log::error!("bootstrap failed");
                 self.state.write_bail_file(
                     "other",

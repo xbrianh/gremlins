@@ -306,7 +306,10 @@ async fn bind_artifact(
 /// Every piece of state it needs — the worktree, the resolved environment, the
 /// stage inputs, the registry — already lives on `gremlin`, so the caller is a
 /// single guard and a single call.
-pub async fn run_definition_bootstrap(gremlin: &mut Gremlin) -> Result<(), RunError> {
+pub async fn run_definition_bootstrap(
+    gremlin: &mut Gremlin,
+    skip_launch: bool,
+) -> Result<(), RunError> {
     // Snapshot the bootstrap block: the DSL step borrows `gremlin` mutably for
     // its registry, so the commands cannot stay borrowed from the definition.
     let bootstrap = gremlin.definition.bootstrap().clone();
@@ -317,7 +320,10 @@ pub async fn run_definition_bootstrap(gremlin: &mut Gremlin) -> Result<(), RunEr
         run_bootstrap(&bootstrap.cmds, &cwd, &env).await?;
     }
 
-    if !bootstrap.launch_cmds.is_empty() {
+    // A forked child inherits the parent's artifacts via copy_tree +
+    // fork_registry — its launch_cmds (bind_artifact, shell guards) and
+    // cli_out already ran in the parent and do not need to run again.
+    if !skip_launch && !bootstrap.launch_cmds.is_empty() {
         log::info!("running {} launch command(s)", bootstrap.launch_cmds.len());
 
         // Every declared source key gets a value, even an absent one, so an
@@ -346,7 +352,7 @@ pub async fn run_definition_bootstrap(gremlin: &mut Gremlin) -> Result<(), RunEr
         }
     }
 
-    if !bootstrap.cli_out.is_empty() {
+    if !skip_launch && !bootstrap.cli_out.is_empty() {
         log::info!("running {} cli_out binding(s)", bootstrap.cli_out.len());
         run_cli_out(gremlin, &bootstrap.cli_out).await?;
     }
@@ -643,7 +649,7 @@ mod tests {
         };
         let (tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
-        run_definition_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
         assert!(tmp.path().join("worktree").join("marker.txt").is_file());
     }
@@ -661,7 +667,7 @@ mod tests {
         let inputs = HashMap::from([("plan".to_string(), source.to_string_lossy().into_owned())]);
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, inputs);
 
-        run_definition_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
         assert!(
             gremlin
@@ -690,7 +696,7 @@ mod tests {
         let inputs = HashMap::from([("note".to_string(), "hello".to_string())]);
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, inputs);
 
-        run_definition_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
         assert_eq!(
             gremlin
@@ -710,7 +716,7 @@ mod tests {
         };
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
-        run_definition_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
         assert!(
             !gremlin
@@ -729,7 +735,9 @@ mod tests {
         };
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
-        let error = run_definition_bootstrap(&mut gremlin).await.unwrap_err();
+        let error = run_definition_bootstrap(&mut gremlin, false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("unknown gremlins: command"));
     }
 
@@ -742,7 +750,7 @@ mod tests {
         let inputs = HashMap::from([("greeting".to_string(), "hi".to_string())]);
         let (tmp, mut gremlin) = test_gremlin(bootstrap, inputs);
 
-        run_definition_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
         let written =
             std::fs::read_to_string(tmp.path().join("worktree").join("greeting.txt")).unwrap();
@@ -762,7 +770,7 @@ mod tests {
         let path = gremlin.registry.as_ref().path_for_uri(&uri).await.unwrap();
         std::fs::write(&path, "123").unwrap();
 
-        run_definition_bootstrap(&mut gremlin).await.unwrap();
+        run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
         assert!(
             gremlin
@@ -781,7 +789,9 @@ mod tests {
         };
         let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
-        let error = run_definition_bootstrap(&mut gremlin).await.unwrap_err();
+        let error = run_definition_bootstrap(&mut gremlin, false)
+            .await
+            .unwrap_err();
         assert!(matches!(
             error,
             RunError::BootstrapFailed { exit_code: 3, .. }
@@ -791,6 +801,6 @@ mod tests {
     #[tokio::test]
     async fn an_empty_bootstrap_does_nothing() {
         let (_tmp, mut gremlin) = test_gremlin(Bootstrap::default(), HashMap::new());
-        assert!(run_definition_bootstrap(&mut gremlin).await.is_ok());
+        assert!(run_definition_bootstrap(&mut gremlin, false).await.is_ok());
     }
 }
