@@ -819,8 +819,12 @@ async fn run_loop(
     let mut outcome: Result<(), RunError> = Ok(());
     let mut stopped = false;
     'iterations: for iteration in 1..=max_iterations {
-        gremlin.loop_iter = iteration.to_string();
-        let _attempt = gremlin.state.read_str("attempt");
+        let attempt = gremlin.state.read_str("attempt");
+        gremlin.loop_iter = if attempt.is_empty() {
+            iteration.to_string()
+        } else {
+            format!("{}~{}", iteration, attempt)
+        };
         let loop_iter = gremlin.loop_iter.clone();
         // Reset tracking left by an earlier partial iteration.
         gremlin.state.clear_done(&loop_iter);
@@ -1651,7 +1655,7 @@ mod tests {
             gremlin
                 .registry
                 .as_ref()
-                .is_registered("artifact://1/bail")
+                .is_registered("artifact://1~test-0001/bail")
                 .await
         );
     }
@@ -1713,7 +1717,7 @@ mod tests {
             gremlin
                 .registry
                 .as_ref()
-                .is_registered("artifact://1/bail")
+                .is_registered("artifact://1~test-0001/bail")
                 .await
         );
     }
@@ -1747,7 +1751,7 @@ mod tests {
             gremlin
                 .registry
                 .as_ref()
-                .is_registered("artifact://1/bail")
+                .is_registered("artifact://1~test-0001/bail")
                 .await
         );
     }
