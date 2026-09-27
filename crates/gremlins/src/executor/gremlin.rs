@@ -47,9 +47,8 @@ use crate::schemas::bootstrap::Bootstrap;
 
 /// State keys that describe *this* run's live execution and must never leak
 /// into a forked child, which starts its own from scratch.
-pub(crate) const FORK_TRANSIENT: [&str; 14] = [
+pub(crate) const FORK_TRANSIENT: [&str; 13] = [
     "parallel_worktrees",
-    "done_children",
     "parallel_attempts",
     "active_children",
     "token_usage",

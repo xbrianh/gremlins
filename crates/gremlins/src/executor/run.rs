@@ -5,7 +5,7 @@
 //! scoped dispatcher below carries the two pieces of bookkeeping the Python
 //! executor kept around every stage — the artifact guard (`skip_if_exists`)
 //! checked before dispatch, and the scope key (`a/b`, `loop~2`) a stage is
-//! tracked under for `done_children` and bail lookups.
+//! tracked under for bail lookups.
 //!
 //! This is sequencing only. Parallel groups are a later milestone and say so
 //! rather than pretending to fan out.
@@ -731,11 +731,12 @@ async fn run_exec(
 // Sequence
 // ---------------------------------------------------------------------------
 
-/// Run a sequence's children in order, skipping those already marked done.
+/// Run a sequence's children in order.
 ///
-/// `done_children` is keyed by the sequence's own scope, so a resumed run
-/// re-enters the sequence and picks up where it stopped; the tracking is
-/// cleared once the whole body has run, since the sequence is then spent.
+/// The sequence always runs every child in declaration order; the
+/// `skip_if_exists` guard on individual stages handles the optimization case.
+/// On resume, `goto` already positions execution at the correct top-level
+/// stage.
 async fn run_sequence(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
@@ -753,15 +754,10 @@ async fn run_sequence(
         .or(enclosing_client);
 
     let key = stage_key(scope, &seq.name);
-    let done = gremlin.state.done_for(&key);
     for child in &seq.stages {
-        if done.contains(child.name()) {
-            continue;
-        }
         // Boxed: the dispatcher recurses through composites, and an unboxed
         // recursive `async fn` future would have no finite size.
         Box::pin(run_stage_scoped(child, gremlin, &key, enclosing_client)).await?;
-        gremlin.state.mark_done(&key, child.name());
 
         // A bail — scoped to the sequence or written for the run as a whole —
         // ends the body, and the sequence reports it: falling through to `Ok`
@@ -772,11 +768,9 @@ async fn run_sequence(
             let reason = bail_reason_for(gremlin.registry.as_ref(), &key, &gremlin.state)
                 .await
                 .unwrap_or_default();
-            gremlin.state.clear_done(&key);
             return Err(RunError::Bail { reason });
         }
     }
-    gremlin.state.clear_done(&key);
     Ok(())
 }
 
@@ -791,8 +785,7 @@ async fn run_sequence(
 /// later stage would inherit a stale `{loop_iter}`.
 ///
 /// The frame carries the loop's own name, so nested loops read
-/// `outer~1~inner~2`; the enclosing scope is bookkeeping for `done_children`,
-/// not part of the iteration substitution.
+/// `outer~1~inner~2`.
 async fn run_loop(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
@@ -829,8 +822,6 @@ async fn run_loop(
             }
         };
         let loop_iter = gremlin.loop_iter.clone();
-        // Reset tracking left by an earlier partial iteration.
-        gremlin.state.clear_done(&loop_iter);
 
         log::info!("loop {name}: iteration {iteration}/{max_iterations} starting");
 
@@ -957,9 +948,26 @@ impl Gremlin {
 
             self.state.set_stage(stage.name(), None, "");
 
-            // A fresh attempt per stage is what lets the failure that follows be
-            // recorded: `write_bail_file` is a no-op without one.
-            let attempt = format!("{}-{}", stage.name(), state::token_hex(4));
+            // Reuse the existing attempt on resume so that artifact scopes —
+            // and therefore done markers in run_parallel — are stable across
+            // retries. A fresh token is generated only when the state has no
+            // prior attempt for this stage.
+            //
+            // Stale bail files from the previous run are removed when the
+            // attempt is reused so that read_bail_info (checked after the
+            // stage runs) does not spuriously flag the resumed run as bailed.
+            let existing_attempt = self.state.read_str("attempt");
+            let attempt = if existing_attempt.starts_with(&format!("{}-", stage.name())) {
+                if let Some(ref sf) = self.state.state_file {
+                    if let Some(parent) = sf.parent() {
+                        let bail_path = parent.join(format!("bail_{existing_attempt}.json"));
+                        let _ = std::fs::remove_file(&bail_path);
+                    }
+                }
+                existing_attempt
+            } else {
+                format!("{}-{}", stage.name(), state::token_hex(4))
+            };
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String(attempt.clone()));
             self.state.patch(&[], &fields);
@@ -1415,7 +1423,7 @@ mod tests {
     // --- sequence ---
 
     #[tokio::test]
-    async fn sequence_runs_children_and_clears_done_tracking() {
+    async fn sequence_runs_children_in_order() {
         let yaml = r#"
 - name: seq
   type: sequence
@@ -1434,32 +1442,6 @@ mod tests {
 
         run_stage(&stage, &mut gremlin).await.unwrap();
         assert!(tmp.path().join("one.marker").exists());
-        assert!(tmp.path().join("two.marker").exists());
-        // The sequence is spent, so its tracking must not survive it.
-        assert!(gremlin.state.done_for("seq").is_empty());
-    }
-
-    #[tokio::test]
-    async fn sequence_skips_children_already_marked_done() {
-        let yaml = r#"
-- name: seq
-  type: sequence
-  body:
-    - name: one
-      type: exec
-      options:
-        cmds: ["echo one > one.marker"]
-    - name: two
-      type: exec
-      options:
-        cmds: ["echo two > two.marker"]
-"#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
-        gremlin.state.mark_done("seq", "one");
-
-        let stage = take_first_stage(&mut gremlin).await;
-        run_stage(&stage, &mut gremlin).await.unwrap();
-        assert!(!tmp.path().join("one.marker").exists());
         assert!(tmp.path().join("two.marker").exists());
     }
 
@@ -1509,7 +1491,6 @@ mod tests {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
             other => panic!("expected Bail, got {other:?}"),
         }
-        assert!(gremlin.state.done_for("seq").is_empty());
     }
 
     #[tokio::test]
@@ -1676,7 +1657,7 @@ mod tests {
             Err(RunError::Bail { reason }) => assert_eq!(reason, "boom"),
             other => panic!("expected Bail, got {other:?}"),
         }
-        // The enclosing sequence scopes `done_children`, not the iteration key.
+        // The iteration key scopes the bail artifact, not the enclosing sequence.
         assert!(
             gremlin
                 .registry
@@ -1855,6 +1836,98 @@ mod tests {
         assert!(!tmp.path().join("first.marker").exists());
         assert!(tmp.path().join("second.marker").exists());
         assert!(tmp.path().join("third.marker").exists());
+    }
+
+    #[tokio::test]
+    async fn run_resume_reuses_attempt_so_parallel_done_markers_are_stable() {
+        // A parallel group with one successful child and one failing child.
+        // On the first run the group fails (ErrorPolicy::Any). On resume, the
+        // successful child must be skipped because its done marker persisted
+        // under the original (now-reused) attempt scope.
+        let yaml = r#"
+- name: group
+  parallel:
+    - name: good
+      type: exec
+      options:
+        cmds: ["true"]
+    - name: bad
+      type: exec
+      options:
+        cmds: ["false"]
+"#;
+        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let state_dir = tmp.path().join("state").join("gr-test");
+
+        // First run: group fails because "bad" exits non-zero.
+        match gremlin.run(None).await {
+            Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "bad"),
+            other => panic!("expected StageFailed, got {other:?}"),
+        }
+        let state_after: Value =
+            serde_json::from_str(&std::fs::read_to_string(state_dir.join("state.json")).unwrap())
+                .unwrap();
+        let first_attempt = state_after["attempt"].as_str().unwrap().to_string();
+        assert!(
+            first_attempt.starts_with("group-"),
+            "unexpected attempt: {first_attempt}"
+        );
+        assert_eq!(state_after["status"], "stopped");
+
+        // The successful child "good" has a done marker in the registry. The
+        // scope embeds the attempt, so the marker URI is e.g.
+        // artifact://1~group-xxxx/group/done/good.
+        let scope = stage_key(&format!("1~{first_attempt}"), "group");
+        let good_done_uri = format!("artifact://{scope}/done/good");
+        assert!(
+            gremlin
+                .registry
+                .as_ref()
+                .is_registered(&good_done_uri)
+                .await,
+            "good child should be marked done at {good_done_uri}"
+        );
+
+        // Clear terminal markers so run() treats this as a resumable run.
+        // `finished` file and `exit_code` must be removed; `status` reset.
+        let finished = state_dir.join("finished");
+        if finished.exists() {
+            std::fs::remove_file(&finished).unwrap();
+        }
+        let bail_path = state_dir.join(format!("bail_{first_attempt}.json"));
+        if bail_path.exists() {
+            std::fs::remove_file(&bail_path).unwrap();
+        }
+        let mut fields = serde_json::Map::new();
+        fields.insert("status".into(), Value::String("running".to_string()));
+        gremlin.state.patch(&["exit_code".to_string()], &fields);
+
+        // Resume: "bad" fails again, but the attempt is reused so "good" is
+        // skipped rather than re-run.
+        match gremlin.run(Some("group")).await {
+            Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "bad"),
+            other => panic!("expected StageFailed on resume, got {other:?}"),
+        }
+
+        let state_final: Value =
+            serde_json::from_str(&std::fs::read_to_string(state_dir.join("state.json")).unwrap())
+                .unwrap();
+        let second_attempt = state_final["attempt"].as_str().unwrap();
+        assert_eq!(
+            second_attempt, first_attempt,
+            "attempt was regenerated on resume: {first_attempt} vs {second_attempt}"
+        );
+
+        // The good child's done marker must still be present under the
+        // original scope — confirming it was skipped, not overwritten.
+        assert!(
+            gremlin
+                .registry
+                .as_ref()
+                .is_registered(&good_done_uri)
+                .await,
+            "good child done marker should survive resume at {good_done_uri}"
+        );
     }
 
     #[tokio::test]
