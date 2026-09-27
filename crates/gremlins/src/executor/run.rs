@@ -959,12 +959,16 @@ impl Gremlin {
 
             // A fresh attempt per stage is what lets the failure that follows be
             // recorded: `write_bail_file` is a no-op without one.
+            let attempt = format!("{}-{}", stage.name(), state::token_hex(4));
             let mut fields = Map::new();
-            fields.insert(
-                "attempt".into(),
-                Value::String(format!("{}-{}", stage.name(), state::token_hex(4))),
-            );
+            fields.insert("attempt".into(), Value::String(attempt.clone()));
             self.state.patch(&[], &fields);
+
+            // Update loop_iter to include the per-stage attempt so artifact
+            // namespaces are distinct across retries — the same pattern
+            // run_loop already applies for nested loops.
+            let saved_loop_iter = self.loop_iter.clone();
+            self.loop_iter = format!("{}~{}", saved_loop_iter, attempt);
 
             log::debug!(
                 "gremlin {}: running top-level stage '{}' (type={})",
@@ -973,7 +977,13 @@ impl Gremlin {
                 stage.stage_type()
             );
 
-            match run_stage(&stage, self).await {
+            let stage_result = run_stage(&stage, self).await;
+            // Restore loop_iter before any early exit so the next stage
+            // (or the enclosing loop) sees the original base value, not
+            // the per-attempt decorated form.
+            self.loop_iter = saved_loop_iter;
+
+            match stage_result {
                 Ok(()) => {}
                 Err(RunError::Bail { reason }) => {
                     self.state.write_bail_file("other", &truncate(&reason, 200));
