@@ -1,4 +1,4 @@
-//! Builder for [`GremlinDefinition`], plus [`BootstrapBuilder`] and
+//! Builder for [`StaticDefinition`], plus [`BootstrapBuilder`] and
 //! [`LandBuilder`].
 
 use std::collections::{HashMap, HashSet};
@@ -10,18 +10,18 @@ use crate::builders::agent::AgentBuilder;
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
 use crate::builders::composite::{LoopBuilder, ParallelBuilder, SequenceBuilder};
 use crate::builders::exec::ExecBuilder;
+use crate::definition::{
+    base_ref_from_yaml, default_client_from_yaml, project_root_for, resolve_default_client,
+    stages_from_yaml, StaticDefinition,
+};
 use crate::schemas::bootstrap::{Bootstrap, InputSource, InputSources};
 use crate::schemas::error::SchemaError;
 use crate::schemas::expand;
 use crate::schemas::expand::key_referenced_in_text;
-use crate::schemas::gremlin_definition::{
-    base_ref_from_yaml, default_client_from_yaml, project_root_for, resolve_default_client,
-    stages_from_yaml, GremlinDefinition,
-};
 use crate::schemas::loader::{self, StageEntry, StageNode};
 use crate::stages::composite::ClientSpec;
 use crate::stages::constants::FRAMEWORK_KEYS;
-use crate::stages::node::RunnableStage;
+use crate::stages::node::ParsedStage;
 use crate::stages::parallel::ErrorPolicy;
 
 // ---------------------------------------------------------------------------
@@ -260,8 +260,8 @@ impl LandBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`RunnableStage::Exec`] named `land`.
-    pub fn build(self) -> Result<RunnableStage, SchemaError> {
+    /// Consume the builder and produce a [`ParsedStage::Exec`] named `land`.
+    pub fn build(self) -> Result<ParsedStage, SchemaError> {
         let name = "land".to_string();
 
         crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
@@ -356,7 +356,7 @@ impl LandBuilder {
             interpolation_map: self.interpolation_map,
             bind_map: self.bind_map,
         };
-        Ok(RunnableStage::Exec {
+        Ok(ParsedStage::Exec {
             stage,
             skip_if_exists: self.skip_if_exists,
             client: self.client,
@@ -374,10 +374,10 @@ impl Default for LandBuilder {
 // DefinitionBuilder
 // ---------------------------------------------------------------------------
 
-/// Build a [`GremlinDefinition`].
+/// Build a [`StaticDefinition`].
 ///
 /// `build()` runs the existing validators (`check_duplicate_producers`,
-/// `check_unresolved_consumers`) and returns `Result<GremlinDefinition,
+/// `check_unresolved_consumers`) and returns `Result<StaticDefinition,
 /// SchemaError>`.
 ///
 /// # Example
@@ -403,8 +403,8 @@ pub struct DefinitionBuilder {
     default_client: String,
     prompt_dir: Option<PathBuf>,
     bootstrap: Bootstrap,
-    stages: Vec<RunnableStage>,
-    land: Option<RunnableStage>,
+    stages: Vec<ParsedStage>,
+    land: Option<ParsedStage>,
 }
 
 impl DefinitionBuilder {
@@ -454,26 +454,26 @@ impl DefinitionBuilder {
     }
 
     /// Append a stage.
-    pub fn stage(mut self, stage: RunnableStage) -> Self {
+    pub fn stage(mut self, stage: ParsedStage) -> Self {
         self.stages.push(stage);
         self
     }
 
     /// Append many stages.
-    pub fn stages(mut self, stages: Vec<RunnableStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<ParsedStage>) -> Self {
         self.stages.extend(stages);
         self
     }
 
     /// Set the land stage.
-    pub fn land(mut self, land: RunnableStage) -> Self {
+    pub fn land(mut self, land: ParsedStage) -> Self {
         self.land = Some(land);
         self
     }
 
     /// Consume the builder, run validators, and produce a
-    /// [`GremlinDefinition`].
-    pub fn build(mut self) -> Result<GremlinDefinition, SchemaError> {
+    /// [`StaticDefinition`].
+    pub fn build(mut self) -> Result<StaticDefinition, SchemaError> {
         let name = self.name.clone();
 
         // Reject blank required fields.
@@ -513,11 +513,8 @@ impl DefinitionBuilder {
         fill_builder_names(&mut self.stages);
 
         // Build the node list for validation, including land.
-        let mut nodes: Vec<StageNode> = self
-            .stages
-            .iter()
-            .map(RunnableStage::to_stage_node)
-            .collect();
+        let mut nodes: Vec<StageNode> =
+            self.stages.iter().map(ParsedStage::to_stage_node).collect();
         if let Some(ref land) = self.land {
             nodes.push(land.to_stage_node());
         }
@@ -529,33 +526,33 @@ impl DefinitionBuilder {
             &self.bootstrap.cli_out,
         )?;
 
-        let definition = GremlinDefinition {
-            name: self.name,
-            path: self.prompt_dir.unwrap_or_else(|| PathBuf::from(".")),
-            default_client: self.default_client,
-            base_ref: self.base_ref,
-            bootstrap: self.bootstrap,
-            stages: self.stages,
-            land: self.land,
-            expanded_yaml: serde_yaml::Value::Null,
-        };
+        let path = self.prompt_dir.unwrap_or_else(|| PathBuf::from("."));
+
+        let mut definition = StaticDefinition::new(
+            self.name,
+            path,
+            self.default_client,
+            self.base_ref,
+            self.bootstrap,
+            self.stages,
+            self.land,
+            serde_yaml::Value::Null,
+        );
 
         // Populate expanded_yaml from the typed tree.
         let expanded_yaml = definition.to_expanded_yaml();
+        definition.expanded_yaml = expanded_yaml;
 
-        Ok(GremlinDefinition {
-            expanded_yaml,
-            ..definition
-        })
+        Ok(definition)
     }
 }
 
 // ---------------------------------------------------------------------------
-// GremlinDefinition::from_builder
+// StaticDefinition::from_builder
 // ---------------------------------------------------------------------------
 
-impl GremlinDefinition {
-    /// Construct a [`GremlinDefinition`] from a [`DefinitionBuilder`].
+impl StaticDefinition {
+    /// Construct a [`StaticDefinition`] from a [`DefinitionBuilder`].
     ///
     /// This is the entry point called by [`DefinitionBuilder::build`].
     pub fn from_builder(builder: DefinitionBuilder) -> Result<Self, SchemaError> {
@@ -569,7 +566,7 @@ impl GremlinDefinition {
 /// Mirrors the YAML path: unnamed stages get auto-generated names based on
 /// their stage type, and duplicate explicit names are disambiguated with
 /// `-N` suffixes.
-pub(crate) fn fill_builder_names(stages: &mut [RunnableStage]) {
+pub(crate) fn fill_builder_names(stages: &mut [ParsedStage]) {
     let mut entries: Vec<StageEntry> = stages.iter().map(|s| s.to_stage_entry()).collect();
     // fill_names is infallible for well-formed stages.
     if loader::fill_names(&mut entries).is_ok() {
@@ -583,9 +580,9 @@ pub(crate) fn fill_builder_names(stages: &mut [RunnableStage]) {
     // Recurse into composite bodies.
     for stage in stages.iter_mut() {
         match stage {
-            RunnableStage::Loop { body, .. }
-            | RunnableStage::Sequence { body, .. }
-            | RunnableStage::Parallel { body, .. } => {
+            ParsedStage::Loop { body, .. }
+            | ParsedStage::Sequence { body, .. }
+            | ParsedStage::Parallel { body, .. } => {
                 fill_builder_names(body);
             }
             _ => {}
@@ -607,7 +604,7 @@ impl DefinitionBuilder {
     pub fn from_yaml(
         path: impl AsRef<Path>,
         default_client_override: Option<&str>,
-    ) -> Result<GremlinDefinition, SchemaError> {
+    ) -> Result<StaticDefinition, SchemaError> {
         let path = path.as_ref();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !path.exists() {
@@ -631,7 +628,7 @@ impl DefinitionBuilder {
     pub fn from_expanded_yaml(
         path: impl AsRef<Path>,
         default_client_override: Option<&str>,
-    ) -> Result<GremlinDefinition, SchemaError> {
+    ) -> Result<StaticDefinition, SchemaError> {
         let path = path.as_ref();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !path.exists() {
@@ -644,21 +641,48 @@ impl DefinitionBuilder {
         // Strip the sentinel if present — the file may lack it but still be
         // fully expanded.
         if let Some(mapping) = expanded.as_mapping_mut() {
-            mapping.remove(Value::from("__gremlins_expanded__"));
+            let sentinel = Value::from("__gremlins_expanded__");
+            mapping.remove(&sentinel);
         }
 
         Self::from_expanded_value(expanded, &path, default_client_override)
     }
 
+    /// Parse already-expanded YAML bytes directly — no file I/O, no
+    /// project-root walk. Used by [`StaticDefinition::deserialize`] so the
+    /// round-trip doesn't need an intermediate temp file.
+    ///
+    /// Strips the `__gremlins_expanded__` sentinel if present, but tolerates
+    /// its absence. Passes through the same validation pipeline as
+    /// [`from_expanded_yaml`](Self::from_expanded_yaml).
+    pub fn from_expanded_bytes(
+        data: &[u8],
+        default_client_override: Option<&str>,
+    ) -> Result<StaticDefinition, SchemaError> {
+        let mut expanded: Value = serde_yaml::from_slice(data)
+            .map_err(|e| SchemaError::Generic(format!("failed to parse definition YAML: {e}")))?;
+        if let Some(mapping) = expanded.as_mapping_mut() {
+            let sentinel = Value::from("__gremlins_expanded__");
+            mapping.remove(&sentinel);
+        }
+        // Use a stable label so error messages are meaningful even though
+        // there is no real file path.
+        Self::from_expanded_value(
+            expanded,
+            Path::new("definition.yaml"),
+            default_client_override,
+        )
+    }
+
     /// Shared extraction: turn an already-expanded YAML [`Value`] into a
-    /// [`GremlinDefinition`] via the builder path. Both [`from_yaml`] and
+    /// [`StaticDefinition`] via the builder path. Both [`from_yaml`] and
     /// [`from_expanded_yaml`] funnel through here once they have the
     /// expanded tree.
     fn from_expanded_value(
         expanded: Value,
         path: &Path,
         default_client_override: Option<&str>,
-    ) -> Result<GremlinDefinition, SchemaError> {
+    ) -> Result<StaticDefinition, SchemaError> {
         let root = expanded
             .as_mapping()
             .ok_or_else(|| SchemaError::YamlNotMapping {
@@ -679,7 +703,7 @@ impl DefinitionBuilder {
         let raw_stages = stages_from_yaml(root)?;
 
         // Parse stages through the per-type YAML→builder dispatch.
-        let mut stages: Vec<RunnableStage> = Vec::new();
+        let mut stages: Vec<ParsedStage> = Vec::new();
         for raw in &raw_stages {
             let mapping = raw
                 .as_mapping()
@@ -724,7 +748,7 @@ impl DefinitionBuilder {
 // ---------------------------------------------------------------------------
 
 /// Dispatch a single stage mapping to the appropriate per-type builder.
-fn stage_from_yaml(mapping: &Mapping) -> Result<RunnableStage, SchemaError> {
+fn stage_from_yaml(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
     let is_parallel = mapping.contains_key("parallel");
     let name = mapping
         .get("name")
@@ -830,7 +854,7 @@ fn yaml_client(mapping: &Mapping) -> Option<ClientSpec> {
 }
 
 /// Build an [`AgentBuilder`] from a YAML stage mapping.
-fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let prompts = yaml_string_list(mapping, "prompt")?;
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
@@ -862,7 +886,7 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Schem
 }
 
 /// Build an [`ExecBuilder`] from a YAML stage mapping.
-fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
@@ -890,7 +914,7 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Schema
 }
 
 /// Build a [`LoopBuilder`] from a YAML stage mapping.
-fn loop_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn loop_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
         None => 3u32,
         Some(v) => {
@@ -943,7 +967,7 @@ fn loop_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Schema
 }
 
 /// Build a [`SequenceBuilder`] from a YAML stage mapping.
-fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
     let body = yaml_children(mapping, "body")?;
@@ -960,7 +984,7 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Sc
 }
 
 /// Build a [`ParallelBuilder`] from a YAML stage mapping.
-fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, SchemaError> {
+fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let max_concurrent = match mapping.get("max_concurrent").filter(|v| !v.is_null()) {
         None => None,
         Some(v) => {
@@ -1021,7 +1045,7 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<RunnableStage, Sc
 
 /// Parse children from a composite's `key` ("body" or "parallel") through
 /// the same per-type dispatch.
-fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<RunnableStage>, SchemaError> {
+fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<ParsedStage>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(Vec::new());
     };
@@ -1041,7 +1065,7 @@ fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<RunnableStage>, Sch
 
 /// Build the land stage from its YAML mapping, forcing name=land and
 /// type=exec through [`LandBuilder`].
-fn land_from_yaml_builder(mapping: &Mapping) -> Result<RunnableStage, SchemaError> {
+fn land_from_yaml_builder(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
@@ -1204,7 +1228,7 @@ mod tests {
     #[test]
     fn from_builder_entry_point() {
         let builder = DefinitionBuilder::new("demo", "xai:grok-4");
-        let def = GremlinDefinition::from_builder(builder).unwrap();
+        let def = StaticDefinition::from_builder(builder).unwrap();
         assert_eq!(def.name, "demo");
     }
 

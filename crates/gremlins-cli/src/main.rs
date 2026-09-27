@@ -11,11 +11,11 @@ use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
+use gremlins::definition::{ExecutorStage, GremlinDefinition};
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
 use gremlins::stages::exec::prepare_exec;
-use gremlins::stages::node::RunnableStage;
 use serde_json::{Map, Value};
 
 mod spawn;
@@ -744,20 +744,16 @@ async fn land(id: &str) -> Result<(), String> {
     let definition = DefinitionBuilder::from_expanded_yaml(&definition_path, None)
         .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
 
-    let land_stage = match &definition.land {
-        Some(stage) => stage,
-        None => {
-            return Err(format!("gremlin {id}: definition has no land block"));
-        }
-    };
-
-    // Extract the Exec from the RunnableStage::Exec variant.
-    let exec = match land_stage {
-        RunnableStage::Exec { stage, .. } => stage,
-        _ => {
+    // Extract the Exec from the land stage.
+    let exec = match definition.land() {
+        Some(ExecutorStage::Exec { stage, .. }) => stage,
+        Some(_) => {
             return Err(format!(
                 "gremlin {id}: land stage is not an exec (internal error)"
             ));
+        }
+        None => {
+            return Err(format!("gremlin {id}: definition has no land block"));
         }
     };
 
@@ -792,7 +788,7 @@ async fn land(id: &str) -> Result<(), String> {
     let registry = FileSystemArtifactRegistry::new(artifact_dir.clone());
 
     // Resolve interpolation references.
-    let prepared = prepare_exec(exec, &registry, &registry, "", &HashMap::new())
+    let prepared = prepare_exec(&exec, &registry, &registry, "", &HashMap::new())
         .await
         .map_err(|e| format!("gremlin {id}: {e}"))?;
 
@@ -855,7 +851,7 @@ async fn validate(definition: &str) -> Result<(), String> {
 
     let mut gremlin = Gremlin::for_dry_run(gremlin_def);
 
-    match gremlin.run().await {
+    match gremlin.run(None).await {
         Ok(0) => Ok(()),
         Ok(exit_code) => {
             let stage = gremlin.state.read_str("stage");
@@ -1025,9 +1021,6 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         .and_then(|s| s.to_str())
         .unwrap_or("gremlin");
 
-    // Generate a gremlin id, re-rolling if the state directory already exists.
-    let gremlin_id = generate_id(definition_name)?;
-
     // Resolve the definition's base_ref so the worktree branches from the
     // configured branch/tag rather than always from HEAD.
     let base_ref = gremlin_def.base_ref.clone();
@@ -1049,15 +1042,14 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         Some(base_ref_sha.as_str())
     };
 
-    // Create the gremlin: state dir, worktree, initial state.json.
-    let gremlin = Gremlin::create(
-        &gremlin_id,
+    // Create the gremlin: id generation, state dir, worktree, state.json,
+    // hermetic definition.yaml, and empty log — all owned by the library.
+    let gremlin = Gremlin::init(
+        definition_name,
         &definition_path,
-        None,
-        None,
-        None,
+        &gremlin_def,
         &stage_inputs,
-        false,
+        None,
         None,
         base_ref_opt,
         base_ref_sha_opt,
@@ -1080,22 +1072,10 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         gremlin.state.patch(&[], &outer);
     }
 
-    // Snapshot the fully expanded definition YAML into the state directory so
-    // the run is hermetic — all prompts, stage-definitions, and recipes are
-    // inlined, making the snapshot independent of the original project.
-    let hermetic = gremlin.state_dir.join("definition.yaml");
-    let yaml_str = serde_yaml::to_string(&gremlin_def.to_expanded_yaml())
-        .map_err(|e| format!("failed to serialize definition: {e}"))?;
-    fs::write(&hermetic, yaml_str).map_err(|e| format!("failed to snapshot definition: {e}"))?;
-
-    // Create an empty log file that the child will append to.
-    let log_path = gremlin.state_dir.join("log");
-    fs::write(&log_path, "").map_err(|e| format!("failed to create log: {e}"))?;
-
     // Spawn the child process.
-    spawn::spawn_gremlin(&gremlin_id, None)?;
+    spawn::spawn_gremlin(gremlin.id.as_str(), None)?;
 
-    println!("{gremlin_id}");
+    println!("{}", gremlin.id);
     Ok(())
 }
 
@@ -1164,28 +1144,6 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
     Ok(map)
 }
 
-/// Generate a "<definition_name>-<4-hex>" id that does not collide with an
-/// existing state directory.
-///
-/// The directory is atomically reserved via `create_dir` so concurrent
-/// launches cannot land on the same id.  If creation fails because the
-/// directory already exists, the loop re-rolls.
-fn generate_id(name: &str) -> Result<String, String> {
-    let state_root = config::state_root();
-    loop {
-        let hex = state::token_hex(2); // 4 hex chars
-        let id = format!("{name}-{hex}");
-        if state_root.join(&id).exists() {
-            continue;
-        }
-        match std::fs::create_dir(state_root.join(&id)) {
-            Ok(()) => return Ok(id),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("failed to create state dir: {e}")),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // _run
 // ---------------------------------------------------------------------------
@@ -1211,10 +1169,10 @@ async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> 
         }
     })?;
 
-    // Set the resume point when the caller provided one.
-    if let Some(stage) = resume_from {
-        gremlin.resume_from = Some(stage.to_string());
-    }
+    // When resuming, the run loop positions the definition cursor via goto.
+    // init_runtime handles loading from the hermetic snapshot and applying
+    // the resume position.
+    let resume = resume_from;
 
     // Write our PID — the launcher wrote its own, but we are the process
     // that actually runs the definition.
@@ -1239,7 +1197,7 @@ async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> 
 
     // Run every stage to completion.  The library's run loop handles
     // terminal-state bookkeeping regardless of outcome.
-    let exit_code = match gremlin.run().await {
+    let exit_code = match gremlin.run(resume).await {
         Ok(ec) => ec,
         Err(e) => {
             // A failure before the stage loop (bootstrap, definition loading)

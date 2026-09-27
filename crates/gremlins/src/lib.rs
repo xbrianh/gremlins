@@ -4,6 +4,7 @@ pub mod builders;
 pub mod clients;
 pub mod config;
 pub mod core;
+pub mod definition;
 pub mod executor;
 pub mod prelude;
 pub mod schemas;

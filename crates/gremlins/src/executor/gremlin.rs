@@ -6,7 +6,7 @@
 //! place where a gremlin's environment is assembled.
 //!
 //! Three constructors cover the lifecycles the Python executor had:
-//! [`Gremlin::create`] starts a fresh run in its own detached worktree,
+//! [`Gremlin::init`] starts a fresh run in its own detached worktree,
 //! [`Gremlin::from`] reconstructs a handle from a persisted state directory
 //! (for status checks, cleanup, and recovery), and [`Gremlin::fork`] spins off
 //! a child that inherits the parent's artifacts, environment, and — optionally
@@ -39,12 +39,11 @@ use crate::builders::definition::DefinitionBuilder;
 use crate::clients::client::Client;
 use crate::config;
 use crate::core::{discovery, env_file, git};
+use crate::definition::{GremlinDefinition, StaticDefinition};
 use crate::executor::bootstrap::parse_gremlins_command;
 use crate::executor::state::{self, StateData};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
-use crate::schemas::gremlin_definition::GremlinDefinition;
-use crate::stages::node::RunnableStage;
 
 /// State keys that describe *this* run's live execution and must never leak
 /// into a forked child, which starts its own from scratch.
@@ -132,18 +131,17 @@ pub struct Gremlin {
     /// The CLI `--client` value this run was launched with, replayed when the
     /// definition is finally loaded.
     pub client_override: Option<String>,
-    pub definition: GremlinDefinition,
+    pub definition: Box<dyn GremlinDefinition>,
     pub registry: Box<dyn ArtifactRegistry>,
     pub worktree: Option<PathBuf>,
     pub worktree_parent: Option<PathBuf>,
     pub project_root: PathBuf,
     pub base_ref_sha: String,
     pub base_ref: String,
-    pub resume_from: Option<String>,
     pub state: StateData,
     pub env: HashMap<String, String>,
     pub client: Client,
-    pub loop_stack: Vec<(String, u32)>,
+    pub loop_iter: String,
     /// The CLI/source values this run was launched with, keyed by source name.
     ///
     /// Bootstrap's `bind_artifact` DSL reads from here: a source key that is
@@ -156,39 +154,55 @@ pub struct Gremlin {
 }
 
 impl Gremlin {
-    /// Start a fresh run of `definition_path` under the id `id`.
+    /// Start a fresh run: generate an id, reserve the state directory, create
+    /// a detached worktree, write `state.json` and a hermetic `definition.yaml`,
+    /// and return a handle ready for [`Gremlin::run`].
     ///
-    /// The worktree is created before anything is persisted, so a launch that
-    /// fails part-way removes the checkout it made rather than leaving it
-    /// registered behind a state directory nobody can use. The checkout is
-    /// branched from `HEAD`, and the commit it lands on is recorded as
-    /// `worktree_base` in `state.json` and returned through
-    /// [`Gremlin::base_ref_sha`].
+    /// This is the single library-owned creation path — the CLI calls it and
+    /// then spawns the child; nothing else is needed to bootstrap a gremlin.
     ///
-    /// The definition YAML is *not* read here: the handle carries the path and
-    /// the `--client` override, and [`Gremlin::init_runtime`] loads them the
-    /// first time [`Gremlin::run`] is called.
+    /// `definition_name` seeds the generated id (`<name>-<4-hex>`).
+    /// `definition` is the already-loaded [`GremlinDefinition`] (the CLI parses
+    /// it for arg validation); it is serialized into the hermetic snapshot but
+    /// the handle itself carries only a stub — [`Gremlin::init_runtime`] loads
+    /// the real definition when [`Gremlin::run`] is called.
     ///
     /// `base_ref_sha`, when non-empty, is the commit the worktree branches
-    /// from. Omitting it (or passing an empty string) falls back to`HEAD`.
+    /// from. Omitting it (or passing an empty string) falls back to `HEAD`.
     #[allow(clippy::too_many_arguments)]
-    pub fn create(
-        id: &str,
+    pub fn init(
+        definition_name: &str,
         definition_path: &Path,
+        _definition: &StaticDefinition,
+        stage_inputs: &HashMap<String, String>,
         client_override: Option<&str>,
         worktree_parent: Option<&Path>,
-        resume_from: Option<&str>,
-        stage_inputs: &HashMap<String, String>,
-        fetch_worktree: bool,
-        worktree_dir: Option<&Path>,
         base_ref: Option<&str>,
         base_ref_sha: Option<&str>,
     ) -> Result<Gremlin, RunError> {
-        let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
+        // Validate definition_name as a safe gremlin-id component before
+        // touching the filesystem. The hex suffix only adds alphanumeric
+        // chars, so a valid name guarantees a valid candidate.
+        validate_gremlin_id(definition_name).map_err(RunError::Message)?;
 
-        let state_dir = config::state_root().join(gremlin_id.as_str());
+        // 1. Generate a gremlin id with collision-avoidance.
+        let state_root = config::state_root();
+        let gremlin_id = loop {
+            let hex = state::token_hex(2);
+            let candidate = format!("{definition_name}-{hex}");
+            match std::fs::create_dir(state_root.join(&candidate)) {
+                Ok(()) => break GremlinId(candidate),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(RunError::Message(format!(
+                        "failed to create state dir: {e}"
+                    )))
+                }
+            }
+        };
+
+        let state_dir = state_root.join(gremlin_id.as_str());
         let artifact_dir = state_dir.join("artifacts");
-        std::fs::create_dir_all(&state_dir)?;
         std::fs::create_dir_all(&artifact_dir)?;
 
         let definition_path = definition_path
@@ -197,27 +211,19 @@ impl Gremlin {
 
         let project_root = project_root_for(&definition_path);
 
-        // A pre-set worktree means the caller owns the checkout; otherwise the
-        // project has to be a repository before we try to branch one off it.
-        if worktree_dir.is_none() && !git::in_git_repo(Some(&project_root)) {
+        // 2. The project must be a git repository before we branch a worktree.
+        if !git::in_git_repo(Some(&project_root)) {
             return Err(RunError::Git {
                 message: format!("{project_root:?} is not a git repository"),
             });
         }
 
-        // The checkout is branched from the provided base ref when given,
-        // otherwise from `HEAD`; the commit it lands on is the base recorded
-        // below.
-        let mut worktree = worktree_dir.map(Path::to_path_buf);
+        // 3. Create the detached-HEAD worktree.
+        let mut worktree: Option<PathBuf> = None;
         let mut created_worktree: Option<String> = None;
         let branch_ref = base_ref_sha.filter(|sha| !sha.is_empty()).unwrap_or("HEAD");
-        if worktree.is_none() && !project_root.as_os_str().is_empty() {
-            match git::setup_detached_worktree(
-                &project_root,
-                branch_ref,
-                fetch_worktree,
-                worktree_parent,
-            ) {
+        if !project_root.as_os_str().is_empty() {
+            match git::setup_detached_worktree(&project_root, branch_ref, false, worktree_parent) {
                 Ok(path) => {
                     created_worktree = Some(path.clone());
                     worktree = Some(PathBuf::from(path));
@@ -230,38 +236,162 @@ impl Gremlin {
             }
         }
 
-        // The checkout is the source of truth: the commit the worktree landed
-        // on is the base, or empty when there is no worktree.
         let base_ref_sha = worktree
             .as_deref()
             .map(|path| git::head_sha(Some(path)))
             .unwrap_or_default();
+        let base_ref = base_ref.unwrap_or("");
 
-        let created = write_launch_state(
-            gremlin_id,
-            &state_dir,
-            &artifact_dir,
-            &definition_path,
-            client_override,
-            &project_root,
-            worktree,
-            worktree_parent,
-            resume_from,
-            stage_inputs,
-            base_ref_sha,
-            base_ref.unwrap_or(""),
-        );
-        match created {
-            Ok(gremlin) => Ok(gremlin),
-            Err(error) => {
-                // The worktree is ours only once `setup_detached_worktree` gave
-                // us its path; if anything after that failed, unregister it.
-                if let Some(path) = created_worktree {
-                    git::remove_worktree(&project_root, &path);
-                }
-                Err(error)
+        // 4. Write state.json (the body of the old write_launch_state).
+        let build_handle = |project_root: &Path| -> Result<Gremlin, RunError> {
+            let workdir = worktree
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let definition_path_str = definition_path.to_string_lossy().into_owned();
+
+            let mut state = StateData::new(Some(gremlin_id.as_str().to_string()));
+            let inputs: Map<String, Value> = stage_inputs
+                .iter()
+                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                .collect();
+
+            let existing = state::read_state_json(Some(&state_dir.join("state.json")));
+            let mut initial = existing;
+            initial.insert("id".to_string(), Value::String(gremlin_id.to_string()));
+            if !initial.contains_key("kind") {
+                initial.insert("kind".to_string(), Value::String(String::new()));
             }
-        }
+            initial.insert(
+                "project_root".to_string(),
+                Value::String(project_root.to_string_lossy().into_owned()),
+            );
+            initial.insert("workdir".to_string(), Value::String(workdir.clone()));
+            initial.insert(
+                "setup_kind".to_string(),
+                Value::String("worktree-detached".to_string()),
+            );
+            initial.insert(
+                "worktree_base".to_string(),
+                Value::String(base_ref_sha.clone()),
+            );
+            if !base_ref.is_empty() {
+                initial.insert("base_ref".to_string(), Value::String(base_ref.to_string()));
+            }
+            initial.insert("status".to_string(), Value::String("running".to_string()));
+            if !initial.contains_key("started_at") {
+                initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
+            }
+            if !initial.contains_key("description") {
+                initial.insert("description".to_string(), Value::String(String::new()));
+            }
+            if !initial.contains_key("parent_id") {
+                initial.insert("parent_id".to_string(), Value::String(String::new()));
+            }
+            if !initial.contains_key("definition_args") {
+                initial.insert("definition_args".to_string(), Value::Array(Vec::new()));
+            }
+            initial.insert("client".to_string(), Value::String(String::new()));
+            initial.insert(
+                "definition_path".to_string(),
+                Value::String(definition_path_str.clone()),
+            );
+            initial.insert("stage".to_string(), Value::String("starting".to_string()));
+            initial.insert("pid".to_string(), Value::from(std::process::id() as i64));
+            initial.insert("stage_inputs".to_string(), Value::Object(inputs));
+            if !initial.contains_key("attempt") {
+                initial.insert("attempt".to_string(), Value::String(String::new()));
+            }
+            if !initial.contains_key("group_name") {
+                initial.insert("group_name".to_string(), Value::String(String::new()));
+            }
+            if !initial.contains_key("child_key") {
+                initial.insert("child_key".to_string(), Value::String(String::new()));
+            }
+            initial.insert("exit_code".to_string(), Value::Null);
+            if !initial.contains_key("metadata") {
+                initial.insert("metadata".to_string(), Value::Object(Map::new()));
+            }
+            state.persist(&state_dir, &initial)?;
+
+            let mut patch = Map::new();
+            patch.insert("workdir".to_string(), Value::String(workdir));
+            patch.insert(
+                "worktree_base".to_string(),
+                Value::String(base_ref_sha.clone()),
+            );
+            patch.insert(
+                "setup_kind".to_string(),
+                Value::String("worktree-detached".to_string()),
+            );
+            state.patch(&[], &patch);
+
+            stage_overlay(project_root, &state_dir);
+
+            // Write the hermetic definition.yaml snapshot now, before we
+            // return the handle, so the spawned child always sees the
+            // definition as it was at launch time — no TOCTTOU window.
+            let hermetic = state_dir.join("definition.yaml");
+            let yaml_bytes = _definition
+                .serialize()
+                .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
+            std::fs::write(&hermetic, &yaml_bytes).map_err(|e| {
+                RunError::Message(format!("failed to write hermetic definition: {e}"))
+            })?;
+            let hermetic = hermetic.canonicalize().unwrap_or(hermetic);
+
+            // Point the stub at the hermetic snapshot so init_runtime
+            // loads from it rather than reparsing the original source.
+            let mut stub = StaticDefinition::stub();
+            stub.path = hermetic.clone();
+            let stub: Box<dyn GremlinDefinition> = Box::new(stub);
+
+            Ok(Gremlin {
+                id: gremlin_id,
+                state_dir: state_dir.to_path_buf(),
+                artifact_dir: artifact_dir.to_path_buf(),
+                definition_path: Some(hermetic),
+                client_override: client_override.map(String::from),
+                definition: stub,
+                registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir.to_path_buf())),
+                worktree,
+                worktree_parent: worktree_parent.map(Path::to_path_buf),
+                project_root: project_root.to_path_buf(),
+                base_ref_sha,
+                base_ref: base_ref.to_string(),
+                state,
+                env: HashMap::new(),
+                client: Client::parse("cmd:true")
+                    .expect("'cmd:true' is always a valid client spec"),
+                loop_iter: "1".to_string(),
+                stage_inputs: stage_inputs.clone(),
+                dry_run: false,
+                definition_is_expanded: true,
+            })
+        };
+
+        let cleanup_worktree = || {
+            if let Some(ref path) = created_worktree {
+                git::remove_worktree(&project_root, path);
+            }
+        };
+
+        let gremlin = match build_handle(&project_root) {
+            Ok(g) => g,
+            Err(error) => {
+                cleanup_worktree();
+                return Err(error);
+            }
+        };
+
+        // 5. Create an empty log file.
+        let log_path = gremlin.state_dir.join("log");
+        std::fs::write(&log_path, "").map_err(|e| {
+            cleanup_worktree();
+            RunError::Message(format!("failed to create log: {e}"))
+        })?;
+
+        Ok(gremlin)
     }
 
     /// Reconstruct a handle from a persisted state directory, without touching
@@ -362,10 +492,11 @@ impl Gremlin {
 
         // The stub keeps the resolved path so `definition.path` still names
         // the definition the run used, even though its stages are not loaded.
-        let mut definition = GremlinDefinition::stub();
+        let mut stub = StaticDefinition::stub();
         if let Some(path) = &definition_path {
-            definition.path = path.clone();
+            stub.path = path.clone();
         }
+        let definition: Box<dyn GremlinDefinition> = Box::new(stub);
 
         Ok(Gremlin {
             id: gremlin_id,
@@ -380,11 +511,10 @@ impl Gremlin {
             project_root,
             base_ref_sha,
             base_ref,
-            resume_from: None,
             state,
             env: HashMap::new(),
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
-            loop_stack: Vec::new(),
+            loop_iter: "1".to_string(),
             stage_inputs,
             dry_run: false,
             definition_is_expanded,
@@ -397,7 +527,7 @@ impl Gremlin {
     /// The registry is an in-memory [`DryRunArtifactRegistry`] seeded with
     /// implicit and bootstrap-declared artifacts. No filesystem access, no
     /// shell commands, no model calls.
-    pub fn for_dry_run(definition: GremlinDefinition) -> Gremlin {
+    pub fn for_dry_run(definition: StaticDefinition) -> Gremlin {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         let state_dir = tmp.path().join("state");
@@ -409,8 +539,8 @@ impl Gremlin {
         let registry = DryRunArtifactRegistry::seeded(seed_keys);
 
         // Snapshot base_ref before moving definition.
-        let base_ref = definition.base_ref.clone();
-        let definition_path = definition.path.clone();
+        let base_ref = definition.base_ref().to_string();
+        let definition_path = definition.path().to_path_buf();
 
         // Write a minimal state.json so the run loop's state operations don't crash.
         let mut state_data = StateData::new(Some("dry-run".to_string()));
@@ -448,18 +578,17 @@ impl Gremlin {
             artifact_dir: tmp_path.join("artifacts"),
             definition_path: Some(definition_path),
             client_override: None,
-            definition,
+            definition: Box::new(definition),
             registry: Box::new(registry),
             worktree: None,
             worktree_parent: None,
             project_root: PathBuf::from("."),
             base_ref_sha: String::new(),
             base_ref,
-            resume_from: None,
             state: state_data,
             env: HashMap::new(),
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
-            loop_stack: Vec::new(),
+            loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: true,
             definition_is_expanded: false,
@@ -480,7 +609,13 @@ impl Gremlin {
     /// handle a stub, and a retry — `resume` re-entering the run loop after a
     /// transient bootstrap failure — starts the whole sequence over instead of
     /// finding a half-built runtime it believes is finished.
-    pub(crate) async fn init_runtime(&mut self) -> Result<(), RunError> {
+    pub(crate) async fn init_runtime(&mut self, resume_from: Option<&str>) -> Result<(), RunError> {
+        // Apply goto before checking is_stub — a resume must position the
+        // cursor even when the definition is already loaded (e.g. test
+        // helpers that pre-seed a real definition).
+        if let Some(name) = resume_from {
+            self.definition.goto(name);
+        }
         if !self.definition.is_stub() {
             return Ok(());
         }
@@ -491,13 +626,24 @@ impl Gremlin {
             )));
         };
 
-        let definition = if self.definition_is_expanded {
+        let mut definition = if self.definition_is_expanded {
             DefinitionBuilder::from_expanded_yaml(&definition_path, self.client_override.as_deref())
                 .map_err(|error| RunError::Message(error.to_string()))?
         } else {
             DefinitionBuilder::from_yaml(&definition_path, self.client_override.as_deref())
                 .map_err(|error| RunError::Message(error.to_string()))?
         };
+
+        // Write the hermetic definition.yaml snapshot so every entry point
+        // that calls run() gets one — resume, fork, and fresh launch alike.
+        let hermetic = self.state_dir.join("definition.yaml");
+        if !hermetic.exists() {
+            let yaml_bytes = definition
+                .serialize()
+                .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
+            std::fs::write(&hermetic, &yaml_bytes)
+                .map_err(|e| RunError::Message(format!("failed to snapshot definition: {e}")))?;
+        }
 
         // An unusable client must not abort a run: the state directory, the
         // worktree and the artifacts all have to exist before any stage can
@@ -537,7 +683,10 @@ impl Gremlin {
 
         // Nothing below this line can fail, so this is the commit point.
         let default_client = definition.default_client.clone();
-        self.definition = definition;
+        if let Some(name) = resume_from {
+            definition.goto(name);
+        }
+        self.definition = Box::new(definition);
         self.client = client;
         self.base_ref = base_ref;
         self.registry = registry;
@@ -567,6 +716,11 @@ impl Gremlin {
     ///
     /// `child_definition_path` is the branch's hermetic `definition.yaml`; pass
     /// `None` to inherit the parent's persisted `definition_path`.
+    ///
+    /// When `effective_client` is `Some`, the child's provider is mutated via
+    /// [`GremlinDefinition::with_client`] so `default_client()` reflects
+    /// the override.
+    #[allow(clippy::too_many_arguments)]
     pub async fn fork(
         &self,
         child_id: &str,
@@ -574,73 +728,26 @@ impl Gremlin {
         group_name: &str,
         child_key: &str,
         child_definition_path: Option<&Path>,
-    ) -> Result<Gremlin, RunError> {
-        let definition = match child_definition_path {
-            Some(path) => {
-                DefinitionBuilder::from_yaml(path, None).unwrap_or_else(|_| self.definition.clone())
-            }
-            None => self.definition.clone(),
-        };
-        self.fork_child(
-            child_id,
-            parent_id,
-            group_name,
-            child_key,
-            child_definition_path,
-            definition,
-        )
-        .await
-    }
-
-    /// Fork a child gremlin that runs only the given `stages`.
-    ///
-    /// Like [`Gremlin::fork`], but instead of loading a child definition from
-    /// disk, the child inherits the parent's definition metadata and runs only
-    /// the provided stage list. Used by the parallel executor so each child
-    /// runs exactly one stage without needing a separate definition file.
-    pub async fn fork_with_stages(
-        &self,
-        child_id: &str,
-        parent_id: &str,
-        group_name: &str,
-        child_key: &str,
-        stages: Vec<RunnableStage>,
-    ) -> Result<Gremlin, RunError> {
-        log::debug!(
-            "fork_with_stages: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}, stage_count={}",
-            stages.len()
-        );
-        let mut definition = self.definition.clone_with_stages(stages);
-        // launch_cmds and cli_out belong to the parent's initial launch;
-        // children inherit the artifacts via the registry copy in `fork_child`.
-        // cmds (worktree setup) still runs — each child has its own worktree.
-        definition.bootstrap.launch_cmds.clear();
-        definition.bootstrap.cli_out.clear();
-        self.fork_child(child_id, parent_id, group_name, child_key, None, definition)
-            .await
-    }
-
-    /// The shared body of [`Gremlin::fork`] and [`Gremlin::fork_with_stages`].
-    ///
-    /// Owns the whole fork sequence — id validation, child directory
-    /// derivation and creation, artifact copy, worktree branching, registry
-    /// rebuild, child-state seeding, and the state/log write — for a child
-    /// whose `definition` the caller has already resolved. `child_definition_path`
-    /// is the branch's hermetic `definition.yaml`, recorded in the child state
-    /// when present and otherwise inherited from the parent's persisted path.
-    async fn fork_child(
-        &self,
-        child_id: &str,
-        parent_id: &str,
-        group_name: &str,
-        child_key: &str,
-        child_definition_path: Option<&Path>,
-        definition: GremlinDefinition,
+        child_provider: Box<dyn GremlinDefinition>,
+        effective_client: Option<&str>,
     ) -> Result<Gremlin, RunError> {
         log::debug!(
             "fork: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}"
         );
         let child_gremlin_id = validate_gremlin_id(child_id).map_err(RunError::Message)?;
+
+        // Allow effective_client mutation via with_client.
+        let mut child_provider = child_provider;
+
+        let client = if let Some(client_spec) = effective_client {
+            let client = Client::parse(client_spec).map_err(|e| {
+                RunError::Message(format!("invalid client spec '{client_spec}': {e}"))
+            })?;
+            child_provider.with_client(client_spec);
+            client
+        } else {
+            self.client.clone()
+        };
 
         let child_state_dir = self
             .state_dir
@@ -757,8 +864,8 @@ impl Gremlin {
 
         log::debug!(
             "fork: child {child_id} ready (provider={}, model={} — shares client with parent {parent_id})",
-            self.client.provider(),
-            self.client.model(),
+            client.provider(),
+            client.model(),
         );
 
         Ok(Gremlin {
@@ -769,18 +876,17 @@ impl Gremlin {
                 .map(Path::to_path_buf)
                 .or_else(|| self.definition_path.clone()),
             client_override: self.client_override.clone(),
-            definition,
+            definition: child_provider,
             registry,
             worktree: child_worktree,
             worktree_parent: self.worktree_parent.clone(),
             project_root: self.project_root.clone(),
             base_ref_sha: child_worktree_base,
             base_ref: self.base_ref.clone(),
-            resume_from: None,
             state: StateData::new(Some(child_id.to_string())),
             env: self.env.clone(),
-            client: self.client.clone(),
-            loop_stack: Vec::new(),
+            client,
+            loop_iter: "1".to_string(),
             // A child inherits the parent's source values: its bootstrap binds
             // the same inputs the parent launched with.
             stage_inputs: self.stage_inputs.clone(),
@@ -877,10 +983,10 @@ impl Gremlin {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
-    /// The framework substitution variables for `stage`.
-    pub fn framework_subs(&self, stage: &RunnableStage) -> HashMap<String, String> {
+    /// The framework substitution variables for a stage.
+    pub fn framework_subs(&self, stage_name: &str) -> HashMap<String, String> {
         framework_subs(
-            stage,
+            stage_name,
             &self.cwd().to_string_lossy(),
             self.client.model(),
             &self.base_ref,
@@ -921,155 +1027,6 @@ fn project_root_for(definition_path: &Path) -> PathBuf {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// The fallible remainder of [`Gremlin::create`], after the worktree exists.
-///
-/// Writes the initial `state.json`, stages the overlay, and returns a handle
-/// whose runtime fields are stubs. Split out so the caller can unregister the
-/// worktree if any of it fails.
-///
-/// The `client` field is written blank: the label comes from the definition's
-/// `default_client`, which is only known once [`Gremlin::init_runtime`] has
-/// loaded the YAML, and that is the patch which fills it in.
-#[allow(clippy::too_many_arguments)]
-fn write_launch_state(
-    gremlin_id: GremlinId,
-    state_dir: &Path,
-    artifact_dir: &Path,
-    definition_path: &Path,
-    client_override: Option<&str>,
-    project_root: &Path,
-    worktree: Option<PathBuf>,
-    worktree_parent: Option<&Path>,
-    resume_from: Option<&str>,
-    stage_inputs: &HashMap<String, String>,
-    base_ref_sha: String,
-    base_ref: &str,
-) -> Result<Gremlin, RunError> {
-    let workdir = worktree
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let definition_path_str = definition_path.to_string_lossy().into_owned();
-
-    let mut state = StateData::new(Some(gremlin_id.as_str().to_string()));
-    let inputs: Map<String, Value> = stage_inputs
-        .iter()
-        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
-        .collect();
-
-    // Merge with existing state.json if present (the Python launcher may have
-    // already written initial state before spawning the subprocess).
-    let existing = state::read_state_json(Some(&state_dir.join("state.json")));
-    let mut initial = existing;
-    // Always set these fields from the Rust launch context.
-    initial.insert("id".to_string(), Value::String(gremlin_id.to_string()));
-    if !initial.contains_key("kind") {
-        initial.insert("kind".to_string(), Value::String(String::new()));
-    }
-    initial.insert(
-        "project_root".to_string(),
-        Value::String(project_root.to_string_lossy().into_owned()),
-    );
-    initial.insert("workdir".to_string(), Value::String(workdir.clone()));
-    initial.insert(
-        "setup_kind".to_string(),
-        Value::String("worktree-detached".to_string()),
-    );
-    initial.insert(
-        "worktree_base".to_string(),
-        Value::String(base_ref_sha.clone()),
-    );
-    if !base_ref.is_empty() {
-        initial.insert("base_ref".to_string(), Value::String(base_ref.to_string()));
-    }
-    initial.insert("status".to_string(), Value::String("running".to_string()));
-    if !initial.contains_key("started_at") {
-        initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
-    }
-    if !initial.contains_key("description") {
-        initial.insert("description".to_string(), Value::String(String::new()));
-    }
-    if !initial.contains_key("parent_id") {
-        initial.insert("parent_id".to_string(), Value::String(String::new()));
-    }
-    if !initial.contains_key("definition_args") {
-        initial.insert("definition_args".to_string(), Value::Array(Vec::new()));
-    }
-    // Left blank until `init_runtime` loads the definition and patches it.
-    initial.insert("client".to_string(), Value::String(String::new()));
-    initial.insert(
-        "definition_path".to_string(),
-        Value::String(definition_path_str.clone()),
-    );
-    initial.insert("stage".to_string(), Value::String("starting".to_string()));
-    // The process running the definition is the one a later `gremlins stop`
-    // must signal. Record our own pid rather than clobbering the launcher's
-    // value with null (which left live gremlins unstoppable).
-    initial.insert("pid".to_string(), Value::from(std::process::id() as i64));
-    initial.insert("stage_inputs".to_string(), Value::Object(inputs));
-    if !initial.contains_key("attempt") {
-        initial.insert("attempt".to_string(), Value::String(String::new()));
-    }
-    if !initial.contains_key("group_name") {
-        initial.insert("group_name".to_string(), Value::String(String::new()));
-    }
-    if !initial.contains_key("child_key") {
-        initial.insert("child_key".to_string(), Value::String(String::new()));
-    }
-    initial.insert("exit_code".to_string(), Value::Null);
-    if !initial.contains_key("metadata") {
-        initial.insert("metadata".to_string(), Value::Object(Map::new()));
-    }
-    state.persist(state_dir, &initial)?;
-
-    // Re-assert the worktree fields now that the checkout exists, matching the
-    // patch the Python initializer applied after `setup_workdir`.
-    let mut patch = Map::new();
-    patch.insert("workdir".to_string(), Value::String(workdir));
-    patch.insert(
-        "worktree_base".to_string(),
-        Value::String(base_ref_sha.clone()),
-    );
-    patch.insert(
-        "setup_kind".to_string(),
-        Value::String("worktree-detached".to_string()),
-    );
-    state.patch(&[], &patch);
-
-    stage_overlay(project_root, state_dir);
-
-    // The stub is not empty: it carries the resolved definition path so that a
-    // pre-init handle reports the same `definition.path` as one built by
-    // [`Gremlin::from`]. `init_runtime` replaces the stub wholesale.
-    let definition = GremlinDefinition {
-        path: definition_path.to_path_buf(),
-        ..GremlinDefinition::stub()
-    };
-
-    Ok(Gremlin {
-        id: gremlin_id,
-        state_dir: state_dir.to_path_buf(),
-        artifact_dir: artifact_dir.to_path_buf(),
-        definition_path: Some(definition_path.to_path_buf()),
-        client_override: client_override.map(String::from),
-        definition,
-        registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir.to_path_buf())),
-        worktree,
-        worktree_parent: worktree_parent.map(Path::to_path_buf),
-        project_root: project_root.to_path_buf(),
-        base_ref_sha,
-        base_ref: base_ref.to_string(),
-        resume_from: resume_from.map(String::from),
-        state,
-        env: HashMap::new(),
-        client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
-        loop_stack: Vec::new(),
-        stage_inputs: stage_inputs.clone(),
-        dry_run: false,
-        definition_is_expanded: false,
-    })
 }
 
 /// Register each stage input that is not a bootstrap source as an artifact.
@@ -1217,13 +1174,13 @@ fn bootstrap_script(bootstrap: &Bootstrap) -> Option<&str> {
 
 /// Runtime-owned substitution vars. Stages must not assemble these themselves.
 pub fn framework_subs(
-    stage: &RunnableStage,
+    stage_name: &str,
     cwd: &str,
     model: &str,
     base_ref: &str,
 ) -> HashMap<String, String> {
     HashMap::from([
-        ("name".to_string(), stage.name().to_string()),
+        ("name".to_string(), stage_name.to_string()),
         ("model".to_string(), model.to_string()),
         ("cwd".to_string(), cwd.to_string()),
         ("base_ref".to_string(), base_ref.to_string()),
@@ -1317,7 +1274,7 @@ pub fn resolve_env(
 
 /// Collect artifact keys the bootstrap declares so the dry-run registry can
 /// seed them — stages that consume them will find them.
-fn bootstrap_artifact_keys(definition: &GremlinDefinition) -> Vec<String> {
+fn bootstrap_artifact_keys(definition: &StaticDefinition) -> Vec<String> {
     let mut keys: Vec<String> = definition
         .bootstrap
         .cli_out
@@ -1543,18 +1500,7 @@ mod tests {
 
     #[test]
     fn framework_subs_carries_the_four_vars() {
-        let stage = RunnableStage::Exec {
-            stage: crate::stages::exec::Exec {
-                name: "plan".to_string(),
-                options: HashMap::new(),
-                interpolation_map: HashMap::new(),
-                bind_map: HashMap::new(),
-            },
-            skip_if_exists: String::new(),
-            client: None,
-        };
-
-        let subs = framework_subs(&stage, "/w", "xai:grok-4", "main");
+        let subs = framework_subs("plan", "/w", "xai:grok-4", "main");
         assert_eq!(subs.len(), 4);
         assert_eq!(subs["name"], "plan");
         assert_eq!(subs["cwd"], "/w");
@@ -1577,14 +1523,13 @@ mod tests {
             return;
         }
 
-        let mut gremlin = Gremlin::create(
+        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let mut gremlin = Gremlin::init(
             "gr-test",
             fx.definition_path(),
-            None,
-            None,
-            None,
+            &definition,
             &HashMap::new(),
-            false,
+            None,
             None,
             None,
             None,
@@ -1594,10 +1539,10 @@ mod tests {
         let worktree = gremlin.worktree.clone().expect("a worktree");
         assert!(worktree.is_dir(), "{worktree:?}");
 
-        let state_file = fx.join("state").join("gr-test").join("state.json");
+        let state_file = gremlin.state_dir.join("state.json");
         assert!(state_file.is_file(), "{state_file:?}");
         let raw = read_state(&state_file);
-        assert_eq!(raw["id"], "gr-test");
+        assert_eq!(raw["id"], gremlin.id.as_str());
         assert_eq!(raw["status"], "running");
         assert_eq!(raw["pid"].as_i64().unwrap(), std::process::id() as i64);
         assert!(raw["definition_path"]
@@ -1618,17 +1563,17 @@ mod tests {
         assert_eq!(base, gremlin.base_ref_sha);
 
         // Lazy init is what fills in the runtime fields.
-        gremlin.init_runtime().await.unwrap();
-        assert_eq!(gremlin.definition.name, "demo");
-        assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], "gr-test");
+        gremlin.init_runtime(None).await.unwrap();
+        assert_eq!(gremlin.definition.name(), "demo");
+        assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], gremlin.id.as_str());
         assert!(gremlin.artifact_dir.ends_with("artifacts"));
         let raw = read_state(&state_file);
         assert_eq!(raw["client"], "cmd:true");
 
         // Idempotent: a second call is a no-op, not a re-parse.
-        let path_before = gremlin.definition.path.clone();
-        gremlin.init_runtime().await.unwrap();
-        assert_eq!(gremlin.definition.path, path_before);
+        let path_before = gremlin.definition.path().to_path_buf();
+        gremlin.init_runtime(None).await.unwrap();
+        assert_eq!(gremlin.definition.path(), path_before);
     }
 
     #[tokio::test]
@@ -1639,20 +1584,20 @@ mod tests {
             return;
         }
 
-        let mut launched = Gremlin::create(
+        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let mut launched = Gremlin::init(
             "gr-test",
             fx.definition_path(),
-            None,
-            None,
-            None,
+            &definition,
             &HashMap::new(),
-            false,
+            None,
             None,
             None,
             None,
         )
         .unwrap();
-        let mut opened = Gremlin::from("gr-test").unwrap();
+        let id = launched.id.to_string();
+        let mut opened = Gremlin::from(&id).unwrap();
 
         assert_eq!(opened.id, launched.id);
         assert_eq!(opened.state_dir, launched.state_dir);
@@ -1660,10 +1605,10 @@ mod tests {
         assert_eq!(opened.worktree, launched.worktree);
         assert_eq!(opened.definition_path, launched.definition_path);
 
-        launched.init_runtime().await.unwrap();
-        opened.init_runtime().await.unwrap();
-        assert_eq!(opened.definition.name, launched.definition.name);
-        assert_eq!(opened.env["GREMLINS_GREMLIN_ID"], "gr-test");
+        launched.init_runtime(None).await.unwrap();
+        opened.init_runtime(None).await.unwrap();
+        assert_eq!(opened.definition.name(), launched.definition.name());
+        assert_eq!(opened.env["GREMLINS_GREMLIN_ID"], id);
     }
 
     #[test]
@@ -1674,31 +1619,31 @@ mod tests {
             return;
         }
 
-        let created = Gremlin::create(
+        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let created = Gremlin::init(
             "gr-test",
             fx.definition_path(),
-            None,
-            None,
-            None,
+            &definition,
             &HashMap::new(),
-            false,
+            None,
             None,
             None,
             None,
         )
         .unwrap();
+        let id = created.id.to_string();
         let worktree = created.worktree.clone().unwrap();
         drop(created);
 
         // A handle reconstructed purely for cleanup: no `run`, so the
         // definition was never loaded, and `clean` must not need it.
-        let handle = Gremlin::from("gr-test").unwrap();
+        let handle = Gremlin::from(&id).unwrap();
         assert!(handle.definition.is_stub());
         handle.clean(true);
 
-        assert!(!fx.join("state").join("gr-test").exists());
+        assert!(!fx.join("state").join(&id).exists());
         assert!(!worktree.exists(), "worktree should be gone");
-        assert!(!fx.join("scratch").join("gr-test").exists());
+        assert!(!fx.join("scratch").join(&id).exists());
     }
 
     #[tokio::test]
@@ -1713,27 +1658,28 @@ mod tests {
             return;
         }
 
-        Gremlin::create(
+        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let launched = Gremlin::init(
             "gr-test",
             fx.definition_path(),
-            None,
-            None,
-            None,
+            &definition,
             &HashMap::new(),
-            false,
+            None,
             None,
             None,
             None,
         )
         .unwrap();
+        let id = launched.id.to_string();
+        drop(launched);
 
-        let mut handle = Gremlin::from("gr-test").unwrap();
+        let mut handle = Gremlin::from(&id).unwrap();
         assert!(handle.definition.is_stub());
 
         // The resume path: reconstruct cheaply, then drive the run. The
         // definition must have been loaded by the time `run` returns.
-        assert_eq!(handle.run().await.unwrap(), 0);
-        assert_eq!(handle.definition.name, "demo");
+        assert_eq!(handle.run(None).await.unwrap(), 0);
+        assert_eq!(handle.definition.name(), "demo");
     }
 
     #[tokio::test]
@@ -1744,14 +1690,13 @@ mod tests {
             return;
         }
 
-        let parent = Gremlin::create(
+        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let parent = Gremlin::init(
             "gr-test",
             fx.definition_path(),
-            None,
-            None,
-            None,
+            &definition,
             &HashMap::new(),
-            false,
+            None,
             None,
             None,
             None,
@@ -1760,13 +1705,18 @@ mod tests {
 
         std::fs::write(parent.artifact_dir.join("note.txt"), "hello").unwrap();
 
-        let child = parent.fork("gr-child", "", "", "", None).await.unwrap();
+        let child_def = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
+        let child = parent
+            .fork("gr-child", "", "", "", None, child_provider, None)
+            .await
+            .unwrap();
 
         assert_ne!(child.artifact_dir, parent.artifact_dir);
         assert!(child.artifact_dir.ends_with("artifacts"));
         assert!(child.artifact_dir.join("note.txt").is_file());
 
-        let child_state = fx.join("state").join("gr-child").join("state.json");
+        let child_state = child.state_dir.join("state.json");
         let raw = read_state(&child_state);
         assert_eq!(raw["id"], "gr-child");
         assert_eq!(raw["status"], "running");
@@ -1798,14 +1748,13 @@ mod tests {
             return;
         }
 
-        let parent = Gremlin::create(
+        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let parent = Gremlin::init(
             "gr-test",
             fx.definition_path(),
-            None,
-            None,
-            None,
+            &definition,
             &HashMap::new(),
-            false,
+            None,
             None,
             None,
             None,
@@ -1815,9 +1764,24 @@ mod tests {
         // Mirrors the reference implementation: an empty argument falls
         // back to whatever the parent state carries (usually the parent's
         // own parent, or nothing at all), never to the parent's own id.
-        parent.fork("gr-a", "", "", "", None).await.unwrap();
+        let child_def_a = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let child_provider_a: Box<dyn GremlinDefinition> = Box::new(child_def_a);
         parent
-            .fork("gr-b", "gr-root", "group", "key", None)
+            .fork("gr-a", "", "", "", None, child_provider_a, None)
+            .await
+            .unwrap();
+        let child_def_b = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let child_provider_b: Box<dyn GremlinDefinition> = Box::new(child_def_b);
+        parent
+            .fork(
+                "gr-b",
+                "gr-root",
+                "group",
+                "key",
+                None,
+                child_provider_b,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1874,17 +1838,16 @@ mod tests {
             artifact_dir,
             definition_path: None,
             client_override: None,
-            definition: GremlinDefinition::stub(),
+            definition: Box::new(StaticDefinition::stub()),
             worktree,
             worktree_parent: None,
             project_root,
             base_ref_sha: String::new(),
             base_ref: String::new(),
-            resume_from: None,
             state: StateData::new(Some(id.to_string())),
             env: HashMap::new(),
             client: Client::parse("cmd:true").unwrap(),
-            loop_stack: Vec::new(),
+            loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
             definition_is_expanded: false,
@@ -2144,16 +2107,22 @@ stages:
         assert_eq!(gremlin.project_root, project_root);
         assert!(gremlin.definition.is_stub());
 
-        gremlin.init_runtime().await.unwrap();
+        gremlin.init_runtime(None).await.unwrap();
 
-        assert_eq!(gremlin.definition.name, "definition");
-        assert_eq!(gremlin.definition.default_client, "cmd:true");
-        assert_eq!(gremlin.definition.base_ref, "main");
-        assert_eq!(gremlin.definition.stages.len(), 1);
-        assert_eq!(gremlin.definition.stages[0].name(), "run");
-        assert_eq!(gremlin.definition.stages[0].stage_type(), "exec");
+        assert_eq!(gremlin.definition.name(), "definition");
+        assert_eq!(gremlin.definition.default_client(), "cmd:true");
+        assert_eq!(gremlin.definition.base_ref(), "main");
         // project_root came from state.json, not from a walk.
         assert_eq!(gremlin.project_root, project_root);
+
+        // Verify stages via next_stage.
+        let stage = gremlin.definition.next_stage().await.unwrap();
+        assert_eq!(stage.name(), "run");
+        assert_eq!(stage.stage_type(), "exec");
+        assert!(matches!(
+            gremlin.definition.next_stage().await.unwrap(),
+            crate::definition::ExecutorStage::Done
+        ));
     }
 
     #[tokio::test]
@@ -2173,12 +2142,16 @@ stages:
         let mut gremlin = Gremlin::from("gr-hermetic-nosent").unwrap();
         assert!(gremlin.definition_is_expanded);
 
-        gremlin.init_runtime().await.unwrap();
+        gremlin.init_runtime(None).await.unwrap();
 
-        assert_eq!(gremlin.definition.name, "definition");
-        assert_eq!(gremlin.definition.default_client, "cmd:true");
-        assert_eq!(gremlin.definition.stages.len(), 1);
-        assert_eq!(gremlin.definition.stages[0].name(), "run");
+        assert_eq!(gremlin.definition.name(), "definition");
+        assert_eq!(gremlin.definition.default_client(), "cmd:true");
+        let stage = gremlin.definition.next_stage().await.unwrap();
+        assert_eq!(stage.name(), "run");
+        assert!(matches!(
+            gremlin.definition.next_stage().await.unwrap(),
+            crate::definition::ExecutorStage::Done
+        ));
     }
 
     #[tokio::test]
@@ -2192,17 +2165,26 @@ stages:
             return;
         }
 
-        Gremlin::create(
-            "gr-noherm",
-            fx.definition_path(),
-            None,
-            None,
-            None,
-            &HashMap::new(),
-            false,
-            None,
-            None,
-            None,
+        // Manually create a state directory without a definition.yaml so
+        // `from` falls back to resolving by kind.
+        let state_dir = fx.join("state").join("gr-noherm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let project_root = fx.repo_path();
+        let state_json = serde_json::json!({
+            "id": "gr-noherm",
+            "kind": "demo",
+            "project_root": project_root.to_string_lossy(),
+            "definition_path": fx.definition_path().to_string_lossy(),
+            "workdir": "",
+            "status": "running",
+            "pid": null,
+            "exit_code": null,
+            "client": "",
+            "attempt": "0001",
+        });
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::to_string_pretty(&state_json).unwrap(),
         )
         .unwrap();
 
@@ -2213,10 +2195,14 @@ stages:
         );
         assert!(gremlin.definition.is_stub());
 
-        gremlin.init_runtime().await.unwrap();
+        gremlin.init_runtime(None).await.unwrap();
 
-        assert_eq!(gremlin.definition.name, "demo");
-        assert_eq!(gremlin.definition.default_client, "cmd:true");
-        assert_eq!(gremlin.definition.stages.len(), 0);
+        assert_eq!(gremlin.definition.name(), "demo");
+        assert_eq!(gremlin.definition.default_client(), "cmd:true");
+        // Verify no stages via next_stage.
+        assert!(matches!(
+            gremlin.definition.next_stage().await.unwrap(),
+            crate::definition::ExecutorStage::Done
+        ));
     }
 }

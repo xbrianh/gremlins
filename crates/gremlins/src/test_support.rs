@@ -151,7 +151,7 @@ pub(crate) fn with_sandbox<T>(config_json: Option<&str>, body: impl FnOnce(&Sand
 // ---------------------------------------------------------------------------
 
 /// A throwaway git repository inside a throwaway sandbox root, wired together
-/// so that [`Gremlin::create`] and [`Gremlin::from`] see a real project with a
+/// so that [`Gremlin::init`] and [`Gremlin::from`] see a real project with a
 /// `.gremlins/demo.yaml` definition.
 ///
 /// The constructor checks for `git` on `PATH` and runs `git init` + commit;
