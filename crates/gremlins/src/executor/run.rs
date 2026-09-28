@@ -942,19 +942,17 @@ mod tests {
 
     use crate::artifacts::registry::{DryRunArtifactRegistry, FileSystemArtifactRegistry};
     use crate::artifacts::uri::Uri;
+    use crate::builders::agent::AgentBuilder;
+    use crate::builders::artifacts::artifact;
+    use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::definition::DefinitionBuilder;
+    use crate::builders::exec::ExecBuilder;
     use crate::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
     use crate::stages::node::ParsedStage;
     use crate::test_support::GitSandbox;
-
-    fn parse_stages(yaml: &str) -> Vec<ParsedStage> {
-        let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("valid YAML");
-        let list = value.as_sequence_mut().expect("a stage list");
-        ParsedStage::parse_stages(list, 0).expect("valid stages")
-    }
 
     /// A gremlin with no git, no worktree, and a seeded state directory: the
     /// smallest thing `run_stage` needs to dispatch a stage.
@@ -1063,17 +1061,18 @@ mod tests {
 
     #[tokio::test]
     async fn agent_skips_when_the_guard_artifact_is_live() {
-        let yaml = r#"
-- name: writer
-  type: sequence
-  skip_if_exists: "artifact://done.md"
-  body:
-    - name: writer-inner
-      type: agent
-      client: "cmd:false"
-      prompt: ["hi"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![SequenceBuilder::new("writer")
+            .skip_if_exists("artifact://done.md")
+            .stage(
+                AgentBuilder::new("writer-inner")
+                    .client("cmd:false")
+                    .prompt("hi")
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         gremlin
             .registry
             .as_ref()
@@ -1089,17 +1088,18 @@ mod tests {
     async fn skip_guard_accepts_a_bare_key() {
         // The guard is spelled without the scheme; it must still match the
         // registered URI, which is the only way the artifact is known.
-        let yaml = r#"
-- name: writer
-  type: sequence
-  skip_if_exists: "done.md"
-  body:
-    - name: writer-inner
-      type: agent
-      client: "cmd:false"
-      prompt: ["hi"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![SequenceBuilder::new("writer")
+            .skip_if_exists("done.md")
+            .stage(
+                AgentBuilder::new("writer-inner")
+                    .client("cmd:false")
+                    .prompt("hi")
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         gremlin
             .registry
             .as_ref()
@@ -1114,15 +1114,13 @@ mod tests {
 
     #[tokio::test]
     async fn agent_commits_a_produced_bound_artifact() {
-        let yaml = r#"
-- name: writer
-  type: agent
-  client: "cmd:sh -c 'cat >/dev/null'"
-  bind:
-    out?: "artifact://{name}.md"
-  prompt: ["hi"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![AgentBuilder::new("writer")
+            .client("cmd:sh -c 'cat >/dev/null'")
+            .bind("out?", artifact("artifact://{name}.md"))
+            .prompt("write {out}")
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         // Use a dry-run registry so has_file always returns true — the cmd
         // backend doesn't write real files, but commit_agent needs to see
         // a produced file.
@@ -1141,15 +1139,13 @@ mod tests {
 
     #[tokio::test]
     async fn agent_missing_artifact_bails() {
-        let yaml = r#"
-- name: writer
-  type: agent
-  client: "cmd:sh -c 'cat >/dev/null'"
-  bind:
-    out: "artifact://out.md"
-  prompt: ["hi"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![AgentBuilder::new("writer")
+            .client("cmd:sh -c 'cat >/dev/null'")
+            .bind("out", artifact("artifact://out.md"))
+            .prompt("write {out}")
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1162,26 +1158,22 @@ mod tests {
 
     #[tokio::test]
     async fn exec_runs_its_commands() {
-        let yaml = r#"
-- name: noop
-  type: exec
-  options:
-    cmds: ["true"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![ExecBuilder::new("noop")
+            .cmds(vec!["true".to_string()])
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
         assert!(run_stage(&stage, &mut gremlin).await.is_ok());
     }
 
     #[tokio::test]
     async fn exec_non_zero_exit_fails_the_stage() {
-        let yaml = r#"
-- name: broken
-  type: exec
-  options:
-    cmds: ["gremlins-nonexistent-cmd-xyz"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![ExecBuilder::new("broken")
+            .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1194,20 +1186,22 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_runs_children_in_order() {
-        let yaml = r#"
-- name: seq
-  type: sequence
-  body:
-    - name: one
-      type: exec
-      options:
-        cmds: ["echo one > one.marker"]
-    - name: two
-      type: exec
-      options:
-        cmds: ["echo two > two.marker"]
-"#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![SequenceBuilder::new("seq")
+            .stage(
+                ExecBuilder::new("one")
+                    .cmds(vec!["echo one > one.marker".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("two")
+                    .cmds(vec!["echo two > two.marker".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         run_stage(&stage, &mut gremlin).await.unwrap();
@@ -1217,16 +1211,16 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_propagates_a_child_failure() {
-        let yaml = r#"
-- name: seq
-  type: sequence
-  body:
-    - name: broken
-      type: exec
-      options:
-        cmds: ["gremlins-nonexistent-cmd-xyz"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![SequenceBuilder::new("seq")
+            .stage(
+                ExecBuilder::new("broken")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1241,18 +1235,18 @@ mod tests {
     async fn repeating_sequence_stops_when_the_artifact_exists() {
         // `skip_if_exists` on a sequence with max_iterations > 1 stops early
         // when the guard artifact is present.
-        let yaml = r#"
-- name: poll
-  type: sequence
-  max-iterations: 3
-  skip_if_exists: "artifact://done"
-  body:
-    - name: tick
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![SequenceBuilder::new("poll")
+            .max_iterations(3)
+            .skip_if_exists("artifact://done")
+            .stage(
+                ExecBuilder::new("tick")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         gremlin
             .registry
             .as_ref()
@@ -1268,18 +1262,18 @@ mod tests {
 
     #[tokio::test]
     async fn repeating_sequence_exhaustion_bails() {
-        let yaml = r#"
-- name: poll
-  type: sequence
-  max-iterations: 2
-  skip_if_exists: "artifact://done"
-  body:
-    - name: tick
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![SequenceBuilder::new("poll")
+            .max_iterations(2)
+            .skip_if_exists("artifact://done")
+            .stage(
+                ExecBuilder::new("tick")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1295,17 +1289,17 @@ mod tests {
     async fn repeating_sequence_child_error_propagates() {
         // A child that fails with a non-zero exit causes the repeating
         // sequence to propagate the error.
-        let yaml = r#"
-- name: poll
-  type: sequence
-  max-iterations: 3
-  body:
-    - name: bad
-      type: exec
-      options:
-        cmds: ["gremlins-nonexistent-cmd-xyz"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![SequenceBuilder::new("poll")
+            .max_iterations(3)
+            .stage(
+                ExecBuilder::new("bad")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1318,20 +1312,22 @@ mod tests {
     async fn repeating_sequence_iter_scope_is_preserved() {
         // The iteration key is the sequence name, even when nested inside
         // another sequence.
-        let yaml = r#"
-- name: seq
-  type: sequence
-  body:
-    - name: poll
-      type: sequence
-      max-iterations: 2
-      body:
-        - name: tick
-          type: exec
-          options:
-            cmds: ["true"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![SequenceBuilder::new("seq")
+            .stage(
+                SequenceBuilder::new("poll")
+                    .max_iterations(2)
+                    .stage(
+                        ExecBuilder::new("tick")
+                            .cmds(vec!["true".to_string()])
+                            .build()
+                            .unwrap(),
+                    )
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         // Should run without error — the inner sequence runs twice.
@@ -1340,21 +1336,23 @@ mod tests {
 
     #[tokio::test]
     async fn nested_repeating_sequences_join_their_own_names() {
-        let yaml = r#"
-- name: outer
-  type: sequence
-  max-iterations: 2
-  body:
-    - name: inner
-      type: sequence
-      max-iterations: 2
-      body:
-        - name: tick
-          type: exec
-          options:
-            cmds: ["true"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![SequenceBuilder::new("outer")
+            .max_iterations(2)
+            .stage(
+                SequenceBuilder::new("inner")
+                    .max_iterations(2)
+                    .stage(
+                        ExecBuilder::new("tick")
+                            .cmds(vec!["true".to_string()])
+                            .build()
+                            .unwrap(),
+                    )
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         run_stage(&stage, &mut gremlin).await.unwrap();
@@ -1363,20 +1361,24 @@ mod tests {
 
     #[tokio::test]
     async fn repeating_sequence_with_interval_sleeps() {
-        let yaml = r#"
-- name: poll
-  type: sequence
-  max-iterations: 3
-  skip_if_exists: "artifact://done"
-  options:
-    interval: 0.01
-  body:
-    - name: tick
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        // NOTE: the old YAML for this test placed `interval` under `options`,
+        // where the legacy `Sequence::with_dict` parser ignored it (it only
+        // read from the top-level dict key).  The builder places `interval`
+        // at the top level, so the test now actually exercises the sleep
+        // path — which was always the intended behaviour of this test.
+        let stages = vec![SequenceBuilder::new("poll")
+            .max_iterations(3)
+            .skip_if_exists("artifact://done")
+            .interval(0.01)
+            .stage(
+                ExecBuilder::new("tick")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         // Should run 3 iterations with 10ms sleeps, then bail on exhaustion.
@@ -1395,16 +1397,16 @@ mod tests {
     async fn parallel_is_dispatched_to_run_parallel() {
         // A single-child parallel group with a trivially successful exec
         // stage exercises the new path through `run_parallel`.
-        let yaml = r#"
-- name: group
-  type: parallel
-  body:
-    - name: a
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![ParallelBuilder::new("group")
+            .stage(
+                ExecBuilder::new("a")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         let result = run_stage(&stage, &mut gremlin).await;
@@ -1415,17 +1417,17 @@ mod tests {
 
     #[tokio::test]
     async fn run_walks_every_stage_and_writes_terminal_state() {
-        let yaml = r#"
-- name: one
-  type: exec
-  options:
-    cmds: ["true"]
-- name: two
-  type: exec
-  options:
-    cmds: ["true"]
-"#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![
+            ExecBuilder::new("one")
+                .cmds(vec!["true".to_string()])
+                .build()
+                .unwrap(),
+            ExecBuilder::new("two")
+                .cmds(vec!["true".to_string()])
+                .build()
+                .unwrap(),
+        ];
+        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let state_dir = tmp.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 0);
@@ -1440,15 +1442,13 @@ mod tests {
     #[tokio::test]
     async fn run_records_a_bail_and_returns_one() {
         // A missing non-optional artifact causes a Bail.
-        let yaml = r#"
-- name: writer
-  type: agent
-  client: "cmd:sh -c 'cat >/dev/null'"
-  bind:
-    out: "artifact://out.md"
-  prompt: ["hi"]
-"#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![AgentBuilder::new("writer")
+            .client("cmd:sh -c 'cat >/dev/null'")
+            .bind("out", artifact("artifact://out.md"))
+            .prompt("hi {out}")
+            .build()
+            .unwrap()];
+        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let state_dir = tmp.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
@@ -1476,21 +1476,21 @@ mod tests {
 
     #[tokio::test]
     async fn run_resumes_from_a_named_stage() {
-        let yaml = r#"
-- name: first
-  type: exec
-  options:
-    cmds: ["touch first.marker"]
-- name: second
-  type: exec
-  options:
-    cmds: ["touch second.marker"]
-- name: third
-  type: exec
-  options:
-    cmds: ["touch third.marker"]
-"#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![
+            ExecBuilder::new("first")
+                .cmds(vec!["touch first.marker".to_string()])
+                .build()
+                .unwrap(),
+            ExecBuilder::new("second")
+                .cmds(vec!["touch second.marker".to_string()])
+                .build()
+                .unwrap(),
+            ExecBuilder::new("third")
+                .cmds(vec!["touch third.marker".to_string()])
+                .build()
+                .unwrap(),
+        ];
+        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
 
         assert_eq!(gremlin.run(Some("second")).await.unwrap(), 0);
         assert!(!tmp.path().join("first.marker").exists());
@@ -1504,20 +1504,22 @@ mod tests {
         // On the first run the group fails (ErrorPolicy::Any). On resume, the
         // successful child must be skipped because its done marker persisted
         // under the original (now-reused) attempt scope.
-        let yaml = r#"
-- name: group
-  type: parallel
-  body:
-    - name: good
-      type: exec
-      options:
-        cmds: ["true"]
-    - name: bad
-      type: exec
-      options:
-        cmds: ["false"]
-"#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![ParallelBuilder::new("group")
+            .stage(
+                ExecBuilder::new("good")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("bad")
+                    .cmds(vec!["false".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let state_dir = tmp.path().join("state").join("gr-test");
 
         // First run: group fails because "bad" exits non-zero.
@@ -1593,13 +1595,11 @@ mod tests {
 
     #[tokio::test]
     async fn run_propagates_a_non_bail_failure() {
-        let yaml = r#"
-- name: broken
-  type: exec
-  options:
-    cmds: ["gremlins-nonexistent-cmd-xyz"]
-"#;
-        let (tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
+        let stages = vec![ExecBuilder::new("broken")
+            .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+            .build()
+            .unwrap()];
+        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let state_dir = tmp.path().join("state").join("gr-test");
 
         match gremlin.run(None).await {
@@ -1624,14 +1624,12 @@ mod tests {
     /// walk, and a failure is a bail — recorded and terminal, never a crash.
     #[tokio::test]
     async fn run_fails_the_bootstrap_and_records_a_bail() {
-        let yaml = r#"
-- name: never
-  type: exec
-  options:
-    cmds: ["touch never.marker"]
-"#;
+        let stages = vec![ExecBuilder::new("never")
+            .cmds(vec!["touch never.marker".to_string()])
+            .build()
+            .unwrap()];
         let (tmp, mut gremlin) = test_gremlin_with_bootstrap(
-            parse_stages(yaml),
+            stages,
             "cmd:true",
             Bootstrap {
                 cmds: vec!["exit 5".to_string()],
@@ -1664,14 +1662,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_runs_the_bootstrap_before_the_stages() {
-        let yaml = r#"
-- name: reader
-  type: exec
-  options:
-    cmds: ["cat marker.txt > read.txt"]
-"#;
+        let stages = vec![ExecBuilder::new("reader")
+            .cmds(vec!["cat marker.txt > read.txt".to_string()])
+            .build()
+            .unwrap()];
         let (tmp, mut gremlin) = test_gremlin_with_bootstrap(
-            parse_stages(yaml),
+            stages,
             "cmd:true",
             Bootstrap {
                 cmds: vec!["echo prepared > marker.txt".to_string()],
@@ -1691,14 +1687,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_skips_the_bootstrap_on_resume() {
-        let yaml = r#"
-- name: only
-  type: exec
-  options:
-    cmds: ["true"]
-"#;
+        let stages = vec![ExecBuilder::new("only")
+            .cmds(vec!["true".to_string()])
+            .build()
+            .unwrap()];
         let (tmp, mut gremlin) = test_gremlin_with_bootstrap(
-            parse_stages(yaml),
+            stages,
             "cmd:true",
             Bootstrap {
                 cmds: vec!["touch bootstrap.marker".to_string()],

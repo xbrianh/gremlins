@@ -5,11 +5,11 @@
 //! gremlins` can cover the rules without an interpreter. The pyext shim is
 //! responsible for turning the parsed children into live stage objects.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::stages::composite::{get_client_from_dict, ClientSpec, StageAttrs};
+use crate::stages::composite::{ClientSpec, StageAttrs};
 
 /// How a group decides to fail once individual children have errored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,111 +54,14 @@ pub struct ParallelGroup {
     pub max_concurrent: Option<u32>,
     pub cancel_on_error: bool,
     pub error_policy: ErrorPolicy,
-    /// Raw child dicts — the pyext shim calls `parse_stages()` on these.
     pub body: Vec<Value>,
-    /// Raw client string, if present — the pyext shim creates a Client from it.
     pub client: Option<ClientSpec>,
-}
-
-impl ParallelGroup {
-    /// Parse and validate a `parallel:` block.
-    ///
-    /// `depth` is the nesting level: parallel groups may not be nested, so any
-    /// `depth > 0` is rejected. Child *names* are validated here; child
-    /// *dicts* are validated by the caller once `parse_stages` has named them.
-    pub fn with_dict(d: &HashMap<String, Value>, depth: usize) -> Result<Self, String> {
-        let name = d
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        if depth > 0 {
-            return Err(format!(
-                "nested parallel groups are not allowed (stage {name:?})"
-            ));
-        }
-
-        let body = match d.get("body") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(arr)) => arr.clone(),
-            Some(_) => return Err(format!("parallel group {name:?}: 'body' must be a list")),
-        };
-
-        let max_concurrent = match d.get("max_concurrent") {
-            None | Some(Value::Null) => None,
-            Some(v) => {
-                let n = v.as_u64().ok_or_else(|| {
-                    format!("parallel group {name:?}: 'max_concurrent' must be a positive integer")
-                })?;
-                if n == 0 {
-                    return Err(format!(
-                        "parallel group {name:?}: 'max_concurrent' must be a positive integer"
-                    ));
-                }
-                Some(u32::try_from(n).map_err(|_| {
-                    format!(
-                        "parallel group {name:?}: 'max_concurrent' must be <= {}, got {n}",
-                        u32::MAX
-                    )
-                })?)
-            }
-        };
-
-        let cancel_on_error = match d.get("cancel_on_error") {
-            None | Some(Value::Null) => false,
-            Some(Value::Bool(b)) => *b,
-            Some(_) => {
-                return Err(format!(
-                    "parallel group {name:?}: 'cancel_on_error' must be a boolean"
-                ))
-            }
-        };
-
-        // `str(d.get("error_policy") or "any")` — any falsy value falls back to "any".
-        // Python's falsy set is: None, False, 0, 0.0, "", [], {}.
-        let raw_policy = match d.get("error_policy") {
-            None | Some(Value::Null) => "any".to_string(),
-            Some(Value::Bool(false)) => "any".to_string(),
-            Some(Value::Number(n)) if n.as_f64() == Some(0.0) => "any".to_string(),
-            Some(Value::String(s)) if s.is_empty() => "any".to_string(),
-            Some(Value::Array(a)) if a.is_empty() => "any".to_string(),
-            Some(Value::Object(o)) if o.is_empty() => "any".to_string(),
-            Some(Value::String(s)) => s.clone(),
-            Some(v) => v.to_string(),
-        };
-        let error_policy = ErrorPolicy::parse(&raw_policy).ok_or_else(|| {
-            format!("parallel group {name:?}: 'error_policy' must be 'any' or 'all'")
-        })?;
-
-        if !name.is_empty() && !is_valid_child_id(&name) {
-            return Err(format!(
-                "parallel group name {name:?} contains invalid characters for child_id"
-            ));
-        }
-
-        let client = get_client_from_dict(d, &name)?;
-        let client_explicit = client.is_some();
-
-        let mut attrs = StageAttrs::new(name);
-        attrs.stage_type = "parallel".to_string();
-        attrs.client_explicit = client_explicit;
-
-        Ok(ParallelGroup {
-            attrs,
-            max_concurrent,
-            cancel_on_error,
-            error_policy,
-            body,
-            client,
-        })
-    }
 }
 
 /// Validate the resolved child names of a parallel group: each must be a legal
 /// `child_id` component, and no two may collide.
 ///
-/// This runs *after* `parse_stages` has assigned names, because a raw
+/// This runs *after* name-filling, because a raw
 /// `parallel:` entry may omit its `name` and inherit one from its `type`.
 pub fn validate_child_names(group_name: &str, names: &[String]) -> Result<(), String> {
     let mut seen: HashSet<&str> = HashSet::new();
@@ -182,59 +85,6 @@ pub fn validate_child_names(group_name: &str, names: &[String]) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    fn dict(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
-    }
-
-    fn children() -> Value {
-        json!([{"type": "exec", "name": "shard-1"}, {"type": "exec", "name": "shard-2"}])
-    }
-
-    #[test]
-    fn with_dict_basic() {
-        let d = dict(&[("name", json!("reviews")), ("body", children())]);
-        let group = ParallelGroup::with_dict(&d, 0).unwrap();
-        assert_eq!(group.attrs.name, "reviews");
-        assert_eq!(group.attrs.stage_type, "parallel");
-        assert_eq!(group.body.len(), 2);
-        assert_eq!(group.max_concurrent, None);
-        assert!(!group.cancel_on_error);
-        assert_eq!(group.error_policy, ErrorPolicy::Any);
-    }
-
-    #[test]
-    fn with_dict_accepts_all_options() {
-        let d = dict(&[
-            ("name", json!("reviews")),
-            ("body", children()),
-            ("max_concurrent", json!(3)),
-            ("cancel_on_error", json!(true)),
-            ("error_policy", json!("all")),
-        ]);
-        let group = ParallelGroup::with_dict(&d, 0).unwrap();
-        assert_eq!(group.max_concurrent, Some(3));
-        assert!(group.cancel_on_error);
-        assert_eq!(group.error_policy, ErrorPolicy::All);
-    }
-
-    #[test]
-    fn with_dict_rejects_nesting() {
-        let d = dict(&[("name", json!("outer")), ("body", children())]);
-        let err = ParallelGroup::with_dict(&d, 1).unwrap_err();
-        assert!(err.contains("nested parallel groups are not allowed"));
-    }
-
-    #[test]
-    fn with_dict_rejects_non_list_children() {
-        let d = dict(&[("name", json!("g")), ("body", json!("nope"))]);
-        let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
-        assert!(err.contains("'body' must be a list"));
-    }
 
     #[test]
     fn validate_child_names_rejects_duplicates() {
@@ -254,97 +104,6 @@ mod tests {
     fn validate_child_names_accepts_clean_names() {
         let names = vec!["shard-1".to_string(), "shard_2".to_string()];
         assert!(validate_child_names("g", &names).is_ok());
-    }
-
-    #[test]
-    fn with_dict_rejects_zero_and_negative_max_concurrent() {
-        for raw in [json!(0), json!(-1)] {
-            let d = dict(&[
-                ("name", json!("g")),
-                ("body", children()),
-                ("max_concurrent", raw),
-            ]);
-            let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
-            assert!(
-                err.contains("'max_concurrent' must be a positive integer"),
-                "{err}"
-            );
-        }
-    }
-
-    #[test]
-    fn with_dict_rejects_non_bool_cancel_on_error() {
-        let d = dict(&[
-            ("name", json!("g")),
-            ("body", children()),
-            ("cancel_on_error", json!("yes")),
-        ]);
-        let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
-        assert!(err.contains("'cancel_on_error' must be a boolean"));
-    }
-
-    #[test]
-    fn with_dict_rejects_unknown_error_policy() {
-        let d = dict(&[
-            ("name", json!("g")),
-            ("body", children()),
-            ("error_policy", json!("sometimes")),
-        ]);
-        let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
-        assert!(err.contains("'error_policy' must be 'any' or 'all'"));
-    }
-
-    #[test]
-    fn with_dict_treats_falsy_error_policy_as_any() {
-        // Python's `d.get("error_policy") or "any"` maps every falsy value to "any".
-        for raw in [
-            json!(false),
-            json!(0),
-            json!(0.0),
-            json!(""),
-            json!([]),
-            json!({}),
-        ] {
-            let d = dict(&[
-                ("name", json!("g")),
-                ("body", children()),
-                ("error_policy", raw.clone()),
-            ]);
-            let group = ParallelGroup::with_dict(&d, 0)
-                .unwrap_or_else(|e| panic!("error_policy={raw} should default to any: {e}"));
-            assert_eq!(group.error_policy, ErrorPolicy::Any, "error_policy={raw}");
-        }
-    }
-
-    #[test]
-    fn with_dict_rejects_invalid_group_name() {
-        let d = dict(&[("name", json!("has space")), ("body", children())]);
-        let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
-        assert!(err.contains("invalid characters for child_id"));
-    }
-
-    #[test]
-    fn with_dict_allows_empty_children() {
-        let d = dict(&[("name", json!("g")), ("body", json!([]))]);
-        assert!(ParallelGroup::with_dict(&d, 0).unwrap().body.is_empty());
-    }
-
-    #[test]
-    fn with_dict_allows_missing_children() {
-        let d = dict(&[("name", json!("g"))]);
-        assert!(ParallelGroup::with_dict(&d, 0).unwrap().body.is_empty());
-    }
-
-    #[test]
-    fn with_dict_carries_client() {
-        let d = dict(&[
-            ("name", json!("g")),
-            ("body", children()),
-            ("client", json!("xai:grok-5")),
-        ]);
-        let group = ParallelGroup::with_dict(&d, 0).unwrap();
-        assert_eq!(group.client, Some(ClientSpec("xai:grok-5".into())));
-        assert!(group.attrs.client_explicit);
     }
 
     #[test]

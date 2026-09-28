@@ -641,6 +641,9 @@ fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builders::artifacts::artifact;
+    use crate::builders::composite::ParallelBuilder;
+    use crate::builders::exec::ExecBuilder;
     use crate::definition::{ExecutorStage, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
@@ -661,15 +664,8 @@ mod tests {
         );
         def.convert_stage(stages[0].clone())
     }
-    use crate::definition::ErrorPolicy;
     use std::collections::HashMap;
     use std::path::PathBuf;
-
-    fn parse_stages(yaml: &str) -> Vec<ParsedStage> {
-        let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("valid YAML");
-        let list = value.as_sequence_mut().expect("a stage list");
-        ParsedStage::parse_stages(list, 0).expect("valid stages")
-    }
 
     fn test_gremlin(
         stages: Vec<ParsedStage>,
@@ -749,16 +745,15 @@ mod tests {
 
     #[tokio::test]
     async fn single_child_succeeds() {
-        let yaml = r#"
-- name: group
-  type: parallel
-  body:
-    - name: a
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .stage(
+                ExecBuilder::new("a")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -769,21 +764,22 @@ mod tests {
 
     #[tokio::test]
     async fn error_policy_any_bails_on_first_child_failure() {
-        let yaml = r#"
-- name: group
-  error_policy: any
-  type: parallel
-  body:
-    - name: bad
-      type: exec
-      options:
-        cmds: ["gremlins-nonexistent-cmd-xyz"]
-    - name: good
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .error_policy(crate::definition::ErrorPolicy::Any)
+            .stage(
+                ExecBuilder::new("bad")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("good")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -799,21 +795,22 @@ mod tests {
 
     #[tokio::test]
     async fn error_policy_all_succeeds_when_one_child_succeeds() {
-        let yaml = r#"
-- name: group
-  error_policy: all
-  type: parallel
-  body:
-    - name: bad
-      type: exec
-      options:
-        cmds: ["gremlins-nonexistent-cmd-xyz"]
-    - name: good
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .error_policy(crate::definition::ErrorPolicy::All)
+            .stage(
+                ExecBuilder::new("bad")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("good")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -823,21 +820,22 @@ mod tests {
 
     #[tokio::test]
     async fn error_policy_all_bails_when_every_child_fails() {
-        let yaml = r#"
-- name: group
-  error_policy: all
-  type: parallel
-  body:
-    - name: bad1
-      type: exec
-      options:
-        cmds: ["gremlins-nonexistent-cmd-xyz"]
-    - name: bad2
-      type: exec
-      options:
-        cmds: ["gremlins-nonexistent-cmd-xyz"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .error_policy(crate::definition::ErrorPolicy::All)
+            .stage(
+                ExecBuilder::new("bad1")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("bad2")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -857,23 +855,24 @@ mod tests {
         // flag makes it exit immediately) or has already started (in which
         // case it runs to completion). Either way, the group returns the
         // correct error and all threads are joined.
-        let yaml = r#"
-- name: group
-  cancel_on_error: true
-  error_policy: any
-  max_concurrent: 1
-  type: parallel
-  body:
-    - name: bad
-      type: exec
-      options:
-        cmds: ["gremlins-nonexistent-cmd-xyz"]
-    - name: slow
-      type: exec
-      options:
-        cmds: ["sleep 1"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .cancel_on_error(true)
+            .error_policy(crate::definition::ErrorPolicy::Any)
+            .max_concurrent(1)
+            .stage(
+                ExecBuilder::new("bad")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("slow")
+                    .cmds(vec!["sleep 1".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -891,25 +890,28 @@ mod tests {
     async fn max_concurrent_bounds_concurrency() {
         // With max_concurrent=1, children run sequentially. We use `sleep 0.1`
         // commands and check that total time is at least N * 0.1s.
-        let yaml = r#"
-- name: group
-  max_concurrent: 1
-  type: parallel
-  body:
-    - name: a
-      type: exec
-      options:
-        cmds: ["sleep 0.1"]
-    - name: b
-      type: exec
-      options:
-        cmds: ["sleep 0.1"]
-    - name: c
-      type: exec
-      options:
-        cmds: ["sleep 0.1"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .max_concurrent(1)
+            .stage(
+                ExecBuilder::new("a")
+                    .cmds(vec!["sleep 0.1".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("b")
+                    .cmds(vec!["sleep 0.1".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("c")
+                    .cmds(vec!["sleep 0.1".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let start = std::time::Instant::now();
@@ -927,20 +929,21 @@ mod tests {
 
     #[tokio::test]
     async fn resumption_skips_already_done_children() {
-        let yaml = r#"
-- name: group
-  type: parallel
-  body:
-    - name: a
-      type: exec
-      options:
-        cmds: ["true"]
-    - name: b
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .stage(
+                ExecBuilder::new("a")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("b")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
         // Mark child "a" as already done in the registry.
@@ -970,20 +973,21 @@ mod tests {
 
     #[tokio::test]
     async fn fully_done_group_is_skipped_entirely() {
-        let yaml = r#"
-- name: group
-  type: parallel
-  body:
-    - name: a
-      type: exec
-      options:
-        cmds: ["gremlins-nonexistent-cmd-xyz"]
-    - name: b
-      type: exec
-      options:
-        cmds: ["gremlins-nonexistent-cmd-xyz"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .stage(
+                ExecBuilder::new("a")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("b")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
         // Mark both children done — the group is fully complete.
@@ -1003,16 +1007,15 @@ mod tests {
     async fn child_worktrees_are_cleaned_up() {
         // Without a git repo, children won't have worktrees — the test
         // verifies that cleanup is best-effort and does not crash.
-        let yaml = r#"
-- name: group
-  type: parallel
-  body:
-    - name: a
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .stage(
+                ExecBuilder::new("a")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -1028,18 +1031,16 @@ mod tests {
         // The child runs an exec stage that produces an artifact via
         // `bind`. After the parallel group succeeds, the parent registry
         // must contain the merged artifact, prefixed with the child name.
-        let yaml = r#"
-- name: group
-  type: parallel
-  body:
-    - name: writer
-      type: exec
-      bind:
-        output: "artifact://out.txt"
-      options:
-        cmds: ["echo hello > {output}"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .stage(
+                ExecBuilder::new("writer")
+                    .bind("output", artifact("artifact://out.txt"))
+                    .cmds(vec!["echo hello > {output}".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
         // Point config::state_root() at the temp dir so the fallback
@@ -1066,16 +1067,15 @@ mod tests {
 
     #[tokio::test]
     async fn child_costs_are_aggregated() {
-        let yaml = r#"
-- name: group
-  type: parallel
-  body:
-    - name: a
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .stage(
+                ExecBuilder::new("a")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -1091,17 +1091,16 @@ mod tests {
         // to child definitions so resolve_client_spec's step-4 fallback
         // picks it up. An exec child doesn't call resolve_client, so this
         // just proves the new code path doesn't crash.
-        let yaml = r#"
-- name: group
-  client: "cmd:true"
-  type: parallel
-  body:
-    - name: a
-      type: exec
-      options:
-        cmds: ["true"]
-"#;
-        let stages = parse_stages(yaml);
+        let stages = vec![ParallelBuilder::new("group")
+            .client("cmd:true")
+            .stage(
+                ExecBuilder::new("a")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
