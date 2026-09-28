@@ -29,7 +29,17 @@ fi
 # --- helpers ---
 
 fetch_meta() {
-    gh pr view "$pr_url" --json statusCheckRollup,reviewDecision,headRefOid --jq '
+    local raw
+    raw="$(gh pr view "$pr_url" --json statusCheckRollup,reviewDecision,headRefOid)"
+    debug "ci-gate: raw check data: ${raw}"
+
+    # Per-check diagnostics
+    printf '%s' "$raw" | jq -r '
+        (.statusCheckRollup // [])[] |
+        "ci-gate: check typename=\(.__typename) name=\(.name // .context) status=\(.status // .state) conclusion=\(.conclusion // "N/A")"
+    ' >&2
+
+    printf '%s' "$raw" | jq -r '
 (.reviewDecision // ""),
 ((.statusCheckRollup // []) | length),
 (.headRefOid // "")

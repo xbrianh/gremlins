@@ -21,3 +21,7 @@ bail() {
     printf '%s\n' "$*" >&2
     exit 2
 }
+
+debug() {
+    printf '%s\n' "$*" >&2
+}

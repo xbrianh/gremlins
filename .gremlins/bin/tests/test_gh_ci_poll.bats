@@ -30,6 +30,7 @@ jqf=""
 while [[ \$# -gt 0 ]]; do
     case "\$1" in
         --jq) jqf="\$2"; shift 2;;
+        --json) cat '$fixture'; exit 0;;
         *) shift;;
     esac
 done
