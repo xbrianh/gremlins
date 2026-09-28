@@ -1,25 +1,9 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Parsed client descriptor from a stage dict's `client` key.
 /// A plain String so gremlins-core stays free of PyO3.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClientSpec(pub String);
-
-/// Extract and validate a client spec from a stage dict.
-/// `None` when the key is absent; an error when present but not a string.
-pub fn get_client_from_dict(
-    d: &HashMap<String, serde_json::Value>,
-    stage_name: &str,
-) -> Result<Option<ClientSpec>, String> {
-    match d.get("client") {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(s)) => Ok(Some(ClientSpec(s.clone()))),
-        Some(v) => Err(format!(
-            "stage '{stage_name}': 'client' must be a string, got {v:?}"
-        )),
-    }
-}
 
 /// Attributes shared by composite stages (Loop, Sequence, Parallel) and
 /// duck-typed test stages.
@@ -80,36 +64,6 @@ mod tests {
         assert_eq!(s.path, "");
         assert!(!s.client_explicit);
         assert_eq!(s.skip_if_exists, "");
-    }
-
-    #[test]
-    fn client_absent() {
-        let d = HashMap::from([("name".into(), serde_json::Value::String("s".into()))]);
-        assert_eq!(get_client_from_dict(&d, "s").unwrap(), None);
-    }
-
-    #[test]
-    fn client_null_is_absent() {
-        let d = HashMap::from([("client".into(), serde_json::Value::Null)]);
-        assert_eq!(get_client_from_dict(&d, "s").unwrap(), None);
-    }
-
-    #[test]
-    fn client_parses() {
-        let d = HashMap::from([(
-            "client".into(),
-            serde_json::Value::String("xai:grok-5".into()),
-        )]);
-        assert_eq!(
-            get_client_from_dict(&d, "s").unwrap(),
-            Some(ClientSpec("xai:grok-5".into()))
-        );
-    }
-
-    #[test]
-    fn client_rejects_non_string() {
-        let d = HashMap::from([("client".into(), serde_json::Value::Number(5.into()))]);
-        assert!(get_client_from_dict(&d, "s").is_err());
     }
 
     #[test]
