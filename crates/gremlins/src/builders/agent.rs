@@ -216,6 +216,14 @@ impl AgentBuilder {
             }
         }
 
+        if !self.skip_if_exists.is_empty() {
+            return Err(SchemaError::Stage {
+                name: name.clone(),
+                msg: "skip_if_exists is not supported on leaf stages; wrap in a sequence instead"
+                    .to_string(),
+            });
+        }
+
         let stage = Agent {
             name,
             prompts: self.prompts,

@@ -917,7 +917,15 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaEr
 /// Build a [`SequenceBuilder`] from a YAML stage mapping.
 fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
-        None => 1u32,
+        None => {
+            // Fall back to options.max_iterations, then default to 1.
+            mapping
+                .get("options")
+                .and_then(|o| o.get("max_iterations"))
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(1)
+        }
         Some(v) => {
             if let Some(n) = v.as_u64().and_then(|n| u32::try_from(n).ok()) {
                 n
