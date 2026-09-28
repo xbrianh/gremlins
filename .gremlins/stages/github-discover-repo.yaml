@@ -1,9 +1,11 @@
 stages:
   - name: github-discover-repo
-    type: exec
+    type: sequence
     skip_if_exists: "artifact://repo.txt"
-    bind:
-      repo: "artifact://repo.txt"
-    options:
-      cmds:
-        - 'gh_discover_repo > "{repo}"'
+    body:
+      - type: exec
+        bind:
+          repo: "artifact://repo.txt"
+        options:
+          cmds:
+            - 'gh_discover_repo > "{repo}"'

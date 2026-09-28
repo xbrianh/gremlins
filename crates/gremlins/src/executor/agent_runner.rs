@@ -6,7 +6,6 @@ use thiserror::Error;
 use crate::artifacts::registry::{ArtifactRegistry, LocalizedArtifactRegistry};
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
-use crate::clients::protocol::CompletedRun;
 use crate::definition::Agent;
 use crate::executor::vars;
 
@@ -33,8 +32,6 @@ pub struct AgentPrepared {
 
 #[derive(Error, Debug)]
 pub enum AgentError {
-    #[error("agent {name}: {reason}")]
-    Bail { name: String, reason: String },
     #[error("agent {name}: artifact {key} was not produced")]
     MissingArtifact { name: String, key: String },
     #[error("agent {name}: {source}")]
@@ -191,32 +188,6 @@ pub async fn commit_agent(
 }
 
 // ---------------------------------------------------------------------------
-// check_bail
-// ---------------------------------------------------------------------------
-
-pub fn check_bail(completed: &CompletedRun) -> Result<(), AgentError> {
-    let text = completed.text_result.as_deref().unwrap_or("");
-    let last_line = text
-        .lines()
-        .rev()
-        .find(|ln| !ln.trim().is_empty())
-        .unwrap_or("");
-    // Format must match: BAIL: <class>: <reason>
-    let trimmed = last_line.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("BAIL:") {
-        let rest = rest.trim_start();
-        if let Some((_class, reason)) = rest.split_once(':') {
-            let reason = reason.trim().to_string();
-            return Err(AgentError::Bail {
-                name: String::new(),
-                reason,
-            });
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Workspace preamble assembly
 // ---------------------------------------------------------------------------
 
@@ -257,160 +228,6 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::artifacts::registry::FileSystemArtifactRegistry;
-
-    // ---- check_bail tests ----
-
-    #[test]
-    fn test_check_bail_finds_bail() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("BAIL: security: found secret".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        let err = check_bail(&cr).unwrap_err();
-        match err {
-            AgentError::Bail { reason, .. } => assert_eq!(reason, "found secret"),
-            _ => panic!("expected Bail"),
-        }
-    }
-
-    #[test]
-    fn test_check_bail_no_bail() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("All good here".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        assert!(check_bail(&cr).is_ok());
-    }
-
-    #[test]
-    fn test_check_bail_empty() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some(String::new()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        assert!(check_bail(&cr).is_ok());
-    }
-
-    #[test]
-    fn test_check_bail_blank() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("\n\n  \n".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        assert!(check_bail(&cr).is_ok());
-    }
-
-    #[test]
-    fn test_check_bail_last_line_only() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("work done\nBAIL: other: timed out".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        let err = check_bail(&cr).unwrap_err();
-        match err {
-            AgentError::Bail { reason, .. } => assert_eq!(reason, "timed out"),
-            _ => panic!("expected Bail"),
-        }
-    }
-
-    #[test]
-    fn test_check_bail_not_last_line() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("BAIL: other: early\nwork done".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        assert!(check_bail(&cr).is_ok());
-    }
-
-    #[test]
-    fn test_check_bail_empty_reason() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("BAIL: other: ".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        let err = check_bail(&cr).unwrap_err();
-        match err {
-            AgentError::Bail { reason, .. } => assert_eq!(reason, ""),
-            _ => panic!("expected Bail"),
-        }
-    }
-
-    #[test]
-    fn test_check_bail_no_bail_class() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("BAIL:".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        assert!(check_bail(&cr).is_ok());
-    }
-
-    #[test]
-    fn test_check_bail_requires_class() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("BAIL: other".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        assert!(check_bail(&cr).is_ok());
-    }
-
-    #[test]
-    fn test_check_bail_whitespace_edges() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("BAIL:  other  :  spaced  ".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        let err = check_bail(&cr).unwrap_err();
-        match err {
-            AgentError::Bail { reason, .. } => assert_eq!(reason, "spaced"),
-            _ => panic!("expected Bail"),
-        }
-    }
-
-    #[test]
-    fn test_check_bail_multiline_skips_trailing_blanks() {
-        let cr = CompletedRun {
-            exit_code: 0,
-            text_result: Some("work\nBAIL: sec: found\n\n".to_string()),
-            events: None,
-            cost_usd: None,
-            token_usage: None,
-        };
-        let err = check_bail(&cr).unwrap_err();
-        match err {
-            AgentError::Bail { reason, .. } => assert_eq!(reason, "found"),
-            _ => panic!("expected Bail"),
-        }
-    }
 
     // ---- prepare_agent tests ----
 

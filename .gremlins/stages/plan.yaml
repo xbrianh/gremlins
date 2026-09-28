@@ -2,16 +2,18 @@ required-prompt: true
 
 stages:
   - name: plan
-    type: agent
+    type: sequence
     skip_if_exists: "artifact://plan.md"
-    prompt:
-      - "{{prompt}}"
-    interpolation:
-      instructions: "artifact://instructions.md?"
-    bind:
-      plan: "artifact://plan.md"
-    options:
-      idle_timeout: 600
+    body:
+      - type: agent
+        prompt:
+          - "{{prompt}}"
+        interpolation:
+          instructions: "artifact://instructions.md?"
+        bind:
+          plan: "artifact://plan.md"
+        options:
+          idle_timeout: 600
 
   - name: set-description
     type: exec

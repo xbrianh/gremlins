@@ -2,16 +2,18 @@ required-prompt: true
 
 stages:
   - name: plan
-    type: agent
+    type: sequence
     skip_if_exists: "artifact://plan.md"
-    prompt:
-      - "{{prompt}}"
-    interpolation:
-      instructions: "artifact://instructions.txt?"
-    bind:
-      plan: "artifact://plan.md"
-    options:
-      idle_timeout: 600
+    body:
+      - type: agent
+        prompt:
+          - "{{prompt}}"
+        interpolation:
+          instructions: "artifact://instructions.txt?"
+        bind:
+          plan: "artifact://plan.md"
+        options:
+          idle_timeout: 600
 
   - name: resolve-plan-source
     type: exec
@@ -24,15 +26,17 @@ stages:
       plan_issue_number?: "artifact://plan-issue-number.txt"
 
   - name: publish-as-issue
-    type: exec
-    interpolation:
-      plan: artifact://plan.md
+    type: sequence
     skip_if_exists: "artifact://plan-issue-number.txt"
-    options:
-      cmds:
-        - 'gh_publish_issue "{plan}" > "{plan_issue_number}"'
-    bind:
-      plan_issue_number: "artifact://plan-issue-number.txt"
+    body:
+      - type: exec
+        interpolation:
+          plan: artifact://plan.md
+        options:
+          cmds:
+            - 'gh_publish_issue "{plan}" > "{plan_issue_number}"'
+        bind:
+          plan_issue_number: "artifact://plan-issue-number.txt"
 
   - name: set-description
     type: exec

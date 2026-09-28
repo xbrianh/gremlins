@@ -42,19 +42,9 @@ impl From<ResolveError> for ExecError {
     }
 }
 
-pub fn is_bail_uri(uri_str: &str, loop_iter: &str) -> bool {
-    if uri_str == "artifact://bail" {
-        return true;
-    }
-    if loop_iter.is_empty() {
-        return false;
-    }
-    let expected = format!("artifact://{loop_iter}/bail");
-    uri_str == expected || uri_str == "artifact://{loop_iter}/bail"
-}
-
 // --- Phased execution model ---
 
+#[derive(Debug)]
 pub struct ShellResult {
     pub output: String,
     pub rc: i32,
@@ -80,7 +70,6 @@ pub struct ExecPrepared {
     /// pyext path leaves it empty and the commands inherit the process
     /// environment instead.
     pub env: HashMap<String, String>,
-    pub(crate) loop_iter: String,
     /// Substitution env vars (`GREMLINS_<KEY> → value`) populated by
     /// `prepare_exec` for the exec command templates. Merged into the
     /// child shell's environment in `run_shell`.
@@ -212,7 +201,6 @@ pub async fn prepare_exec(
         state_dir: PathBuf::new(),
         timeout,
         env: HashMap::new(),
-        loop_iter: loop_iter.to_string(),
         substitution_env,
     })
 }
@@ -373,14 +361,8 @@ pub fn process_shell_result(
         raw_output_str.len(),
     );
 
-    // A non-zero exit is an error unless a bind URI is a bail URI; in that
-    // case the failure is reported by the caller as a Python exception.
-    if shell_rc != 0
-        && !prepared
-            .bind_uris
-            .iter()
-            .any(|(_, uri_str, _)| is_bail_uri(uri_str, &prepared.loop_iter))
-    {
+    // A non-zero exit is always an error.
+    if shell_rc != 0 {
         return Err(ExecError::NonZeroExit {
             name: name.clone(),
             rc: shell_rc,
@@ -411,7 +393,7 @@ pub async fn commit_exec(
                     name: prepared.name.clone(),
                     detail: e.to_string(),
                 })?;
-        } else if !*optional && !is_bail_uri(uri_str, &prepared.loop_iter) {
+        } else if !*optional {
             return Err(ExecError::MissingArtifact {
                 name: prepared.name.clone(),
                 uri: uri_str.clone(),
@@ -553,30 +535,6 @@ mod tests {
         assert!(reg.is_registered("artifact://out.txt").await);
     }
 
-    #[test]
-    fn test_is_bail_uri_bail_key() {
-        assert!(is_bail_uri("artifact://bail", ""));
-        assert!(is_bail_uri("artifact://bail", "loop~1"));
-    }
-
-    #[test]
-    fn test_is_bail_uri_with_loop_iter() {
-        assert!(is_bail_uri("artifact://loop~1/bail", "loop~1"));
-        assert!(!is_bail_uri("artifact://loop~1/bail", ""));
-    }
-
-    #[test]
-    fn test_is_bail_uri_template() {
-        assert!(is_bail_uri("artifact://{loop_iter}/bail", "loop~1"));
-        assert!(!is_bail_uri("artifact://stuff/bail", "loop~1"));
-    }
-
-    #[test]
-    fn test_is_bail_uri_no_match() {
-        assert!(!is_bail_uri("artifact://stuff", ""));
-        assert!(!is_bail_uri("artifact://stuff", "loop~1"));
-    }
-
     // --- run_shell integration: injection payloads are not executed ---
 
     #[tokio::test]
@@ -604,7 +562,6 @@ mod tests {
             state_dir: state_dir.clone(),
             timeout: Some(5.0),
             env: HashMap::new(),
-            loop_iter: String::new(),
             substitution_env,
         };
 
@@ -630,7 +587,6 @@ mod tests {
             state_dir: state_dir.to_path_buf(),
             timeout: Some(5.0),
             env: HashMap::new(),
-            loop_iter: String::new(),
             substitution_env: HashMap::new(),
         }
     }
@@ -721,13 +677,10 @@ mod tests {
         let state_dir = tmp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
 
-        // exit 42 is non-zero but we need a bail URI so run_shell doesn't
-        // convert it to an error.
-        let mut prepared = make_prepared("failing", vec!["exit 42"], &state_dir);
-        prepared.bind_uris = vec![("bail".to_string(), "artifact://bail".to_string(), false)];
+        let prepared = make_prepared("failing", vec!["exit 42"], &state_dir);
 
-        let result = run_shell(&prepared).await.unwrap();
-        assert_eq!(result.rc, 42);
+        let err = run_shell(&prepared).await.unwrap_err();
+        assert!(matches!(err, ExecError::NonZeroExit { rc: 42, .. }));
 
         let log = read_log(&state_dir, "failing");
         assert!(

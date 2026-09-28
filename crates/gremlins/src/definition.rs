@@ -40,16 +40,17 @@ pub const UNLOADED_NAME: &str = "unknown";
 // Sequence — shared payload for Sequence and Loop variants
 // ---------------------------------------------------------------------------
 
-/// A sequence of stages with an optional scope and artifact guard.
-/// Used as the payload of [`ExecutorStage::Sequence`] and as the body of
-/// [`ExecutorStage::Loop`].
+/// A sequence of stages with an optional scope, artifact guard, and
+/// repetition controls.  When `max_iterations > 1` the body repeats up to
+/// that many times, sleeping `interval` seconds between iterations, and
+/// stopping early when `skip_if_exists` is satisfied.
 pub struct Sequence {
     pub name: String,
     pub stages: Vec<ExecutorStage>,
     pub scope: Option<String>,
     pub skip_if_exists: String,
     pub client: Option<ClientSpec>,
-    pub max_iterations: Option<u32>,
+    pub max_iterations: u32,
     pub interval: Option<f64>,
 }
 
@@ -63,13 +64,11 @@ pub enum ExecutorStage {
     /// Run an agent stage.
     Agent {
         stage: Agent,
-        skip_if_exists: String,
         client: Option<ClientSpec>,
     },
     /// Run an exec stage.
     Exec {
         stage: Exec,
-        skip_if_exists: String,
         client: Option<ClientSpec>,
     },
     /// Run a sequence of stages in order.
@@ -84,16 +83,6 @@ pub enum ExecutorStage {
         children: Vec<Box<dyn GremlinDefinition>>,
         skip_if_exists: String,
     },
-    /// Run a body repeatedly.
-    Loop {
-        name: String,
-        max_iterations: Option<u32>,
-        stop_when_exists: Option<String>,
-        interval: Option<f64>,
-        client: Option<ClientSpec>,
-        body: Sequence,
-        skip_if_exists: String,
-    },
     /// No more stages — the gremlin is done.
     Done,
 }
@@ -106,7 +95,6 @@ impl ExecutorStage {
             ExecutorStage::Exec { stage, .. } => &stage.name,
             ExecutorStage::Sequence(seq) => &seq.name,
             ExecutorStage::Parallel { name, .. } => name,
-            ExecutorStage::Loop { name, .. } => name,
             ExecutorStage::Done => "",
         }
     }
@@ -118,7 +106,6 @@ impl ExecutorStage {
             ExecutorStage::Exec { .. } => "exec",
             ExecutorStage::Sequence(_) => "sequence",
             ExecutorStage::Parallel { .. } => "parallel",
-            ExecutorStage::Loop { .. } => "loop",
             ExecutorStage::Done => "done",
         }
     }
@@ -128,21 +115,20 @@ impl ExecutorStage {
         match self {
             ExecutorStage::Agent { client, .. }
             | ExecutorStage::Exec { client, .. }
-            | ExecutorStage::Parallel { client, .. }
-            | ExecutorStage::Loop { client, .. } => client.as_ref(),
+            | ExecutorStage::Parallel { client, .. } => client.as_ref(),
             ExecutorStage::Sequence(seq) => seq.client.as_ref(),
             ExecutorStage::Done => None,
         }
     }
 
     /// The artifact guard that makes the stage a conditional producer.
+    /// Only [`ExecutorStage::Sequence`] and [`ExecutorStage::Parallel`]
+    /// carry guards; leaf stages always return an empty string.
     pub fn skip_if_exists(&self) -> &str {
         match self {
-            ExecutorStage::Agent { skip_if_exists, .. }
-            | ExecutorStage::Exec { skip_if_exists, .. } => skip_if_exists,
+            ExecutorStage::Agent { .. } | ExecutorStage::Exec { .. } => "",
             ExecutorStage::Sequence(seq) => &seq.skip_if_exists,
-            ExecutorStage::Parallel { skip_if_exists, .. }
-            | ExecutorStage::Loop { skip_if_exists, .. } => skip_if_exists,
+            ExecutorStage::Parallel { skip_if_exists, .. } => skip_if_exists,
             ExecutorStage::Done => "",
         }
     }
@@ -499,22 +485,14 @@ impl StaticDefinition {
         match stage {
             ParsedStage::Agent {
                 stage,
-                skip_if_exists,
+                skip_if_exists: _,
                 client,
-            } => ExecutorStage::Agent {
-                stage,
-                skip_if_exists,
-                client,
-            },
+            } => ExecutorStage::Agent { stage, client },
             ParsedStage::Exec {
                 stage,
-                skip_if_exists,
+                skip_if_exists: _,
                 client,
-            } => ExecutorStage::Exec {
-                stage,
-                skip_if_exists,
-                client,
-            },
+            } => ExecutorStage::Exec { stage, client },
             ParsedStage::Sequence {
                 attrs,
                 max_iterations,
@@ -524,36 +502,15 @@ impl StaticDefinition {
             } => {
                 let stages: Vec<ExecutorStage> =
                     body.into_iter().map(|s| self.convert_stage(s)).collect();
-                if max_iterations > 1 {
-                    ExecutorStage::Loop {
-                        name: attrs.name.clone(),
-                        max_iterations: Some(max_iterations),
-                        stop_when_exists: (!attrs.skip_if_exists.is_empty())
-                            .then(|| attrs.skip_if_exists.clone()),
-                        interval,
-                        client: seq_client.clone(),
-                        body: Sequence {
-                            name: String::new(),
-                            stages,
-                            scope: None,
-                            skip_if_exists: String::new(),
-                            client: None,
-                            max_iterations: None,
-                            interval: None,
-                        },
-                        skip_if_exists: attrs.skip_if_exists,
-                    }
-                } else {
-                    ExecutorStage::Sequence(Sequence {
-                        name: attrs.name,
-                        stages,
-                        scope: None,
-                        skip_if_exists: attrs.skip_if_exists,
-                        client: seq_client,
-                        max_iterations: None,
-                        interval: None,
-                    })
-                }
+                ExecutorStage::Sequence(Sequence {
+                    name: attrs.name,
+                    stages,
+                    scope: None,
+                    skip_if_exists: attrs.skip_if_exists,
+                    client: seq_client,
+                    max_iterations,
+                    interval,
+                })
             }
             ParsedStage::Parallel {
                 attrs,
@@ -949,7 +906,6 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 bind_map: std::collections::HashMap::new(),
             },
-            skip_if_exists: String::new(),
             client: None,
         }
     }
@@ -962,7 +918,6 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 bind_map: std::collections::HashMap::new(),
             },
-            skip_if_exists: String::new(),
             client: None,
         }
     }
@@ -993,7 +948,7 @@ mod tests {
             scope: None,
             skip_if_exists: String::new(),
             client: None,
-            max_iterations: None,
+            max_iterations: 1,
             interval: None,
         });
         assert_eq!(seq.name(), "my-sequence");
@@ -1009,7 +964,7 @@ mod tests {
             scope: None,
             skip_if_exists: String::new(),
             client: None,
-            max_iterations: None,
+            max_iterations: 1,
             interval: None,
         });
         assert_eq!(seq.name(), "");
@@ -1033,31 +988,6 @@ mod tests {
     }
 
     #[test]
-    fn executor_stage_loop_name() {
-        let stage = ExecutorStage::Loop {
-            name: "retry".into(),
-            max_iterations: Some(3),
-            stop_when_exists: None,
-            interval: None,
-            client: None,
-            body: Sequence {
-                name: String::new(),
-                stages: vec![],
-                scope: None,
-                skip_if_exists: String::new(),
-                client: None,
-                max_iterations: None,
-                interval: None,
-            },
-            skip_if_exists: "artifact://retry".into(),
-        };
-        assert_eq!(stage.name(), "retry");
-        assert_eq!(stage.stage_type(), "loop");
-        assert!(stage.client().is_none());
-        assert_eq!(stage.skip_if_exists(), "artifact://retry");
-    }
-
-    #[test]
     fn executor_stage_done() {
         assert_eq!(ExecutorStage::Done.name(), "");
         assert_eq!(ExecutorStage::Done.stage_type(), "done");
@@ -1075,39 +1005,35 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 bind_map: std::collections::HashMap::new(),
             },
-            skip_if_exists: String::new(),
             client: Some(ClientSpec("xai:grok-5".into())),
         };
         assert_eq!(stage.client(), Some(&ClientSpec("xai:grok-5".into())));
     }
 
     #[test]
-    fn executor_stage_skip_if_exists() {
-        let stage = ExecutorStage::Exec {
-            stage: Exec {
-                name: "build".into(),
-                options: std::collections::HashMap::new(),
-                interpolation_map: std::collections::HashMap::new(),
-                bind_map: std::collections::HashMap::new(),
-            },
-            skip_if_exists: "artifact://done".into(),
-            client: None,
-        };
-        assert_eq!(stage.skip_if_exists(), "artifact://done");
-    }
-
-    #[test]
-    fn executor_stage_sequence_skip_if_exists() {
+    fn executor_stage_skip_if_exists_on_sequence() {
         let seq = ExecutorStage::Sequence(Sequence {
             name: String::new(),
             stages: vec![],
             scope: None,
             skip_if_exists: "artifact://guard".into(),
             client: None,
-            max_iterations: None,
+            max_iterations: 1,
             interval: None,
         });
         assert_eq!(seq.skip_if_exists(), "artifact://guard");
+    }
+
+    #[test]
+    fn executor_stage_skip_if_exists_on_agent_is_always_empty() {
+        let stage = make_agent("plan");
+        assert_eq!(stage.skip_if_exists(), "");
+    }
+
+    #[test]
+    fn executor_stage_skip_if_exists_on_exec_is_always_empty() {
+        let stage = make_exec("build");
+        assert_eq!(stage.skip_if_exists(), "");
     }
 
     // ---- StaticDefinition cursor / goto / next_stage tests ----
@@ -1270,8 +1196,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn convert_stage_loop() {
-        // A Sequence with max_iterations > 1 converts to ExecutorStage::Loop.
+    async fn convert_stage_sequence_with_max_iterations() {
+        // A Sequence with max_iterations > 1 stays an ExecutorStage::Sequence
+        // (the Loop variant no longer exists).
         let seq = ParsedStage::Sequence {
             attrs: StageAttrs {
                 name: "retry".into(),
@@ -1279,7 +1206,7 @@ mod tests {
                 ..StageAttrs::new("retry".into())
             },
             max_iterations: 5,
-            interval: None,
+            interval: Some(20.0),
             client: Some(ClientSpec("xai:grok".into())),
             body: vec![parsed_agent("loop-child")],
         };
@@ -1287,25 +1214,19 @@ mod tests {
         let mut sd = def;
         let s = sd.next_stage().await.unwrap();
         assert_eq!(s.name(), "retry");
-        assert_eq!(s.stage_type(), "loop");
+        assert_eq!(s.stage_type(), "sequence");
         assert_eq!(s.skip_if_exists(), "artifact://retry-guard");
         match s {
-            ExecutorStage::Loop {
-                max_iterations,
-                stop_when_exists,
-                client,
-                body,
-                ..
-            } => {
-                assert_eq!(max_iterations, Some(5));
-                assert_eq!(stop_when_exists.as_deref(), Some("artifact://retry-guard"));
-                assert_eq!(client, Some(ClientSpec("xai:grok".into())));
-                assert_eq!(body.stages.len(), 1);
-                assert_eq!(body.stages[0].name(), "loop-child");
-                assert!(body.scope.is_none());
-                assert_eq!(body.skip_if_exists, "");
+            ExecutorStage::Sequence(seq) => {
+                assert_eq!(seq.max_iterations, 5);
+                assert_eq!(seq.interval, Some(20.0));
+                assert_eq!(seq.client, Some(ClientSpec("xai:grok".into())));
+                assert_eq!(seq.stages.len(), 1);
+                assert_eq!(seq.stages[0].name(), "loop-child");
+                assert!(seq.scope.is_none());
+                assert_eq!(seq.skip_if_exists, "artifact://retry-guard");
             }
-            _ => panic!("expected Loop"),
+            _ => panic!("expected Sequence"),
         }
     }
 

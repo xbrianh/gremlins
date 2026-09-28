@@ -23,18 +23,20 @@ stages:
         - 'git_diff_summary "{base_ref_to_open_pr}" > "{diff_summary}"'
 
   - name: compose-pr
-    type: agent
+    type: sequence
     skip_if_exists: "artifact://pr-title.txt"
-    interpolation:
-      base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
-      plan_issue_number: content("artifact://plan-issue-number.txt")
-      plan: content("artifact://plan.md")?
-      diff_summary: content("artifact://diff-summary.txt")
-    prompt:
-      - github_open_pull_request.md
-    bind:
-      pr_title:  "artifact://pr-title.txt"
-      pr_body:   "artifact://pr-body.md"
+    body:
+      - type: agent
+        interpolation:
+          base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
+          plan_issue_number: content("artifact://plan-issue-number.txt")
+          plan: content("artifact://plan.md")?
+          diff_summary: content("artifact://diff-summary.txt")
+        prompt:
+          - github_open_pull_request.md
+        bind:
+          pr_title:  "artifact://pr-title.txt"
+          pr_body:   "artifact://pr-body.md"
 
   - name: push-and-open
     type: exec
