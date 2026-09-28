@@ -867,7 +867,6 @@ mod tests {
         assert_eq!(stages[0].skip_if_exists(), "artifact://done");
     }
 
-
     #[test]
     fn stage_client_is_parsed() {
         let stages = parse_all(
