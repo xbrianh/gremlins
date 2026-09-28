@@ -24,7 +24,7 @@ Parsing happens in two layers, both visible in `node.rs`:
 
 2. **Stage layer** (`ParsedStage::parse`). Runs second on name-complete YAML. Matches `type` to the correct variant, calls each struct's `from_dict` / `with_dict`, descends into composite bodies (recursing into `parse_stages`), and validates cross-cutting rules like `max_concurrent`-on-non-parallel rejection.
 
-The `parallel:` sugar (bare `parallel:` key without `type`) is normalized to `type: parallel` early in `ParsedStage::parse` so both spellings converge on the same `parse_parallel` path.
+Parallel groups use `type: parallel` with a `body:` list — there is no bare `parallel:` sugar.
 
 ## Key invariants
 
@@ -42,7 +42,6 @@ The `parallel:` sugar (bare `parallel:` key without `type`) is normalized to `ty
 | `type: exec` | `"exec"` | `ParsedStage::Exec` |
 | `type: sequence` | `"sequence"` | `ParsedStage::Sequence` |
 | `type: parallel` | `"parallel"` | `ParsedStage::Parallel` |
-| `parallel:` (sugar) | `"parallel"` | `ParsedStage::Parallel` |
 
 ## Where to look for…
 

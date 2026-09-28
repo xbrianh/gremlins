@@ -79,14 +79,10 @@ impl ParallelGroup {
             ));
         }
 
-        let body = match d.get("parallel") {
+        let body = match d.get("body") {
             None | Some(Value::Null) => Vec::new(),
             Some(Value::Array(arr)) => arr.clone(),
-            Some(_) => {
-                return Err(format!(
-                    "parallel group {name:?}: 'parallel' must be a list"
-                ))
-            }
+            Some(_) => return Err(format!("parallel group {name:?}: 'body' must be a list")),
         };
 
         let max_concurrent = match d.get("max_concurrent") {
@@ -201,7 +197,7 @@ mod tests {
 
     #[test]
     fn with_dict_basic() {
-        let d = dict(&[("name", json!("reviews")), ("parallel", children())]);
+        let d = dict(&[("name", json!("reviews")), ("body", children())]);
         let group = ParallelGroup::with_dict(&d, 0).unwrap();
         assert_eq!(group.attrs.name, "reviews");
         assert_eq!(group.attrs.stage_type, "parallel");
@@ -215,7 +211,7 @@ mod tests {
     fn with_dict_accepts_all_options() {
         let d = dict(&[
             ("name", json!("reviews")),
-            ("parallel", children()),
+            ("body", children()),
             ("max_concurrent", json!(3)),
             ("cancel_on_error", json!(true)),
             ("error_policy", json!("all")),
@@ -228,16 +224,16 @@ mod tests {
 
     #[test]
     fn with_dict_rejects_nesting() {
-        let d = dict(&[("name", json!("outer")), ("parallel", children())]);
+        let d = dict(&[("name", json!("outer")), ("body", children())]);
         let err = ParallelGroup::with_dict(&d, 1).unwrap_err();
         assert!(err.contains("nested parallel groups are not allowed"));
     }
 
     #[test]
     fn with_dict_rejects_non_list_children() {
-        let d = dict(&[("name", json!("g")), ("parallel", json!("nope"))]);
+        let d = dict(&[("name", json!("g")), ("body", json!("nope"))]);
         let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
-        assert!(err.contains("'parallel' must be a list"));
+        assert!(err.contains("'body' must be a list"));
     }
 
     #[test]
@@ -265,7 +261,7 @@ mod tests {
         for raw in [json!(0), json!(-1)] {
             let d = dict(&[
                 ("name", json!("g")),
-                ("parallel", children()),
+                ("body", children()),
                 ("max_concurrent", raw),
             ]);
             let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
@@ -280,7 +276,7 @@ mod tests {
     fn with_dict_rejects_non_bool_cancel_on_error() {
         let d = dict(&[
             ("name", json!("g")),
-            ("parallel", children()),
+            ("body", children()),
             ("cancel_on_error", json!("yes")),
         ]);
         let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
@@ -291,7 +287,7 @@ mod tests {
     fn with_dict_rejects_unknown_error_policy() {
         let d = dict(&[
             ("name", json!("g")),
-            ("parallel", children()),
+            ("body", children()),
             ("error_policy", json!("sometimes")),
         ]);
         let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
@@ -311,7 +307,7 @@ mod tests {
         ] {
             let d = dict(&[
                 ("name", json!("g")),
-                ("parallel", children()),
+                ("body", children()),
                 ("error_policy", raw.clone()),
             ]);
             let group = ParallelGroup::with_dict(&d, 0)
@@ -322,14 +318,14 @@ mod tests {
 
     #[test]
     fn with_dict_rejects_invalid_group_name() {
-        let d = dict(&[("name", json!("has space")), ("parallel", children())]);
+        let d = dict(&[("name", json!("has space")), ("body", children())]);
         let err = ParallelGroup::with_dict(&d, 0).unwrap_err();
         assert!(err.contains("invalid characters for child_id"));
     }
 
     #[test]
     fn with_dict_allows_empty_children() {
-        let d = dict(&[("name", json!("g")), ("parallel", json!([]))]);
+        let d = dict(&[("name", json!("g")), ("body", json!([]))]);
         assert!(ParallelGroup::with_dict(&d, 0).unwrap().body.is_empty());
     }
 
@@ -343,7 +339,7 @@ mod tests {
     fn with_dict_carries_client() {
         let d = dict(&[
             ("name", json!("g")),
-            ("parallel", children()),
+            ("body", children()),
             ("client", json!("xai:grok-5")),
         ]);
         let group = ParallelGroup::with_dict(&d, 0).unwrap();

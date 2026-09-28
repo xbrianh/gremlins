@@ -231,7 +231,8 @@ stages:
 
 ```yaml
 - name: reviews
-  parallel:
+  type: parallel
+  body:
     - name: review-detail
       type: review-code
       client: xai:grok-4
@@ -244,7 +245,8 @@ stages:
 | Key | Description |
 |---|---|
 | `name` | Group identifier |
-| `parallel` | List of child stage entries (no nesting allowed) |
+| `type` | Must be `parallel` |
+| `body` | List of child stage entries (no nesting allowed) |
 | `max_concurrent` | Max simultaneously running children (optional) |
 
 ### Client specifiers
@@ -303,7 +305,7 @@ Five primitive stage types are built into the engine:
 | `agent` | Resolves `interpolation:` artifacts, renders prompt, invokes the agent, verifies `bind:` artifacts |
 | `exec` | Runs shell commands (`options.cmds` joined with `&&`) with `interpolation:`/`bind:` artifact bindings |
 | `loop` | Iterates `body` stages until `stop_when_exists` is bound or `max-iterations` is exhausted |
-| `parallel` | Fan-out/fan-in: runs `parallel:` children concurrently (up to `max_concurrent`) |
+| `parallel` | Fan-out/fan-in: runs `body:` children concurrently (up to `max_concurrent`) |
 | `sequence` | Runs `body` stages sequentially using child state |
 
 ### Stage types: recipes
@@ -377,7 +379,7 @@ When a definition declares `land:`, `gremlins land` runs this stage instead of t
 
 ### Parallel groups
 
-Wrap sibling stages in a `parallel:` list to run them concurrently:
+Wrap sibling stages in a `type: parallel` group with a `body:` list to run them concurrently:
 
 ```yaml
 default_client: xai:grok-4
@@ -387,7 +389,8 @@ stages:
     prompt: [code-style, plan.md]
 
   - name: reviews
-    parallel:
+    type: parallel
+    body:
       - name: review-detail
         type: review-code
       - name: review-security
@@ -454,7 +457,8 @@ stages:
   - { type: implement,  prompt: [code-style, implement.md] }
 
   - name: reviews
-    parallel:
+    type: parallel
+    body:
       - name: review-detail
         type: review-code
       - name: review-security

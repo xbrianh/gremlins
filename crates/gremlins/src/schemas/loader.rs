@@ -7,7 +7,6 @@ pub struct StageEntry {
     pub name: Option<String>,
     pub auto_name: Option<String>,
     pub stage_type: Option<String>,
-    pub is_parallel: bool,
 }
 
 /// A stage node for duplicate-producer checking.
@@ -61,8 +60,6 @@ pub fn fill_names(stages: &mut [StageEntry]) -> Result<(), SchemaError> {
         let auto = stage.auto_name.take().unwrap_or_default();
         let stage_type = if !auto.is_empty() {
             auto
-        } else if stage.is_parallel {
-            "parallel".to_string()
         } else {
             stage.stage_type.clone().unwrap_or_default()
         };
@@ -309,13 +306,11 @@ mod tests {
                 name: None,
                 auto_name: None,
                 stage_type: Some("agent".to_string()),
-                is_parallel: false,
             },
             StageEntry {
                 name: None,
                 auto_name: None,
                 stage_type: Some("agent".to_string()),
-                is_parallel: false,
             },
         ];
         fill_names(&mut stages).unwrap();
@@ -328,8 +323,7 @@ mod tests {
         let mut stages = vec![StageEntry {
             name: None,
             auto_name: None,
-            stage_type: None,
-            is_parallel: true,
+            stage_type: Some("parallel".to_string()),
         }];
         fill_names(&mut stages).unwrap();
         assert_eq!(stages[0].name.as_deref(), Some("parallel"));
@@ -341,7 +335,6 @@ mod tests {
             name: Some("custom".to_string()),
             auto_name: None,
             stage_type: Some("agent".to_string()),
-            is_parallel: false,
         }];
         fill_names(&mut stages).unwrap();
         assert_eq!(stages[0].name.as_deref(), Some("custom"));

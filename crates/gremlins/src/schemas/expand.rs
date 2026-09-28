@@ -385,13 +385,6 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
         }
     }
 
-    // Collect text from parallel children
-    if let Some(parallel) = mapping.get("parallel").and_then(|v| v.as_sequence()) {
-        for child in parallel {
-            collect_stage_text(child, &mut text);
-        }
-    }
-
     for (key_str, map_name) in &keys {
         if key_referenced_in_text(key_str, &text) {
             continue;
@@ -468,12 +461,6 @@ fn collect_stage_text(stage: &serde_yaml::Value, out: &mut String) {
 
     if let Some(body) = mapping.get("body").and_then(|v| v.as_sequence()) {
         for child in body {
-            collect_stage_text(child, out);
-        }
-    }
-
-    if let Some(parallel) = mapping.get("parallel").and_then(|v| v.as_sequence()) {
-        for child in parallel {
             collect_stage_text(child, out);
         }
     }
@@ -705,11 +692,16 @@ fn _expand_entry(
         );
     }
 
-    if let Some(parallel_val) = entry_map.get("parallel") {
-        if let Some(parallel_list) = parallel_val.as_sequence() {
-            let mut expanded_parallel: Vec<serde_yaml::Value> = Vec::new();
-            for child in parallel_list {
-                let child_dict = child.as_mapping();
+    let is_parallel_body = entry_map
+        .get("type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| t == "parallel");
+
+    if let Some(body_val) = entry_map.get("body") {
+        if let Some(body_list) = body_val.as_sequence() {
+            let mut expanded_body: Vec<serde_yaml::Value> = Vec::new();
+            for body_entry in body_list {
+                let child_dict = body_entry.as_mapping();
                 let include_name = child_dict
                     .filter(|m| m.len() == 1)
                     .and_then(|m| m.get("include"))
@@ -717,7 +709,7 @@ fn _expand_entry(
                     .map(String::from);
 
                 let expanded = _expand_entry(
-                    child,
+                    body_entry,
                     prompt_dir,
                     project_root,
                     chain,
@@ -727,16 +719,16 @@ fn _expand_entry(
                     resolver,
                 )?;
 
-                if expanded.is_empty() {
+                if is_parallel_body && expanded.is_empty() {
                     return Err(SchemaError::Generic(
                         "parallel child expanded to 0 stages via include; includes inside parallel groups must resolve to at least one stage".to_string()
                     ));
                 }
-                if expanded.len() == 1 {
-                    expanded_parallel.push(expanded.into_iter().next().unwrap());
+                if !is_parallel_body || expanded.len() == 1 {
+                    expanded_body.extend(expanded);
                 } else {
-                    let name = include_name
-                        .unwrap_or_else(|| format!("sequence-{}", expanded_parallel.len()));
+                    let name =
+                        include_name.unwrap_or_else(|| format!("sequence-{}", expanded_body.len()));
                     let mut seq = serde_yaml::Mapping::new();
                     seq.insert(
                         serde_yaml::Value::String("name".to_string()),
@@ -750,31 +742,8 @@ fn _expand_entry(
                         serde_yaml::Value::String("body".to_string()),
                         serde_yaml::Value::Sequence(expanded),
                     );
-                    expanded_parallel.push(serde_yaml::Value::Mapping(seq));
+                    expanded_body.push(serde_yaml::Value::Mapping(seq));
                 }
-            }
-            entry_map.insert(
-                serde_yaml::Value::String("parallel".to_string()),
-                serde_yaml::Value::Sequence(expanded_parallel),
-            );
-        }
-    }
-
-    if let Some(body_val) = entry_map.get("body") {
-        if let Some(body_list) = body_val.as_sequence() {
-            let mut expanded_body: Vec<serde_yaml::Value> = Vec::new();
-            for body_entry in body_list {
-                let expanded = _expand_entry(
-                    body_entry,
-                    prompt_dir,
-                    project_root,
-                    chain,
-                    named_prompts,
-                    stage_defs,
-                    seen_defs,
-                    resolver,
-                )?;
-                expanded_body.extend(expanded);
             }
             entry_map.insert(
                 serde_yaml::Value::String("body".to_string()),
