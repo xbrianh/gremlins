@@ -30,7 +30,7 @@ fi
 
 fetch_meta() {
     local raw
-    raw="$(gh pr view "$pr_url" --json statusCheckRollup,reviewDecision,headRefOid)"
+    raw="$(gh pr view "$pr_url" --json statusCheckRollup,reviewDecision,headRefOid)" || return 1
     debug "ci-gate: raw check data: ${raw}"
 
     # Per-check diagnostics

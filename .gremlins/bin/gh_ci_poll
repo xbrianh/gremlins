@@ -24,7 +24,7 @@ fi
 # Outputs three lines: decision, checks_done ("true"/"false"), rollup_len.
 fetch_meta() {
     local raw
-    raw="$(gh pr view "$pr_url" --json statusCheckRollup,reviewDecision)"
+    raw="$(gh pr view "$pr_url" --json statusCheckRollup,reviewDecision)" || return 1
     debug "ci-gate: raw check data: ${raw}"
 
     # Per-check diagnostics
@@ -69,7 +69,7 @@ fetch_meta() {
 
 count_failed() {
     local raw
-    raw="$(gh pr view "$pr_url" --json statusCheckRollup)"
+    raw="$(gh pr view "$pr_url" --json statusCheckRollup)" || return 1
     debug "ci-gate: raw failed-check data: ${raw}"
     printf '%s' "$raw" | jq -r '
 [.statusCheckRollup // [] | .[] |
