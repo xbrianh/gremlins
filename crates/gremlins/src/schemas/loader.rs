@@ -262,7 +262,7 @@ fn check_consumers_inner(
             // Resolve runtime templates in keys: {name} → stage name
             let resolved_key = key.replace("{name}", &stage.name);
             if val.starts_with("artifact://") {
-                stage_outputs.push(val.clone());
+                stage_outputs.push(val.replace("{name}", &stage.name));
             }
             // Plain keys (no :// scheme) also serve as artifact lookup keys.
             if !resolved_key.ends_with('?') && !resolved_key.contains("://") {
@@ -277,7 +277,10 @@ fn check_consumers_inner(
 
         // Recurse into body children.
         // For parallel children, pass only pre-parallel + this child's own
-        // outputs so nested parallels don't see sibling outputs.
+        // outputs so nested parallels don't see sibling outputs. After the
+        // recursive call, merge any newly-discovered outputs back into the
+        // parent produced set so that composite children (e.g. a sequence
+        // inside a parallel block) can expose their descendants' outputs.
         if !stage.body.is_empty() {
             let is_parallel = stage.stage_type == "parallel";
             if is_parallel_child {
@@ -286,6 +289,12 @@ fn check_consumers_inner(
                     child_produced.insert(uri.clone());
                 }
                 check_consumers_inner(&stage.body, &mut child_produced, is_parallel)?;
+                // Propagate outputs discovered in the child subtree up to parent.
+                for uri in &child_produced {
+                    if !base_produced.contains(uri) {
+                        produced.insert(uri.clone());
+                    }
+                }
             } else {
                 check_consumers_inner(&stage.body, produced, is_parallel)?;
             }
@@ -867,6 +876,90 @@ mod tests {
                 "artifact://instructions.md?".to_string(),
             )]),
         )];
+        check_unresolved_consumers(&stages, &[], &HashMap::new()).unwrap();
+    }
+
+    #[test]
+    fn test_unresolved_subsequent_stage_consumes_parallel_output() {
+        // A sequential stage after a parallel block should be able to
+        // consume artifacts produced by parallel children.
+        let stages = vec![
+            stage_with_bind(
+                "pre",
+                "agent",
+                HashMap::from([("out".to_string(), "artifact://diff.txt".to_string())]),
+            ),
+            StageNode {
+                name: "par".to_string(),
+                stage_type: "parallel".to_string(),
+                bind_map: HashMap::new(),
+                interpolation_map: HashMap::new(),
+                skip_if_exists: String::new(),
+                body: vec![stage_with_bind(
+                    "c1",
+                    "agent",
+                    HashMap::from([(
+                        "filepath".to_string(),
+                        "artifact://review-one.md".to_string(),
+                    )]),
+                )],
+            },
+            stage_with_interp(
+                "address",
+                "agent",
+                HashMap::from([(
+                    "review_one".to_string(),
+                    r#"content("artifact://review-one.md")"#.to_string(),
+                )]),
+            ),
+        ];
+        check_unresolved_consumers(&stages, &[], &HashMap::new()).unwrap();
+    }
+
+    #[test]
+    fn test_unresolved_composite_parallel_child_output_reaches_sequential() {
+        // A sequence child inside a parallel block whose nested agent
+        // binds an artifact must expose that output so a later sequential
+        // stage can consume it.
+        let stages = vec![
+            StageNode {
+                name: "par".to_string(),
+                stage_type: "parallel".to_string(),
+                bind_map: HashMap::new(),
+                interpolation_map: HashMap::new(),
+                skip_if_exists: String::new(),
+                body: vec![
+                    StageNode {
+                        name: "seq".to_string(),
+                        stage_type: "sequence".to_string(),
+                        bind_map: HashMap::new(),
+                        interpolation_map: HashMap::new(),
+                        skip_if_exists: String::new(),
+                        body: vec![stage_with_bind(
+                            "nested-agent",
+                            "agent",
+                            HashMap::from([(
+                                "out".to_string(),
+                                "artifact://nested-out.md".to_string(),
+                            )]),
+                        )],
+                    },
+                    stage_with_bind(
+                        "c2",
+                        "agent",
+                        HashMap::from([("out".to_string(), "artifact://c2-out.md".to_string())]),
+                    ),
+                ],
+            },
+            stage_with_interp(
+                "consumer",
+                "agent",
+                HashMap::from([(
+                    "instr".to_string(),
+                    r#"content("artifact://nested-out.md")"#.to_string(),
+                )]),
+            ),
+        ];
         check_unresolved_consumers(&stages, &[], &HashMap::new()).unwrap();
     }
 
