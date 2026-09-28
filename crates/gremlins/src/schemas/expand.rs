@@ -7,7 +7,8 @@ use crate::schemas::prompts;
 use crate::schemas::resolve::BuiltinResolver;
 
 /// Trait for resolving gremlin definition names to file paths.
-/// The pyext layer provides a Python-callback implementation.
+/// The built-in implementation looks up gremlin definitions by name;
+/// callers can supply custom resolution logic (e.g. from a registry).
 pub trait DefinitionResolver {
     fn resolve(&self, name: &str, project_root: &std::path::Path) -> Result<PathBuf, SchemaError>;
 }

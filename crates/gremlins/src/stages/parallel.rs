@@ -1,9 +1,8 @@
 //! Validation for parallel groups: name shape, concurrency, and error policy.
 //!
-//! This module is deliberately free of PyO3: it owns only the pure parsing and
-//! validation that the Python module used to perform, so `cargo test -p
-//! gremlins` can cover the rules without an interpreter. The pyext shim is
-//! responsible for turning the parsed children into live stage objects.
+//! This module is pure Rust: all parsing, validation, and child-name
+//! checks run without an interpreter, so `cargo test -p gremlins` covers
+//! the rules end-to-end.
 
 use std::collections::HashSet;
 

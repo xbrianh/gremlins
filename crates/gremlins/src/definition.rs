@@ -37,7 +37,7 @@ const MISSING_DEFAULT_CLIENT: &str = "gremlin definition is missing 'default_cli
 pub const UNLOADED_NAME: &str = "unknown";
 
 // ---------------------------------------------------------------------------
-// Sequence — shared payload for Sequence and Loop variants
+// Sequence — repeating-stage pipeline payload
 // ---------------------------------------------------------------------------
 
 /// A sequence of stages with an optional scope, artifact guard, and
@@ -1187,8 +1187,7 @@ mod tests {
 
     #[tokio::test]
     async fn convert_stage_sequence_with_max_iterations() {
-        // A Sequence with max_iterations > 1 stays an ExecutorStage::Sequence
-        // (the Loop variant no longer exists).
+        // A Sequence with max_iterations > 1 stays an ExecutorStage::Sequence.
         let seq = ParsedStage::Sequence {
             attrs: StageAttrs {
                 name: "retry".into(),

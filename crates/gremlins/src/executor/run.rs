@@ -1361,11 +1361,7 @@ mod tests {
 
     #[tokio::test]
     async fn repeating_sequence_with_interval_sleeps() {
-        // NOTE: the old YAML for this test placed `interval` under `options`,
-        // where the legacy `Sequence::with_dict` parser ignored it (it only
-        // read from the top-level dict key).  The builder places `interval`
-        // at the top level, so the test now actually exercises the sleep
-        // path — which was always the intended behaviour of this test.
+        // The builder places `interval` at the top level.
         let stages = vec![SequenceBuilder::new("poll")
             .max_iterations(3)
             .skip_if_exists("artifact://done")
