@@ -79,7 +79,9 @@ stages:
       cmds:
         - "git diff {base_sha}...HEAD > {diff}"
 
-  - parallel:
+  - type: parallel
+    name: reviews
+    body:
       - name: review-one
         type: agent
         interpolation:

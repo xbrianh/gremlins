@@ -738,18 +738,13 @@ impl DefinitionBuilder {
 
 /// Dispatch a single stage mapping to the appropriate per-type builder.
 fn stage_from_yaml(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
-    let is_parallel = mapping.contains_key("parallel");
     let name = mapping
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
 
-    let stage_type = if is_parallel {
-        "parallel"
-    } else {
-        mapping.get("type").and_then(Value::as_str).unwrap_or("")
-    };
+    let stage_type = mapping.get("type").and_then(Value::as_str).unwrap_or("");
 
     match stage_type {
         "agent" => agent_from_yaml(mapping, &name),
@@ -977,8 +972,7 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, Sche
     let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
-    // Parallel children live under the `parallel` key, not `body`.
-    let body = yaml_children(mapping, "parallel")?;
+    let body = yaml_children(mapping, "body")?;
 
     let mut builder = ParallelBuilder::new(name)
         .stages(body)
@@ -997,7 +991,7 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, Sche
     builder.build()
 }
 
-/// Parse children from a composite's `key` ("body" or "parallel") through
+/// Parse children from a composite's `key` ("body") through
 /// the same per-type dispatch.
 fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<ParsedStage>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {

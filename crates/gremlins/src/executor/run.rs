@@ -1397,7 +1397,8 @@ mod tests {
         // stage exercises the new path through `run_parallel`.
         let yaml = r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - name: a
       type: exec
       options:
@@ -1505,7 +1506,8 @@ mod tests {
         // under the original (now-reused) attempt scope.
         let yaml = r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - name: good
       type: exec
       options:

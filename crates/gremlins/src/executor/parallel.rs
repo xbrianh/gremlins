@@ -751,7 +751,8 @@ mod tests {
     async fn single_child_succeeds() {
         let yaml = r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - name: a
       type: exec
       options:
@@ -771,7 +772,8 @@ mod tests {
         let yaml = r#"
 - name: group
   error_policy: any
-  parallel:
+  type: parallel
+  body:
     - name: bad
       type: exec
       options:
@@ -800,7 +802,8 @@ mod tests {
         let yaml = r#"
 - name: group
   error_policy: all
-  parallel:
+  type: parallel
+  body:
     - name: bad
       type: exec
       options:
@@ -823,7 +826,8 @@ mod tests {
         let yaml = r#"
 - name: group
   error_policy: all
-  parallel:
+  type: parallel
+  body:
     - name: bad1
       type: exec
       options:
@@ -858,7 +862,8 @@ mod tests {
   cancel_on_error: true
   error_policy: any
   max_concurrent: 1
-  parallel:
+  type: parallel
+  body:
     - name: bad
       type: exec
       options:
@@ -889,7 +894,8 @@ mod tests {
         let yaml = r#"
 - name: group
   max_concurrent: 1
-  parallel:
+  type: parallel
+  body:
     - name: a
       type: exec
       options:
@@ -923,7 +929,8 @@ mod tests {
     async fn resumption_skips_already_done_children() {
         let yaml = r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - name: a
       type: exec
       options:
@@ -965,7 +972,8 @@ mod tests {
     async fn fully_done_group_is_skipped_entirely() {
         let yaml = r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - name: a
       type: exec
       options:
@@ -997,7 +1005,8 @@ mod tests {
         // verifies that cleanup is best-effort and does not crash.
         let yaml = r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - name: a
       type: exec
       options:
@@ -1021,7 +1030,8 @@ mod tests {
         // must contain the merged artifact, prefixed with the child name.
         let yaml = r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - name: writer
       type: exec
       bind:
@@ -1058,7 +1068,8 @@ mod tests {
     async fn child_costs_are_aggregated() {
         let yaml = r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - name: a
       type: exec
       options:
@@ -1083,7 +1094,8 @@ mod tests {
         let yaml = r#"
 - name: group
   client: "cmd:true"
-  parallel:
+  type: parallel
+  body:
     - name: a
       type: exec
       options:

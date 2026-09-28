@@ -102,33 +102,26 @@ impl ParsedStage {
             .as_mapping()
             .ok_or_else(|| StageError::Message("each stage must be a mapping".to_string()))?;
 
-        // A bare `parallel:` block is sugar for `type: parallel`; both spellings
-        // converge on the same branch below.
-        let is_parallel = mapping.contains_key("parallel");
-        let name = match mapping.get("name").and_then(Value::as_str) {
-            Some(name) => name.to_string(),
-            None if is_parallel => "<parallel>".to_string(),
-            None => String::new(),
+        let name = mapping
+            .get("name")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_default();
+
+        let stage_type = match mapping.get("type").and_then(Value::as_str) {
+            Some(kind) if !kind.is_empty() => kind,
+            _ => {
+                return Err(StageError::Message(format!(
+                    "stage {name:?}: must have a 'type' field"
+                )))
+            }
         };
 
-        if !is_parallel && mapping.contains_key("max_concurrent") {
+        if stage_type != "parallel" && mapping.contains_key("max_concurrent") {
             return Err(StageError::Message(format!(
                 "stage {name:?}: 'max_concurrent' is only valid on parallel groups"
             )));
         }
-
-        let stage_type = if is_parallel {
-            "parallel"
-        } else {
-            match mapping.get("type").and_then(Value::as_str) {
-                Some(kind) if !kind.is_empty() => kind,
-                _ => {
-                    return Err(StageError::Message(format!(
-                        "stage {name:?}: must have a 'type' field"
-                    )))
-                }
-            }
-        };
 
         // Composites take their children out of the mapping as they descend, so
         // parse from an owned copy rather than the shared expanded tree.
@@ -205,7 +198,6 @@ impl ParsedStage {
             },
             auto_name: None,
             stage_type: Some(self.stage_type().to_string()),
-            is_parallel: self.stage_type() == "parallel",
         }
     }
 
@@ -321,7 +313,7 @@ fn parse_parallel(
     let dict = json_map(mapping, &name)?;
     let mut parsed = ParallelGroup::with_dict(&dict, depth).map_err(StageError::Message)?;
     parsed.attrs.skip_if_exists = parse_skip_if_exists(mapping, &name)?;
-    let body = parse_body(mapping, "parallel", depth + 1)?;
+    let body = parse_body(mapping, "body", depth + 1)?;
     // Child names are only knowable once the children have been parsed.
     let child_names: Vec<String> = body.iter().map(|child| child.name().to_string()).collect();
     validate_child_names(&parsed.attrs.name, &child_names).map_err(StageError::Message)?;
@@ -393,7 +385,6 @@ fn stage_entry(value: &Value) -> StageEntry {
         name,
         auto_name,
         stage_type,
-        is_parallel: mapping.is_some_and(|entry| entry.contains_key("parallel")),
     }
 }
 
@@ -657,10 +648,7 @@ fn parallel_to_yaml(
     }
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
     let children: Vec<Value> = body.iter().map(ParsedStage::to_yaml).collect();
-    m.insert(
-        Value::String("parallel".to_string()),
-        Value::Sequence(children),
-    );
+    m.insert(Value::String("body".to_string()), Value::Sequence(children));
     Value::Mapping(m)
 }
 
@@ -748,7 +736,8 @@ mod tests {
     fn parallel_sugar_parses_children() {
         let stages = parse_all(
             r#"
-- parallel:
+- type: parallel
+  body:
     - type: exec
       options:
         cmds: ["true"]
@@ -769,11 +758,29 @@ mod tests {
     }
 
     #[test]
+    fn bare_parallel_sugar_is_rejected() {
+        let err = parse_all(
+            r#"
+- parallel:
+    - type: exec
+      options:
+        cmds: ["true"]
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("must have a 'type' field"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn parallel_options_are_preserved() {
         let stages = parse_all(
             r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - type: exec
       options:
         cmds: ["true"]
@@ -803,11 +810,13 @@ mod tests {
     fn nested_parallel_is_rejected() {
         let err = parse_all(
             r#"
-- parallel:
+- type: parallel
+  body:
     - type: exec
       options:
         cmds: ["true"]
-    - parallel:
+    - type: parallel
+      body:
         - type: exec
           options:
             cmds: ["true"]
@@ -933,7 +942,8 @@ mod tests {
         let stages = parse_all(
             r#"
 - name: group
-  parallel:
+  type: parallel
+  body:
     - name: shard
       type: exec
       options:
