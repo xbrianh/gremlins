@@ -1357,6 +1357,7 @@ mod tests {
 
     #[test]
     fn resolve_env_injects_system_vars() {
+        let _guard = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state").join("gr-test");
         let project_root = dir.path().join("project");
@@ -1404,6 +1405,7 @@ mod tests {
 
     #[test]
     fn resolve_env_sources_and_keeps_system_vars() {
+        let _guard = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state").join("gr-test");
         let project_root = dir.path().join("project");
@@ -1447,6 +1449,7 @@ mod tests {
 
     #[test]
     fn resolve_env_lets_the_script_read_system_vars() {
+        let _guard = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state").join("gr-test");
         let project_root = dir.path().join("project");
