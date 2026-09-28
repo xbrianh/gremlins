@@ -58,12 +58,10 @@ impl From<StageError> for SchemaError {
 pub enum ParsedStage {
     Agent {
         stage: Agent,
-        skip_if_exists: String,
         client: Option<ClientSpec>,
     },
     Exec {
         stage: Exec,
-        skip_if_exists: String,
         client: Option<ClientSpec>,
     },
     Sequence {
@@ -137,10 +135,6 @@ impl ParsedStage {
         let mut mapping = mapping.clone();
         match stage_type {
             "parallel" => parse_parallel(&mut mapping, name, depth),
-            "loop" => Err(StageError::Message(
-                "the 'loop' stage type has been removed; use 'sequence' with max_iterations > 1"
-                    .to_string(),
-            )),
             "sequence" => parse_sequence(&mut mapping, name, depth),
             "exec" => parse_exec(&mapping, &name),
             "agent" => parse_agent(&mapping, &name),
@@ -185,8 +179,7 @@ impl ParsedStage {
     /// The artifact guard that makes the stage a conditional producer.
     pub fn skip_if_exists(&self) -> &str {
         match self {
-            ParsedStage::Agent { skip_if_exists, .. }
-            | ParsedStage::Exec { skip_if_exists, .. } => skip_if_exists,
+            ParsedStage::Agent { .. } | ParsedStage::Exec { .. } => "",
             ParsedStage::Sequence { attrs, .. } | ParsedStage::Parallel { attrs, .. } => {
                 &attrs.skip_if_exists
             }
@@ -231,16 +224,8 @@ impl ParsedStage {
     /// [`serde_yaml::Value`] matching the canonical expanded-YAML shape.
     pub fn to_yaml(&self) -> Value {
         match self {
-            ParsedStage::Agent {
-                stage,
-                skip_if_exists,
-                client,
-            } => agent_to_yaml(stage, skip_if_exists, client),
-            ParsedStage::Exec {
-                stage,
-                skip_if_exists,
-                client,
-            } => exec_to_yaml(stage, skip_if_exists, client),
+            ParsedStage::Agent { stage, client } => agent_to_yaml(stage, client),
+            ParsedStage::Exec { stage, client } => exec_to_yaml(stage, client),
             ParsedStage::Sequence {
                 attrs,
                 max_iterations,
@@ -300,34 +285,14 @@ fn parse_agent(mapping: &Mapping, name: &str) -> Result<ParsedStage, StageError>
     let dict = json_map(mapping, name)?;
     let stage = Agent::from_dict(&dict).map_err(StageError::Message)?;
     let client = get_client_from_dict(&dict, name).map_err(StageError::Message)?;
-    let skip_if_exists = parse_skip_if_exists(mapping, name)?;
-    if !skip_if_exists.is_empty() {
-        return Err(StageError::Message(
-            "'skip_if_exists' is only valid on sequence and parallel stages".to_string(),
-        ));
-    }
-    Ok(ParsedStage::Agent {
-        stage,
-        skip_if_exists,
-        client,
-    })
+    Ok(ParsedStage::Agent { stage, client })
 }
 
 fn parse_exec(mapping: &Mapping, name: &str) -> Result<ParsedStage, StageError> {
     let dict = json_map(mapping, name)?;
     let stage = Exec::from_dict(&dict).map_err(StageError::Message)?;
     let client = get_client_from_dict(&dict, name).map_err(StageError::Message)?;
-    let skip_if_exists = parse_skip_if_exists(mapping, name)?;
-    if !skip_if_exists.is_empty() {
-        return Err(StageError::Message(
-            "'skip_if_exists' is only valid on sequence and parallel stages".to_string(),
-        ));
-    }
-    Ok(ParsedStage::Exec {
-        stage,
-        skip_if_exists,
-        client,
-    })
+    Ok(ParsedStage::Exec { stage, client })
 }
 
 fn parse_sequence(
@@ -557,7 +522,7 @@ fn client_to_yaml(client: &Option<ClientSpec>) -> Option<Value> {
     client.as_ref().map(|c| Value::String(c.0.clone()))
 }
 
-fn agent_to_yaml(stage: &Agent, skip_if_exists: &str, client: &Option<ClientSpec>) -> Value {
+fn agent_to_yaml(stage: &Agent, client: &Option<ClientSpec>) -> Value {
     let mut m = Mapping::new();
     m.insert(
         Value::String("name".to_string()),
@@ -589,11 +554,10 @@ fn agent_to_yaml(stage: &Agent, skip_if_exists: &str, client: &Option<ClientSpec
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
-    insert_str_if_nonempty(&mut m, "skip_if_exists", skip_if_exists);
     Value::Mapping(m)
 }
 
-fn exec_to_yaml(stage: &Exec, skip_if_exists: &str, client: &Option<ClientSpec>) -> Value {
+fn exec_to_yaml(stage: &Exec, client: &Option<ClientSpec>) -> Value {
     let mut m = Mapping::new();
     m.insert(
         Value::String("name".to_string()),
@@ -613,7 +577,6 @@ fn exec_to_yaml(stage: &Exec, skip_if_exists: &str, client: &Option<ClientSpec>)
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
-    insert_str_if_nonempty(&mut m, "skip_if_exists", skip_if_exists);
     Value::Mapping(m)
 }
 
@@ -640,12 +603,10 @@ fn sequence_to_yaml(
         );
     }
     if let Some(interval_secs) = interval {
-        let mut opts = Mapping::new();
-        opts.insert(
+        m.insert(
             Value::String("interval".to_string()),
             serde_yaml::to_value(interval_secs).unwrap_or(Value::Null),
         );
-        m.insert(Value::String("options".to_string()), Value::Mapping(opts));
     }
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
@@ -861,9 +822,9 @@ mod tests {
     }
 
     #[test]
-    fn loop_type_is_rejected_with_migration_hint() {
+    fn loop_type_is_rejected_with_unknown_type() {
         let err = parse_one("type: loop\nmax-iterations: 2\nbody: []\n").unwrap_err();
-        assert!(err.to_string().contains("has been removed"), "{err}");
+        assert!(err.to_string().contains("unknown type"), "{err}");
     }
 
     #[test]
@@ -907,13 +868,10 @@ mod tests {
     }
 
     #[test]
-    fn skip_if_exists_must_be_a_string() {
-        let err = parse_one("type: agent\nskip_if_exists: 3\n").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("'skip_if_exists' must be a string"),
-            "{err}"
-        );
+    fn skip_if_exists_on_leaf_is_silently_ignored() {
+        // skip_if_exists is no longer validated on leaf stages — it's simply ignored.
+        let stages = parse_one("type: agent\nskip_if_exists: 3\n").unwrap();
+        assert_eq!(stages.skip_if_exists(), "");
     }
 
     #[test]

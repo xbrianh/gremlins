@@ -483,16 +483,8 @@ impl StaticDefinition {
     /// Recursively convert one [`ParsedStage`] into an [`ExecutorStage`].
     pub(crate) fn convert_stage(&self, stage: ParsedStage) -> ExecutorStage {
         match stage {
-            ParsedStage::Agent {
-                stage,
-                skip_if_exists: _,
-                client,
-            } => ExecutorStage::Agent { stage, client },
-            ParsedStage::Exec {
-                stage,
-                skip_if_exists: _,
-                client,
-            } => ExecutorStage::Exec { stage, client },
+            ParsedStage::Agent { stage, client } => ExecutorStage::Agent { stage, client },
+            ParsedStage::Exec { stage, client } => ExecutorStage::Exec { stage, client },
             ParsedStage::Sequence {
                 attrs,
                 max_iterations,
@@ -1048,7 +1040,6 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 bind_map: std::collections::HashMap::new(),
             },
-            skip_if_exists: String::new(),
             client: None,
         }
     }
@@ -1062,7 +1053,6 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 bind_map: std::collections::HashMap::new(),
             },
-            skip_if_exists: String::new(),
             client: None,
         }
     }

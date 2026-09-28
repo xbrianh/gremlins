@@ -56,18 +56,8 @@ impl Sequence {
             .unwrap_or("")
             .to_string();
 
-        let options = match d.get("options") {
-            None | Some(Value::Null) => HashMap::new(),
-            Some(Value::Object(m)) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(_) => return Err(format!("stage '{name}': 'options' must be a mapping")),
-        };
-
-        // `d.get("max-iterations") or options.get("max_iterations")` — default 1.
-        let raw_max = d
-            .get("max-iterations")
-            .filter(|v| truthy(v))
-            .or_else(|| options.get("max_iterations").filter(|v| !v.is_null()));
-        let max_iterations = match raw_max {
+        // Read max-iterations from top-level only — default 1.
+        let max_iterations = match d.get("max-iterations").filter(|v| truthy(v)) {
             Some(v) => {
                 let n = as_int(v).ok_or_else(|| {
                     format!("stage '{name}': 'max_iterations' must be an integer, got {v:?}")
@@ -87,7 +77,7 @@ impl Sequence {
             None => 1,
         };
 
-        let interval = match options.get("interval") {
+        let interval = match d.get("interval").filter(|v| !v.is_null()) {
             None | Some(Value::Null) => None,
             Some(v) => Some(as_float(v).ok_or_else(|| {
                 format!("stage '{name}': 'interval' must be a number, got {v:?}")
@@ -221,21 +211,22 @@ mod tests {
     }
 
     #[test]
-    fn with_dict_parses_max_iterations_from_options() {
+    fn with_dict_ignores_options_max_iterations() {
         let d = dict(&[
             ("name", json!("s")),
             ("options", json!({"max_iterations": 4})),
             ("body", json!([{"type": "exec", "name": "step"}])),
         ]);
         let seq = Sequence::with_dict(&d).unwrap();
-        assert_eq!(seq.max_iterations, 4);
+        // options.max_iterations is not read — defaults to 1
+        assert_eq!(seq.max_iterations, 1);
     }
 
     #[test]
-    fn with_dict_parses_interval_from_options() {
+    fn with_dict_parses_interval_from_top_level() {
         let d = dict(&[
             ("name", json!("s")),
-            ("options", json!({"interval": 2.5})),
+            ("interval", json!(2.5)),
             ("body", json!([{"type": "exec", "name": "step"}])),
         ]);
         let seq = Sequence::with_dict(&d).unwrap();
@@ -256,7 +247,7 @@ mod tests {
     fn with_dict_rejects_max_iterations_below_one() {
         let d = dict(&[
             ("name", json!("s")),
-            ("options", json!({"max_iterations": 0})),
+            ("max-iterations", json!(-1)),
             ("body", json!([{"type": "exec", "name": "step"}])),
         ]);
         let err = Sequence::with_dict(&d).unwrap_err();
@@ -288,7 +279,7 @@ mod tests {
     fn with_dict_parses_bool_interval() {
         let d = dict(&[
             ("name", json!("s")),
-            ("options", json!({"interval": true})),
+            ("interval", json!(true)),
             ("body", json!([{"type": "exec", "name": "step"}])),
         ]);
         assert_eq!(Sequence::with_dict(&d).unwrap().interval, Some(1.0));
@@ -298,7 +289,7 @@ mod tests {
     fn with_dict_parses_string_interval() {
         let d = dict(&[
             ("name", json!("s")),
-            ("options", json!({"interval": "20"})),
+            ("interval", json!("20")),
             ("body", json!([{"type": "exec", "name": "step"}])),
         ]);
         let seq = Sequence::with_dict(&d).unwrap();
@@ -319,7 +310,7 @@ mod tests {
     fn with_dict_rejects_max_iterations_above_u32() {
         let d = dict(&[
             ("name", json!("s")),
-            ("options", json!({"max_iterations": u32::MAX as i64 + 1})),
+            ("max-iterations", json!(u32::MAX as i64 + 1)),
             ("body", json!([{"type": "exec", "name": "step"}])),
         ]);
         let err = Sequence::with_dict(&d).unwrap_err();

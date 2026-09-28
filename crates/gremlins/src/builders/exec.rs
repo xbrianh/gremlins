@@ -32,7 +32,6 @@ pub struct ExecBuilder {
     options: HashMap<String, serde_json::Value>,
     interpolation_map: HashMap<String, String>,
     bind_map: HashMap<String, String>,
-    skip_if_exists: String,
     client: Option<ClientSpec>,
 }
 
@@ -44,7 +43,6 @@ impl ExecBuilder {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             bind_map: HashMap::new(),
-            skip_if_exists: String::new(),
             client: None,
         }
     }
@@ -126,12 +124,6 @@ impl ExecBuilder {
     /// Replace all options.
     pub fn options(mut self, options: HashMap<String, serde_json::Value>) -> Self {
         self.options = options;
-        self
-    }
-
-    /// Set the `skip_if_exists` artifact guard.
-    pub fn skip_if_exists(mut self, uri: impl Into<String>) -> Self {
-        self.skip_if_exists = uri.into();
         self
     }
 
@@ -231,14 +223,6 @@ impl ExecBuilder {
             }
         }
 
-        if !self.skip_if_exists.is_empty() {
-            return Err(SchemaError::Stage {
-                name: name.clone(),
-                msg: "skip_if_exists is not supported on leaf stages; wrap in a sequence instead"
-                    .to_string(),
-            });
-        }
-
         let stage = Exec {
             name,
             options: self.options,
@@ -247,7 +231,6 @@ impl ExecBuilder {
         };
         Ok(ParsedStage::Exec {
             stage,
-            skip_if_exists: self.skip_if_exists,
             client: self.client,
         })
     }

@@ -164,7 +164,6 @@ pub struct LandBuilder {
     options: HashMap<String, serde_json::Value>,
     interpolation_map: HashMap<String, String>,
     bind_map: HashMap<String, String>,
-    skip_if_exists: String,
     client: Option<crate::stages::composite::ClientSpec>,
 }
 
@@ -175,7 +174,6 @@ impl LandBuilder {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             bind_map: HashMap::new(),
-            skip_if_exists: String::new(),
             client: None,
         }
     }
@@ -245,12 +243,6 @@ impl LandBuilder {
     /// Set an option value.
     pub fn option(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
         self.options.insert(key.into(), value.into());
-        self
-    }
-
-    /// Set the `skip_if_exists` artifact guard.
-    pub fn skip_if_exists(mut self, uri: impl Into<String>) -> Self {
-        self.skip_if_exists = uri.into();
         self
     }
 
@@ -358,7 +350,6 @@ impl LandBuilder {
         };
         Ok(ParsedStage::Exec {
             stage,
-            skip_if_exists: self.skip_if_exists,
             client: self.client,
         })
     }
@@ -763,10 +754,6 @@ fn stage_from_yaml(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
     match stage_type {
         "agent" => agent_from_yaml(mapping, &name),
         "exec" => exec_from_yaml(mapping, &name),
-        "loop" => Err(SchemaError::Generic(
-            "the 'loop' stage type has been removed; use 'sequence' with max_iterations > 1"
-                .to_string(),
-        )),
         "sequence" => sequence_from_yaml(mapping, &name),
         "parallel" => parallel_from_yaml(mapping, &name),
         other => Err(SchemaError::Generic(format!(
@@ -860,7 +847,6 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaE
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
-    let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
     let mut builder = AgentBuilder::new(name);
@@ -876,9 +862,6 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaE
     for (k, v) in options {
         builder = builder.option(k, v);
     }
-    if !skip_if_exists.is_empty() {
-        builder = builder.skip_if_exists(skip_if_exists);
-    }
     if let Some(c) = client {
         builder = builder.client(c.0);
     }
@@ -891,7 +874,6 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaEr
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
-    let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
     let mut builder = ExecBuilder::new(name);
@@ -904,9 +886,6 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaEr
     for (k, v) in options {
         builder = builder.option(k, v);
     }
-    if !skip_if_exists.is_empty() {
-        builder = builder.skip_if_exists(skip_if_exists);
-    }
     if let Some(c) = client {
         builder = builder.client(c.0);
     }
@@ -917,15 +896,7 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaEr
 /// Build a [`SequenceBuilder`] from a YAML stage mapping.
 fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
-        None => {
-            // Fall back to options.max_iterations, then default to 1.
-            mapping
-                .get("options")
-                .and_then(|o| o.get("max_iterations"))
-                .and_then(|v| v.as_u64())
-                .and_then(|n| u32::try_from(n).ok())
-                .unwrap_or(1)
-        }
+        None => 1u32,
         Some(v) => {
             if let Some(n) = v.as_u64().and_then(|n| u32::try_from(n).ok()) {
                 n
@@ -945,11 +916,8 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, Sche
     let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
-    // Interval from options.interval.
-    let interval = mapping
-        .get("options")
-        .and_then(|v| v.get("interval"))
-        .and_then(|v| v.as_f64());
+    // Interval from top-level key.
+    let interval = mapping.get("interval").and_then(|v| v.as_f64());
 
     let body = yaml_children(mapping, "body")?;
 
@@ -1055,7 +1023,6 @@ fn land_from_yaml_builder(mapping: &Mapping) -> Result<ParsedStage, SchemaError>
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
-    let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
     let mut builder = LandBuilder::new();
@@ -1067,9 +1034,6 @@ fn land_from_yaml_builder(mapping: &Mapping) -> Result<ParsedStage, SchemaError>
     }
     for (k, v) in options {
         builder = builder.option(k, v);
-    }
-    if !skip_if_exists.is_empty() {
-        builder = builder.skip_if_exists(skip_if_exists);
     }
     if let Some(c) = client {
         builder = builder.client(c.0);
