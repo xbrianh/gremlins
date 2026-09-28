@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Exec {
     pub name: String,
     pub options: HashMap<String, serde_json::Value>,

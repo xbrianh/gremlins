@@ -44,7 +44,7 @@ impl From<StageError> for SchemaError {
 /// the `skip_if_exists` guard and the stage's `client`. Composite variants
 /// reuse the composite stage's parsed data and replace its raw
 /// `Vec<serde_json::Value>` body with the fully parsed children.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ParsedStage {
     Agent {
         stage: Agent,

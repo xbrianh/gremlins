@@ -7,7 +7,7 @@ pub struct ClientSpec(pub String);
 
 /// Attributes shared by composite stages (Loop, Sequence, Parallel) and
 /// duck-typed test stages.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StageAttrs {
     pub name: String,
     pub stage_type: String,

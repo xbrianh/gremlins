@@ -1048,6 +1048,7 @@ mod tests {
     use crate::builders::artifacts::{artifact, content};
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
+    use crate::stages::parallel::ErrorPolicy;
     use serde_yaml::Value;
 
     #[test]
@@ -1538,5 +1539,128 @@ mod tests {
         // Both unnamed exec children should get auto-filled names.
         assert_eq!(body[0].name(), "exec");
         assert_eq!(body[1].name(), "exec-2");
+    }
+
+    // ------------------------------------------------------------------
+    // to_yaml / from_yaml round-trip symmetry
+    // ------------------------------------------------------------------
+
+    /// Helper: serialize a ParsedStage to a YAML Mapping and parse it back
+    /// through stage_from_yaml, asserting the two are equal.
+    fn assert_round_trip(stage: &ParsedStage) {
+        let yaml_val = stage.to_yaml();
+        let mapping = yaml_val
+            .as_mapping()
+            .expect("to_yaml must produce a mapping");
+        let round_tripped =
+            stage_from_yaml(mapping).expect("stage_from_yaml must accept to_yaml output");
+        assert_eq!(
+            stage, &round_tripped,
+            "round-trip mismatch for stage {} (type {})",
+            stage.name(),
+            stage.stage_type()
+        );
+    }
+
+    #[test]
+    fn agent_to_yaml_round_trip() {
+        let stage = AgentBuilder::new("plan")
+            .prompt("write the plan using {input} to {plan}")
+            .interpolate(
+                "input",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://input.md\")",
+                ),
+            )
+            .bind("plan", artifact("artifact://plan.md"))
+            .option("model", "xai:grok-4")
+            .client("xai:grok-4")
+            .build()
+            .unwrap();
+        assert_round_trip(&stage);
+    }
+
+    #[test]
+    fn agent_to_yaml_round_trip_minimal() {
+        let stage = AgentBuilder::new("min")
+            .prompt("hi")
+            .build()
+            .unwrap();
+        assert_round_trip(&stage);
+    }
+
+    #[test]
+    fn exec_to_yaml_round_trip() {
+        let stage = ExecBuilder::new("run")
+            .cmd("echo {input} > {out}")
+            .interpolate(
+                "input",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://in.txt\")",
+                ),
+            )
+            .bind("out", artifact("artifact://out.txt"))
+            .option("timeout", "30")
+            .client("local")
+            .build()
+            .unwrap();
+        assert_round_trip(&stage);
+    }
+
+    #[test]
+    fn exec_to_yaml_round_trip_minimal() {
+        let stage = ExecBuilder::new("cmd")
+            .cmd("true")
+            .build()
+            .unwrap();
+        assert_round_trip(&stage);
+    }
+
+    #[test]
+    fn sequence_to_yaml_round_trip() {
+        let stage = SequenceBuilder::new("workflow")
+            .stage(ExecBuilder::new("step-a").cmd("echo a").build().unwrap())
+            .stage(ExecBuilder::new("step-b").cmd("echo b").build().unwrap())
+            .max_iterations(3)
+            .interval(1.5)
+            .skip_if_exists("artifact://done.txt")
+            .client("xai:grok-4")
+            .build()
+            .unwrap();
+        assert_round_trip(&stage);
+    }
+
+    #[test]
+    fn sequence_to_yaml_round_trip_minimal() {
+        let stage = SequenceBuilder::new("seq")
+            .stage(ExecBuilder::new("x").cmd("true").build().unwrap())
+            .build()
+            .unwrap();
+        assert_round_trip(&stage);
+    }
+
+    #[test]
+    fn parallel_to_yaml_round_trip() {
+        let stage = ParallelBuilder::new("reviews")
+            .stage(AgentBuilder::new("review-a").prompt("review").build().unwrap())
+            .stage(AgentBuilder::new("review-b").prompt("review").build().unwrap())
+            .max_concurrent(2)
+            .cancel_on_error(true)
+            .error_policy(ErrorPolicy::All)
+            .skip_if_exists("artifact://reviews-done")
+            .client("xai:grok-4")
+            .build()
+            .unwrap();
+        assert_round_trip(&stage);
+    }
+
+    #[test]
+    fn parallel_to_yaml_round_trip_minimal() {
+        let stage = ParallelBuilder::new("par")
+            .stage(ExecBuilder::new("a").cmd("true").build().unwrap())
+            .stage(ExecBuilder::new("b").cmd("true").build().unwrap())
+            .build()
+            .unwrap();
+        assert_round_trip(&stage);
     }
 }
