@@ -23,7 +23,17 @@ fi
 # Fetches metadata and checks-completed status in a single gh pr view call.
 # Outputs three lines: decision, checks_done ("true"/"false"), rollup_len.
 fetch_meta() {
-    gh pr view "$pr_url" --json statusCheckRollup,reviewDecision --jq '
+    local raw
+    raw="$(gh pr view "$pr_url" --json statusCheckRollup,reviewDecision)" || return 1
+    debug "ci-gate: raw check data: ${raw}"
+
+    # Per-check diagnostics
+    printf '%s' "$raw" | jq -r '
+        (.statusCheckRollup // [])[] |
+        "ci-gate: check typename=\(.__typename) name=\(.name // .context) status=\(.status // .state) conclusion=\(.conclusion // "N/A")"
+    ' >&2
+
+    printf '%s' "$raw" | jq -r '
 (.reviewDecision // ""),
 (
     (.statusCheckRollup // []) as $r |
@@ -39,12 +49,29 @@ fetch_meta() {
         ] | length) == 0
     end
 ),
-((.statusCheckRollup // []) | length)
+((.statusCheckRollup // []) | length),
+(
+    (.statusCheckRollup // []) as $r |
+    if ($r | length) == 0 then
+        0
+    else
+        ([$r[] |
+            if .__typename == "StatusContext" then
+                select(.state == "EXPECTED" or .state == "PENDING")
+            else
+                select(.status != "COMPLETED")
+            end
+        ] | length)
+    end
+)
 '
 }
 
 count_failed() {
-    gh pr view "$pr_url" --json statusCheckRollup --jq '
+    local raw
+    raw="$(gh pr view "$pr_url" --json statusCheckRollup)" || return 1
+    debug "ci-gate: raw failed-check data: ${raw}"
+    printf '%s' "$raw" | jq -r '
 [.statusCheckRollup // [] | .[] |
     if .__typename == "StatusContext" then
         select(.state == "FAILURE" or .state == "ERROR")
@@ -74,7 +101,8 @@ while true; do
     decision=$(printf '%s' "$meta" | sed -n '1p')
     checks_done=$(printf '%s' "$meta" | sed -n '2p')
     rollup_len=$(printf '%s' "$meta" | sed -n '3p')
-    info "ci-gate: poll iteration... checks_done=${checks_done} rollup_len=${rollup_len} ${remaining}s remaining"
+    in_progress=$(printf '%s' "$meta" | sed -n '4p')
+    info "ci-gate: poll iteration... checks_done=${checks_done} in_progress=${in_progress} total=${rollup_len} ${remaining}s remaining"
     bail_review_required "$decision"
 
     if [ "$checks_done" = "true" ]; then
