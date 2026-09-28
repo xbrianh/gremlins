@@ -20,7 +20,7 @@ per-stage builder (`AgentBuilder`, `ExecBuilder`, `SequenceBuilder`,
 | `constants.rs` | `FRAMEWORK_KEYS` — variable names (`name`, `model`, `cwd`, `base_ref`) reserved for runtime injection and excluded from interpolation maps. |
 | `outcome.rs` | `Done` marker — unit type signaling a stage completed without bailing. |
 | `builders/agent.rs` | `AgentBuilder` — builder pattern for `ParsedStage::Agent`. Validates interpolation syntax, framework-key collisions, bind/interpolation key collisions, and unused keys. |
-| `builders/exec.rs` | `ExecBuilder` — builder pattern for `ParsedStage::Exec`. Same validations as `AgentBuilder`. |
+| `builders/exec.rs` | `ExecBuilder` — builder pattern for `ParsedStage::Exec`. Validates interpolation syntax, bind/interpolation key collisions, and unused keys. Unlike `AgentBuilder`, rejects **all** `FRAMEWORK_KEYS` in options (including `model`). |
 | `builders/composite.rs` | `SequenceBuilder`, `ParallelBuilder` — builder patterns for composite stages. Validates empty-body rejection, max-iterations, nested-parallel rejection, and child-name uniqueness/validity. |
 | `builders/definition.rs` | `DefinitionBuilder` — top-level YAML ingestion. `from_yaml` expands, then `stage_from_yaml` dispatches to the per-stage builders. Also `BootstrapBuilder` and `LandBuilder`. |
 
@@ -28,27 +28,36 @@ per-stage builder (`AgentBuilder`, `ExecBuilder`, `SequenceBuilder`,
 
 Parsing happens in two layers:
 
-1. **Schema layer** (`schemas/loader::fill_names`). Runs first. Fills
-   names across siblings, handles `_auto_name` from recipe expansion,
-   and normalizes the YAML shape.
+1. **Builder layer** (`builders/definition.rs::stage_from_yaml`). Runs
+   first. Matches `type` to the correct builder (`AgentBuilder`,
+   `ExecBuilder`, `SequenceBuilder`, `ParallelBuilder`), calls
+   `.build()` → `ParsedStage`, and descends into composite bodies
+   (recursing into `stage_from_yaml`). Builders validate per-stage
+   constraints (interpolation syntax, framework-key collisions,
+   bind/interpolation key collisions, unused keys, empty-body rejection,
+   nested-parallel rejection, child-name uniqueness).
 
-2. **Builder layer** (`builders/definition.rs::stage_from_yaml`). Runs
-   on name-complete YAML. Matches `type` to the correct builder
-   (`AgentBuilder`, `ExecBuilder`, `SequenceBuilder`, `ParallelBuilder`),
-   calls `.build()` → `ParsedStage`, descends into composite bodies
-   (recursing into `stage_from_yaml`), and validates cross-cutting rules
-   like `max_concurrent`-on-non-parallel rejection.
+2. **Name-filling pass** (`builders/definition.rs::fill_builder_names`).
+   Runs after the `ParsedStage` tree is built (inside
+   `DefinitionBuilder::build`). Converts each stage to a `StageEntry`
+   (with `auto_name: None`), calls `schemas/loader::fill_names` to
+   assign auto-generated names to unnamed stages and disambiguate
+   duplicates, then writes the resolved names back via `set_name()`.
+   Recurses into composite bodies.
 
 Parallel groups use `type: parallel` with a `body:` list — there is no
 bare `parallel:` sugar.
 
 ## Key invariants
 
-- **`client` is a composite-only concern.** Leaf structs (`Agent`, `Exec`)
-  never read the `client` key; it is stored on the `ParsedStage` variant
-  by the per-stage builder. Composition resolves inheritance.
+- **`client` is read by every stage type.** Both leaf builders
+  (`agent_from_yaml`, `exec_from_yaml`) and composite builders read the
+  `client` key and store it as `Option<ClientSpec>` on their
+  `ParsedStage` variant. At runtime, an explicit leaf client takes
+  precedence over an enclosing composite's client (see
+  `executor/run.rs::resolve_client_spec`).
 - **`skip_if_exists` is composite-only.** Set on `Sequence` and `Parallel`
-  via the builder; silently ignored on leaves (returns `""`).
+  via the builder; leaf `ParsedStage` accessors return `""`.
 - **Composite bodies are fully parsed.** Children are `Vec<ParsedStage>`,
   not raw YAML. Descent happens in `stage_from_yaml` via `yaml_children`.
 - **Framework-key filtering.** `cwd` and `base_ref` are stripped from
