@@ -24,7 +24,6 @@ use crate::stages::agent::Agent;
 use crate::stages::composite::{get_client_from_dict, ClientSpec, StageAttrs};
 use crate::stages::exec::Exec;
 use crate::stages::parallel::{validate_child_names, ErrorPolicy, ParallelGroup};
-use crate::stages::r#loop::Loop;
 use crate::stages::sequence::Sequence;
 
 /// Why a stage failed to parse.
@@ -59,24 +58,16 @@ impl From<StageError> for SchemaError {
 pub enum ParsedStage {
     Agent {
         stage: Agent,
-        skip_if_exists: String,
         client: Option<ClientSpec>,
     },
     Exec {
         stage: Exec,
-        skip_if_exists: String,
         client: Option<ClientSpec>,
-    },
-    Loop {
-        attrs: StageAttrs,
-        max_iterations: u32,
-        stop_when_exists: Option<String>,
-        interval: Option<f64>,
-        client: Option<ClientSpec>,
-        body: Vec<ParsedStage>,
     },
     Sequence {
         attrs: StageAttrs,
+        max_iterations: u32,
+        interval: Option<f64>,
         client: Option<ClientSpec>,
         body: Vec<ParsedStage>,
     },
@@ -144,7 +135,6 @@ impl ParsedStage {
         let mut mapping = mapping.clone();
         match stage_type {
             "parallel" => parse_parallel(&mut mapping, name, depth),
-            "loop" => parse_loop(&mut mapping, name, depth),
             "sequence" => parse_sequence(&mut mapping, name, depth),
             "exec" => parse_exec(&mapping, &name),
             "agent" => parse_agent(&mapping, &name),
@@ -159,9 +149,9 @@ impl ParsedStage {
         match self {
             ParsedStage::Agent { stage, .. } => &stage.name,
             ParsedStage::Exec { stage, .. } => &stage.name,
-            ParsedStage::Loop { attrs, .. }
-            | ParsedStage::Sequence { attrs, .. }
-            | ParsedStage::Parallel { attrs, .. } => &attrs.name,
+            ParsedStage::Sequence { attrs, .. } | ParsedStage::Parallel { attrs, .. } => {
+                &attrs.name
+            }
         }
     }
 
@@ -170,9 +160,9 @@ impl ParsedStage {
         match self {
             ParsedStage::Agent { .. } => "agent",
             ParsedStage::Exec { .. } => "exec",
-            ParsedStage::Loop { attrs, .. }
-            | ParsedStage::Sequence { attrs, .. }
-            | ParsedStage::Parallel { attrs, .. } => &attrs.stage_type,
+            ParsedStage::Sequence { attrs, .. } | ParsedStage::Parallel { attrs, .. } => {
+                &attrs.stage_type
+            }
         }
     }
 
@@ -181,7 +171,6 @@ impl ParsedStage {
         match self {
             ParsedStage::Agent { client, .. }
             | ParsedStage::Exec { client, .. }
-            | ParsedStage::Loop { client, .. }
             | ParsedStage::Sequence { client, .. }
             | ParsedStage::Parallel { client, .. } => client.as_ref(),
         }
@@ -190,11 +179,10 @@ impl ParsedStage {
     /// The artifact guard that makes the stage a conditional producer.
     pub fn skip_if_exists(&self) -> &str {
         match self {
-            ParsedStage::Agent { skip_if_exists, .. }
-            | ParsedStage::Exec { skip_if_exists, .. } => skip_if_exists,
-            ParsedStage::Loop { attrs, .. }
-            | ParsedStage::Sequence { attrs, .. }
-            | ParsedStage::Parallel { attrs, .. } => &attrs.skip_if_exists,
+            ParsedStage::Agent { .. } | ParsedStage::Exec { .. } => "",
+            ParsedStage::Sequence { attrs, .. } | ParsedStage::Parallel { attrs, .. } => {
+                &attrs.skip_if_exists
+            }
         }
     }
 
@@ -202,9 +190,7 @@ impl ParsedStage {
     pub fn body(&self) -> &[ParsedStage] {
         match self {
             ParsedStage::Agent { .. } | ParsedStage::Exec { .. } => &[],
-            ParsedStage::Loop { body, .. }
-            | ParsedStage::Sequence { body, .. }
-            | ParsedStage::Parallel { body, .. } => body,
+            ParsedStage::Sequence { body, .. } | ParsedStage::Parallel { body, .. } => body,
         }
     }
 
@@ -228,9 +214,9 @@ impl ParsedStage {
         match self {
             ParsedStage::Agent { stage, .. } => stage.name = name,
             ParsedStage::Exec { stage, .. } => stage.name = name,
-            ParsedStage::Loop { attrs, .. }
-            | ParsedStage::Sequence { attrs, .. }
-            | ParsedStage::Parallel { attrs, .. } => attrs.name = name,
+            ParsedStage::Sequence { attrs, .. } | ParsedStage::Parallel { attrs, .. } => {
+                attrs.name = name
+            }
         }
     }
 
@@ -238,36 +224,15 @@ impl ParsedStage {
     /// [`serde_yaml::Value`] matching the canonical expanded-YAML shape.
     pub fn to_yaml(&self) -> Value {
         match self {
-            ParsedStage::Agent {
-                stage,
-                skip_if_exists,
-                client,
-            } => agent_to_yaml(stage, skip_if_exists, client),
-            ParsedStage::Exec {
-                stage,
-                skip_if_exists,
-                client,
-            } => exec_to_yaml(stage, skip_if_exists, client),
-            ParsedStage::Loop {
+            ParsedStage::Agent { stage, client } => agent_to_yaml(stage, client),
+            ParsedStage::Exec { stage, client } => exec_to_yaml(stage, client),
+            ParsedStage::Sequence {
                 attrs,
                 max_iterations,
-                stop_when_exists,
                 interval,
                 client,
                 body,
-            } => loop_to_yaml(
-                attrs,
-                *max_iterations,
-                stop_when_exists,
-                *interval,
-                client,
-                body,
-            ),
-            ParsedStage::Sequence {
-                attrs,
-                client,
-                body,
-            } => sequence_to_yaml(attrs, client, body),
+            } => sequence_to_yaml(attrs, *max_iterations, *interval, client, body),
             ParsedStage::Parallel {
                 attrs,
                 max_concurrent,
@@ -300,9 +265,9 @@ impl ParsedStage {
             ParsedStage::Exec { stage, .. } => {
                 (stage.bind_map.clone(), stage.interpolation_map.clone())
             }
-            ParsedStage::Loop { .. }
-            | ParsedStage::Sequence { .. }
-            | ParsedStage::Parallel { .. } => (HashMap::new(), HashMap::new()),
+            ParsedStage::Sequence { .. } | ParsedStage::Parallel { .. } => {
+                (HashMap::new(), HashMap::new())
+            }
         };
 
         StageNode {
@@ -320,43 +285,14 @@ fn parse_agent(mapping: &Mapping, name: &str) -> Result<ParsedStage, StageError>
     let dict = json_map(mapping, name)?;
     let stage = Agent::from_dict(&dict).map_err(StageError::Message)?;
     let client = get_client_from_dict(&dict, name).map_err(StageError::Message)?;
-    let skip_if_exists = parse_skip_if_exists(mapping, name)?;
-    Ok(ParsedStage::Agent {
-        stage,
-        skip_if_exists,
-        client,
-    })
+    Ok(ParsedStage::Agent { stage, client })
 }
 
 fn parse_exec(mapping: &Mapping, name: &str) -> Result<ParsedStage, StageError> {
     let dict = json_map(mapping, name)?;
     let stage = Exec::from_dict(&dict).map_err(StageError::Message)?;
     let client = get_client_from_dict(&dict, name).map_err(StageError::Message)?;
-    let skip_if_exists = parse_skip_if_exists(mapping, name)?;
-    Ok(ParsedStage::Exec {
-        stage,
-        skip_if_exists,
-        client,
-    })
-}
-
-fn parse_loop(
-    mapping: &mut Mapping,
-    name: String,
-    depth: usize,
-) -> Result<ParsedStage, StageError> {
-    let dict = json_map(mapping, &name)?;
-    let mut parsed = Loop::with_dict(&dict).map_err(StageError::Message)?;
-    parsed.attrs.skip_if_exists = parse_skip_if_exists(mapping, &name)?;
-    let body = parse_body(mapping, "body", depth)?;
-    Ok(ParsedStage::Loop {
-        attrs: parsed.attrs,
-        max_iterations: parsed.max_iterations,
-        stop_when_exists: parsed.stop_when_exists,
-        interval: parsed.interval,
-        client: parsed.client,
-        body,
-    })
+    Ok(ParsedStage::Exec { stage, client })
 }
 
 fn parse_sequence(
@@ -370,6 +306,8 @@ fn parse_sequence(
     let body = parse_body(mapping, "body", depth)?;
     Ok(ParsedStage::Sequence {
         attrs: parsed.attrs,
+        max_iterations: parsed.max_iterations,
+        interval: parsed.interval,
         client: parsed.client,
         body,
     })
@@ -584,7 +522,7 @@ fn client_to_yaml(client: &Option<ClientSpec>) -> Option<Value> {
     client.as_ref().map(|c| Value::String(c.0.clone()))
 }
 
-fn agent_to_yaml(stage: &Agent, skip_if_exists: &str, client: &Option<ClientSpec>) -> Value {
+fn agent_to_yaml(stage: &Agent, client: &Option<ClientSpec>) -> Value {
     let mut m = Mapping::new();
     m.insert(
         Value::String("name".to_string()),
@@ -616,11 +554,10 @@ fn agent_to_yaml(stage: &Agent, skip_if_exists: &str, client: &Option<ClientSpec
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
-    insert_str_if_nonempty(&mut m, "skip_if_exists", skip_if_exists);
     Value::Mapping(m)
 }
 
-fn exec_to_yaml(stage: &Exec, skip_if_exists: &str, client: &Option<ClientSpec>) -> Value {
+fn exec_to_yaml(stage: &Exec, client: &Option<ClientSpec>) -> Value {
     let mut m = Mapping::new();
     m.insert(
         Value::String("name".to_string()),
@@ -640,57 +577,13 @@ fn exec_to_yaml(stage: &Exec, skip_if_exists: &str, client: &Option<ClientSpec>)
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
-    insert_str_if_nonempty(&mut m, "skip_if_exists", skip_if_exists);
-    Value::Mapping(m)
-}
-
-fn loop_to_yaml(
-    attrs: &StageAttrs,
-    max_iterations: u32,
-    stop_when_exists: &Option<String>,
-    interval: Option<f64>,
-    client: &Option<ClientSpec>,
-    body: &[ParsedStage],
-) -> Value {
-    let mut m = Mapping::new();
-    m.insert(
-        Value::String("name".to_string()),
-        Value::String(attrs.name.clone()),
-    );
-    m.insert(
-        Value::String("type".to_string()),
-        Value::String("loop".to_string()),
-    );
-    m.insert(
-        Value::String("max-iterations".to_string()),
-        Value::Number((max_iterations as i64).into()),
-    );
-    if let Some(ref uri) = stop_when_exists {
-        m.insert(
-            Value::String("stop_when_exists".to_string()),
-            Value::String(uri.clone()),
-        );
-    }
-    if let Some(interval_secs) = interval {
-        let mut opts = Mapping::new();
-        opts.insert(
-            Value::String("interval".to_string()),
-            serde_yaml::to_value(interval_secs).unwrap_or(Value::Null),
-        );
-        m.insert(Value::String("options".to_string()), Value::Mapping(opts));
-    }
-    if let Some(client_val) = client_to_yaml(client) {
-        m.insert(Value::String("client".to_string()), client_val);
-    }
-    insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
-    // body: children
-    let children: Vec<Value> = body.iter().map(ParsedStage::to_yaml).collect();
-    m.insert(Value::String("body".to_string()), Value::Sequence(children));
     Value::Mapping(m)
 }
 
 fn sequence_to_yaml(
     attrs: &StageAttrs,
+    max_iterations: u32,
+    interval: Option<f64>,
     client: &Option<ClientSpec>,
     body: &[ParsedStage],
 ) -> Value {
@@ -703,6 +596,18 @@ fn sequence_to_yaml(
         Value::String("type".to_string()),
         Value::String("sequence".to_string()),
     );
+    if max_iterations > 1 {
+        m.insert(
+            Value::String("max-iterations".to_string()),
+            Value::Number((max_iterations as i64).into()),
+        );
+    }
+    if let Some(interval_secs) = interval {
+        m.insert(
+            Value::String("interval".to_string()),
+            serde_yaml::to_value(interval_secs).unwrap_or(Value::Null),
+        );
+    }
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
@@ -917,32 +822,9 @@ mod tests {
     }
 
     #[test]
-    fn loop_body_is_a_typed_tree() {
-        let stages = parse_all(
-            r#"
-- type: loop
-  max-iterations: 2
-  body:
-    - type: agent
-      prompt:
-        - "hi\n"
-"#,
-        )
-        .unwrap();
-
-        match &stages[0] {
-            ParsedStage::Loop {
-                max_iterations,
-                body,
-                ..
-            } => {
-                assert_eq!(*max_iterations, 2);
-                assert_eq!(body.len(), 1);
-                assert_eq!(body[0].name(), "agent");
-                assert_eq!(body[0].stage_type(), "agent");
-            }
-            other => panic!("expected loop, got {other:?}"),
-        }
+    fn loop_type_is_rejected_with_unknown_type() {
+        let err = parse_one("type: loop\nmax-iterations: 2\nbody: []\n").unwrap_err();
+        assert!(err.to_string().contains("unknown type"), "{err}");
     }
 
     #[test]
@@ -973,7 +855,7 @@ mod tests {
     fn skip_if_exists_is_carried() {
         let stages = parse_all(
             r#"
-- type: loop
+- type: sequence
   skip_if_exists: "artifact://done"
   body:
     - type: exec
@@ -983,16 +865,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stages[0].skip_if_exists(), "artifact://done");
-    }
-
-    #[test]
-    fn skip_if_exists_must_be_a_string() {
-        let err = parse_one("type: agent\nskip_if_exists: 3\n").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("'skip_if_exists' must be a string"),
-            "{err}"
-        );
     }
 
     #[test]

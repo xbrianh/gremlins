@@ -12,10 +12,10 @@ use gremlins::core::discovery;
 use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
 use gremlins::definition::{ExecutorStage, GremlinDefinition};
+use gremlins::executor::exec_runner::prepare_exec;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
-use gremlins::stages::exec::prepare_exec;
 use serde_json::{Map, Value};
 
 mod spawn;

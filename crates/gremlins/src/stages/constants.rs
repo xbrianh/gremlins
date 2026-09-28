@@ -1,9 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
-/// The artifact URI key used to store bail state.
-pub const BAIL_KEY: &str = "artifact://bail";
-
 /// Variable names reserved for framework-substitution and excluded from
 /// stage interpolation maps.
 pub static FRAMEWORK_KEYS: LazyLock<BTreeSet<&'static str>> =
@@ -12,11 +9,6 @@ pub static FRAMEWORK_KEYS: LazyLock<BTreeSet<&'static str>> =
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bail_key_is_correct() {
-        assert_eq!(BAIL_KEY, "artifact://bail");
-    }
 
     #[test]
     fn framework_keys_contains_expected() {

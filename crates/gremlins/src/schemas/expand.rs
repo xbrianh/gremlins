@@ -1056,27 +1056,30 @@ mod tests {
         let yaml_str = r#"
 stages:
   - name: verify
-    type: loop
-    stop_when_exists: "artifact://{loop_iter}/done"
+    type: sequence
+    skip_if_exists: "artifact://{loop_iter}/done"
     body:
       - name: fix
-        type: agent
+        type: sequence
         skip_if_exists: "artifact://{loop_iter}/done"
+        body:
+          - name: fix
+            type: agent
 "#;
         let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
         let stages = parsed["stages"].as_sequence().unwrap();
-        let loop_stage = &stages[0];
-        let sw = loop_stage["stop_when_exists"].as_str().unwrap();
+        let seq_stage = &stages[0];
+        let sif = seq_stage["skip_if_exists"].as_str().unwrap();
         assert_eq!(
-            sw, "artifact://{loop_iter}/done",
-            "stop_when_exists should preserve {{loop_iter}}"
+            sif, "artifact://{loop_iter}/done",
+            "skip_if_exists should preserve {{loop_iter}}"
         );
-        let body = loop_stage["body"].as_sequence().unwrap();
-        let fix = &body[0];
-        let skip = fix["skip_if_exists"].as_str().unwrap();
+        let body = seq_stage["body"].as_sequence().unwrap();
+        let fix_wrapper = &body[0];
+        let skip = fix_wrapper["skip_if_exists"].as_str().unwrap();
         assert_eq!(
             skip, "artifact://{loop_iter}/done",
-            "skip_if_exists should preserve {{loop_iter}}"
+            "skip_if_exists on sequence wrapper should preserve {{loop_iter}}"
         );
     }
 
@@ -1088,10 +1091,12 @@ stages:
         )))
         .unwrap();
         let stages = recipe["stages"].as_sequence().unwrap();
-        let loop_stage = &stages[0];
-        let body = loop_stage["body"].as_sequence().unwrap();
-        let fix = &body[1];
-        let skip = fix["skip_if_exists"].as_str().unwrap();
+        let seq_stage = &stages[0];
+        let body = seq_stage["body"].as_sequence().unwrap();
+        // The fix child is now wrapped in a sequence (agents can't carry
+        // skip_if_exists directly), so body[1] is the sequence wrapper.
+        let fix_wrapper = &body[1];
+        let skip = fix_wrapper["skip_if_exists"].as_str().unwrap();
         assert_eq!(
             skip, "artifact://{loop_iter}/done",
             "Raw verify recipe skip_if_exists should preserve {{loop_iter}}"

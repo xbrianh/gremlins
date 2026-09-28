@@ -8,7 +8,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::builders::agent::AgentBuilder;
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
-use crate::builders::composite::{LoopBuilder, ParallelBuilder, SequenceBuilder};
+use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
 use crate::builders::exec::ExecBuilder;
 use crate::definition::{
     base_ref_from_yaml, default_client_from_yaml, project_root_for, resolve_default_client,
@@ -164,7 +164,6 @@ pub struct LandBuilder {
     options: HashMap<String, serde_json::Value>,
     interpolation_map: HashMap<String, String>,
     bind_map: HashMap<String, String>,
-    skip_if_exists: String,
     client: Option<crate::stages::composite::ClientSpec>,
 }
 
@@ -175,7 +174,6 @@ impl LandBuilder {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             bind_map: HashMap::new(),
-            skip_if_exists: String::new(),
             client: None,
         }
     }
@@ -245,12 +243,6 @@ impl LandBuilder {
     /// Set an option value.
     pub fn option(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
         self.options.insert(key.into(), value.into());
-        self
-    }
-
-    /// Set the `skip_if_exists` artifact guard.
-    pub fn skip_if_exists(mut self, uri: impl Into<String>) -> Self {
-        self.skip_if_exists = uri.into();
         self
     }
 
@@ -358,7 +350,6 @@ impl LandBuilder {
         };
         Ok(ParsedStage::Exec {
             stage,
-            skip_if_exists: self.skip_if_exists,
             client: self.client,
         })
     }
@@ -580,9 +571,7 @@ pub(crate) fn fill_builder_names(stages: &mut [ParsedStage]) {
     // Recurse into composite bodies.
     for stage in stages.iter_mut() {
         match stage {
-            ParsedStage::Loop { body, .. }
-            | ParsedStage::Sequence { body, .. }
-            | ParsedStage::Parallel { body, .. } => {
+            ParsedStage::Sequence { body, .. } | ParsedStage::Parallel { body, .. } => {
                 fill_builder_names(body);
             }
             _ => {}
@@ -765,7 +754,6 @@ fn stage_from_yaml(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
     match stage_type {
         "agent" => agent_from_yaml(mapping, &name),
         "exec" => exec_from_yaml(mapping, &name),
-        "loop" => loop_from_yaml(mapping, &name),
         "sequence" => sequence_from_yaml(mapping, &name),
         "parallel" => parallel_from_yaml(mapping, &name),
         other => Err(SchemaError::Generic(format!(
@@ -859,7 +847,6 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaE
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
-    let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
     let mut builder = AgentBuilder::new(name);
@@ -875,9 +862,6 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaE
     for (k, v) in options {
         builder = builder.option(k, v);
     }
-    if !skip_if_exists.is_empty() {
-        builder = builder.skip_if_exists(skip_if_exists);
-    }
     if let Some(c) = client {
         builder = builder.client(c.0);
     }
@@ -890,7 +874,6 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaEr
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
-    let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
     let mut builder = ExecBuilder::new(name);
@@ -903,9 +886,6 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaEr
     for (k, v) in options {
         builder = builder.option(k, v);
     }
-    if !skip_if_exists.is_empty() {
-        builder = builder.skip_if_exists(skip_if_exists);
-    }
     if let Some(c) = client {
         builder = builder.client(c.0);
     }
@@ -913,12 +893,11 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaEr
     builder.build()
 }
 
-/// Build a [`LoopBuilder`] from a YAML stage mapping.
-fn loop_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
+/// Build a [`SequenceBuilder`] from a YAML stage mapping.
+fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
     let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
-        None => 3u32,
+        None => 1u32,
         Some(v) => {
-            // Try as integer first, then as string.
             if let Some(n) = v.as_u64().and_then(|n| u32::try_from(n).ok()) {
                 n
             } else if let Some(s) = v.as_str() {
@@ -934,45 +913,20 @@ fn loop_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaEr
             }
         }
     };
-    let stop_when_exists = yaml_str(mapping, "stop_when_exists");
     let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
-    // Interval from options.interval.
-    let interval = mapping
-        .get("options")
-        .and_then(|v| v.get("interval"))
-        .and_then(|v| v.as_f64());
+    // Interval from top-level key.
+    let interval = mapping.get("interval").and_then(|v| v.as_f64());
 
-    // Parse children.
     let body = yaml_children(mapping, "body")?;
 
-    let mut builder = LoopBuilder::new(name)
+    let mut builder = SequenceBuilder::new(name)
         .max_iterations(max_iterations)
         .stages(body);
-    if let Some(uri) = stop_when_exists {
-        builder = builder.stop_when_exists(uri);
-    }
     if let Some(secs) = interval {
         builder = builder.interval(secs);
     }
-    if !skip_if_exists.is_empty() {
-        builder = builder.skip_if_exists(skip_if_exists);
-    }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
-    }
-
-    builder.build()
-}
-
-/// Build a [`SequenceBuilder`] from a YAML stage mapping.
-fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
-    let skip_if_exists = yaml_skip_if_exists(mapping);
-    let client = yaml_client(mapping);
-    let body = yaml_children(mapping, "body")?;
-
-    let mut builder = SequenceBuilder::new(name).stages(body);
     if !skip_if_exists.is_empty() {
         builder = builder.skip_if_exists(skip_if_exists);
     }
@@ -1069,7 +1023,6 @@ fn land_from_yaml_builder(mapping: &Mapping) -> Result<ParsedStage, SchemaError>
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
-    let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
     let mut builder = LandBuilder::new();
@@ -1081,9 +1034,6 @@ fn land_from_yaml_builder(mapping: &Mapping) -> Result<ParsedStage, SchemaError>
     }
     for (k, v) in options {
         builder = builder.option(k, v);
-    }
-    if !skip_if_exists.is_empty() {
-        builder = builder.skip_if_exists(skip_if_exists);
     }
     if let Some(c) = client {
         builder = builder.client(c.0);
@@ -1097,7 +1047,7 @@ mod tests {
     use super::*;
     use crate::builders::agent::AgentBuilder;
     use crate::builders::artifacts::{artifact, content};
-    use crate::builders::composite::{LoopBuilder, ParallelBuilder, SequenceBuilder};
+    use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
     use serde_yaml::Value;
 
@@ -1347,8 +1297,9 @@ mod tests {
     }
 
     #[test]
-    fn loop_builder_rejects_max_iterations_zero() {
-        let err = LoopBuilder::new("test")
+    fn sequence_builder_rejects_max_iterations_zero() {
+        let err = SequenceBuilder::new("test")
+            .stage(ExecBuilder::new("cmd").cmd("echo hi").build().unwrap())
             .max_iterations(0)
             .build()
             .unwrap_err();
@@ -1359,8 +1310,12 @@ mod tests {
     }
 
     #[test]
-    fn loop_builder_accepts_max_iterations_one() {
-        LoopBuilder::new("test").max_iterations(1).build().unwrap();
+    fn sequence_builder_accepts_max_iterations_one() {
+        SequenceBuilder::new("test")
+            .stage(ExecBuilder::new("cmd").cmd("echo hi").build().unwrap())
+            .max_iterations(1)
+            .build()
+            .unwrap();
     }
 
     #[test]

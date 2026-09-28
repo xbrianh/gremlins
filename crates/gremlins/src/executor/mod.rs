@@ -11,11 +11,14 @@ use thiserror::Error;
 use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
+pub mod agent_runner;
 pub mod bootstrap;
+pub mod exec_runner;
 pub mod gremlin;
 pub mod parallel;
 pub mod run;
 pub mod state;
+pub mod vars;
 
 /// Why a gremlin run failed.
 ///

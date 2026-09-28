@@ -33,6 +33,6 @@ pub mod exec;
 // Re-export everything at the module root
 pub use agent::AgentBuilder;
 pub use artifacts::{artifact, content, BindTarget, InterpolationValue};
-pub use composite::{LoopBuilder, ParallelBuilder, SequenceBuilder};
+pub use composite::{ParallelBuilder, SequenceBuilder};
 pub use definition::{BootstrapBuilder, DefinitionBuilder, LandBuilder};
 pub use exec::ExecBuilder;

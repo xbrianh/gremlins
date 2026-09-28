@@ -6,9 +6,9 @@ required-prompt: true
 
 stages:
   - name: github-wait-ci
-    type: loop
+    type: sequence
     max-iterations: 3
-    stop_when_exists: "artifact://{loop_iter}/done"
+    skip_if_exists: "artifact://{loop_iter}/done"
     body:
       - name: ci-await
         type: exec
@@ -17,7 +17,6 @@ stages:
           fix_head: content("artifact://fix-head")?
         bind:
           done?: "artifact://{loop_iter}/done"
-          bail?: "artifact://{loop_iter}/bail"
         options:
           timeout: 180
           startup_grace_secs: "60"
@@ -27,84 +26,87 @@ stages:
             - |
               set -o pipefail
               TMP_OUT="$(dirname "{done}")/ci_await_out"
-              TMP_BAIL="$(dirname "{done}")/ci_await_bail"
-              if gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2> >(tee "$TMP_BAIL" >&2) | tee "$TMP_OUT"; then
+              if gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2>&1 | tee "$TMP_OUT"; then
                 if [ "$(tail -n 1 "$TMP_OUT")" = "skipped" ]; then
                   touch "{done}"
                 fi
               else
-                wait
-                cat "$TMP_BAIL" > "{bail}"
                 exit 2
               fi
 
       - name: ci-poll
-        type: exec
+        type: sequence
         skip_if_exists: "artifact://{loop_iter}/done"
-        interpolation:
-          pr_url: content("artifact://pr-url.txt")
-        bind:
-          status: "artifact://{loop_iter}/status"
-          done?: "artifact://{loop_iter}/done"
-          bail?: "artifact://{loop_iter}/bail"
-        options:
-          timeout: 1260
-          poll_timeout: "1200"
-          poll_interval: "30"
-          cmds:
-            - |
-              set -o pipefail
-              TMP_OUT="$(dirname "{done}")/ci_poll_out"
-              TMP_BAIL="$(dirname "{done}")/ci_poll_bail"
-              if gh_ci_poll "{pr_url}" {poll_timeout} {poll_interval} 2> >(tee "$TMP_BAIL" >&2) | tee "$TMP_OUT"; then
-                cp "$TMP_OUT" "{status}"
-                if [ "$(tail -n 1 "$TMP_OUT")" = "passed" ]; then
-                  touch "{done}"
-                fi
-              else
-                wait
-                cat "$TMP_BAIL" > "{bail}"
-                exit 2
-              fi
+        body:
+          - type: exec
+            interpolation:
+              pr_url: content("artifact://pr-url.txt")
+            bind:
+              status: "artifact://{loop_iter}/status"
+              done?: "artifact://{loop_iter}/done"
+            options:
+              timeout: 1260
+              poll_timeout: "1200"
+              poll_interval: "30"
+              cmds:
+                - |
+                  set -o pipefail
+                  TMP_OUT="$(dirname "{done}")/ci_poll_out"
+                  if gh_ci_poll "{pr_url}" {poll_timeout} {poll_interval} 2>&1 | tee "$TMP_OUT"; then
+                    cp "$TMP_OUT" "{status}"
+                    if [ "$(tail -n 1 "$TMP_OUT")" = "passed" ]; then
+                      touch "{done}"
+                    fi
+                  else
+                    exit 2
+                  fi
 
       - name: ci-failure-log
-        type: exec
+        type: sequence
         skip_if_exists: "artifact://{loop_iter}/done"
-        interpolation:
-          pr_url: content("artifact://pr-url.txt")
-        bind:
-          ci_log?: "artifact://{loop_iter}/ci_failure.txt"
-        options:
-          timeout: 120
-          cmds:
-            - |
-              set -o pipefail
-              gh_ci_failure_log "{pr_url}" | tee "{ci_log}"
+        body:
+          - type: exec
+            interpolation:
+              pr_url: content("artifact://pr-url.txt")
+            bind:
+              ci_log?: "artifact://{loop_iter}/ci_failure.txt"
+            options:
+              timeout: 120
+              cmds:
+                - |
+                  set -o pipefail
+                  gh_ci_failure_log "{pr_url}" | tee "{ci_log}"
 
       - name: fix
-        type: agent
+        type: sequence
         skip_if_exists: "artifact://{loop_iter}/done"
-        prompt:
-          - "{{prompt}}"
-        interpolation:
-          failure_output: content("artifact://{loop_iter}/ci_failure.txt")?
+        body:
+          - type: agent
+            prompt:
+              - "{{prompt}}"
+            interpolation:
+              failure_output: content("artifact://{loop_iter}/ci_failure.txt")?
 
       - name: push-fix
-        type: exec
+        type: sequence
         skip_if_exists: "artifact://{loop_iter}/done"
-        interpolation:
-          pr_branch: content("artifact://pr-branch.txt")
-        options:
-          cmds:
-            - git push origin "HEAD:{pr_branch}"
+        body:
+          - type: exec
+            interpolation:
+              pr_branch: content("artifact://pr-branch.txt")
+            options:
+              cmds:
+                - git push origin "HEAD:{pr_branch}"
 
       - name: capture-head
-        type: exec
+        type: sequence
         skip_if_exists: "artifact://fix-head"
-        bind:
-          fix_head: "artifact://fix-head"
-        options:
-          cmds:
-            - |
-              set -o pipefail
-              git rev-parse HEAD | tee "{fix_head}"
+        body:
+          - type: exec
+            bind:
+              fix_head: "artifact://fix-head"
+            options:
+              cmds:
+                - |
+                  set -o pipefail
+                  git rev-parse HEAD | tee "{fix_head}"

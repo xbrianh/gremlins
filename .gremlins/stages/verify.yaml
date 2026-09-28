@@ -4,8 +4,8 @@ required-prompt: true
 
 stages:
   - name: verify
-    type: loop
-    stop_when_exists: "artifact://{loop_iter}/done"
+    type: sequence
+    skip_if_exists: "artifact://{loop_iter}/done"
     max-iterations: "{{options.max_iterations | default(3)}}"
     body:
       - name: cmd
@@ -19,9 +19,11 @@ stages:
           cmds:
             - ({{options.cmds}}) > "{verify_log}" 2>&1; rc=$?; printf '%d' "$rc" > "{exec_exit_code}"; if [ "$rc" -eq 0 ]; then printf 'done' > "{done}"; fi; true
       - name: fix
-        type: agent
+        type: sequence
         skip_if_exists: "artifact://{loop_iter}/done"
-        prompt:
-          - "{{prompt}}"
-        interpolation:
-          verify_output: content("artifact://{loop_iter}/verify_output.txt")
+        body:
+          - type: agent
+            prompt:
+              - "{{prompt}}"
+            interpolation:
+              verify_output: content("artifact://{loop_iter}/verify_output.txt")
