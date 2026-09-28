@@ -288,6 +288,22 @@ fn check_consumers_inner(
                 check_consumers_inner(&stage.body, &mut child_produced, is_parallel)?;
             } else {
                 check_consumers_inner(&stage.body, produced, is_parallel)?;
+                // After a parallel block, collect all children's bind
+                // outputs into the shared produced set so subsequent
+                // sequential stages can consume them.
+                if is_parallel {
+                    for child in &stage.body {
+                        for (key, val) in &child.bind_map {
+                            let resolved_key = key.replace("{name}", &child.name);
+                            if val.starts_with("artifact://") {
+                                produced.insert(val.clone());
+                            }
+                            if !resolved_key.ends_with('?') && !resolved_key.contains("://") {
+                                produced.insert(format!("artifact://{resolved_key}"));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -867,6 +883,43 @@ mod tests {
                 "artifact://instructions.md?".to_string(),
             )]),
         )];
+        check_unresolved_consumers(&stages, &[], &HashMap::new()).unwrap();
+    }
+
+    #[test]
+    fn test_unresolved_subsequent_stage_consumes_parallel_output() {
+        // A sequential stage after a parallel block should be able to
+        // consume artifacts produced by parallel children.
+        let stages = vec![
+            stage_with_bind(
+                "pre",
+                "agent",
+                HashMap::from([("out".to_string(), "artifact://diff.txt".to_string())]),
+            ),
+            StageNode {
+                name: "par".to_string(),
+                stage_type: "parallel".to_string(),
+                bind_map: HashMap::new(),
+                interpolation_map: HashMap::new(),
+                skip_if_exists: String::new(),
+                body: vec![stage_with_bind(
+                    "c1",
+                    "agent",
+                    HashMap::from([(
+                        "filepath".to_string(),
+                        "artifact://review-one.md".to_string(),
+                    )]),
+                )],
+            },
+            stage_with_interp(
+                "address",
+                "agent",
+                HashMap::from([(
+                    "review_one".to_string(),
+                    r#"content("artifact://review-one.md")"#.to_string(),
+                )]),
+            ),
+        ];
         check_unresolved_consumers(&stages, &[], &HashMap::new()).unwrap();
     }
 
