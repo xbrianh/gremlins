@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_sugar_parses_children() {
+    fn parallel_stage_parses_children() {
         let stages = parse_all(
             r#"
 - type: parallel
