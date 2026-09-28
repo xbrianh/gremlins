@@ -1,6 +1,6 @@
 //! Validation for parallel groups: name shape, concurrency, and error policy.
 //!
-//! This module is pure Rust: all parsing, validation, and child-name
+//! This module is pure Rust: validation and child-name
 //! checks run without an interpreter, so `cargo test -p gremlins` covers
 //! the rules end-to-end.
 
