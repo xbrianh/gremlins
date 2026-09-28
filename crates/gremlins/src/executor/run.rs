@@ -1117,7 +1117,7 @@ mod tests {
         let stages = vec![AgentBuilder::new("writer")
             .client("cmd:sh -c 'cat >/dev/null'")
             .bind("out?", artifact("artifact://{name}.md"))
-            .prompt("hi")
+            .prompt("write {out}")
             .build()
             .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
@@ -1142,7 +1142,7 @@ mod tests {
         let stages = vec![AgentBuilder::new("writer")
             .client("cmd:sh -c 'cat >/dev/null'")
             .bind("out", artifact("artifact://out.md"))
-            .prompt("hi")
+            .prompt("write {out}")
             .build()
             .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
