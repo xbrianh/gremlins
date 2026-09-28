@@ -49,6 +49,8 @@ pub struct Sequence {
     pub scope: Option<String>,
     pub skip_if_exists: String,
     pub client: Option<ClientSpec>,
+    pub max_iterations: Option<u32>,
+    pub interval: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -515,44 +517,42 @@ impl StaticDefinition {
             },
             ParsedStage::Sequence {
                 attrs,
+                max_iterations,
+                interval,
                 client: seq_client,
                 body,
             } => {
                 let stages: Vec<ExecutorStage> =
                     body.into_iter().map(|s| self.convert_stage(s)).collect();
-                ExecutorStage::Sequence(Sequence {
-                    name: attrs.name,
-                    stages,
-                    scope: None,
-                    skip_if_exists: attrs.skip_if_exists,
-                    client: seq_client,
-                })
-            }
-            ParsedStage::Loop {
-                attrs,
-                max_iterations,
-                stop_when_exists,
-                interval,
-                client,
-                body,
-                ..
-            } => {
-                let stages: Vec<ExecutorStage> =
-                    body.into_iter().map(|s| self.convert_stage(s)).collect();
-                ExecutorStage::Loop {
-                    name: attrs.name,
-                    max_iterations: Some(max_iterations),
-                    stop_when_exists,
-                    interval,
-                    client,
-                    body: Sequence {
-                        name: String::new(),
+                if max_iterations > 1 {
+                    ExecutorStage::Loop {
+                        name: attrs.name.clone(),
+                        max_iterations: Some(max_iterations),
+                        stop_when_exists: (!attrs.skip_if_exists.is_empty())
+                            .then(|| attrs.skip_if_exists.clone()),
+                        interval,
+                        client: seq_client.clone(),
+                        body: Sequence {
+                            name: String::new(),
+                            stages,
+                            scope: None,
+                            skip_if_exists: String::new(),
+                            client: None,
+                            max_iterations: None,
+                            interval: None,
+                        },
+                        skip_if_exists: attrs.skip_if_exists,
+                    }
+                } else {
+                    ExecutorStage::Sequence(Sequence {
+                        name: attrs.name,
                         stages,
                         scope: None,
-                        skip_if_exists: String::new(),
-                        client: None,
-                    },
-                    skip_if_exists: attrs.skip_if_exists,
+                        skip_if_exists: attrs.skip_if_exists,
+                        client: seq_client,
+                        max_iterations: None,
+                        interval: None,
+                    })
                 }
             }
             ParsedStage::Parallel {
@@ -993,6 +993,8 @@ mod tests {
             scope: None,
             skip_if_exists: String::new(),
             client: None,
+            max_iterations: None,
+            interval: None,
         });
         assert_eq!(seq.name(), "my-sequence");
         assert_eq!(seq.stage_type(), "sequence");
@@ -1007,6 +1009,8 @@ mod tests {
             scope: None,
             skip_if_exists: String::new(),
             client: None,
+            max_iterations: None,
+            interval: None,
         });
         assert_eq!(seq.name(), "");
     }
@@ -1042,6 +1046,8 @@ mod tests {
                 scope: None,
                 skip_if_exists: String::new(),
                 client: None,
+                max_iterations: None,
+                interval: None,
             },
             skip_if_exists: "artifact://retry".into(),
         };
@@ -1098,6 +1104,8 @@ mod tests {
             scope: None,
             skip_if_exists: "artifact://guard".into(),
             client: None,
+            max_iterations: None,
+            interval: None,
         });
         assert_eq!(seq.skip_if_exists(), "artifact://guard");
     }
@@ -1239,6 +1247,8 @@ mod tests {
                 skip_if_exists: "artifact://guard".into(),
                 ..StageAttrs::new("outer".into())
             },
+            max_iterations: 1,
+            interval: None,
             client: None,
             body: vec![parsed_agent("inner-a"), parsed_exec("inner-b")],
         };
@@ -1261,19 +1271,19 @@ mod tests {
 
     #[tokio::test]
     async fn convert_stage_loop() {
-        let lp = ParsedStage::Loop {
+        // A Sequence with max_iterations > 1 converts to ExecutorStage::Loop.
+        let seq = ParsedStage::Sequence {
             attrs: StageAttrs {
                 name: "retry".into(),
                 skip_if_exists: "artifact://retry-guard".into(),
                 ..StageAttrs::new("retry".into())
             },
             max_iterations: 5,
-            stop_when_exists: Some("artifact://done".into()),
             interval: None,
             client: Some(ClientSpec("xai:grok".into())),
             body: vec![parsed_agent("loop-child")],
         };
-        let def = definition_with(vec![lp]);
+        let def = definition_with(vec![seq]);
         let mut sd = def;
         let s = sd.next_stage().await.unwrap();
         assert_eq!(s.name(), "retry");
@@ -1288,7 +1298,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(max_iterations, Some(5));
-                assert_eq!(stop_when_exists.as_deref(), Some("artifact://done"));
+                assert_eq!(stop_when_exists.as_deref(), Some("artifact://retry-guard"));
                 assert_eq!(client, Some(ClientSpec("xai:grok".into())));
                 assert_eq!(body.stages.len(), 1);
                 assert_eq!(body.stages[0].name(), "loop-child");

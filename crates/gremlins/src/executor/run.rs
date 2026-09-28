@@ -28,7 +28,6 @@ use crate::executor::state;
 use crate::executor::RunError;
 use crate::stages::agent::{check_bail, commit_agent, prepare_agent, AgentError};
 use crate::stages::base;
-use crate::stages::constants::BAIL_KEY;
 use crate::stages::exec::{commit_exec, prepare_exec, run_shell, ExecError};
 
 // ---------------------------------------------------------------------------
@@ -100,7 +99,7 @@ pub(crate) async fn bail_reason(registry: &dyn ArtifactRegistry, scope: &str) ->
 
 /// The run-wide bail marker, `artifact://bail`.
 pub(crate) async fn global_bail_reason(registry: &dyn ArtifactRegistry) -> Option<String> {
-    bail_at_uri(registry, BAIL_KEY).await
+    bail_at_uri(registry, "artifact://bail").await
 }
 
 /// Whether a bail is recorded for `scope` or for the run as a whole.
@@ -1239,7 +1238,7 @@ mod tests {
         assert!(!is_bail_set(registry.as_ref(), "scope").await);
         assert!(global_bail_reason(registry.as_ref()).await.is_none());
 
-        let uri = Uri::parse(BAIL_KEY).unwrap();
+        let uri = Uri::parse("artifact://bail").unwrap();
         registry
             .write_into_registry(&uri, "stopped\n")
             .await
@@ -1257,10 +1256,13 @@ mod tests {
     async fn agent_skips_when_the_guard_artifact_is_live() {
         let yaml = r#"
 - name: writer
-  type: agent
+  type: sequence
   skip_if_exists: "artifact://done.md"
-  client: "cmd:false"
-  prompt: ["hi"]
+  body:
+    - name: writer-inner
+      type: agent
+      client: "cmd:false"
+      prompt: ["hi"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
         gremlin
@@ -1280,10 +1282,13 @@ mod tests {
         // registered URI, which is the only way the artifact is known.
         let yaml = r#"
 - name: writer
-  type: agent
+  type: sequence
   skip_if_exists: "done.md"
-  client: "cmd:false"
-  prompt: ["hi"]
+  body:
+    - name: writer-inner
+      type: agent
+      client: "cmd:false"
+      prompt: ["hi"]
 "#;
         let (_tmp, mut gremlin) = test_gremlin(parse_stages(yaml), "cmd:true");
         gremlin
@@ -1411,7 +1416,13 @@ mod tests {
         let stage = take_first_stage(&mut gremlin).await;
 
         run_stage(&stage, &mut gremlin).await.unwrap();
-        assert!(gremlin.registry.as_ref().is_registered(BAIL_KEY).await);
+        assert!(
+            gremlin
+                .registry
+                .as_ref()
+                .is_registered("artifact://bail")
+                .await
+        );
         assert_eq!(
             global_bail_reason(gremlin.registry.as_ref())
                 .await
@@ -1524,11 +1535,14 @@ mod tests {
 
     #[tokio::test]
     async fn loop_stops_when_the_artifact_exists() {
+        // `skip_if_exists` on a sequence with max_iterations > 1 bridges to
+        // `stop_when_exists` on the executor loop, so the loop stops early
+        // when the guard artifact is present.
         let yaml = r#"
 - name: poll
-  type: loop
+  type: sequence
   max-iterations: 3
-  stop_when_exists: "artifact://done"
+  skip_if_exists: "artifact://done"
   body:
     - name: tick
       type: exec
@@ -1553,7 +1567,7 @@ mod tests {
     async fn loop_exhaustion_bails() {
         let yaml = r#"
 - name: poll
-  type: loop
+  type: sequence
   max-iterations: 2
   body:
     - name: tick
@@ -1577,7 +1591,7 @@ mod tests {
     async fn loop_reports_a_scoped_bail() {
         let yaml = r#"
 - name: poll
-  type: loop
+  type: sequence
   max-iterations: 3
   body:
     - name: tick
@@ -1609,7 +1623,7 @@ mod tests {
     async fn loop_stops_the_body_at_the_bailing_child() {
         let yaml = r#"
 - name: poll
-  type: loop
+  type: sequence
   max-iterations: 3
   body:
     - name: guard
@@ -1640,7 +1654,7 @@ mod tests {
   type: sequence
   body:
     - name: poll
-      type: loop
+      type: sequence
       max-iterations: 2
       body:
         - name: guard
@@ -1671,12 +1685,12 @@ mod tests {
     async fn nested_loops_join_their_own_names() {
         let yaml = r#"
 - name: outer
-  type: loop
-  max-iterations: 1
+  type: sequence
+  max-iterations: 2
   body:
     - name: inner
-      type: loop
-      max-iterations: 1
+      type: sequence
+      max-iterations: 2
       body:
         - name: guard
           type: exec
@@ -1717,6 +1731,8 @@ mod tests {
                 scope: None,
                 skip_if_exists: String::new(),
                 client: None,
+                max_iterations: None,
+                interval: None,
             },
             skip_if_exists: String::new(),
         };

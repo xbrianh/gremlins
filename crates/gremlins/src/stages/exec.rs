@@ -9,7 +9,7 @@ use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_shell_async, ProcError, ProcResult};
 use crate::stages::base;
-use crate::stages::constants::{BAIL_KEY, FRAMEWORK_KEYS};
+use crate::stages::constants::FRAMEWORK_KEYS;
 
 #[derive(Debug, Clone)]
 pub struct Exec {
@@ -124,7 +124,7 @@ impl From<ResolveError> for ExecError {
 }
 
 pub fn is_bail_uri(uri_str: &str, loop_iter: &str) -> bool {
-    if uri_str == BAIL_KEY {
+    if uri_str == "artifact://bail" {
         return true;
     }
     if loop_iter.is_empty() {
@@ -713,8 +713,8 @@ mod tests {
     }
     #[test]
     fn test_is_bail_uri_bail_key() {
-        assert!(is_bail_uri(BAIL_KEY, ""));
-        assert!(is_bail_uri(BAIL_KEY, "loop~1"));
+        assert!(is_bail_uri("artifact://bail", ""));
+        assert!(is_bail_uri("artifact://bail", "loop~1"));
     }
 
     #[test]
@@ -983,7 +983,7 @@ mod tests {
         // exit 42 is non-zero but we need a bail URI so run_shell doesn't
         // convert it to an error.
         let mut prepared = make_prepared("failing", vec!["exit 42"], &state_dir);
-        prepared.bind_uris = vec![("bail".to_string(), BAIL_KEY.to_string(), false)];
+        prepared.bind_uris = vec![("bail".to_string(), "artifact://bail".to_string(), false)];
 
         let result = run_shell(&prepared).await.unwrap();
         assert_eq!(result.rc, 42);
