@@ -38,8 +38,7 @@ static BASH_INTERNALS: &[&str] = &[
 
 /// Failure modes of sourcing an environment script.
 ///
-/// The pyext layer raises every one of these as a Python `RuntimeError`, the
-/// same shape the Python module this replaces always produced.
+/// Every one of these is surfaced as an [`EnvFileError`] variant.
 #[derive(Debug, thiserror::Error)]
 pub enum EnvFileError {
     /// `bash` could not be found on `PATH`.

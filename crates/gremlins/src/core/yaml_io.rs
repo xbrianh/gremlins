@@ -10,21 +10,18 @@
 //!   have to re-check.
 //!
 //! Serialization is deliberately one-directional: [`dump_yaml_text`] renders a
-//! [`Value`] the caller already built, so the full-fidelity number handling it
-//! depends on lives in the pyext converter that builds that value
-//! (`convert::pyval_to_serde` / `convert::serde_to_pyval`).
+//! [`Value`] the caller already built. The caller is responsible for
+//! number fidelity.
 //!
-//! The error type keeps every failure distinguishable so the pyext layer can
-//! raise the exact Python exception the module this replaces raised —
-//! `YamlLoadError` for file problems.
+//! The error type keeps every failure distinguishable so callers can match
+//! on the specific failure mode.
 
 use std::io;
 use std::path::Path;
 
 /// Failure modes of loading, dumping, and rendering YAML.
 ///
-/// Each variant maps to the `YamlLoadError` Python exception the module this
-/// replaces defined (see `crates/pyext/src/python/utils/yaml_io.rs`).
+/// Each variant describes a specific load, parse, or serialize failure.
 #[derive(Debug, thiserror::Error)]
 pub enum YamlIoError {
     /// The file does not exist.

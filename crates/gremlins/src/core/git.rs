@@ -26,8 +26,7 @@ use crate::core::proc;
 /// [`Exit`](GitError::Exit) is reserved for non-zero exits and is raised only
 /// when a caller asks for `check` semantics. [`Io`](GitError::Io) covers spawn
 /// and filesystem failures, and [`Timeout`](GitError::Timeout) a run that
-/// outlived its deadline. The pyext layer maps them to a Python `GitError`,
-/// `OSError`, and `TimeoutError` respectively.
+/// outlived its deadline.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("git exited {0}: {1}")]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClientSpec(pub String);
 
-/// Attributes shared by composite stages (Loop, Sequence, Parallel) and
+/// Attributes shared by composite stages (Sequence, Parallel) and
 /// duck-typed test stages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StageAttrs {

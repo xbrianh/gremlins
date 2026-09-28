@@ -66,9 +66,8 @@ pub struct ExecPrepared {
     /// The environment the commands run under.
     ///
     /// The native executor supplies a fully-resolved env (the gremlin's
-    /// system variables plus anything its bootstrap script sourced); the
-    /// pyext path leaves it empty and the commands inherit the process
-    /// environment instead.
+    /// system variables plus anything its bootstrap script sourced). An
+    /// empty env means the commands inherit the process environment.
     pub env: HashMap<String, String>,
     /// Substitution env vars (`GREMLINS_<KEY> → value`) populated by
     /// `prepare_exec` for the exec command templates. Merged into the
