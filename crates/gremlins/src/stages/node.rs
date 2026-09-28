@@ -133,7 +133,6 @@ impl ParsedStage {
             },
             auto_name: None,
             stage_type: Some(self.stage_type().to_string()),
-            is_parallel: self.stage_type() == "parallel",
         }
     }
 
