@@ -4,7 +4,7 @@ use std::collections::HashMap;
 // Agent struct
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Agent {
     pub name: String,
     pub prompts: Vec<String>,

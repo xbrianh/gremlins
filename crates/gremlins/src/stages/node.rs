@@ -44,7 +44,7 @@ impl From<StageError> for SchemaError {
 /// the `skip_if_exists` guard and the stage's `client`. Composite variants
 /// reuse the composite stage's parsed data and replace its raw
 /// `Vec<serde_json::Value>` body with the fully parsed children.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ParsedStage {
     Agent {
         stage: Agent,
@@ -412,9 +412,6 @@ fn parallel_to_yaml(
     }
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
     let children: Vec<Value> = body.iter().map(ParsedStage::to_yaml).collect();
-    m.insert(
-        Value::String("parallel".to_string()),
-        Value::Sequence(children),
-    );
+    m.insert(Value::String("body".to_string()), Value::Sequence(children));
     Value::Mapping(m)
 }
