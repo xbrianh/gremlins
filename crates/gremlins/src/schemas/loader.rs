@@ -947,10 +947,7 @@ mod tests {
                     stage_with_bind(
                         "c2",
                         "agent",
-                        HashMap::from([(
-                            "out".to_string(),
-                            "artifact://c2-out.md".to_string(),
-                        )]),
+                        HashMap::from([("out".to_string(), "artifact://c2-out.md".to_string())]),
                     ),
                 ],
             },
