@@ -80,7 +80,6 @@ stages:
         - "git diff {base_sha}...HEAD > {diff}"
 
   - type: parallel
-    name: reviews
     body:
       - name: review-one
         type: agent

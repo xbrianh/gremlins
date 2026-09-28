@@ -745,6 +745,11 @@ fn stage_from_yaml(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
         .to_string();
 
     let stage_type = mapping.get("type").and_then(Value::as_str).unwrap_or("");
+    if stage_type.is_empty() {
+        return Err(SchemaError::Generic(format!(
+            "stage {name:?}: must have a 'type' field"
+        )));
+    }
 
     match stage_type {
         "agent" => agent_from_yaml(mapping, &name),
