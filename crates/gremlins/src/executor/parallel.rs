@@ -27,12 +27,12 @@ use tokio::task::JoinSet;
 
 use crate::artifacts::registry::ArtifactRegistry;
 use crate::artifacts::uri::Uri;
+use crate::definition::ErrorPolicy;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::stage_key;
 use crate::executor::state;
 use crate::executor::RunError;
-use crate::stages::parallel::ErrorPolicy;
 
 /// The registry URI marking `child_name` as done under `scope`.
 fn done_uri(scope: &str, child_name: &str) -> String {
@@ -661,7 +661,7 @@ mod tests {
         );
         def.convert_stage(stages[0].clone())
     }
-    use crate::stages::parallel::ErrorPolicy;
+    use crate::definition::ErrorPolicy;
     use std::collections::HashMap;
     use std::path::PathBuf;
 

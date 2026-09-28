@@ -21,14 +21,14 @@ use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
 use crate::config;
 use crate::definition::{ExecutorStage, GremlinDefinition};
+use crate::executor::agent_runner::{check_bail, commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
+use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell, ExecError};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::parallel::run_parallel;
 use crate::executor::state;
+use crate::executor::vars;
 use crate::executor::RunError;
-use crate::stages::agent::{check_bail, commit_agent, prepare_agent, AgentError};
-use crate::stages::base;
-use crate::stages::exec::{commit_exec, prepare_exec, run_shell, ExecError};
 
 // ---------------------------------------------------------------------------
 // Scope bookkeeping
@@ -299,7 +299,7 @@ async fn run_agent(
     // We need to resolve template variables in the URIs before looking them up.
     // Do a preliminary content-only resolution against the main registry, then
     // use those values + framework_subs + string_options to substitute URIs.
-    let str_opts = base::string_options(&agent.options);
+    let str_opts = vars::string_options(&agent.options);
     let (content_map, filepath_map) =
         crate::artifacts::resolve::split_interpolation_map(&agent.interpolation_map);
     let content_interpolated = crate::artifacts::resolve::resolve_interpolation_map(
@@ -325,7 +325,7 @@ async fn run_agent(
 
     let mut checkout_keys: Vec<String> = Vec::new();
     for raw_uri_str in agent.bind_map.values() {
-        let resolved = base::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
+        let resolved = vars::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
         // Strip optional marker (? or ?fallback).
         let resolved = match resolved.find('?') {
             Some(pos) => &resolved[..pos],
@@ -341,7 +341,7 @@ async fn run_agent(
         }
     }
     for raw in filepath_map.values() {
-        let resolved = base::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
+        let resolved = vars::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
         let resolved = match resolved.find('?') {
             Some(pos) => &resolved[..pos],
             None => &resolved[..],
@@ -561,7 +561,7 @@ async fn run_exec(
 
     // Compute checkout keys: bind_map keys + filepath-style interpolation keys.
     // Content interpolation keys are NOT included — they're read once at prepare time.
-    let str_opts = base::string_options(&exec.options);
+    let str_opts = vars::string_options(&exec.options);
     let (content_map, filepath_map) =
         crate::artifacts::resolve::split_interpolation_map(&exec.interpolation_map);
     let content_interpolated = crate::artifacts::resolve::resolve_interpolation_map(
@@ -585,7 +585,7 @@ async fn run_exec(
 
     let mut checkout_keys: Vec<String> = Vec::new();
     for raw_uri_str in exec.bind_map.values() {
-        let resolved = base::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
+        let resolved = vars::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
         // Strip optional marker (? or ?fallback).
         let resolved = match resolved.find('?') {
             Some(pos) => &resolved[..pos],
@@ -601,7 +601,7 @@ async fn run_exec(
         }
     }
     for raw in filepath_map.values() {
-        let resolved = base::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
+        let resolved = vars::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
         let resolved = match resolved.find('?') {
             Some(pos) => &resolved[..pos],
             None => &resolved[..],

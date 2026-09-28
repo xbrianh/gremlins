@@ -16,11 +16,11 @@ use thiserror::Error;
 use crate::config;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
-use crate::stages::agent::Agent;
+pub use crate::stages::agent::Agent;
 use crate::stages::composite::ClientSpec;
-use crate::stages::exec::Exec;
+pub use crate::stages::exec::Exec;
 use crate::stages::node::ParsedStage;
-use crate::stages::parallel::ErrorPolicy;
+pub use crate::stages::parallel::ErrorPolicy;
 
 // ---------------------------------------------------------------------------
 // Constants
