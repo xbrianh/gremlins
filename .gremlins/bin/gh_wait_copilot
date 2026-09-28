@@ -18,11 +18,16 @@ if [ -z "$pr_number" ] || [ -z "$repo" ]; then
     die "Usage: gh_wait_copilot <pr_number> <repo>"
 fi
 
+info "copilot: checking for Copilot review on PR #${pr_number} in ${repo}..."
+
 review=$(gh api "repos/$repo/pulls/$pr_number/reviews" \
     --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' 2>/dev/null || true)
 
 if [ -n "$review" ]; then
+    info "copilot: review found — state=${review}"
     printf '%s' "$review"
+else
+    info "copilot: no non-PENDING Copilot review yet"
 fi
 
 exit 0

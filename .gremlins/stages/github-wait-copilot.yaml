@@ -20,4 +20,4 @@ stages:
         options:
           timeout: 30
           cmds:
-            - 'output=$(gh_wait_copilot "{pr_number}" "{repo}" 2>/dev/null); if [ -n "$output" ]; then printf "%s\n" "$output" > "{status}"; fi'
+            - 'output=$(gh_wait_copilot "{pr_number}" "{repo}"); if [ -n "$output" ]; then printf "%s\n" "$output" > "{status}"; fi'
