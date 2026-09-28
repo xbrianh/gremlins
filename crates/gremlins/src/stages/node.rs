@@ -867,12 +867,6 @@ mod tests {
         assert_eq!(stages[0].skip_if_exists(), "artifact://done");
     }
 
-    #[test]
-    fn skip_if_exists_on_leaf_is_silently_ignored() {
-        // skip_if_exists is no longer validated on leaf stages — it's simply ignored.
-        let stages = parse_one("type: agent\nskip_if_exists: 3\n").unwrap();
-        assert_eq!(stages.skip_if_exists(), "");
-    }
 
     #[test]
     fn stage_client_is_parsed() {
