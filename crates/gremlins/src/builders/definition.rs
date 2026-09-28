@@ -1555,7 +1555,8 @@ mod tests {
         let round_tripped =
             stage_from_yaml(mapping).expect("stage_from_yaml must accept to_yaml output");
         assert_eq!(
-            stage, &round_tripped,
+            stage,
+            &round_tripped,
             "round-trip mismatch for stage {} (type {})",
             stage.name(),
             stage.stage_type()
@@ -1582,10 +1583,7 @@ mod tests {
 
     #[test]
     fn agent_to_yaml_round_trip_minimal() {
-        let stage = AgentBuilder::new("min")
-            .prompt("hi")
-            .build()
-            .unwrap();
+        let stage = AgentBuilder::new("min").prompt("hi").build().unwrap();
         assert_round_trip(&stage);
     }
 
@@ -1609,10 +1607,7 @@ mod tests {
 
     #[test]
     fn exec_to_yaml_round_trip_minimal() {
-        let stage = ExecBuilder::new("cmd")
-            .cmd("true")
-            .build()
-            .unwrap();
+        let stage = ExecBuilder::new("cmd").cmd("true").build().unwrap();
         assert_round_trip(&stage);
     }
 
@@ -1642,8 +1637,18 @@ mod tests {
     #[test]
     fn parallel_to_yaml_round_trip() {
         let stage = ParallelBuilder::new("reviews")
-            .stage(AgentBuilder::new("review-a").prompt("review").build().unwrap())
-            .stage(AgentBuilder::new("review-b").prompt("review").build().unwrap())
+            .stage(
+                AgentBuilder::new("review-a")
+                    .prompt("review")
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                AgentBuilder::new("review-b")
+                    .prompt("review")
+                    .build()
+                    .unwrap(),
+            )
             .max_concurrent(2)
             .cancel_on_error(true)
             .error_policy(ErrorPolicy::All)
