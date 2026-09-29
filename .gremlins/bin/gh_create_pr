@@ -25,7 +25,10 @@ SLUG="$(printf '%04x' "${RANDOM}")"
 BRANCH="$(printf '%s' "$pr_title" | sed 's/[^a-zA-Z0-9]/-/g' | tr '[:upper:]' '[:lower:]' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')"
 BRANCH="${BRANCH}-${SLUG}"
 
+info "create-pr: pushing branch ${BRANCH} (base=${base_ref})..."
 git push origin "HEAD:refs/heads/$BRANCH"
+
+info "create-pr: opening PR '${pr_title}'..."
 
 URL="$(gh pr create \
     --head "$BRANCH" \

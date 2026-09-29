@@ -23,8 +23,11 @@ first=$(head -1 "$plan_file" 2>/dev/null) || exit 0
 
 # Check if the first line matches owner/repo#N or #N
 if ! printf '%s' "$first" | grep -qE '^([^/#]+/[^#]+)?#[0-9]+$'; then
+    info "plan-source: first line is not an issue reference, skipping resolution"
     exit 0
 fi
+
+info "plan-source: resolving issue reference '${first}'..."
 
 repo=$(printf '%s' "$first" | sed -n 's/^\([^/#]*\/[^#]*\)#.*/\1/p')
 num=$(printf '%s' "$first" | sed 's/.*#//')
@@ -37,10 +40,13 @@ _gh_view() {
     fi
 }
 
+info "plan-source: fetching issue #${num}..."
 issue_data=$(_gh_view --jq '[.title, .body, .number] | @tsv')
 title=$(printf '%s' "$issue_data" | cut -f1)
 body=$(printf '%s' "$issue_data" | cut -f2)
 number=$(printf '%s' "$issue_data" | cut -f3)
+
+info "plan-source: resolved to issue #${number} '${title}'"
 
 case "$body" in
     '#'*) printf '%s\n' "$body" > "$plan_file" ;;

@@ -16,11 +16,14 @@ fi
 # Determine the range: base_ref..HEAD, or fall back to HEAD~10..HEAD, or root..HEAD.
 if git merge-base --is-ancestor "$base_ref" HEAD 2>/dev/null; then
     RANGE="$base_ref..HEAD"
+    info "diff-summary: using range ${RANGE}"
 elif git rev-parse --verify HEAD~10 >/dev/null 2>&1; then
     RANGE="HEAD~10..HEAD"
+    info "diff-summary: base not an ancestor, falling back to ${RANGE}"
 else
     ROOT=$(git rev-list --max-parents=0 HEAD)
     RANGE="${ROOT}..HEAD"
+    info "diff-summary: shallow history, using root range ${RANGE}"
 fi
 
 {

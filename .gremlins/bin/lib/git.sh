@@ -8,5 +8,7 @@
 push_branch() {
     local remote="${1:-origin}"
     local branch="$2"
+    info "git: pushing HEAD to ${remote}/refs/heads/${branch}..."
     git push "$remote" "HEAD:refs/heads/$branch" || die "git push $remote HEAD:refs/heads/$branch failed"
+    info "git: push complete"
 }

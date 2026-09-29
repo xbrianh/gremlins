@@ -17,6 +17,8 @@ if ! [ -s "$plan_file" ]; then
     die "publish-as-issue: plan file is empty or missing"
 fi
 
+info "publish-as-issue: extracting title from ${plan_file}..."
+
 # Extract the first H1 heading, strip the leading "# " and trim to 80 chars.
 title=$(awk '/^# /{sub(/^#+ */,""); print; exit}' "$plan_file" | cut -c1-80)
 
@@ -24,7 +26,10 @@ if [ -z "$title" ]; then
     die "publish-as-issue: plan file has no H1 title"
 fi
 
+info "publish-as-issue: creating GitHub issue with title '${title}'..."
 url=$(gh issue create --body-file "$plan_file" --title "$title")
+
+info "publish-as-issue: issue created at ${url}"
 
 # Extract the issue number from the URL (last path component).
 printf '%s' "${url##*/}"
