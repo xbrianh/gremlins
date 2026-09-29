@@ -643,11 +643,11 @@ mod tests {
     use crate::builders::artifacts::artifact;
     use crate::builders::composite::ParallelBuilder;
     use crate::builders::exec::ExecBuilder;
+    use crate::definition::BuilderStage;
     use crate::definition::{ExecutorStage, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::stages::node::BuilderStage;
 
     /// Convert the first parsed stage to an ExecutorStage for dispatch.
     fn first_executor_stage(stages: &[BuilderStage]) -> ExecutorStage {

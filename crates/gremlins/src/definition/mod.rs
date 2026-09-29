@@ -17,6 +17,7 @@ use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 pub use crate::stages::agent::Agent;
 pub use crate::stages::exec::Exec;
+pub use crate::stages::node::BuilderStage;
 pub use crate::stages::parallel::ErrorPolicy;
 
 /// Parsed client descriptor from a stage dict's `client` key.
