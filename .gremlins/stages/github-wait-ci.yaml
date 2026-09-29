@@ -17,7 +17,7 @@ stages:
           pr_url: content("artifact://pr-url.txt")
           fix_head: content("artifact://fix-head")?
         bind:
-          status: "artifact://{loop_iter}/status"
+          status?: "artifact://{loop_iter}/status"
           done?: "artifact://{loop_iter}/done"
         options:
           timeout: 1470
@@ -29,27 +29,49 @@ stages:
             - ci_wait "{pr_url}" "{fix_head}" "{done}" "{status}" {startup_grace_secs} {poll_interval} {sync_timeout} {poll_timeout}
 
       - name: ci-failure-log
-        type: exec
-        interpolation:
-          pr_url: content("artifact://pr-url.txt")
-        bind:
-          ci_log?: "artifact://{loop_iter}/ci_failure.txt"
-        options:
-          timeout: 120
-          cmds:
-            - ci_failure_log "{pr_url}" "{ci_log}"
+        type: sequence
+        skip_if_exists: "artifact://{loop_iter}/done"
+        body:
+          - type: exec
+            interpolation:
+              pr_url: content("artifact://pr-url.txt")
+            bind:
+              ci_log?: "artifact://{loop_iter}/ci_failure.txt"
+            options:
+              timeout: 120
+              cmds:
+                - ci_failure_log "{pr_url}" "{ci_log}"
 
       - name: fix
-        type: agent
-        prompt:
-          - "{{prompt}}"
-        interpolation:
-          failure_output: content("artifact://{loop_iter}/ci_failure.txt")?
+        type: sequence
+        skip_if_exists: "artifact://{loop_iter}/done"
+        body:
+          - type: agent
+            prompt:
+              - "{{prompt}}"
+            interpolation:
+              failure_output: content("artifact://{loop_iter}/ci_failure.txt")?
 
       - name: push-fix
-        type: exec
-        interpolation:
-          pr_branch: content("artifact://pr-branch.txt")
-        options:
-          cmds:
-            - ci_push_fix "{pr_branch}"
+        type: sequence
+        skip_if_exists: "artifact://{loop_iter}/done"
+        body:
+          - type: exec
+            interpolation:
+              pr_branch: content("artifact://pr-branch.txt")
+            options:
+              cmds:
+                - ci_push_fix "{pr_branch}"
+
+      - name: capture-head
+        type: sequence
+        skip_if_exists: "artifact://fix-head"
+        body:
+          - type: exec
+            bind:
+              fix_head: "artifact://fix-head"
+            options:
+              cmds:
+                - |
+                  set -o pipefail
+                  git rev-parse HEAD | tr -d '\n' | tee "{fix_head}"

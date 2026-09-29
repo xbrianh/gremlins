@@ -43,7 +43,9 @@ if gh_ci_await "$pr_url" "$fix_head" "$startup_grace_secs" "$poll_interval" "$sy
         touch "$done_file"
         exit 0
     fi
-    if ! grep -q 'status=IN_PROGRESS' "$TMP_AWAIT" && grep -q 'conclusion=SUCCESS' "$TMP_AWAIT"; then
+    if ! grep -q 'status=IN_PROGRESS' "$TMP_AWAIT" && \
+       grep -q 'conclusion=SUCCESS' "$TMP_AWAIT" && \
+       ! grep -qE 'conclusion=(FAILURE|CANCELLED|ERROR|ACTION_REQUIRED|TIMED_OUT|STARTUP_FAILURE)' "$TMP_AWAIT"; then
         info "ci_wait: CI already passed"
         touch "$done_file"
         exit 0
