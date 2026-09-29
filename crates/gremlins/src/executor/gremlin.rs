@@ -117,6 +117,52 @@ pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
     Ok(GremlinId(id.to_string()))
 }
 
+/// Snapshot of process-global configuration needed by the run loop.
+/// Populated once in [`Gremlin::init_runtime`] so multiple `Gremlin::run()`
+/// invocations can coexist in one process without reading global state.
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct RuntimeConfig {
+    /// Resolved scratch directory for this gremlin.
+    pub scratch_dir: PathBuf,
+    /// Resolved overlay directory for this gremlin.
+    pub overlay_dir: PathBuf,
+    /// Resolved work root for worktree creation.
+    pub work_root: PathBuf,
+    /// Resolved state root.
+    pub state_root: PathBuf,
+    /// Exact-match stage→client mappings from config.
+    pub stage_clients_exact: HashMap<String, String>,
+    /// Prefix-match stage→client mappings from config.
+    pub stage_clients_prefix: HashMap<String, String>,
+    /// Exact-match task→client mappings from config.
+    pub task_clients_exact: HashMap<String, String>,
+    /// Prefix-match task→client mappings from config.
+    pub task_clients_prefix: HashMap<String, String>,
+    /// The default client from config.json, if any.
+    pub default_client: Option<String>,
+    /// The base process environment captured at startup, before any
+    /// bootstrap or system vars are layered on.
+    pub base_process_env: HashMap<String, String>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            scratch_dir: PathBuf::new(),
+            overlay_dir: PathBuf::new(),
+            work_root: PathBuf::new(),
+            state_root: PathBuf::new(),
+            stage_clients_exact: HashMap::new(),
+            stage_clients_prefix: HashMap::new(),
+            task_clients_exact: HashMap::new(),
+            task_clients_prefix: HashMap::new(),
+            default_client: None,
+            base_process_env: HashMap::new(),
+        }
+    }
+}
+
 /// One gremlin run, reconstructed from its state directory.
 pub struct Gremlin {
     pub id: GremlinId,
@@ -146,6 +192,7 @@ pub struct Gremlin {
     /// absent or empty is an optional source with nothing to bind.
     pub stage_inputs: HashMap<String, String>,
     pub dry_run: bool,
+    pub(crate) runtime_config: RuntimeConfig,
 }
 
 impl Gremlin {
@@ -361,6 +408,7 @@ impl Gremlin {
                 loop_iter: "1".to_string(),
                 stage_inputs: stage_inputs.clone(),
                 dry_run: false,
+                runtime_config: RuntimeConfig::default(),
             })
         };
 
@@ -510,6 +558,7 @@ impl Gremlin {
             loop_iter: "1".to_string(),
             stage_inputs,
             dry_run: false,
+            runtime_config: RuntimeConfig::default(),
         })
     }
 
@@ -583,6 +632,7 @@ impl Gremlin {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: true,
+            runtime_config: RuntimeConfig::default(),
         }
     }
 
@@ -607,6 +657,38 @@ impl Gremlin {
         if let Some(name) = resume_from {
             self.definition.goto(name);
         }
+
+        // Snapshot global config once so the rest of the run loop never reads it.
+        if self.runtime_config.scratch_dir.as_os_str().is_empty() {
+            let cfg = config::get_global();
+            let (stage_exact, stage_prefix) = cfg
+                .as_ref()
+                .map(|c| c.default_client_by_stage())
+                .map(|(e, p)| (e.clone(), p.clone()))
+                .unwrap_or_default();
+            let (task_exact, task_prefix) = cfg
+                .as_ref()
+                .map(|c| c.task_clients())
+                .map(|(e, p)| (e.clone(), p.clone()))
+                .unwrap_or_default();
+            let default_client = cfg
+                .as_ref()
+                .and_then(|c| c.default_client().map(String::from));
+            let base_process_env: HashMap<String, String> = std::env::vars().collect();
+            self.runtime_config = RuntimeConfig {
+                scratch_dir: config::scratch_root(Some(self.id.as_str())),
+                overlay_dir: self.state_dir.join(config::overlay_dirname()),
+                work_root: config::work_root(),
+                state_root: config::state_root(),
+                stage_clients_exact: stage_exact,
+                stage_clients_prefix: stage_prefix,
+                task_clients_exact: task_exact,
+                task_clients_prefix: task_prefix,
+                default_client,
+                base_process_env,
+            };
+        }
+
         if !self.definition.is_stub() {
             return Ok(());
         }
@@ -617,9 +699,12 @@ impl Gremlin {
             )));
         };
 
-        let mut definition =
-            StaticDefinition::from_yaml_file(&definition_path, self.client_override.as_deref())
-                .map_err(|error| RunError::Message(error.to_string()))?;
+        let mut definition = StaticDefinition::from_yaml_file(
+            &definition_path,
+            self.client_override.as_deref(),
+            self.runtime_config.default_client.as_deref(),
+        )
+        .map_err(|error| RunError::Message(error.to_string()))?;
 
         // Write the hermetic definition.yaml snapshot so every entry point
         // that calls run() gets one — resume, fork, and fresh launch alike.
@@ -666,6 +751,8 @@ impl Gremlin {
             &self.project_root,
             self.worktree.as_deref(),
             &overlay_dir,
+            &self.runtime_config.scratch_dir,
+            &self.runtime_config.base_process_env,
         )?;
 
         // Nothing below this line can fail, so this is the commit point.
@@ -681,12 +768,7 @@ impl Gremlin {
         // The Python launcher sources bootstrap.env before the worktree
         // exists, so GREMLINS_WORKTREE_PATH (and any variable the script
         // derives from it) is absent. resolve_env produces the correct map now
-        // that the worktree is real — write it back to the process so agent
-        // stages and their child processes inherit the correct PATH,
-        // VIRTUAL_ENV, etc.
-        for (key, value) in &env {
-            std::env::set_var(key, value);
-        }
+        // that the worktree is real.
         self.env = env;
 
         // The client label is only knowable once the definition is loaded; the
@@ -855,6 +937,8 @@ impl Gremlin {
             client.model(),
         );
 
+        let child_scratch_dir = config::scratch_root(Some(child_gremlin_id.as_str()));
+
         Ok(Gremlin {
             id: child_gremlin_id,
             state_dir: child_state_dir,
@@ -878,6 +962,11 @@ impl Gremlin {
             // the same inputs the parent launched with.
             stage_inputs: self.stage_inputs.clone(),
             dry_run: self.dry_run,
+            runtime_config: {
+                let mut child_runtime_config = self.runtime_config.clone();
+                child_runtime_config.scratch_dir = child_scratch_dir;
+                child_runtime_config
+            },
         })
     }
 
@@ -945,11 +1034,11 @@ impl Gremlin {
 
     /// Remove the scratch directory — best-effort.
     fn clean_scratch(&self) {
-        let scratch = config::scratch_root(Some(self.id.as_str()));
+        let scratch = &self.runtime_config.scratch_dir;
         if !scratch.is_dir() {
             return;
         }
-        if let Err(error) = std::fs::remove_dir_all(&scratch) {
+        if let Err(error) = std::fs::remove_dir_all(scratch) {
             log::warn!(
                 "clean: could not remove scratch dir {}: {error}",
                 scratch.display()
@@ -982,17 +1071,10 @@ impl Gremlin {
 
 /// The worktree of `definition_path`'s project.
 ///
-/// Mirrors the private `project_root_for` in `schemas::gremlin_definition`: the parent of
-/// the nearest ancestor `.gremlins` directory, else the definition's own parent.
-/// Falls back to `GREMLINS_PROJECT_ROOT` when the env var is set, so a running
-/// gremlin whose state dir has a staged overlay still resolves the real project.
+/// Walks up from the definition path looking for the nearest ancestor
+/// `.gremlins` directory; the parent of that directory is the project root.
+/// Falls back to the definition's own parent when no overlay is found.
 fn project_root_for(definition_path: &Path) -> PathBuf {
-    if let Ok(env_root) = std::env::var("GREMLINS_PROJECT_ROOT") {
-        let path = PathBuf::from(&env_root);
-        if path.is_dir() {
-            return path;
-        }
-    }
     let canonical = definition_path
         .canonicalize()
         .unwrap_or_else(|_| definition_path.to_path_buf());
@@ -1184,6 +1266,7 @@ pub fn system_env(
     project_root: &Path,
     worktree: Option<&Path>,
     overlay_dir: &Path,
+    scratch_dir: &Path,
 ) -> HashMap<String, String> {
     let worktree_path = worktree
         .map(|path| path.to_string_lossy().into_owned())
@@ -1197,7 +1280,7 @@ pub fn system_env(
     } else {
         worktree_path.clone()
     };
-    let scratch_dir = config::scratch_root(Some(gremlin_id));
+    let scratch_dir = scratch_dir.to_path_buf();
 
     let mut vars = HashMap::new();
     vars.insert("GREMLINS_GREMLIN_ID".to_string(), gremlin_id.to_string());
@@ -1228,6 +1311,7 @@ pub fn system_env(
 /// is sourced, so the script can read them (e.g. to point `VIRTUAL_ENV` at the
 /// worktree's venv), then re-asserted on top afterwards. The script can shape
 /// the environment but can never redirect the harness's paths.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_env(
     bootstrap_env: Option<&str>,
     state_dir: &Path,
@@ -1235,10 +1319,19 @@ pub fn resolve_env(
     project_root: &Path,
     worktree: Option<&Path>,
     overlay_dir: &Path,
+    scratch_dir: &Path,
+    base_env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, RunError> {
-    let system = system_env(state_dir, gremlin_id, project_root, worktree, overlay_dir);
+    let system = system_env(
+        state_dir,
+        gremlin_id,
+        project_root,
+        worktree,
+        overlay_dir,
+        scratch_dir,
+    );
 
-    let mut base: HashMap<String, String> = std::env::vars().collect();
+    let mut base: HashMap<String, String> = base_env.clone();
     base.extend(system.clone());
 
     let mut env = match bootstrap_env {
@@ -1351,6 +1444,8 @@ mod tests {
         let overlay_dir = state_dir.join(config::overlay_dirname());
         std::fs::create_dir_all(&overlay_dir).unwrap();
 
+        let scratch_dir = config::scratch_root(Some("gr-test"));
+        let base_env: HashMap<String, String> = std::env::vars().collect();
         let env = resolve_env(
             None,
             &state_dir,
@@ -1358,6 +1453,8 @@ mod tests {
             &project_root,
             None,
             &overlay_dir,
+            &scratch_dir,
+            &base_env,
         )
         .unwrap();
 
@@ -1370,10 +1467,7 @@ mod tests {
             std::env::current_dir().unwrap().to_string_lossy()
         );
         assert_eq!(env["GREMLIN_STATE_DIR"], state_dir.to_string_lossy());
-        assert_eq!(
-            env["GREMLINS_SCRATCH_DIR"],
-            config::scratch_root(Some("gr-test")).to_string_lossy()
-        );
+        assert_eq!(env["GREMLINS_SCRATCH_DIR"], scratch_dir.to_string_lossy());
     }
 
     /// The absolute path of `env`, so a bootstrap script that replaces `PATH`
@@ -1406,6 +1500,8 @@ mod tests {
             "export GREMLINS_TEST_SOURCED=yes\nexport PATH=/custom\nhash -p {} env\n",
             env_binary(),
         );
+        let scratch_dir = config::scratch_root(Some("gr-test"));
+        let base_env: HashMap<String, String> = std::env::vars().collect();
         let env = resolve_env(
             Some(&script),
             &state_dir,
@@ -1413,6 +1509,8 @@ mod tests {
             &project_root,
             None,
             &overlay_dir,
+            &scratch_dir,
+            &base_env,
         )
         .unwrap();
 
@@ -1428,10 +1526,7 @@ mod tests {
             std::env::current_dir().unwrap().to_string_lossy()
         );
         assert_eq!(env["GREMLIN_STATE_DIR"], state_dir.to_string_lossy());
-        assert_eq!(
-            env["GREMLINS_SCRATCH_DIR"],
-            config::scratch_root(Some("gr-test")).to_string_lossy()
-        );
+        assert_eq!(env["GREMLINS_SCRATCH_DIR"], scratch_dir.to_string_lossy());
     }
 
     #[test]
@@ -1449,6 +1544,8 @@ mod tests {
         // bundled definitions use — then tries to redirect a system variable.
         let script = "export VIRTUAL_ENV=\"${GREMLINS_WORKTREE_PATH}/.venv\"\n\
                        export GREMLINS_WORKTREE_PATH=/hijacked\n";
+        let scratch_dir = config::scratch_root(Some("gr-test"));
+        let base_env: HashMap<String, String> = std::env::vars().collect();
         let env = resolve_env(
             Some(script),
             &state_dir,
@@ -1456,6 +1553,8 @@ mod tests {
             &project_root,
             Some(&worktree),
             &overlay_dir,
+            &scratch_dir,
+            &base_env,
         )
         .unwrap();
 
@@ -1470,6 +1569,8 @@ mod tests {
         let state_dir = dir.path().join("state").join("gr-test");
         std::fs::create_dir_all(&state_dir).unwrap();
 
+        let scratch_dir = config::scratch_root(Some("gr-test"));
+        let base_env: HashMap<String, String> = std::env::vars().collect();
         let error = resolve_env(
             Some("exit 3"),
             &state_dir,
@@ -1477,6 +1578,8 @@ mod tests {
             dir.path(),
             None,
             &state_dir.join(config::overlay_dirname()),
+            &scratch_dir,
+            &base_env,
         )
         .unwrap_err();
         assert!(
@@ -1512,7 +1615,8 @@ mod tests {
             return;
         }
 
-        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let mut gremlin = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1573,7 +1677,8 @@ mod tests {
             return;
         }
 
-        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let mut launched = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1608,7 +1713,8 @@ mod tests {
             return;
         }
 
-        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let created = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1647,7 +1753,8 @@ mod tests {
             return;
         }
 
-        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let launched = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1679,7 +1786,8 @@ mod tests {
             return;
         }
 
-        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let parent = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1694,7 +1802,7 @@ mod tests {
 
         std::fs::write(parent.artifact_dir.join("note.txt"), "hello").unwrap();
 
-        let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
         let child = parent
             .fork("gr-child", "", "", "", None, child_provider, None)
@@ -1737,7 +1845,8 @@ mod tests {
             return;
         }
 
-        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let parent = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1753,13 +1862,15 @@ mod tests {
         // Mirrors the reference implementation: an empty argument falls
         // back to whatever the parent state carries (usually the parent's
         // own parent, or nothing at all), never to the parent's own id.
-        let child_def_a = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let child_def_a =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let child_provider_a: Box<dyn GremlinDefinition> = Box::new(child_def_a);
         parent
             .fork("gr-a", "", "", "", None, child_provider_a, None)
             .await
             .unwrap();
-        let child_def_b = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let child_def_b =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let child_provider_b: Box<dyn GremlinDefinition> = Box::new(child_def_b);
         parent
             .fork(
@@ -1839,6 +1950,10 @@ mod tests {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
+            runtime_config: RuntimeConfig {
+                scratch_dir: config::scratch_root(Some(id)),
+                ..RuntimeConfig::default()
+            },
         }
     }
 

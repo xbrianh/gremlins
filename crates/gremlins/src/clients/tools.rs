@@ -45,6 +45,7 @@ pub(crate) type TaskFn = Arc<dyn Fn(String, String) -> TaskFuture + Send + Sync>
 pub(crate) struct ToolContext {
     pub cwd: Option<PathBuf>,
     pub extra_env: Option<HashMap<String, String>>,
+    pub(crate) base_env: Option<HashMap<String, String>>,
     pub(crate) allowed_roots: Vec<PathBuf>,
     pub(crate) audit_log: Option<PathBuf>,
     pub(crate) allowed_tools: Option<Vec<String>>,
@@ -1010,7 +1011,10 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         cmd.current_dir(cwd);
     }
     if let Some(extra) = &ctx.extra_env {
-        let mut env: HashMap<String, String> = std::env::vars().collect();
+        let mut env: HashMap<String, String> = ctx
+            .base_env
+            .clone()
+            .unwrap_or_else(|| std::env::vars().collect());
         env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
         cmd.env_clear().envs(env);
     }
@@ -1741,6 +1745,7 @@ mod tests {
         ToolContext {
             cwd: Some(cwd.to_path_buf()),
             extra_env: None,
+            base_env: None,
             allowed_roots: vec![cwd.to_path_buf()],
             audit_log: None,
             allowed_tools: None,
@@ -1851,6 +1856,7 @@ mod tests {
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
+            base_env: None,
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,
@@ -1876,6 +1882,7 @@ mod tests {
         let c = ToolContext {
             cwd: None,
             extra_env: None,
+            base_env: None,
             allowed_roots: vec![std::env::current_dir().unwrap()],
             audit_log: None,
             allowed_tools: None,
@@ -2499,6 +2506,7 @@ mod tests {
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
+            base_env: None,
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: Some(vec!["Read".into()]),
@@ -2904,6 +2912,7 @@ mod tests {
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
+            base_env: None,
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,
@@ -2927,6 +2936,7 @@ mod tests {
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
+            base_env: None,
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,
@@ -2949,6 +2959,7 @@ mod tests {
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
+            base_env: None,
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,
@@ -2972,6 +2983,7 @@ mod tests {
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
+            base_env: None,
             allowed_roots: vec![dir.clone()],
             audit_log: None,
             allowed_tools: None,

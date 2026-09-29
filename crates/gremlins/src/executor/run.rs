@@ -19,7 +19,6 @@ use crate::artifacts::registry::{ArtifactRegistry, Collision};
 use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::RunParams;
 use crate::clients::client::Client;
-use crate::config;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
@@ -95,7 +94,7 @@ async fn run_stage_scoped(
 /// Resolve the client spec string for a stage, consulting:
 /// 1. The stage's own `client:` field (always wins)
 /// 2. The enclosing composite's explicit `client:` (new — the `fill_client` replacement)
-/// 3. `default-client-by-stage` from global config (exact → longest prefix)
+/// 3. `default-client-by-stage` from runtime config (exact → longest prefix)
 /// 4. The definition's `default_client`
 fn resolve_client_spec(
     stage: &ExecutorStage,
@@ -114,9 +113,10 @@ fn resolve_client_spec(
 
     let stage_name = stage.name();
 
-    // 3. Consult default-client-by-stage from global config
-    if let Some(cfg) = config::get_global() {
-        let (exact, prefix) = cfg.default_client_by_stage();
+    // 3. Consult default-client-by-stage from runtime config
+    {
+        let exact = &gremlin.runtime_config.stage_clients_exact;
+        let prefix = &gremlin.runtime_config.stage_clients_prefix;
 
         // Exact match
         if let Some(client_spec) = exact.get(stage_name) {
@@ -352,6 +352,9 @@ async fn run_agent(
             .collect(),
         system_prompt: Some(prepared.system_prompt()),
         gremlin_id: Some(gremlin.id.to_string()),
+        base_env: Some(gremlin.runtime_config.base_process_env.clone()),
+        task_clients_exact: gremlin.runtime_config.task_clients_exact.clone(),
+        task_clients_prefix: gremlin.runtime_config.task_clients_prefix.clone(),
     };
 
     log::debug!(
@@ -544,6 +547,7 @@ async fn run_exec(
     prepared.artifact_dir = local_registry.artifact_dir().to_path_buf();
     prepared.state_dir = gremlin.state_dir.clone();
     prepared.env = gremlin.env.clone();
+    prepared.base_env = gremlin.runtime_config.base_process_env.clone();
 
     if gremlin.dry_run {
         log::debug!(
@@ -1020,6 +1024,7 @@ mod tests {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
+            runtime_config: crate::executor::gremlin::RuntimeConfig::default(),
         };
         (tmp, gremlin)
     }
@@ -1728,7 +1733,8 @@ mod tests {
             return;
         }
 
-        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let mut gremlin = Gremlin::init(
             "gr-e2e",
             fx.definition_path(),

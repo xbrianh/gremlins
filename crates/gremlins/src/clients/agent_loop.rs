@@ -166,6 +166,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     let mut tool_ctx = ToolContext {
         cwd: cwd.clone(),
         extra_env,
+        base_env: ctx.params.base_env.clone(),
         allowed_roots,
         audit_log,
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
@@ -1263,6 +1264,9 @@ mod tests {
                 expected_artifact_paths: vec![],
                 system_prompt: None,
                 gremlin_id: None,
+                base_env: None,
+                task_clients_exact: HashMap::new(),
+                task_clients_prefix: HashMap::new(),
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,

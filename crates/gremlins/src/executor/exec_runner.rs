@@ -69,6 +69,9 @@ pub struct ExecPrepared {
     /// system variables plus anything its bootstrap script sourced). An
     /// empty env means the commands inherit the process environment.
     pub env: HashMap<String, String>,
+    /// Base process environment for fallback when `env` is empty.
+    /// Populated from the gremlin's runtime_config.
+    pub base_env: HashMap<String, String>,
     /// Substitution env vars (`GREMLINS_<KEY> → value`) populated by
     /// `prepare_exec` for the exec command templates. Merged into the
     /// child shell's environment in `run_shell`.
@@ -200,6 +203,7 @@ pub async fn prepare_exec(
         state_dir: PathBuf::new(),
         timeout,
         env: HashMap::new(),
+        base_env: HashMap::new(),
         substitution_env,
     })
 }
@@ -265,9 +269,10 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
 
     let joined = prepared.cmds.join(" && ");
     let resolved_cmd = resolve_cmd_for_log(&joined, &prepared.substitution_env);
-    // A prepared env is authoritative when present; otherwise inherit ours.
+    // A prepared env is authoritative when present; otherwise fall back to
+    // the base process env snapshotted from the gremlin's runtime_config.
     let mut env: HashMap<String, String> = if prepared.env.is_empty() {
-        std::env::vars().collect()
+        prepared.base_env.clone()
     } else {
         prepared.env.clone()
     };
@@ -595,6 +600,7 @@ mod tests {
             state_dir: state_dir.clone(),
             timeout: Some(5.0),
             env: HashMap::new(),
+            base_env: HashMap::new(),
             substitution_env,
         };
 
@@ -620,6 +626,7 @@ mod tests {
             state_dir: state_dir.to_path_buf(),
             timeout: Some(5.0),
             env: HashMap::new(),
+            base_env: HashMap::new(),
             substitution_env: HashMap::new(),
         }
     }

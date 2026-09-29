@@ -740,7 +740,7 @@ async fn land(id: &str) -> Result<(), String> {
             definition_path.display()
         ));
     }
-    let definition = StaticDefinition::from_yaml_file(&definition_path, None)
+    let definition = StaticDefinition::from_yaml_file(&definition_path, None, None)
         .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
 
     // Extract the Exec from the land stage.
@@ -800,12 +800,14 @@ async fn land(id: &str) -> Result<(), String> {
         std::env::current_dir().map_err(|e| format!("failed to get current directory: {e}"))?;
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
+    let scratch_dir = config::scratch_root(Some(id));
     env.extend(system_env(
         &state_dir,
         id,
         &project_root,
         worktree.as_deref(),
         &overlay_dir,
+        &scratch_dir,
     ));
     // Merge substitution env vars (GREMLINS_<KEY> → value) so that
     // {key} tokens in command templates resolve to their actual values.
@@ -845,7 +847,7 @@ async fn validate(definition: &str) -> Result<(), String> {
     let definition_path = discovery::resolve_definition_path(definition, project_root.clone())
         .map_err(|e| format!("definition not found: {e}"))?;
 
-    let gremlin_def = StaticDefinition::from_yaml_file(&definition_path, None)
+    let gremlin_def = StaticDefinition::from_yaml_file(&definition_path, None, None)
         .map_err(|e| format!("invalid definition: {e}"))?;
 
     let mut gremlin = Gremlin::for_dry_run(gremlin_def);
@@ -987,7 +989,7 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     // Load the definition just enough to validate --key args against
     // bootstrap.source.
-    let gremlin_def = StaticDefinition::from_yaml_file(&definition_path, None)
+    let gremlin_def = StaticDefinition::from_yaml_file(&definition_path, None, None)
         .map_err(|e| format!("invalid definition: {e}"))?;
 
     match &gremlin_def.bootstrap.source {

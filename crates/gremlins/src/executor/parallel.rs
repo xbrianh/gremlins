@@ -19,6 +19,7 @@
 //! `run_parallel` returns — no orphaned threads, even after `cancel_on_error`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -419,9 +420,10 @@ pub(crate) async fn run_parallel(
         "parallel group {group_name}: merging artifacts from {} successful children",
         child_results.len() - failed_names.len()
     );
+    let state_root = gremlin.runtime_config.state_root.clone();
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
-            if let Err(e) = merge_child_artifacts(gremlin, outcome).await {
+            if let Err(e) = merge_child_artifacts(gremlin, outcome, &state_root).await {
                 log::warn!(
                     "parallel group {group_name}: failed to merge artifacts from {}: {e}",
                     outcome.child_name
@@ -495,9 +497,9 @@ struct ChildOutcome {
 async fn merge_child_artifacts(
     gremlin: &mut Gremlin,
     outcome: &ChildOutcome,
+    state_root: &Path,
 ) -> Result<(), RunError> {
     use crate::artifacts::registry::{Collision, FileSystemArtifactRegistry};
-    use crate::config;
 
     // Prefer the in-memory registry the child passed back. This handles
     // dry-run children (whose DryRunArtifactRegistry never writes files)
@@ -516,9 +518,7 @@ async fn merge_child_artifacts(
     }
 
     // Fallback: construct a FileSystemArtifactRegistry from disk.
-    let child_artifact_dir = config::state_root()
-        .join(&outcome.child_id)
-        .join("artifacts");
+    let child_artifact_dir = state_root.join(&outcome.child_id).join("artifacts");
     if !child_artifact_dir.exists() {
         return Ok(());
     }
@@ -645,7 +645,7 @@ mod tests {
     use crate::builders::exec::ExecBuilder;
     use crate::definition::StageSpec;
     use crate::definition::{ExecutorStage, StaticDefinition};
-    use crate::executor::gremlin::validate_gremlin_id;
+    use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig};
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
 
@@ -714,6 +714,10 @@ mod tests {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
+            runtime_config: RuntimeConfig {
+                state_root: tmp.path().join("state"),
+                ..RuntimeConfig::default()
+            },
         };
         (tmp, gremlin)
     }

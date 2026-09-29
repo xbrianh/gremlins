@@ -42,7 +42,11 @@ impl StaticDefinition {
     /// Load a definition from a YAML file, expanding includes, stage-definitions,
     /// and prompts. `client_override` is the CLI `--client` value; consulted only
     /// when the YAML declares none.
-    pub fn from_yaml_file(path: &Path, client_override: Option<&str>) -> Result<Self, SchemaError> {
+    pub fn from_yaml_file(
+        path: &Path,
+        client_override: Option<&str>,
+        config_default_client: Option<&str>,
+    ) -> Result<Self, SchemaError> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !path.exists() {
             return Err(SchemaError::DefinitionFileNotFound {
@@ -53,7 +57,7 @@ impl StaticDefinition {
         let project_root = project_root_for(&path);
         let expanded = expand::parse_definition_file(&path, &project_root)?;
 
-        from_expanded_value(expanded, &path, client_override)
+        from_expanded_value(expanded, &path, client_override, config_default_client)
     }
 
     /// Parse already-expanded YAML bytes directly — no file I/O, no
@@ -66,7 +70,12 @@ impl StaticDefinition {
         client_override: Option<&str>,
     ) -> Result<Self, SchemaError> {
         let expanded = parse_expanded_yaml(data)?;
-        from_expanded_value(expanded, Path::new("definition.yaml"), client_override)
+        from_expanded_value(
+            expanded,
+            Path::new("definition.yaml"),
+            client_override,
+            None,
+        )
     }
 
     /// Read an already-expanded YAML file — no expansion, no project-root
@@ -74,11 +83,12 @@ impl StaticDefinition {
     pub fn from_expanded_yaml_file(
         path: &Path,
         client_override: Option<&str>,
+        config_default_client: Option<&str>,
     ) -> Result<Self, SchemaError> {
         let data = std::fs::read(path)
             .map_err(|e| SchemaError::Generic(format!("failed to read {}: {e}", path.display())))?;
         let expanded = parse_expanded_yaml(&data)?;
-        from_expanded_value(expanded, path, client_override)
+        from_expanded_value(expanded, path, client_override, config_default_client)
     }
 }
 
@@ -107,6 +117,7 @@ fn from_expanded_value(
     expanded: Value,
     path: &Path,
     default_client_override: Option<&str>,
+    config_default_client: Option<&str>,
 ) -> Result<StaticDefinition, SchemaError> {
     let root = expanded
         .as_mapping()
@@ -152,7 +163,11 @@ fn from_expanded_value(
         None
     };
 
-    let default_client = resolve_default_client(yaml_default_client, default_client_override)?;
+    let default_client = resolve_default_client(
+        yaml_default_client,
+        default_client_override,
+        config_default_client,
+    )?;
 
     let builder = DefinitionBuilder {
         name,
@@ -549,6 +564,7 @@ fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {
 fn resolve_default_client(
     yaml_default: Option<String>,
     override_client: Option<&str>,
+    config_default_client: Option<&str>,
 ) -> Result<String, SchemaError> {
     if let Some(client) = yaml_default {
         return Ok(client);
@@ -561,9 +577,8 @@ fn resolve_default_client(
     {
         return Ok(client.to_string());
     }
-    config::global_config()
-        .ok()
-        .and_then(|cfg| cfg.default_client().map(String::from))
+    config_default_client
+        .map(String::from)
         .ok_or_else(|| SchemaError::Generic(MISSING_DEFAULT_CLIENT.to_string()))
 }
 
