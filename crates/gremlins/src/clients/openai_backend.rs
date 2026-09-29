@@ -1,19 +1,11 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rig_core::client::CompletionClient;
 use rig_core::providers::openai;
 
-use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
 use super::backend::{Backend, ClientError, RunParams};
+use super::openai_protocol::{reap_openai_compat, run_openai_compat, OpenAiRunState};
 use super::protocol::CompletedRun;
-use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
-use super::task::TaskModelSelector;
-
-/// The completion model type shared by every OpenAI-compatible backend.
-pub(crate) type OpenAiModel = <openai::CompletionsClient as CompletionClient>::CompletionModel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiProvider {
@@ -53,13 +45,7 @@ impl OpenAiProvider {
 
 pub struct OpenAiBackend {
     provider: OpenAiProvider,
-    client: openai::CompletionsClient,
-    model: String,
-    tool_filter: Option<Vec<String>>,
-    client_params: HashMap<String, String>,
-    last_ctx: Mutex<Option<RunContext>>,
-    cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
-    next_id: AtomicU64,
+    state: OpenAiRunState,
 }
 
 impl OpenAiBackend {
@@ -77,290 +63,26 @@ impl OpenAiBackend {
         };
         Self {
             provider,
-            client,
-            model,
-            tool_filter,
-            client_params,
-            last_ctx: Mutex::new(None),
-            cancels: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
-        }
-    }
-
-    fn extra_params(&self) -> Option<serde_json::Value> {
-        build_extra_params(&self.client_params)
-    }
-
-    fn effective_model(&self, override_model: Option<&str>) -> String {
-        match override_model {
-            Some(m) if !m.is_empty() => m.to_string(),
-            _ => self.model.clone(),
-        }
-    }
-
-    async fn attempt(&self, prompt: &str, ctx: &RunContext) -> Result<CompletedRun, ClientError> {
-        let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let cancel = CancelToken::new();
-        self.cancels
-            .lock()
-            .unwrap()
-            .entry(gremlin_id.clone())
-            .or_default()
-            .insert(id, cancel.clone());
-        let result = self.attempt_inner(prompt, ctx, cancel).await;
-        if let Ok(mut guard) = self.cancels.lock() {
-            if let Some(inner) = guard.get_mut(&gremlin_id) {
-                inner.remove(&id);
-                if inner.is_empty() {
-                    guard.remove(&gremlin_id);
-                }
-            }
-        }
-        result
-    }
-
-    async fn attempt_inner(
-        &self,
-        prompt: &str,
-        ctx: &RunContext,
-        cancel: Arc<CancelToken>,
-    ) -> Result<CompletedRun, ClientError> {
-        let model_name = self.effective_model(ctx.params.model.as_deref());
-        run_with_agent_loop(
-            &self.client,
-            &model_name,
-            prompt,
-            ctx,
-            cancel,
-            self.extra_params(),
-            self.tool_filter.as_deref(),
-            None, // default classifier
-            task_model_selector(
-                &self.client,
-                self.provider.name(),
-                &ctx.params.task_clients_exact,
-                &ctx.params.task_clients_prefix,
+            state: OpenAiRunState::new(
+                client,
+                model,
+                tool_filter,
+                client_params,
+                "OpenAiBackend".to_string(),
             ),
-        )
-        .await
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_with_agent_loop(
-    client: &openai::CompletionsClient,
-    model_name: &str,
-    prompt: &str,
-    ctx: &RunContext,
-    cancel: Arc<CancelToken>,
-    extra: Option<serde_json::Value>,
-    tool_filter: Option<&[String]>,
-    classify_error: Option<ErrorClassifier>,
-    task_model_selector: Option<TaskModelSelector<OpenAiModel>>,
-) -> Result<CompletedRun, ClientError> {
-    let model = client.completion_model(model_name);
-    let mut ctx = ctx.clone();
-    ctx.params.model = Some(model_name.to_string());
-
-    run_agent_loop(
-        &model,
-        prompt,
-        &ctx,
-        cancel,
-        LoopOpts {
-            extra,
-            tool_filter,
-            classify_error,
-        },
-        task_model_selector,
-    )
-    .await
-}
-
-/// Build the `task-clients` selector for an OpenAI-compatible client, or `None`
-/// when `config.json` declares no entries this backend can serve.
-///
-/// The config is read once per run; the returned selector is shared behind an
-/// `Arc`, so each Task clones a pointer rather than the maps themselves. When
-/// nothing is configured the selector is `None` and the common path is free.
-pub(super) fn task_model_selector(
-    client: &openai::CompletionsClient,
-    provider_name: &str,
-    task_clients_exact: &HashMap<String, String>,
-    task_clients_prefix: &HashMap<String, String>,
-) -> Option<TaskModelSelector<OpenAiModel>> {
-    if task_clients_exact.is_empty() && task_clients_prefix.is_empty() {
-        return None;
-    }
-
-    let exact = task_clients_exact.clone();
-    let prefix = task_clients_prefix.clone();
-    let client = client.clone();
-    let provider_name = provider_name.to_string();
-    TaskModelSelector::new(
-        exact,
-        prefix,
-        Arc::new(move |spec: &str| {
-            let (provider, model) = provider_and_model(spec)?;
-            if provider == provider_name {
-                Some(client.completion_model(model))
-            } else {
-                log::warn!(
-                    "task-clients entry spec {spec:?} names provider {provider:?}, but this \
-                     backend serves {provider_name:?} — falling back to parent model"
-                );
-                None
-            }
-        }),
-    )
-}
-
-/// Split a client specifier into `(provider, model)`, or `None` when the
-/// provider or model part is empty.
-///
-/// The provider is everything before the first `:`; the remainder is the model
-/// identifier.  A trailing `:k=v,...` parameter suffix (where the segment after
-/// the last `:` contains `=`) is stripped, so `openai:gpt-4o:foo=bar` yields
-/// `("openai", "gpt-4o")`.  OpenRouter model IDs that carry colon suffixes
-/// like `:free` or `:online` are preserved — `openrouter:some/model:free`
-/// yields `("openrouter", "some/model:free")`.
-fn provider_and_model(spec: &str) -> Option<(&str, &str)> {
-    let (provider, rest) = spec.split_once(':')?;
-    if provider.is_empty() || rest.is_empty() {
-        return None;
-    }
-    // Strip a trailing `:k=v,...` params suffix.  That suffix always contains
-    // `=` in the segment following the last colon.
-    let model = if let Some(colon_pos) = rest.rfind(':') {
-        let after_last_colon = &rest[colon_pos + 1..];
-        if after_last_colon.contains('=') {
-            &rest[..colon_pos]
-        } else {
-            rest
         }
-    } else {
-        rest
-    };
-    if model.is_empty() {
-        return None;
-    }
-    Some((provider, model))
-}
-
-pub(crate) fn build_extra_params(
-    client_params: &HashMap<String, String>,
-) -> Option<serde_json::Value> {
-    let mut params = serde_json::Map::new();
-
-    params.insert("parallel_tool_calls".into(), serde_json::Value::Bool(true));
-
-    // reasoning effort: client param > env var
-    let effort = client_params
-        .get("reasoning")
-        .cloned()
-        .or_else(crate::config::reasoning_effort);
-    if let Some(effort) = effort {
-        params.insert(
-            "reasoning".into(),
-            serde_json::json!({"effort": effort, "summary": "auto"}),
-        );
-    }
-
-    // Pass through any other client params. Parse each value as JSON so
-    // numbers/bools survive as their natural types; fall back to a plain
-    // string if the value isn't valid JSON (e.g. an opaque enum like
-    // thinking=deepseek).
-    // "reasoning" and "parallel_tool_calls" are excluded — reserved keys with
-    // provider-specific handling above.
-    for (k, v) in client_params {
-        if k != "reasoning" && k != "parallel_tool_calls" {
-            let val = match serde_json::from_str::<serde_json::Value>(v) {
-                Ok(parsed) => parsed,
-                Err(_) => serde_json::Value::String(v.clone()),
-            };
-            params.insert(k.clone(), val);
-        }
-    }
-
-    if params.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(params))
-    }
-}
-
-fn classify_retryable(e: &ClientError) -> bool {
-    matches!(
-        e,
-        ClientError::Timeout { .. } | ClientError::ApiServerError { .. }
-    )
-}
-
-fn retry_prompt(err: &ClientError, prompt: &str, on_timeout_prompt: Option<&str>) -> String {
-    match err {
-        ClientError::Timeout { .. } => on_timeout_prompt.unwrap_or(prompt).to_string(),
-        _ => prompt.to_string(),
     }
 }
 
 #[async_trait]
 impl Backend for OpenAiBackend {
     async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError> {
-        validate_max_retries(params.max_retries)
-            .map_err(|m| ClientError::Runtime { message: m })?;
-
-        let idle_timeout = params
-            .idle_timeout
-            .unwrap_or_else(crate::config::stream_idle_timeout);
-        let prefix = if params.label.is_empty() {
-            String::new()
-        } else {
-            format!("[{}] ", params.label)
-        };
-        let ctx = RunContext {
-            params: params.clone(),
-            prefix: prefix.clone(),
-            idle_timeout,
-            expected_artifact_paths: params.expected_artifact_paths.clone(),
-            reminder_budget: crate::config::artifact_reminder_budget(),
-            completion_nudge_budget: crate::config::completion_nudge_budget(),
-        };
-        *self.last_ctx.lock().unwrap() = Some(ctx.clone());
-
-        let prompt = Mutex::new(params.prompt.clone());
-        let timeout_prompt = params.on_timeout_prompt.clone();
-        let backoff = &STREAM_IDLE_BACKOFF[..params.max_retries];
-
-        retry::with_retry(
-            backoff,
-            classify_retryable,
-            |attempt, e, wait| {
-                let next = retry_prompt(e, &prompt.lock().unwrap(), timeout_prompt.as_deref());
-                *prompt.lock().unwrap() = next;
-                let cause = match e {
-                    ClientError::Timeout { .. } => "stream idle timeout",
-                    ClientError::ApiServerError { .. } => "transient-error",
-                    _ => "error",
-                };
-                log::warn!(
-                    "{prefix}stream {cause}, retrying in {wait}s ({}/{})...",
-                    attempt + 1,
-                    params.max_retries
-                );
-            },
-            || {
-                let p = prompt.lock().unwrap().clone();
-                let ctx = ctx.clone();
-                async move { self.attempt(&p, &ctx).await }
-            },
-        )
-        .await
+        run_openai_compat(&self.state, params, None, self.provider.name()).await
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
         let params = {
-            let guard = self.last_ctx.lock().unwrap();
+            let guard = self.state.last_ctx.lock().unwrap();
             let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
                 message: "resume() called before run()".into(),
             })?;
@@ -370,21 +92,7 @@ impl Backend for OpenAiBackend {
     }
 
     fn reap_all(&self, gremlin_id: &str) {
-        if let Ok(mut guard) = self.cancels.lock() {
-            let tokens: Vec<_> = guard
-                .remove(gremlin_id)
-                .into_iter()
-                .flat_map(|m| m.into_values())
-                .collect();
-            let count = tokens.len();
-            log::debug!(
-                "OpenAiBackend::reap_all: cancelling {count} in-flight token(s) for gremlin_id={gremlin_id} (model={})",
-                self.model,
-            );
-            for token in &tokens {
-                token.cancel();
-            }
-        }
+        reap_openai_compat(&self.state, gremlin_id);
     }
 
     fn total_cost_usd(&self) -> Option<f64> {
@@ -394,6 +102,7 @@ impl Backend for OpenAiBackend {
 
 #[cfg(test)]
 mod tests {
+    use super::super::agent_loop::CancelToken;
     use super::*;
 
     #[test]
@@ -404,105 +113,6 @@ mod tests {
         assert_eq!(OpenAiProvider::Xai.api_key_env(), "XAI_API_KEY");
         assert_eq!(OpenAiProvider::Xai.base_url(), "https://api.x.ai/v1");
         assert_eq!(OpenAiProvider::Xai.default_model(), "grok-4");
-    }
-
-    #[test]
-    fn extra_params_default_no_reasoning() {
-        let p = build_extra_params(&HashMap::new()).unwrap();
-        assert_eq!(p["parallel_tool_calls"], true);
-        assert!(p.get("reasoning").is_none());
-    }
-
-    #[test]
-    fn extra_params_client_reasoning_overrides() {
-        let mut cp = HashMap::new();
-        cp.insert("reasoning".into(), "low".into());
-        let p = build_extra_params(&cp).unwrap();
-        assert_eq!(p["reasoning"]["effort"], "low");
-        assert_eq!(p["reasoning"]["summary"], "auto");
-    }
-
-    /// Lock the contract between [`build_extra_params`] output shape and the
-    /// `opts.extra -> reasoning.effort` extraction in [`run_agent_loop`]. If
-    /// the JSON structure produced by `build_extra_params` ever changes, this
-    /// test must also change — preventing silent `reasoning_effort=default`
-    /// degradation in stage-init telemetry.
-    #[test]
-    fn build_extra_params_to_reasoning_effort_extraction_locked() {
-        let mut cp = HashMap::new();
-        cp.insert("reasoning".into(), "low".into());
-        let extra = build_extra_params(&cp).unwrap();
-        let effort = extra
-            .get("reasoning")
-            .and_then(|r| r.get("effort"))
-            .and_then(|e| e.as_str());
-        assert_eq!(effort, Some("low"));
-
-        // Without reasoning, extraction returns None
-        let extra = build_extra_params(&HashMap::new()).unwrap();
-        let effort = extra
-            .get("reasoning")
-            .and_then(|r| r.get("effort"))
-            .and_then(|e| e.as_str());
-        assert_eq!(effort, None);
-    }
-
-    #[test]
-    fn extra_params_client_passthrough() {
-        let mut cp = HashMap::new();
-        cp.insert("thinking".into(), "deepseek".into());
-        cp.insert("foo".into(), "bar".into());
-        let p = build_extra_params(&cp).unwrap();
-        assert_eq!(p["thinking"], "deepseek");
-        assert_eq!(p["foo"], "bar");
-        assert!(p.get("reasoning").is_none());
-    }
-
-    #[test]
-    fn extra_params_client_passthrough_json_types() {
-        let mut cp = HashMap::new();
-        cp.insert("temperature".into(), "0.7".into());
-        cp.insert("top_p".into(), "0.95".into());
-        cp.insert("stream".into(), "true".into());
-        cp.insert("max_tokens".into(), "4096".into());
-        cp.insert("stop".into(), "[\"END\"]".into()); // JSON array
-        let p = build_extra_params(&cp).unwrap();
-        // numbers
-        assert_eq!(p["temperature"], serde_json::json!(0.7));
-        assert_eq!(p["top_p"], serde_json::json!(0.95));
-        assert_eq!(p["max_tokens"], serde_json::json!(4096));
-        // bool
-        assert_eq!(p["stream"], serde_json::json!(true));
-        // JSON array passthrough
-        assert_eq!(p["stop"], serde_json::json!(["END"]));
-    }
-
-    #[test]
-    fn extra_params_client_reasoning_plus_passthrough() {
-        let mut cp = HashMap::new();
-        cp.insert("reasoning".into(), "high".into());
-        cp.insert("thinking".into(), "deepseek".into());
-        let p = build_extra_params(&cp).unwrap();
-        assert_eq!(p["reasoning"]["effort"], "high");
-        assert_eq!(p["thinking"], "deepseek");
-        // xai auto-inserts parallel_tool_calls alongside reasoning + passthrough
-        assert_eq!(p["parallel_tool_calls"], true);
-    }
-
-    #[test]
-    fn retry_prompt_swaps_only_on_timeout() {
-        let timeout = ClientError::Timeout {
-            message: "idle".into(),
-        };
-        let api = ClientError::ApiServerError {
-            message: "rate limit".into(),
-        };
-        assert_eq!(
-            retry_prompt(&timeout, "orig", Some("timeout-prompt")),
-            "timeout-prompt"
-        );
-        assert_eq!(retry_prompt(&api, "orig", Some("timeout-prompt")), "orig");
-        assert_eq!(retry_prompt(&timeout, "orig", None), "orig");
     }
 
     #[test]
@@ -524,6 +134,7 @@ mod tests {
         let b = CancelToken::new();
         let sibling = CancelToken::new();
         backend
+            .state
             .cancels
             .lock()
             .unwrap()
@@ -531,6 +142,7 @@ mod tests {
             .or_default()
             .insert(1, a.clone());
         backend
+            .state
             .cancels
             .lock()
             .unwrap()
@@ -538,6 +150,7 @@ mod tests {
             .or_default()
             .insert(2, b.clone());
         backend
+            .state
             .cancels
             .lock()
             .unwrap()
@@ -548,50 +161,21 @@ mod tests {
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());
         // The gremlin entry is dropped when empty.
-        assert!(backend.cancels.lock().unwrap().get("gr-test").is_none());
+        assert!(backend
+            .state
+            .cancels
+            .lock()
+            .unwrap()
+            .get("gr-test")
+            .is_none());
         // Sibling tokens are untouched.
         assert!(!sibling.is_cancelled());
-        assert!(backend.cancels.lock().unwrap().get("gr-sibling").is_some());
-    }
-
-    #[test]
-    fn provider_and_model_plain() {
-        assert_eq!(
-            provider_and_model("openai:gpt-4o"),
-            Some(("openai", "gpt-4o"))
-        );
-    }
-
-    #[test]
-    fn provider_and_model_strips_params_suffix() {
-        assert_eq!(
-            provider_and_model("openai:gpt-4o:foo=bar"),
-            Some(("openai", "gpt-4o"))
-        );
-        assert_eq!(
-            provider_and_model("openai:gpt-4o:top_p=0.7,n=3"),
-            Some(("openai", "gpt-4o"))
-        );
-    }
-
-    #[test]
-    fn provider_and_model_preserves_openrouter_colon_suffixes() {
-        // OpenRouter model IDs can contain `:free`, `:online`, etc.
-        assert_eq!(
-            provider_and_model("openrouter:anthropic/claude-sonnet-4:free"),
-            Some(("openrouter", "anthropic/claude-sonnet-4:free"))
-        );
-        assert_eq!(
-            provider_and_model("openrouter:google/gemini-2.5-flash:online"),
-            Some(("openrouter", "google/gemini-2.5-flash:online"))
-        );
-    }
-
-    #[test]
-    fn provider_and_model_rejects_empty_parts() {
-        assert_eq!(provider_and_model("only"), None);
-        assert_eq!(provider_and_model(":model"), None);
-        assert_eq!(provider_and_model("provider:"), None);
-        assert_eq!(provider_and_model(""), None);
+        assert!(backend
+            .state
+            .cancels
+            .lock()
+            .unwrap()
+            .get("gr-sibling")
+            .is_some());
     }
 }

@@ -81,7 +81,7 @@ fn params_re() -> &'static Regex {
 /// the model rather than rejected: `openrouter:some/model:free` names the model
 /// `some/model:free`. Only a suffix that parses as a parameter list is split
 /// off, and only a repeated key within one is an error. `provider_and_model` in
-/// `openai_backend` re-splits a spec by the same rule, so the two agree.
+/// `openai_protocol` re-splits a spec by the same rule, so the two agree.
 pub fn parse_spec(s: &str) -> Result<(String, String, IndexMap<String, String>), String> {
     let (provider, rest) = s
         .split_once(':')
