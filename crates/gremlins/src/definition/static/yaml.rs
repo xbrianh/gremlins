@@ -65,12 +65,7 @@ impl StaticDefinition {
         data: &[u8],
         client_override: Option<&str>,
     ) -> Result<Self, SchemaError> {
-        let mut expanded: Value = serde_yaml::from_slice(data)
-            .map_err(|e| SchemaError::Generic(format!("failed to parse definition YAML: {e}")))?;
-        if let Some(mapping) = expanded.as_mapping_mut() {
-            let sentinel = Value::from("__gremlins_expanded__");
-            mapping.remove(&sentinel);
-        }
+        let expanded = parse_expanded_yaml(data)?;
         from_expanded_value(expanded, Path::new("definition.yaml"), client_override)
     }
 
@@ -82,8 +77,24 @@ impl StaticDefinition {
     ) -> Result<Self, SchemaError> {
         let data = std::fs::read(path)
             .map_err(|e| SchemaError::Generic(format!("failed to read {}: {e}", path.display())))?;
-        Self::from_expanded_bytes(&data, client_override)
+        let expanded = parse_expanded_yaml(&data)?;
+        from_expanded_value(expanded, path, client_override)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Private: parse_expanded_yaml
+// ---------------------------------------------------------------------------
+
+/// Parse YAML bytes and strip the `__gremlins_expanded__` sentinel.
+fn parse_expanded_yaml(data: &[u8]) -> Result<Value, SchemaError> {
+    let mut expanded: Value = serde_yaml::from_slice(data)
+        .map_err(|e| SchemaError::Generic(format!("failed to parse definition YAML: {e}")))?;
+    if let Some(mapping) = expanded.as_mapping_mut() {
+        let sentinel = Value::from("__gremlins_expanded__");
+        mapping.remove(&sentinel);
+    }
+    Ok(expanded)
 }
 
 // ---------------------------------------------------------------------------
