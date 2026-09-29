@@ -18,7 +18,7 @@ stages:
         bind:
           done?: "artifact://{loop_iter}/done"
         options:
-          timeout: 180
+          timeout: 210
           startup_grace_secs: "60"
           poll_interval: "30"
           sync_timeout: "180"
@@ -109,4 +109,4 @@ stages:
               cmds:
                 - |
                   set -o pipefail
-                  git rev-parse HEAD | tee "{fix_head}"
+                  git rev-parse HEAD | tr -d '\n' | tee "{fix_head}"
