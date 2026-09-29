@@ -21,6 +21,13 @@ pub struct RunParams {
     pub expected_artifact_paths: Vec<PathBuf>,
     pub system_prompt: Option<String>,
     pub gremlin_id: Option<String>,
+    /// Base process environment for tool sandboxing.
+    /// When set, replaces `std::env::vars()` as the base for bash tool env.
+    pub base_env: Option<HashMap<String, String>>,
+    /// Task-client override maps from config (exact + prefix).
+    /// When both are empty, task_model_selector returns None.
+    pub task_clients_exact: HashMap<String, String>,
+    pub task_clients_prefix: HashMap<String, String>,
 }
 
 #[derive(Debug)]

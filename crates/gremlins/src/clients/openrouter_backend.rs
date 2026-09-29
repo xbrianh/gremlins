@@ -154,7 +154,12 @@ impl OpenRouterBackend {
             self.extra_params(),
             self.tool_filter.as_deref(),
             Some(classify),
-            task_model_selector(&self.client, PROVIDER_NAME),
+            task_model_selector(
+                &self.client,
+                PROVIDER_NAME,
+                &ctx.params.task_clients_exact,
+                &ctx.params.task_clients_prefix,
+            ),
         )
         .await
     }

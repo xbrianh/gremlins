@@ -417,6 +417,7 @@ mod tests {
         ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
+            base_env: None,
             allowed_roots: vec![dir],
             audit_log: None,
             allowed_tools: None,

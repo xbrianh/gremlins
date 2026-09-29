@@ -136,7 +136,12 @@ impl OpenAiBackend {
             self.extra_params(),
             self.tool_filter.as_deref(),
             None, // default classifier
-            task_model_selector(&self.client, self.provider.name()),
+            task_model_selector(
+                &self.client,
+                self.provider.name(),
+                &ctx.params.task_clients_exact,
+                &ctx.params.task_clients_prefix,
+            ),
         )
         .await
     }
@@ -182,18 +187,20 @@ pub(crate) async fn run_with_agent_loop(
 pub(super) fn task_model_selector(
     client: &openai::CompletionsClient,
     provider_name: &str,
+    task_clients_exact: &HashMap<String, String>,
+    task_clients_prefix: &HashMap<String, String>,
 ) -> Option<TaskModelSelector<OpenAiModel>> {
-    let config = crate::config::global_config().ok()?;
-    let (exact, prefix) = config.task_clients();
-    if exact.is_empty() && prefix.is_empty() {
+    if task_clients_exact.is_empty() && task_clients_prefix.is_empty() {
         return None;
     }
 
+    let exact = task_clients_exact.clone();
+    let prefix = task_clients_prefix.clone();
     let client = client.clone();
     let provider_name = provider_name.to_string();
     TaskModelSelector::new(
-        exact.clone(),
-        prefix.clone(),
+        exact,
+        prefix,
         Arc::new(move |spec: &str| {
             let (provider, model) = provider_and_model(spec)?;
             if provider == provider_name {

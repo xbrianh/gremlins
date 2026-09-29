@@ -58,22 +58,26 @@ pub(crate) fn resolve_prompt_dir(
     }
 }
 
-pub(crate) fn project_stage_def_dir(project_root: &Path) -> PathBuf {
-    crate::config::project_overlay_dir(project_root).join("stages")
+pub(crate) fn project_stage_def_dir(_project_root: &Path, overlay_dir: &Path) -> PathBuf {
+    overlay_dir.join("stages")
 }
 
-pub(crate) fn stage_definition_dirs_with_project(project_root: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![project_stage_def_dir(project_root)];
-    dirs.extend(crate::config::stage_definition_dirs());
-    dirs
+pub(crate) fn stage_definition_dirs_with_project(
+    project_root: &Path,
+    overlay_dir: &Path,
+) -> Vec<PathBuf> {
+    vec![project_stage_def_dir(project_root, overlay_dir)]
 }
 
 pub(crate) fn load_stage_def_from_dirs(
     name: &str,
     project_root: Option<&Path>,
+    overlay_dir: Option<&Path>,
 ) -> Result<Option<serde_yaml::Value>, SchemaError> {
-    let dirs: Vec<PathBuf> = if let Some(pr) = project_root {
-        stage_definition_dirs_with_project(pr)
+    let dirs: Vec<PathBuf> = if let (Some(pr), Some(od)) = (project_root, overlay_dir) {
+        stage_definition_dirs_with_project(pr, od)
+    } else if let Some(od) = overlay_dir {
+        vec![od.join("stages")]
     } else {
         crate::config::stage_definition_dirs()
     };
@@ -92,6 +96,7 @@ pub(crate) fn load_stage_def_from_dirs(
 pub(crate) fn parse_stage_definitions(
     raw: Option<&serde_yaml::Value>,
     project_root: Option<&PathBuf>,
+    overlay_dir: &Path,
 ) -> Result<HashMap<String, serde_yaml::Value>, SchemaError> {
     let mut defs: HashMap<String, serde_yaml::Value> = HashMap::new();
     match raw {
@@ -104,7 +109,11 @@ pub(crate) fn parse_stage_definitions(
                     continue;
                 }
                 if let Some(s) = v.as_str() {
-                    match load_stage_def_from_dirs(s, project_root.map(|p| p.as_path()))? {
+                    match load_stage_def_from_dirs(
+                        s,
+                        project_root.map(|p| p.as_path()),
+                        Some(overlay_dir),
+                    )? {
                         Some(recipe) => {
                             defs.insert(name.clone(), recipe);
                         }
@@ -477,15 +486,17 @@ fn collect_stage_text(stage: &serde_yaml::Value, out: &mut String) {
 pub(crate) fn parse_definition_file(
     yaml_path: &Path,
     project_root: &Path,
+    overlay_dir: &Path,
 ) -> Result<serde_yaml::Value, SchemaError> {
     let resolver = BuiltinResolver;
-    expand_definition(yaml_path, Some(project_root), &resolver)
+    expand_definition(yaml_path, Some(project_root), overlay_dir, &resolver)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn expand_definition(
     yaml_path: &Path,
     project_root: Option<&Path>,
+    overlay_dir: &Path,
     resolver: &dyn DefinitionResolver,
 ) -> Result<serde_yaml::Value, SchemaError> {
     let project_root = project_root.map(|p| p.to_path_buf()).unwrap_or_else(|| {
@@ -501,13 +512,14 @@ pub(crate) fn expand_definition(
     });
 
     let chain: Vec<PathBuf> = Vec::new();
-    _expand(yaml_path, &project_root, &chain, resolver)
+    _expand(yaml_path, &project_root, overlay_dir, &chain, resolver)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn _expand(
     yaml_path: &Path,
     project_root: &PathBuf,
+    overlay_dir: &Path,
     chain: &[PathBuf],
     resolver: &dyn DefinitionResolver,
 ) -> Result<serde_yaml::Value, SchemaError> {
@@ -547,8 +559,11 @@ fn _expand(
 
     let named_prompts = prompts::parse_named_prompts(raw_mapping.get("prompts"), &prompt_dir)?;
 
-    let stage_defs =
-        parse_stage_definitions(raw_mapping.get("stage-definitions"), Some(project_root))?;
+    let stage_defs = parse_stage_definitions(
+        raw_mapping.get("stage-definitions"),
+        Some(project_root),
+        overlay_dir,
+    )?;
 
     let stages_raw = raw_mapping.get("stages");
     let stages_list: Vec<serde_yaml::Value> = match stages_raw {
@@ -565,6 +580,7 @@ fn _expand(
             &entry,
             &prompt_dir,
             project_root,
+            overlay_dir,
             &new_chain,
             &named_prompts,
             &stage_defs,
@@ -603,6 +619,7 @@ fn _expand_entry(
     entry: &serde_yaml::Value,
     prompt_dir: &PathBuf,
     project_root: &PathBuf,
+    overlay_dir: &Path,
     chain: &[PathBuf],
     named_prompts: &HashMap<String, Vec<String>>,
     stage_defs: &HashMap<String, serde_yaml::Value>,
@@ -626,7 +643,7 @@ fn _expand_entry(
             ));
         }
         let included_path: PathBuf = resolver.resolve(name, project_root)?;
-        let included = _expand(&included_path, project_root, chain, resolver)?;
+        let included = _expand(&included_path, project_root, overlay_dir, chain, resolver)?;
         let stages = match included.get("stages") {
             Some(serde_yaml::Value::Sequence(s)) => s.clone(),
             _ => Vec::new(),
@@ -643,6 +660,7 @@ fn _expand_entry(
                 stage_defs,
                 prompt_dir,
                 project_root,
+                overlay_dir,
                 chain,
                 named_prompts,
                 seen_defs,
@@ -652,7 +670,9 @@ fn _expand_entry(
         // Try stage definition directories first (e.g. .gremlins/stages/plan.yaml).
         // This must precede the gremlin-definition lookup so that stage recipes
         // receive call-site {{prompt}} and {{options}} substitution.
-        if let Some(recipe) = load_stage_def_from_dirs(stage_type, Some(project_root))? {
+        if let Some(recipe) =
+            load_stage_def_from_dirs(stage_type, Some(project_root), Some(overlay_dir))?
+        {
             let mut direct_defs = stage_defs.clone();
             direct_defs.insert(stage_type.to_string(), recipe);
             return _expand_stage_def(
@@ -661,6 +681,7 @@ fn _expand_entry(
                 &direct_defs,
                 prompt_dir,
                 project_root,
+                overlay_dir,
                 chain,
                 named_prompts,
                 seen_defs,
@@ -671,7 +692,8 @@ fn _expand_entry(
         match resolver.resolve(stage_type, project_root) {
             Ok(included_path) => {
                 if !chain.contains(&included_path) {
-                    let included = _expand(&included_path, project_root, chain, resolver)?;
+                    let included =
+                        _expand(&included_path, project_root, overlay_dir, chain, resolver)?;
                     let stages = match included.get("stages") {
                         Some(serde_yaml::Value::Sequence(s)) => s.clone(),
                         _ => Vec::new(),
@@ -718,6 +740,7 @@ fn _expand_entry(
                     body_entry,
                     prompt_dir,
                     project_root,
+                    overlay_dir,
                     chain,
                     named_prompts,
                     stage_defs,
@@ -768,6 +791,7 @@ fn _expand_stage_def(
     stage_defs: &HashMap<String, serde_yaml::Value>,
     prompt_dir: &PathBuf,
     project_root: &PathBuf,
+    overlay_dir: &Path,
     chain: &[PathBuf],
     named_prompts: &HashMap<String, Vec<String>>,
     seen_defs: &HashSet<String>,
@@ -972,6 +996,7 @@ fn _expand_stage_def(
                 &inner,
                 prompt_dir,
                 project_root,
+                overlay_dir,
                 chain,
                 named_prompts,
                 stage_defs,
@@ -1012,6 +1037,7 @@ fn _expand_stage_def(
         &merged,
         prompt_dir,
         project_root,
+        overlay_dir,
         chain,
         named_prompts,
         stage_defs,
