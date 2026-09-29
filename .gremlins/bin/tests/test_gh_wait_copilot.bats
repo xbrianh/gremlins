@@ -13,7 +13,9 @@ teardown() {
 }
 
 @test "outputs APPROVED when copilot review is done" {
-    mock_gh 'api.*repos/owner/repo/pulls/42/reviews' 'APPROVED'
+    mock_gh 'api.*pulls/42.*head\.sha' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    mock_gh 'api.*check-runs' '{"status":"completed","conclusion":"neutral"}'
+    mock_gh 'api.*pulls/42/reviews' 'APPROVED'
     run --separate-stderr bash "$SCRIPT" 42 "owner/repo"
     [ "$status" -eq 0 ]
     [ "$output" = "APPROVED" ]
@@ -22,7 +24,9 @@ teardown() {
 }
 
 @test "outputs CHANGES_REQUESTED when review requests changes" {
-    mock_gh 'api.*repos/owner/repo/pulls/42/reviews' 'CHANGES_REQUESTED'
+    mock_gh 'api.*pulls/42.*head\.sha' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    mock_gh 'api.*check-runs' '{"status":"completed","conclusion":"neutral"}'
+    mock_gh 'api.*pulls/42/reviews' 'CHANGES_REQUESTED'
     run --separate-stderr bash "$SCRIPT" 42 "owner/repo"
     [ "$status" -eq 0 ]
     [ "$output" = "CHANGES_REQUESTED" ]
@@ -31,11 +35,12 @@ teardown() {
 }
 
 @test "exits 0 with empty output when no review found (one-shot)" {
-    mock_gh 'api.*repos/owner/repo/pulls/42/reviews' ''
+    mock_gh 'api.*pulls/42.*head\.sha' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    mock_gh 'api.*check-runs' '{"status":"in_progress","conclusion":null}'
     run --separate-stderr bash "$SCRIPT" 42 "owner/repo"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
-    [[ "$stderr" == *"no non-PENDING Copilot review yet"* ]]
+    [[ "$stderr" == *"still waiting"* ]]
 }
 
 @test "dies without arguments" {

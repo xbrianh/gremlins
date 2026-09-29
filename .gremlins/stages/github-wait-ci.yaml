@@ -18,7 +18,7 @@ stages:
         bind:
           done?: "artifact://{loop_iter}/done"
         options:
-          timeout: 180
+          timeout: 210
           startup_grace_secs: "60"
           poll_interval: "30"
           sync_timeout: "180"
@@ -28,6 +28,8 @@ stages:
               TMP_OUT="$(dirname "{done}")/ci_await_out"
               if gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2>&1 | tee "$TMP_OUT"; then
                 if [ "$(tail -n 1 "$TMP_OUT")" = "skipped" ]; then
+                  touch "{done}"
+                elif ! grep -q 'status=IN_PROGRESS' "$TMP_OUT" && grep -q 'conclusion=SUCCESS' "$TMP_OUT"; then
                   touch "{done}"
                 fi
               else
@@ -109,4 +111,4 @@ stages:
               cmds:
                 - |
                   set -o pipefail
-                  git rev-parse HEAD | tee "{fix_head}"
+                  git rev-parse HEAD | tr -d '\n' | tee "{fix_head}"

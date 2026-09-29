@@ -20,17 +20,59 @@ fi
 
 info "copilot: checking for Copilot review on PR #${pr_number} in ${repo}..."
 
+# Copilot reviews are surfaced as check runs on the PR's head commit.
+# The check run name is "copilot-pull-request-reviewer".
+# We poll the check runs endpoint first — only when the check run
+# completes do we look at /reviews for the final state.
+head_sha=$(gh api "repos/$repo/pulls/$pr_number" --jq '.head.sha // empty' 2>/dev/null) || true
+
+# Validate it looks like a SHA (40 hex chars).
+if [ -z "$head_sha" ] || ! [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    info "copilot: could not determine head SHA for PR #${pr_number} (got: ${head_sha})"
+    exit 0
+fi
+
 api_stderr=$(mktemp)
-review=$(gh api "repos/$repo/pulls/$pr_number/reviews" \
+
+# Check if the Copilot check run exists and is completed.
+check_run=$(gh api "repos/$repo/commits/$head_sha/check-runs" \
+    --jq '.check_runs[]? | select(.name == "copilot-pull-request-reviewer") | {status: .status, conclusion}' 2>"$api_stderr") && cr_ok=1 || true
+
+if [ -z "${cr_ok:-}" ]; then
+    info "copilot: check-runs API call failed: $(cat "$api_stderr")"
+    rm -f "$api_stderr"
+    exit 0
+fi
+
+if [ -z "$check_run" ]; then
+    info "copilot: no Copilot check run yet"
+    rm -f "$api_stderr"
+    exit 0
+fi
+
+check_status=$(printf '%s' "$check_run" | jq -r '.status // empty')
+check_conclusion=$(printf '%s' "$check_run" | jq -r '.conclusion // empty')
+
+if [ "$check_status" != "completed" ]; then
+    info "copilot: check run status=${check_status} — still waiting"
+    rm -f "$api_stderr"
+    exit 0
+fi
+
+# Check run is completed. Now get the review state from /reviews.
+info "copilot: check run completed (conclusion=${check_conclusion}) — fetching review state..."
+
+review=$(gh api "repos/$repo/pulls/$pr_number/reviews" --paginate \
     --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' 2>"$api_stderr") && api_ok=1 || true
 
 if [ -n "$review" ]; then
     info "copilot: review found — state=${review}"
     printf '%s' "$review"
 elif [ -n "${api_ok:-}" ]; then
-    info "copilot: no non-PENDING Copilot review yet"
+    # Check run completed but no review yet — transient race, keep waiting.
+    info "copilot: check run completed but review not yet posted"
 else
-    info "copilot: API call failed: $(cat "$api_stderr")"
+    info "copilot: reviews API call failed: $(cat "$api_stderr")"
 fi
 rm -f "$api_stderr"
 
