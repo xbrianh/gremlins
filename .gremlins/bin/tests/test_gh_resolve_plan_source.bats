@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 
 load helpers/mocks
 
@@ -24,9 +25,10 @@ teardown() {
 @test "resolves #N and rewrites plan with title/body" {
     printf '#42\n' > "$PLAN_FILE"
     mock_gh 'issue view 42.*--json title,body,number' 'Issue Title	Issue body text	42'
-    run bash "$SCRIPT" "$PLAN_FILE"
+    run --separate-stderr bash "$SCRIPT" "$PLAN_FILE"
     [ "$status" -eq 0 ]
     [ "$output" = "42" ]
+    [[ "$stderr" == *"resolving issue reference"* ]]
     grep -q '# Issue Title' "$PLAN_FILE"
     grep -q 'Issue body text' "$PLAN_FILE"
 }
@@ -34,9 +36,10 @@ teardown() {
 @test "resolves owner/repo#N with repo arg" {
     printf 'myorg/myrepo#99\n' > "$PLAN_FILE"
     mock_gh 'issue view 99.*--repo myorg/myrepo.*--json title,body,number' 'Repo Issue	Body here	99'
-    run bash "$SCRIPT" "$PLAN_FILE"
+    run --separate-stderr bash "$SCRIPT" "$PLAN_FILE"
     [ "$status" -eq 0 ]
     [ "$output" = "99" ]
+    [[ "$stderr" == *"resolving issue reference"* ]]
     grep -q '# Repo Issue' "$PLAN_FILE"
 }
 
