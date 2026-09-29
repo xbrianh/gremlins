@@ -18,27 +18,53 @@ pub(crate) async fn connect() -> Result<tokio::net::UnixStream, String> {
     socket::connect_socket(&state_root).await
 }
 
-/// Become the executor: bind the socket, write the pidfile, and start serving.
-///
-/// This function blocks until the executor shuts down (run map goes empty).
-pub(crate) async fn serve() -> Result<(), String> {
+/// Atomically claim the executor socket: try `connect()`, fall back to
+/// `bind()`, and retry `connect()` on `EADDRINUSE`. Returns a connected
+/// stream to the executor (either an existing one or the one we just
+/// started).
+pub(crate) async fn bind_or_connect() -> Result<tokio::net::UnixStream, String> {
+    // Fast path: an executor is already running.
+    match connect().await {
+        Ok(stream) => return Ok(stream),
+        Err(e) if is_no_socket(&e) || is_connection_refused(&e) => {
+            // No executor — try to become one.
+        }
+        Err(e) => return Err(e),
+    }
+
     let state_root = config::state_root();
 
-    // Write pidfile.
+    // Write pidfile and try to bind.
     socket::write_pidfile(&state_root)?;
-
-    // Bind the socket.
-    let listener = socket::bind_socket(&state_root)?;
+    let listener = match socket::bind_socket(&state_root) {
+        Ok(l) => l,
+        Err(e) if is_addr_in_use(&e) => {
+            // Another process won the race — retry connect.
+            return connect().await;
+        }
+        Err(e) => return Err(e),
+    };
 
     log::info!(
         "executor: listening on {}",
         socket::socket_path(&state_root).display()
     );
 
-    // Run the supervisor accept loop.
-    supervisor::run_supervisor(listener, state_root).await;
+    // We won the race — spawn the supervisor in the background.
+    tokio::spawn(async move {
+        supervisor::run_supervisor(listener, state_root).await;
+    });
 
-    Ok(())
+    // Poll until our own supervisor is accepting connections.
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        match connect().await {
+            Ok(stream) => return Ok(stream),
+            Err(_) => continue,
+        }
+    }
+
+    Err("executor failed to start".to_string())
 }
 
 /// Send a JSON-line request to the executor and read one reply.
@@ -64,4 +90,11 @@ pub(crate) fn is_connection_refused(error: &str) -> bool {
 /// Check if the error is "no such file" (socket doesn't exist).
 pub(crate) fn is_no_socket(error: &str) -> bool {
     error.contains("No such file") || error.contains("ENOENT") || error.contains("not found")
+}
+
+/// Check if the error is "address in use" (another process bound first).
+pub(crate) fn is_addr_in_use(error: &str) -> bool {
+    error.contains("Address already in use")
+        || error.contains("address already in use")
+        || error.contains("EADDRINUSE")
 }

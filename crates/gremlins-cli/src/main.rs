@@ -123,18 +123,8 @@ async fn main() {
 /// Ensure an executor is running, becoming one if needed.
 /// Returns a connected stream.
 async fn ensure_executor() -> Result<tokio::net::UnixStream, String> {
-    match spawn::connect().await {
-        Ok(stream) => Ok(stream),
-        Err(e) if spawn::is_connection_refused(&e) || spawn::is_no_socket(&e) => {
-            // No executor — become one.
-            config::init_global().map_err(|e| e.to_string())?;
-            spawn::serve().await?;
-            // After serve() returns, the executor has exited.
-            // Return an error so the caller knows nothing happened.
-            Err("executor exited".to_string())
-        }
-        Err(e) => Err(e),
-    }
+    config::init_global().map_err(|e| e.to_string())?;
+    spawn::bind_or_connect().await
 }
 
 /// Send a request to the executor and return the response.
@@ -166,13 +156,15 @@ async fn ls(here: bool) -> Result<(), String> {
         .map(|path| path.canonicalize().unwrap_or(path))
         .unwrap_or_else(|_| PathBuf::from("."));
 
-    // Try the executor first.
-    let response = match executor_request(serde_json::json!({"op": "ls"})).await {
-        Ok(r) => r,
-        Err(_) => {
-            // Fall back to direct state-dir scan.
-            return ls_direct(here, &cwd);
+    // Try the executor first — but only connect, don't become one.
+    let response = match spawn::connect().await {
+        Ok(mut stream) => {
+            match spawn::send_request(&mut stream, serde_json::json!({"op": "ls"})).await {
+                Ok(r) => r,
+                Err(_) => return ls_direct(here, &cwd),
+            }
         }
+        Err(_) => return ls_direct(here, &cwd),
     };
 
     check_error(&response)?;
@@ -295,13 +287,17 @@ async fn status(id: &str) -> Result<(), String> {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    // Try executor first.
-    let response = match executor_request(serde_json::json!({"op": "status", "id": id})).await {
-        Ok(r) => r,
-        Err(_) => {
-            // Fall back to direct.
-            return status_direct(id);
+    // Try executor first — but only connect, don't become one.
+    let response = match spawn::connect().await {
+        Ok(mut stream) => {
+            match spawn::send_request(&mut stream, serde_json::json!({"op": "status", "id": id}))
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => return status_direct(id),
+            }
         }
+        Err(_) => return status_direct(id),
     };
 
     check_error(&response)?;
@@ -450,12 +446,17 @@ async fn info(id: &str) -> Result<(), String> {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    // Try executor first.
-    let response = match executor_request(serde_json::json!({"op": "info", "id": id})).await {
-        Ok(r) => r,
-        Err(_) => {
-            return info_direct(id);
+    // Try executor first — but only connect, don't become one.
+    let response = match spawn::connect().await {
+        Ok(mut stream) => {
+            match spawn::send_request(&mut stream, serde_json::json!({"op": "info", "id": id}))
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => return info_direct(id),
+            }
         }
+        Err(_) => return info_direct(id),
     };
 
     check_error(&response)?;
@@ -982,6 +983,7 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         "op": "launch",
         "definition": definition,
         "args": raw_args,
+        "project_root": project_root.to_string_lossy(),
     }))
     .await?;
 

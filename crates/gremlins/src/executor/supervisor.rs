@@ -100,7 +100,7 @@ async fn handle_connection(
             .unwrap_or("")
             .to_string();
 
-        let response = dispatch_op(&op, &request, &run_map, &state_root).await;
+        let response = dispatch_op(&op, &request, &run_map, &state_root, &shutdown_tx).await;
 
         if let Err(e) = socket::write_json_line(&mut write_half, &response).await {
             log::warn!("supervisor: write error: {e}");
@@ -122,11 +122,12 @@ async fn dispatch_op(
     request: &Value,
     run_map: &Arc<Mutex<HashMap<String, RunHandle>>>,
     state_root: &Path,
+    shutdown_tx: &watch::Sender<bool>,
 ) -> Value {
     match op {
-        "launch" => handle_launch(request, run_map, state_root).await,
+        "launch" => handle_launch(request, run_map, state_root, shutdown_tx).await,
         "stop" => handle_stop(request, run_map).await,
-        "resume" => handle_resume(request, run_map, state_root).await,
+        "resume" => handle_resume(request, run_map, state_root, shutdown_tx).await,
         "ls" => handle_ls(request, run_map, state_root).await,
         "status" => handle_status(request, run_map, state_root).await,
         "info" => handle_info(request, run_map, state_root).await,
@@ -158,6 +159,7 @@ async fn handle_launch(
     request: &Value,
     run_map: &Arc<Mutex<HashMap<String, RunHandle>>>,
     _state_root: &Path,
+    shutdown_tx: &watch::Sender<bool>,
 ) -> Value {
     let definition = request
         .get("definition")
@@ -186,7 +188,13 @@ async fn handle_launch(
         return error_response(&format!("config init: {e}"));
     }
 
-    let project_root = config::project_root();
+    // Use the client's project_root if provided, otherwise resolve from cwd.
+    let project_root = request
+        .get("project_root")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(config::project_root);
     let definition_path =
         match crate::core::discovery::resolve_definition_path(definition, project_root.clone()) {
             Ok(p) => p,
@@ -277,9 +285,10 @@ async fn handle_launch(
     let run_map_clone = run_map.clone();
     let id_clone = id.clone();
     let state_tx_clone = state_tx.clone();
+    let shutdown_tx_clone = shutdown_tx.clone();
 
     tokio::spawn(async move {
-        let result = run_gremlin_task(gremlin, Some(cancel_rx)).await;
+        let result = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
         run_map_clone.lock().await.remove(&id_clone);
         let _ = state_tx_clone.send(RunState {
             id: id_clone.clone(),
@@ -287,6 +296,9 @@ async fn handle_launch(
             stage: String::new(),
             started_at: String::new(),
         });
+        if run_map_clone.lock().await.is_empty() {
+            let _ = shutdown_tx_clone.send(true);
+        }
     });
 
     let handle = RunHandle {
@@ -348,6 +360,7 @@ async fn handle_resume(
     request: &Value,
     run_map: &Arc<Mutex<HashMap<String, RunHandle>>>,
     state_root: &Path,
+    shutdown_tx: &watch::Sender<bool>,
 ) -> Value {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
@@ -411,6 +424,7 @@ async fn handle_resume(
     gremlin.state.patch(&[], &fields);
 
     let resume_stage = stage.clone();
+    let resume_stage_for_response = resume_stage.clone();
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let (state_tx, _state_rx) = watch::channel(RunState {
@@ -423,9 +437,10 @@ async fn handle_resume(
     let run_map_clone = run_map.clone();
     let id_clone = id.to_string();
     let state_tx_clone = state_tx.clone();
+    let shutdown_tx_clone = shutdown_tx.clone();
 
     tokio::spawn(async move {
-        let result = run_gremlin_task(gremlin, Some(cancel_rx)).await;
+        let result = run_gremlin_task(gremlin, Some(cancel_rx), Some(&resume_stage)).await;
         run_map_clone.lock().await.remove(&id_clone);
         let _ = state_tx_clone.send(RunState {
             id: id_clone.clone(),
@@ -433,6 +448,9 @@ async fn handle_resume(
             stage: String::new(),
             started_at: String::new(),
         });
+        if run_map_clone.lock().await.is_empty() {
+            let _ = shutdown_tx_clone.send(true);
+        }
     });
 
     let handle = RunHandle {
@@ -441,7 +459,7 @@ async fn handle_resume(
     };
     run_map.lock().await.insert(id.to_string(), handle);
 
-    ok_response(serde_json::json!({"id": id, "resume_from": resume_stage}))
+    ok_response(serde_json::json!({"id": id, "resume_from": resume_stage_for_response}))
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +627,7 @@ async fn handle_status(
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
-        "pid": Value::from(std::process::id() as i64),
+        "pid": gremlin.state.read_field("pid").unwrap_or(Value::Null),
         "client": gremlin.state.read_str("client"),
         "attempt": gremlin.state.read_str("attempt"),
         "kind": gremlin.state.read_str("kind"),
@@ -667,7 +685,7 @@ async fn handle_info(
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
-        "pid": Value::from(std::process::id() as i64),
+        "pid": gremlin.state.read_field("pid").unwrap_or(Value::Null),
         "client": gremlin.state.read_str("client"),
         "attempt": gremlin.state.read_str("attempt"),
         "kind": gremlin.state.read_str("kind"),
@@ -681,11 +699,15 @@ async fn handle_info(
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn run_gremlin_task(mut gremlin: Gremlin, cancel: Option<watch::Receiver<bool>>) -> i32 {
+async fn run_gremlin_task(
+    mut gremlin: Gremlin,
+    cancel: Option<watch::Receiver<bool>>,
+    resume_from: Option<&str>,
+) -> i32 {
     let log_path = gremlin.state_dir.join("log");
     redirect_stdio_to_log(&log_path);
 
-    match gremlin.run(None, cancel).await {
+    match gremlin.run(resume_from, cancel).await {
         Ok(ec) => ec,
         Err(e) => {
             log::error!("gremlin {}: {e}", gremlin.id.as_str());
@@ -696,25 +718,13 @@ async fn run_gremlin_task(mut gremlin: Gremlin, cancel: Option<watch::Receiver<b
 }
 
 fn redirect_stdio_to_log(log_path: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        if let Ok(log_file) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(log_path)
-        {
-            let log_fd = log_file.as_raw_fd();
-            unsafe {
-                libc::dup2(log_fd, libc::STDOUT_FILENO);
-                libc::dup2(log_fd, libc::STDERR_FILENO);
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = log_path;
-    }
+    // Per-task stdio redirection is not safe in a multi-gremlin address
+    // space — dup2 would corrupt other tasks' output. Instead, each
+    // gremlin's output is captured via the logging framework and the
+    // per-run log file. This stub remains as a no-op; per-gremlin output
+    // capture will be implemented with dedicated pipes/files in a
+    // follow-up.
+    let _ = log_path;
 }
 
 fn definition_display_name(gremlin: &Gremlin) -> String {
