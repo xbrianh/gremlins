@@ -133,7 +133,7 @@ pub trait LocalizedArtifactRegistry: ArtifactRegistry {
     /// The artifact storage directory (or sentinel path for dry-run).
     fn artifact_dir(&self) -> &Path;
 
-    /// Check whether a file exists and is non-empty at `path`.
+    /// Check whether a file exists at `path` (empty files are valid).
     /// For dry-run registries this always returns true.
     async fn has_file(&self, path: &str) -> bool;
 }
@@ -832,10 +832,7 @@ impl LocalizedArtifactRegistry for FileSystemArtifactRegistry {
     }
 
     async fn has_file(&self, path: &str) -> bool {
-        tokio::fs::metadata(path)
-            .await
-            .map(|m| m.len() > 0)
-            .unwrap_or(false)
+        tokio::fs::metadata(path).await.is_ok()
     }
 }
 
