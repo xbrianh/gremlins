@@ -111,13 +111,13 @@ impl GremlinsDaemonLock {
         }
 
         // 3. Check the fd holds an exclusive lock.
-        let probe = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&lock_path)
-            .map_err(|e| format!("cannot open lock file for validation: {e}"))?;
-        let ret = unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if ret == 0 {
-            unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_UN) };
+        //    Re-acquire the nonblocking exclusive lock on fd itself.
+        //    If fd holds the lock (same open file description), this
+        //    succeeds immediately. If fd is an unrelated descriptor
+        //    for the same file, it fails with EWOULDBLOCK because the
+        //    real lock holder's open file description already owns it.
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
             return Err("lock fd does not hold the executor lock".to_string());
         }
 
