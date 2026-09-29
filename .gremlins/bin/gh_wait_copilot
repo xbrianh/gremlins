@@ -18,11 +18,20 @@ if [ -z "$pr_number" ] || [ -z "$repo" ]; then
     die "Usage: gh_wait_copilot <pr_number> <repo>"
 fi
 
+info "copilot: checking for Copilot review on PR #${pr_number} in ${repo}..."
+
+api_stderr=$(mktemp)
 review=$(gh api "repos/$repo/pulls/$pr_number/reviews" \
-    --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' 2>/dev/null || true)
+    --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' 2>"$api_stderr") && api_ok=1 || true
 
 if [ -n "$review" ]; then
+    info "copilot: review found — state=${review}"
     printf '%s' "$review"
+elif [ -n "${api_ok:-}" ]; then
+    info "copilot: no non-PENDING Copilot review yet"
+else
+    info "copilot: API call failed: $(cat "$api_stderr")"
 fi
+rm -f "$api_stderr"
 
 exit 0

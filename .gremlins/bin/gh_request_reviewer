@@ -13,4 +13,6 @@ if [ -z "$pr_number" ] || [ -z "$repo" ]; then
     die "Usage: gh_request_reviewer <pr_number> <repo>"
 fi
 
+info "reviewer: requesting Copilot review on PR #${pr_number} in ${repo}..."
 gh pr edit "$pr_number" --repo "$repo" --add-reviewer copilot-pull-request-reviewer
+info "reviewer: Copilot review requested"

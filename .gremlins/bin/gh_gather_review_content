@@ -31,6 +31,8 @@ gh pr view "$PR_URL" --json number,title,body,author,headRefName,baseRefName --j
     PR_NUMBER="$(printf '%s' "$PR_NUMBER" | tr -d '\n')"
     OWNER_REPO="$(echo "$PR_URL" | sed 's|https://github.com/||; s|/pull/.*||')"
 
+    info "gather-review: collecting review content for PR #${PR_NUMBER} (${OWNER_REPO})"
+
     echo "# PR Review Comments"
     echo
     echo "**PR:** $PR_URL"
@@ -48,9 +50,12 @@ gh pr view "$PR_URL" --json number,title,body,author,headRefName,baseRefName --j
     fi
     echo "## Review Comments"
     echo
+    info "gather-review: fetching review comments..."
     gh api "repos/$OWNER_REPO/pulls/$PR_NUMBER/comments" --paginate --jq '.[] | "### Comment \(.id) by \(.user.login)\n\n\(.body)\n\n_File: `\(.path):\(.line // .original_line)`_\n\n---\n"'
     echo
     echo "## Issue Comments"
     echo
+    info "gather-review: fetching issue comments..."
     gh pr view "$PR_URL" --json comments --jq '.comments[] | "### Comment by \(.author.login) (\(.createdAt))\n\n\(.body)\n\n---\n"'
+    info "gather-review: done"
 }

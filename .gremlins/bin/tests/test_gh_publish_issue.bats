@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 
 load helpers/mocks
 
@@ -16,9 +17,10 @@ teardown() {
 @test "creates issue from plan file and outputs number" {
     printf '# My Feature Title\n\nPlan body here\n' > "$PLAN_FILE"
     mock_gh 'issue create.*--body-file.*--title My Feature Title' 'https://github.com/owner/repo/issues/55'
-    run bash "$SCRIPT" "$PLAN_FILE"
+    run --separate-stderr bash "$SCRIPT" "$PLAN_FILE"
     [ "$status" -eq 0 ]
     [ "$output" = "55" ]
+    [[ "$stderr" == *"extracting title"* ]]
 }
 
 @test "dies when plan file is empty" {
