@@ -188,7 +188,8 @@ impl StaticDefinition {
     /// [`StaticDefinition`] so callers can call [`goto`](Self::goto) and
     /// extract fields before handing it to the executor.
     pub fn deserialize_owned(data: &[u8]) -> Result<Self, DefinitionError> {
-        Self::from_expanded_bytes(data, None).map_err(|e| DefinitionError::Message(e.to_string()))
+        Self::from_expanded_bytes(data, None, None)
+            .map_err(|e| DefinitionError::Message(e.to_string()))
     }
 
     // -----------------------------------------------------------------------

@@ -740,8 +740,12 @@ async fn land(id: &str) -> Result<(), String> {
             definition_path.display()
         ));
     }
-    let definition = StaticDefinition::from_yaml_file(&definition_path, None, None)
-        .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
+    let default_client = config::global_config()
+        .ok()
+        .and_then(|c| c.default_client().map(String::from));
+    let definition =
+        StaticDefinition::from_yaml_file(&definition_path, None, default_client.as_deref())
+            .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
 
     // Extract the Exec from the land stage.
     let exec = match definition.land() {
@@ -847,8 +851,12 @@ async fn validate(definition: &str) -> Result<(), String> {
     let definition_path = discovery::resolve_definition_path(definition, project_root.clone())
         .map_err(|e| format!("definition not found: {e}"))?;
 
-    let gremlin_def = StaticDefinition::from_yaml_file(&definition_path, None, None)
-        .map_err(|e| format!("invalid definition: {e}"))?;
+    let default_client = config::global_config()
+        .ok()
+        .and_then(|c| c.default_client().map(String::from));
+    let gremlin_def =
+        StaticDefinition::from_yaml_file(&definition_path, None, default_client.as_deref())
+            .map_err(|e| format!("invalid definition: {e}"))?;
 
     let mut gremlin = Gremlin::for_dry_run(gremlin_def);
 
@@ -989,8 +997,12 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     // Load the definition just enough to validate --key args against
     // bootstrap.source.
-    let gremlin_def = StaticDefinition::from_yaml_file(&definition_path, None, None)
-        .map_err(|e| format!("invalid definition: {e}"))?;
+    let default_client = config::global_config()
+        .ok()
+        .and_then(|c| c.default_client().map(String::from));
+    let gremlin_def =
+        StaticDefinition::from_yaml_file(&definition_path, None, default_client.as_deref())
+            .map_err(|e| format!("invalid definition: {e}"))?;
 
     match &gremlin_def.bootstrap.source {
         Some(source) => {

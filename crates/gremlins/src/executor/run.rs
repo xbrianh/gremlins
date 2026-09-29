@@ -352,7 +352,7 @@ async fn run_agent(
             .collect(),
         system_prompt: Some(prepared.system_prompt()),
         gremlin_id: Some(gremlin.id.to_string()),
-        base_env: Some(gremlin.runtime_config.base_process_env.clone()),
+        base_env: Some(gremlin.env.clone()),
         task_clients_exact: gremlin.runtime_config.task_clients_exact.clone(),
         task_clients_prefix: gremlin.runtime_config.task_clients_prefix.clone(),
     };

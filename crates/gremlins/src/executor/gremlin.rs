@@ -121,14 +121,9 @@ pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
 /// Populated once in [`Gremlin::init_runtime`] so multiple `Gremlin::run()`
 /// invocations can coexist in one process without reading global state.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub(crate) struct RuntimeConfig {
     /// Resolved scratch directory for this gremlin.
     pub scratch_dir: PathBuf,
-    /// Resolved overlay directory for this gremlin.
-    pub overlay_dir: PathBuf,
-    /// Resolved work root for worktree creation.
-    pub work_root: PathBuf,
     /// Resolved state root.
     pub state_root: PathBuf,
     /// Exact-match stage→client mappings from config.
@@ -150,8 +145,6 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             scratch_dir: PathBuf::new(),
-            overlay_dir: PathBuf::new(),
-            work_root: PathBuf::new(),
             state_root: PathBuf::new(),
             stage_clients_exact: HashMap::new(),
             stage_clients_prefix: HashMap::new(),
@@ -677,8 +670,6 @@ impl Gremlin {
             let base_process_env: HashMap<String, String> = std::env::vars().collect();
             self.runtime_config = RuntimeConfig {
                 scratch_dir: config::scratch_root(Some(self.id.as_str())),
-                overlay_dir: self.state_dir.join(config::overlay_dirname()),
-                work_root: config::work_root(),
                 state_root: config::state_root(),
                 stage_clients_exact: stage_exact,
                 stage_clients_prefix: stage_prefix,
@@ -937,7 +928,12 @@ impl Gremlin {
             client.model(),
         );
 
-        let child_scratch_dir = config::scratch_root(Some(child_gremlin_id.as_str()));
+        let child_scratch_dir = self
+            .runtime_config
+            .scratch_dir
+            .parent()
+            .map(|p| p.join(child_gremlin_id.as_str()))
+            .unwrap_or_else(|| config::scratch_root(Some(child_gremlin_id.as_str())));
 
         Ok(Gremlin {
             id: child_gremlin_id,

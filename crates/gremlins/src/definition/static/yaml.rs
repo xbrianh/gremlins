@@ -68,13 +68,14 @@ impl StaticDefinition {
     pub fn from_expanded_bytes(
         data: &[u8],
         client_override: Option<&str>,
+        config_default_client: Option<&str>,
     ) -> Result<Self, SchemaError> {
         let expanded = parse_expanded_yaml(data)?;
         from_expanded_value(
             expanded,
             Path::new("definition.yaml"),
             client_override,
-            None,
+            config_default_client,
         )
     }
 

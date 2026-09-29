@@ -1010,11 +1010,14 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     if let Some(cwd) = &ctx.cwd {
         cmd.current_dir(cwd);
     }
-    if let Some(extra) = &ctx.extra_env {
-        let mut env: HashMap<String, String> = ctx
-            .base_env
-            .clone()
-            .unwrap_or_else(|| std::env::vars().collect());
+    if let Some(base) = &ctx.base_env {
+        let mut env = base.clone();
+        if let Some(extra) = &ctx.extra_env {
+            env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        cmd.env_clear().envs(env);
+    } else if let Some(extra) = &ctx.extra_env {
+        let mut env: HashMap<String, String> = std::env::vars().collect();
         env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
         cmd.env_clear().envs(env);
     }
