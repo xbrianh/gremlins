@@ -953,6 +953,8 @@ impl Gremlin {
             .map(|p| p.join(child_gremlin_id.as_str()))
             .unwrap_or_else(|| config::scratch_root(Some(child_gremlin_id.as_str())));
 
+        let child_state_file = child_state_dir.join("state.json");
+
         Ok(Gremlin {
             id: child_gremlin_id,
             state_dir: child_state_dir,
@@ -968,7 +970,11 @@ impl Gremlin {
             project_root: self.project_root.clone(),
             base_ref_sha: child_worktree_base,
             base_ref: self.base_ref.clone(),
-            state: StateData::new(Some(child_id.to_string())),
+            state: {
+                let mut child_state = StateData::new(Some(child_id.to_string()));
+                child_state.state_file = Some(child_state_file);
+                child_state
+            },
             env: self.env.clone(),
             client,
             loop_iter: "1".to_string(),
