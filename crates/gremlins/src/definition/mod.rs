@@ -19,7 +19,7 @@ use crate::stages::composite::ClientSpec;
 pub use crate::stages::exec::Exec;
 pub use crate::stages::parallel::ErrorPolicy;
 
-pub mod r#static;
+pub(crate) mod r#static;
 pub use r#static::StaticDefinition;
 
 // ---------------------------------------------------------------------------

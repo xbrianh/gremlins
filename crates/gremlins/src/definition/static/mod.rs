@@ -15,7 +15,7 @@ pub(crate) mod expand;
 pub(crate) mod loader;
 pub(crate) mod prompts;
 pub(crate) mod resolve;
-pub mod yaml;
+pub(crate) mod yaml;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -123,10 +123,8 @@ impl StaticDefinition {
     /// canonical expanded-YAML shape.
     ///
     /// The output always includes `__gremlins_expanded__: true` so
-    /// [`StaticDefinition::from_expanded_yaml`] recognizes it.
-    ///
-    /// [`StaticDefinition::from_expanded_yaml`]: StaticDefinition::from_expanded_yaml
-    pub fn to_expanded_yaml(&self) -> Value {
+    /// [`StaticDefinition::from_yaml_file`] recognizes it.
+    pub(crate) fn to_expanded_yaml(&self) -> Value {
         let mut root = Mapping::new();
 
         // Sentinel — always emitted.

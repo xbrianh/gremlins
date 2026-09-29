@@ -55,34 +55,6 @@ impl StaticDefinition {
 
         from_expanded_value(expanded, &path, client_override)
     }
-
-    /// Load an already-expanded YAML file directly — no expansion, no
-    /// project-root walk. Used when a hermetic `definition.yaml` exists
-    /// alongside the state directory.
-    ///
-    /// Strips the `__gremlins_expanded__` sentinel if present, but tolerates
-    /// its absence.
-    pub fn from_expanded_yaml(
-        path: &Path,
-        default_client_override: Option<&str>,
-    ) -> Result<Self, SchemaError> {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if !path.exists() {
-            return Err(SchemaError::DefinitionFileNotFound {
-                path: path.display().to_string(),
-            });
-        }
-
-        let mut expanded = expand::load_yaml_file(&path)?;
-        // Strip the sentinel if present — the file may lack it but still be
-        // fully expanded.
-        if let Some(mapping) = expanded.as_mapping_mut() {
-            let sentinel = Value::from("__gremlins_expanded__");
-            mapping.remove(&sentinel);
-        }
-
-        from_expanded_value(expanded, &path, default_client_override)
-    }
 }
 
 // ---------------------------------------------------------------------------

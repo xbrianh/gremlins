@@ -740,7 +740,7 @@ async fn land(id: &str) -> Result<(), String> {
             definition_path.display()
         ));
     }
-    let definition = StaticDefinition::from_expanded_yaml(&definition_path, None)
+    let definition = StaticDefinition::from_yaml_file(&definition_path, None)
         .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
 
     // Extract the Exec from the land stage.
