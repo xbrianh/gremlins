@@ -34,8 +34,8 @@ pub(crate) async fn bind_or_connect() -> Result<tokio::net::UnixStream, String> 
 
     let state_root = config::state_root();
 
-    // Write pidfile and try to bind.
-    socket::write_pidfile(&state_root)?;
+    // We already confirmed via connect() that no executor is listening.
+    // bind_socket() will unlink any stale socket file before binding.
     let listener = match socket::bind_socket(&state_root) {
         Ok(l) => l,
         Err(e) if is_addr_in_use(&e) => {

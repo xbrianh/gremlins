@@ -1,9 +1,6 @@
 //! Unix-domain socket helpers for the single-instance executor.
 //!
-//! The socket lives at `$state_root/executor.sock`. A pidfile at
-//! `$state_root/executor.pid` records the executor's PID so a crashed
-//! executor's stale socket can be detected and reclaimed.
-//!
+//! The socket lives at `$state_root/executor.sock`.
 //! All I/O is async via tokio.
 
 use std::path::Path;
@@ -17,53 +14,18 @@ pub fn socket_path(state_root: &Path) -> std::path::PathBuf {
     state_root.join("executor.sock")
 }
 
-/// Path to the executor pidfile.
-pub fn pidfile_path(state_root: &Path) -> std::path::PathBuf {
-    state_root.join("executor.pid")
-}
-
-/// Write the current PID to the pidfile.
-pub fn write_pidfile(state_root: &Path) -> Result<(), String> {
-    let path = pidfile_path(state_root);
-    let pid = std::process::id();
-    std::fs::write(&path, pid.to_string())
-        .map_err(|e| format!("failed to write pidfile {}: {e}", path.display()))
-}
-
-/// Remove the pidfile.
-pub fn unlink_pidfile(state_root: &Path) {
-    let path = pidfile_path(state_root);
-    let _ = std::fs::remove_file(&path);
-}
-
-/// Check whether the PID recorded in the pidfile is still alive.
+/// Bind the executor socket.
 ///
-/// Returns `true` when the pidfile exists and the process it names is still
-/// running. Returns `false` when the pidfile is missing, unreadable, or the
-/// process is gone — in all of those cases the socket can be reclaimed.
-pub fn pidfile_alive(state_root: &Path) -> bool {
-    let path = pidfile_path(state_root);
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let pid: libc::pid_t = match content.trim().parse() {
-        Ok(p) if p > 0 => p,
-        _ => return false,
-    };
-    // kill(pid, 0) checks existence without sending a signal.
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-/// Bind the executor socket, reclaiming a stale socket if the previous
-/// executor is dead.
+/// The caller must have already confirmed no executor is listening
+/// (i.e. `connect_socket` returned ECONNREFUSED or ENOENT). Any
+/// stale socket file is unlinked before binding.
 pub fn bind_socket(state_root: &Path) -> Result<UnixListener, String> {
     let path = socket_path(state_root);
 
-    // If the socket file exists but the executor is dead, unlink it.
-    if path.exists() && !pidfile_alive(state_root) {
+    // If a socket file is left over from a crashed executor, remove it.
+    // We know it's stale because the caller already tried connect().
+    if path.exists() {
         let _ = std::fs::remove_file(&path);
-        unlink_pidfile(state_root);
     }
 
     UnixListener::bind(&path)

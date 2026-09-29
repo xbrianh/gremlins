@@ -72,7 +72,6 @@ pub async fn run_supervisor(listener: UnixListener, state_root: PathBuf) {
 
     log::info!("supervisor: shutting down");
     socket::unlink_socket(&state_root);
-    socket::unlink_pidfile(&state_root);
 }
 
 async fn handle_connection(
