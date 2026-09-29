@@ -5,17 +5,27 @@ use regex::Regex;
 
 static VAR_SUB_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([-\w]+)\}").unwrap());
 
-/// Extract string-valued entries from an options map, filtering out
-/// non-string JSON values (numbers, booleans, arrays, etc.).
+/// Convert every JSON value to its natural string form for substitution.
+/// Strings pass through, numbers use `to_string()`, booleans become
+/// "true"/"false", null becomes "null", and arrays/objects are
+/// serialized as compact JSON.
 pub fn string_options(options: &HashMap<String, serde_json::Value>) -> HashMap<String, String> {
     options
         .iter()
-        .filter_map(|(k, v)| {
-            if let serde_json::Value::String(s) = v {
-                Some((k.clone(), s.clone()))
-            } else {
-                None
-            }
+        .map(|(k, v)| {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => "null".to_string(),
+                serde_json::Value::Array(arr) => {
+                    serde_json::to_string(arr).unwrap_or_else(|_| "[]".to_string())
+                }
+                serde_json::Value::Object(obj) => {
+                    serde_json::to_string(obj).unwrap_or_else(|_| "{}".to_string())
+                }
+            };
+            (k.clone(), s)
         })
         .collect()
 }
@@ -265,14 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn test_substitute_vars_non_string_options_filtered() {
+    fn test_substitute_vars_non_string_options_converted() {
         let mut opts: HashMap<String, serde_json::Value> = HashMap::new();
         opts.insert("count".to_string(), serde_json::Value::Number(42.into()));
         let str_opts = string_options(&opts);
         let extra = HashMap::new();
         let fw = HashMap::new();
         let result = substitute_vars("{count}", &str_opts, &extra, &fw);
-        assert_eq!(result, "{count}");
+        assert_eq!(result, "42");
     }
 
     #[test]
