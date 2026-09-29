@@ -160,7 +160,7 @@ pub async fn prepare_agent(
 // ---------------------------------------------------------------------------
 
 /// Commit produced artifacts into the localized registry. Every non-optional
-/// bind must have a non-empty produced file; only produced files are committed.
+/// bind must have a file that exists; only extant files are committed.
 /// Optional binds may be absent.
 pub async fn commit_agent(
     prepared: &AgentPrepared,
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_commit_agent_rejects_empty_file() {
+    async fn test_commit_agent_accepts_empty_file() {
         let tmp = tempfile::TempDir::new().unwrap();
         let reg = make_registry(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
@@ -653,8 +653,8 @@ mod tests {
             .await
             .unwrap();
         std::fs::write(&prepared.bind_paths["out"], "").unwrap();
-        assert!(commit_agent(&prepared, &reg).await.is_err());
-        assert!(!reg.is_registered("artifact://out.md").await);
+        commit_agent(&prepared, &reg).await.unwrap();
+        assert!(reg.is_registered("artifact://out.md").await);
     }
 
     #[tokio::test]

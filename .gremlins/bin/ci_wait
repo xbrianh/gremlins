@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Await CI on a PR, then fall through to polling if still in progress.
+# Usage: ci_wait <pr_url> <fix_head> <done_file> <status_file> \
+#               [startup_grace_secs] [poll_interval] [sync_timeout] [poll_timeout]
+#
+# Phase 1 — await: wait for CI to become available.  On success the last line
+# of combined stdout+stderr is inspected:
+#   "skipped"                → no CI checks exist; touch <done_file>.
+#   no IN_PROGRESS + SUCCESS → CI already passed; touch <done_file>.
+# Phase 2 — poll: if await found CI still in-progress, poll until completion.
+#   "passed" → touch <done_file> and write poll output to <status_file>.
+#   "failed" → write poll output to <status_file> (no <done_file>).
+#
+# Exits 2 on timeout / REVIEW_REQUIRED / poll failure.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+pr_url="${1:-}"
+fix_head="${2:-}"
+done_file="${3:-}"
+status_file="${4:-}"
+startup_grace_secs="${5:-60}"
+poll_interval="${6:-30}"
+sync_timeout="${7:-180}"
+poll_timeout="${8:-1200}"
+
+if [ -z "$pr_url" ] || [ -z "$done_file" ] || [ -z "$status_file" ]; then
+    die "Usage: ci_wait <pr_url> <fix_head> <done_file> <status_file> [startup_grace_secs] [poll_interval] [sync_timeout] [poll_timeout]"
+fi
+
+mkdir -p "$(dirname "$done_file")"
+
+# --- Phase 1: await CI availability ---
+info "ci_wait: awaiting CI for ${pr_url}"
+TMP_AWAIT="${done_file}.await_out"
+
+if gh_ci_await "$pr_url" "$fix_head" "$startup_grace_secs" "$poll_interval" "$sync_timeout" 2>&1 | tee "$TMP_AWAIT"; then
+    last_line=$(tail -n 1 "$TMP_AWAIT")
+    if [ "$last_line" = "skipped" ]; then
+        info "ci_wait: no CI checks — skipping"
+        touch "$done_file"
+        exit 0
+    fi
+    if ! grep -q 'status=IN_PROGRESS' "$TMP_AWAIT" && \
+       grep -q 'conclusion=SUCCESS' "$TMP_AWAIT" && \
+       ! grep -qE 'conclusion=(FAILURE|CANCELLED|ERROR|ACTION_REQUIRED|TIMED_OUT|STARTUP_FAILURE)' "$TMP_AWAIT"; then
+        info "ci_wait: CI already passed"
+        touch "$done_file"
+        exit 0
+    fi
+else
+    exit 2
+fi
+
+# --- Phase 2: poll for completion ---
+info "ci_wait: CI in progress, polling..."
+TMP_POLL="${done_file}.poll_out"
+
+if gh_ci_poll "$pr_url" "$poll_timeout" "$poll_interval" 2>&1 | tee "$TMP_POLL"; then
+    cp "$TMP_POLL" "$status_file"
+    if [ "$(tail -n 1 "$TMP_POLL")" = "passed" ]; then
+        info "ci_wait: CI passed"
+        touch "$done_file"
+    else
+        info "ci_wait: CI failed"
+    fi
+else
+    exit 2
+fi

@@ -1,6 +1,7 @@
-# Loop body: await → poll → failure-log → fix → push-fix → capture-head.
-# Iteration-1 detection: fix-head absent means no prior fix push.
-# Post-fix SHA verification: fix-head present → wait for headRefOid to match.
+# Wait for CI on a PR. If CI fails, hand the failure log to the agent for a
+# fix, push, and loop.  The fix stage is safe when there are no failures (the
+# prompt should emit a no-op), and push-fix guards against pushing an
+# already-pushed HEAD.
 
 required-prompt: true
 
@@ -10,58 +11,22 @@ stages:
     max-iterations: 3
     skip_if_exists: "artifact://{loop_iter}/done"
     body:
-      - name: ci-await
+      - name: ci-wait
         type: exec
         interpolation:
           pr_url: content("artifact://pr-url.txt")
           fix_head: content("artifact://fix-head")?
         bind:
+          status?: "artifact://{loop_iter}/status"
           done?: "artifact://{loop_iter}/done"
         options:
-          timeout: 210
+          timeout: 1470
           startup_grace_secs: "60"
           poll_interval: "30"
           sync_timeout: "180"
+          poll_timeout: "1200"
           cmds:
-            - |
-              set -o pipefail
-              TMP_OUT="$(dirname "{done}")/ci_await_out"
-              if gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2>&1 | tee "$TMP_OUT"; then
-                if [ "$(tail -n 1 "$TMP_OUT")" = "skipped" ]; then
-                  touch "{done}"
-                elif ! grep -q 'status=IN_PROGRESS' "$TMP_OUT" && grep -q 'conclusion=SUCCESS' "$TMP_OUT"; then
-                  touch "{done}"
-                fi
-              else
-                exit 2
-              fi
-
-      - name: ci-poll
-        type: sequence
-        skip_if_exists: "artifact://{loop_iter}/done"
-        body:
-          - type: exec
-            interpolation:
-              pr_url: content("artifact://pr-url.txt")
-            bind:
-              status: "artifact://{loop_iter}/status"
-              done?: "artifact://{loop_iter}/done"
-            options:
-              timeout: 1260
-              poll_timeout: "1200"
-              poll_interval: "30"
-              cmds:
-                - |
-                  set -o pipefail
-                  TMP_OUT="$(dirname "{done}")/ci_poll_out"
-                  if gh_ci_poll "{pr_url}" {poll_timeout} {poll_interval} 2>&1 | tee "$TMP_OUT"; then
-                    cp "$TMP_OUT" "{status}"
-                    if [ "$(tail -n 1 "$TMP_OUT")" = "passed" ]; then
-                      touch "{done}"
-                    fi
-                  else
-                    exit 2
-                  fi
+            - ci_wait "{pr_url}" "{fix_head}" "{done}" "{status}" {startup_grace_secs} {poll_interval} {sync_timeout} {poll_timeout}
 
       - name: ci-failure-log
         type: sequence
@@ -75,9 +40,7 @@ stages:
             options:
               timeout: 120
               cmds:
-                - |
-                  set -o pipefail
-                  gh_ci_failure_log "{pr_url}" | tee "{ci_log}"
+                - ci_failure_log "{pr_url}" "{ci_log}"
 
       - name: fix
         type: sequence
@@ -98,7 +61,7 @@ stages:
               pr_branch: content("artifact://pr-branch.txt")
             options:
               cmds:
-                - git push origin "HEAD:{pr_branch}"
+                - ci_push_fix "{pr_branch}"
 
       - name: capture-head
         type: sequence
