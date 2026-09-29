@@ -1,30 +1,24 @@
 //! The parallel fan-out / fan-in executor.
 //!
 //! [`run_parallel`] destructures a [`StageSpec::Parallel`], guards against
-//! already-completed groups, spawns one tokio task per child (bounded by a
-//! [`Semaphore`]), collects results from a [`JoinSet`], applies the group's
+//! already-completed groups, forks one child gremlin per stage via
+//! [`Gremlin::fork`], launches each through [`supervisor::launch_child`] so
+//! they appear in `gremlins ls` with live status, awaits completion via
+//! [`watch::Receiver<RunState>`] channels, applies the group's
 //! [`ErrorPolicy`], merges artifacts from successful children into the parent
 //! registry, cleans up child worktrees (best-effort), and aggregates child
 //! costs into the parent.
 //!
-//! Children run as forked gremlins via [`Gremlin::fork`], which takes a
-//! [`GremlinDefinition`] and optional `effective_client` for client
-//! inheritance.
-//!
-//! Each child runs on a dedicated [`std::thread`] worker thread (spawned via
-//! [`std::thread::spawn`]) with its own single-threaded tokio runtime.
-//! The [`JoinSet`] manages the concurrency bound and cancellation: each
-//! spawned task awaits a [`oneshot`] receiver from its worker thread. Thread
-//! join handles are collected so that every worker thread is joined before
-//! `run_parallel` returns — no orphaned threads, even after `cancel_on_error`.
+//! Children are first-class gremlins: the supervisor owns their lifecycle,
+//! they can be inspected and stopped like any other gremlin, and the
+//! "orphan" display in `gremlins ls` is gone.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::oneshot;
-use tokio::task::JoinSet;
+use futures::stream::{FuturesUnordered, StreamExt};
+use tokio::sync::watch;
 
 use crate::artifacts::registry::ArtifactRegistry;
 use crate::artifacts::uri::Uri;
@@ -33,6 +27,7 @@ use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::stage_key;
 use crate::executor::state;
+use crate::executor::supervisor::{self, RunState};
 use crate::executor::RunError;
 
 /// The registry URI marking `child_name` as done under `scope`.
@@ -53,8 +48,8 @@ async fn mark_child_done(registry: &dyn ArtifactRegistry, scope: &str, child_nam
     }
 }
 
-/// Run a parallel group: fork one child per stage, fan out via [`JoinSet`],
-/// join, and apply the error policy.
+/// Run a parallel group: fork one child per stage, launch via supervisor,
+/// await completion, and apply the error policy.
 pub(crate) async fn run_parallel(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
@@ -80,11 +75,6 @@ pub(crate) async fn run_parallel(
     );
 
     // --- Resumption guard ---
-    //
-    // A group is fully complete when every child has a done artifact under
-    // `artifact://<scope>/done/<child>`. The scope bakes in the loop iteration
-    // and attempt token, so markers are naturally distinct per attempt. The
-    // check is against `total_children`, not the number of successful children.
     let scope = stage_key(&gremlin.loop_iter, group_name);
     let mut done: HashSet<String> = HashSet::new();
     for child in children {
@@ -105,37 +95,26 @@ pub(crate) async fn run_parallel(
     }
 
     // --- Concurrency bound ---
-    //
-    // `max_concurrent` caps the number of in-flight tasks. When absent, every
-    // child spawns at once. The semaphore is acquired *inside* each worker
-    // thread so that all JoinSet tasks are immediately enqueued and can be
-    // cancelled by `abort_all` before their threads acquire a permit.
     let semaphore: Option<Arc<tokio::sync::Semaphore>> = max_concurrent
         .filter(|&n| n > 0)
         .map(|n| Arc::new(tokio::sync::Semaphore::new(n as usize)));
 
-    // Cancellation flag: set when `cancel_on_error` fires so worker threads
-    // that are still waiting on the semaphore can exit immediately instead
-    // of starting real work.
-    let cancel_flag = Arc::new(AtomicBool::new(false));
+    // --- Fork and launch children ---
+    //
+    // Each child is forked (artifacts copied, worktree branched, state
+    // written) then launched via supervisor::launch_child, which registers
+    // it in the run_map and spawns its tokio task. The semaphore is
+    // acquired *before* launch_child so max_concurrent bounds in-flight
+    // children.
+    struct LaunchedChild {
+        child_name: String,
+        child_id: String,
+        state_rx: watch::Receiver<RunState>,
+    }
 
-    // We use a JoinSet to manage the concurrency bound and cancellation.
-    // Each task awaits a oneshot receiver from a worker thread.
-    type ChildResult = (
-        String,
-        String,
-        Result<(), RunError>,
-        Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
-    );
-
-    let mut join_set: JoinSet<ChildResult> = JoinSet::new();
-    let mut thread_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
-    let mut spawned_ids: Vec<(String, String)> = Vec::new(); // (child_name, child_id)
-    let mut spawned = 0usize;
+    let mut launched: Vec<LaunchedChild> = Vec::with_capacity(children.len());
 
     for child in children {
-        // Resolve the effective client for this parallel group (must come
-        // first so it can be baked into the child provider).
         let enclosing_spec = enclosing_client.map(|c| crate::definition::ClientSpec(c.to_string()));
         let effective_client: Option<&str> = client
             .as_ref()
@@ -158,9 +137,14 @@ pub(crate) async fn run_parallel(
             "parallel group {group_name}: forking child {child_name} (child_id={child_id})"
         );
 
-        // Fork the child gremlin (before spawning), so the
-        // worker thread only has to call `run()`.
-        let mut child_gremlin = gremlin
+        // Acquire semaphore permit before launching.
+        let _permit = match &semaphore {
+            Some(sem) => Some(sem.clone().acquire_owned().await),
+            None => None,
+        };
+
+        // Fork the child gremlin.
+        let child_gremlin = gremlin
             .fork(
                 &child_id,
                 &parent_id,
@@ -178,110 +162,103 @@ pub(crate) async fn run_parallel(
             child_gremlin.artifact_dir.display()
         );
 
-        spawned_ids.push((child_name.clone(), child_id.clone()));
+        // Launch the child via the supervisor — it becomes a first-class
+        // gremlin visible in `gremlins ls`.
+        let state_rx = supervisor::launch_child(child_gremlin);
 
-        let (tx, rx) = oneshot::channel::<ChildResult>();
-
-        let child_name_for_thread = child_name.clone();
-        let child_id_for_thread = child_id.clone();
-        let sem = semaphore.clone();
-        let cancel = Arc::clone(&cancel_flag);
-
-        let handle = std::thread::spawn(move || {
-            // Each child gets its own single-threaded runtime.
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build child runtime");
-
-            // Acquire the permit inside the thread (and its runtime) so the
-            // spawn loop is not blocked and the JoinSet task can be aborted
-            // before the permit is acquired.
-            let _permit = sem
-                .as_ref()
-                .map(|sem| rt.block_on(sem.clone().acquire_owned()));
-
-            // Check the cancellation flag after acquiring the permit but
-            // before starting real work. If the group has already been
-            // cancelled, exit immediately.
-            if cancel.load(Ordering::Acquire) {
-                log::debug!(
-                    "parallel group {group_name_owned}: child {child_name_for_thread} cancel flag set before run() — exiting"
-                );
-                // Mark the child terminal so its state directory isn't left
-                // permanently as "running" with no finished marker.
-                child_gremlin.state.write_terminal_state(-1);
-                let _ = tx.send((
-                    child_name_for_thread,
-                    child_id_for_thread,
-                    Err(RunError::Message("cancelled".to_string())),
-                    Some(child_gremlin.registry),
-                ));
-                return;
-            }
-
-            log::debug!(
-                "parallel group {group_name_owned}: child {child_name_for_thread} (id={child_id_for_thread}) calling run()"
-            );
-            let outcome = rt.block_on(async { child_gremlin.run(None, None).await.map(|_| ()) });
-            log::debug!(
-                "parallel group {group_name_owned}: child {child_name_for_thread} (id={child_id_for_thread}) run() completed (outcome={})",
-                match &outcome {
-                    Ok(()) => "Ok".to_string(),
-                    Err(e) => format!("Err: {e}"),
-                }
-            );
-
-            let _ = tx.send((
-                child_name_for_thread,
-                child_id_for_thread,
-                outcome,
-                if child_gremlin.dry_run {
-                    Some(child_gremlin.registry)
-                } else {
-                    None
-                },
-            ));
+        launched.push(LaunchedChild {
+            child_name,
+            child_id,
+            state_rx,
         });
 
-        thread_handles.push(handle);
-
-        // Spawn a JoinSet task that awaits the oneshot receiver.
-        let child_name_js = child_name.clone();
-        join_set.spawn(async move {
-            match rx.await {
-                Ok(result) => result,
-                Err(_) => (
-                    child_name_js.clone(),
-                    String::new(),
-                    Err(RunError::Message(format!(
-                        "child {child_name_js} thread terminated unexpectedly"
-                    ))),
-                    None,
-                ),
-            }
-        });
-
-        spawned += 1;
-        log::debug!("parallel group {group_name}: spawned child {child_name} on thread");
+        log::debug!("parallel group {group_name}: launched child via supervisor");
     }
 
-    if spawned == 0 {
-        // Every child was already done — the group is complete.
+    if launched.is_empty() {
         return Ok(());
     }
 
-    // --- Collect results ---
+    // --- Await completion ---
     //
-    // On `cancel_on_error`, abort all remaining JoinSet tasks before
-    // draining, then drain whatever is left. The worker threads continue
-    // running, but we join them all at the end so none are orphaned.
-    let mut child_results: Vec<ChildOutcome> = Vec::with_capacity(spawned);
+    // Each child has a watch::Receiver<RunState> that fires when the child
+    // reaches a terminal state. We collect them via FuturesUnordered.
+    let mut child_results: Vec<ChildOutcome> = Vec::with_capacity(launched.len());
     let mut first_error: Option<RunError> = None;
 
-    while let Some(result) = join_set.join_next().await {
+    // Build a map from child_id → index for quick lookup.
+    let child_id_to_idx: HashMap<String, usize> = launched
+        .iter()
+        .enumerate()
+        .map(|(i, lc)| (lc.child_id.clone(), i))
+        .collect();
+
+    // Track which children are still running (for cancel_on_error).
+    let mut running: HashSet<usize> = (0..launched.len()).collect();
+
+    // Spawn a future for each child that waits for its state_rx to change
+    // to a terminal status, then reads the child's state.json to determine
+    // the real outcome (exit code, error message).
+    type ChildResult = (usize, String, String, Result<(), RunError>);
+    let mut futs: FuturesUnordered<tokio::task::JoinHandle<ChildResult>> = FuturesUnordered::new();
+
+    for (idx, lc) in launched.into_iter().enumerate() {
+        let child_name = lc.child_name.clone();
+        let child_id = lc.child_id.clone();
+        let mut state_rx = lc.state_rx;
+        // Derive the child state dir from the parent's state_dir parent —
+        // this is the same layout `fork()` uses and works regardless of
+        // whether `state_root` was overridden in tests.
+        let parent_state_root = gremlin
+            .state_dir
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+
+        let handle = tokio::spawn(async move {
+            // Wait for the state to change to a terminal status.
+            loop {
+                state_rx.changed().await.ok();
+                let state = state_rx.borrow().clone();
+                if state.status == "done" || state.status == "stopped" {
+                    // Read the child's state.json to get the real outcome.
+                    let child_state_dir = parent_state_root.join(&child_id);
+                    let child_state_file = child_state_dir.join("state.json");
+                    let outcome = if child_state_file.is_file() {
+                        let raw = state::read_state_json(Some(&child_state_file));
+                        let exit_code = raw.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1);
+                        if exit_code == 0 {
+                            Ok(())
+                        } else {
+                            // Try to get a meaningful error from the bail file or state.
+                            let reason = raw
+                                .get("stage")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty() && *s != "starting")
+                                .map(|s| format!("stage {s}: exited {exit_code}"))
+                                .unwrap_or_else(|| format!("exited {exit_code}"));
+                            Err(RunError::StageFailed {
+                                stage: child_name.clone(),
+                                message: reason,
+                            })
+                        }
+                    } else {
+                        Err(RunError::Message(format!(
+                            "child {child_name} state file not found"
+                        )))
+                    };
+                    return (idx, child_name, child_id, outcome);
+                }
+            }
+        });
+
+        futs.push(handle);
+    }
+
+    while let Some(result) = futs.next().await {
         match result {
-            Ok((child_name, child_id, outcome, child_registry)) => {
+            Ok((idx, child_name, child_id, outcome)) => {
+                running.remove(&idx);
                 log::debug!(
                     "parallel group {group_name}: child {child_name} completed (outcome={})",
                     match &outcome {
@@ -289,46 +266,50 @@ pub(crate) async fn run_parallel(
                         Err(e) => format!("Err: {e}"),
                     }
                 );
+
                 match outcome {
                     Ok(()) => {
                         child_results.push(ChildOutcome {
                             child_name,
                             child_id,
                             outcome: Ok(()),
-                            child_registry,
                         });
                     }
                     Err(err) => {
                         if *cancel_on_error && first_error.is_none() {
-                            // Save the error for the group result. The child
-                            // still gets its real outcome recorded so
-                            // downstream merge / done-marking can correctly
-                            // classify it as failed.
                             first_error = Some(RunError::StageFailed {
                                 stage: child_name.clone(),
                                 message: err.to_string(),
                             });
-                            cancel_flag.store(true, Ordering::Release);
-                            join_set.abort_all();
+                            // Cancel all remaining running children.
+                            for &running_idx in &running {
+                                let running_id = child_id_to_idx.iter().find_map(|(id, &i)| {
+                                    if i == running_idx {
+                                        Some(id.clone())
+                                    } else {
+                                        None
+                                    }
+                                });
+                                if let Some(rid) = running_id {
+                                    supervisor::stop_child(&rid).await;
+                                }
+                            }
                             child_results.push(ChildOutcome {
                                 child_name,
                                 child_id,
                                 outcome: Err(err),
-                                child_registry,
                             });
                         } else {
                             child_results.push(ChildOutcome {
                                 child_name,
                                 child_id,
                                 outcome: Err(err),
-                                child_registry,
                             });
                         }
                     }
                 }
             }
             Err(join_error) => {
-                // A task panicked or was cancelled.
                 if join_error.is_panic() {
                     let msg =
                         format!("parallel group {group_name}: a child task panicked: {join_error}");
@@ -337,32 +318,11 @@ pub(crate) async fn run_parallel(
                         first_error = Some(RunError::Message(msg));
                     }
                 }
-                // Cancelled tasks are expected after abort_all — ignore.
             }
         }
     }
 
-    // --- Join all worker threads ---
-    //
-    // After the JoinSet is fully drained (including after abort_all), join
-    // every worker thread so none are orphaned. Threads that were waiting on
-    // the semaphore will have seen the cancel flag and exited quickly;
-    // threads that were already running will finish naturally.
-    for handle in thread_handles {
-        if let Err(e) = handle.join() {
-            log::error!("parallel group {group_name}: a worker thread panicked: {e:?}");
-        }
-    }
-
     // --- Apply error policy ---
-    //
-    // `Any`: bail the group when any child bailed or failed.
-    // `All`: bail only when every child bailed or failed.
-    //
-    // Previously-completed children (in `done`) count as successes so that a
-    // resumed group with prior successes does not incorrectly fail under
-    // `ErrorPolicy::All` when every *remaining* child fails.
-
     let mut failed_names: HashSet<String> = HashSet::new();
     let mut real_errors: Vec<RunError> = Vec::new();
     let mut success_count = done.len();
@@ -373,10 +333,6 @@ pub(crate) async fn run_parallel(
             success_count += 1;
         } else {
             failed_names.insert(outcome.child_name.clone());
-            // Take the error out for policy evaluation. The outcome is
-            // replaced with Ok(()) but `failed_names` tracks the truth —
-            // downstream merge / done-marking consult `failed_names`, not
-            // `outcome.outcome`.
             let err = std::mem::replace(&mut outcome.outcome, Ok(())).unwrap_err();
             real_errors.push(err);
         }
@@ -406,8 +362,6 @@ pub(crate) async fn run_parallel(
         }
     };
 
-    // If we already captured a first_error from cancel_on_error or a panic,
-    // use that in preference to the policy-derived error.
     let group_error = first_error.or(group_error);
 
     log::debug!(
@@ -442,10 +396,6 @@ pub(crate) async fn run_parallel(
     }
 
     // --- Mark children done ---
-    //
-    // Done markers live in the artifact registry, scoped to this attempt, so
-    // they never collide with a later run. Failed children are not marked;
-    // successful ones stay marked so a resume re-forks only the failures.
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
             mark_child_done(gremlin.registry.as_ref(), &scope, &outcome.child_name).await;
@@ -454,23 +404,14 @@ pub(crate) async fn run_parallel(
 
     // --- Clean up child worktrees (best-effort) ---
     log::debug!(
-        "parallel group {group_name}: cleaning up worktrees for {} spawned children",
-        spawned_ids.len()
+        "parallel group {group_name}: cleaning up worktrees for {} children",
+        child_results.len()
     );
-    //
-    // Iterate over *all* spawned children — not just those that reported a
-    // result — so worktrees created during `fork` for cancelled
-    // or otherwise missing tasks are still cleaned up.
-    //
-    // On success the child is spent: `clean(true)` drops its worktree, its
-    // scratch directory and its state directory, and the parent has already
-    // merged everything worth keeping. On failure the state directory is the
-    // only record of what went wrong, so only the worktree is removed.
-    for (child_name, child_id) in &spawned_ids {
+    for outcome in &child_results {
         if group_error.is_none() {
-            cleanup_child_fully(child_name, child_id);
+            cleanup_child_fully(&outcome.child_name, &outcome.child_id);
         } else {
-            cleanup_child_worktree(gremlin, child_name, child_id);
+            cleanup_child_worktree(gremlin, &outcome.child_name, &outcome.child_id);
         }
     }
 
@@ -485,15 +426,9 @@ struct ChildOutcome {
     child_name: String,
     child_id: String,
     outcome: Result<(), RunError>,
-    child_registry: Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
 }
 
 /// Merge artifacts from a successful child into the parent registry.
-///
-/// Uses [`ArtifactRegistry::merge_registry`] with [`Collision::Ignore`]
-/// and the child name as `key_prefix`. The child's filesystem registry is
-/// constructed from its artifact directory on disk; the file copy inside
-/// `merge_registry` makes merged artifacts survive child cleanup.
 async fn merge_child_artifacts(
     gremlin: &mut Gremlin,
     outcome: &ChildOutcome,
@@ -501,23 +436,6 @@ async fn merge_child_artifacts(
 ) -> Result<(), RunError> {
     use crate::artifacts::registry::{Collision, FileSystemArtifactRegistry};
 
-    // Prefer the in-memory registry the child passed back. This handles
-    // dry-run children (whose DryRunArtifactRegistry never writes files)
-    // and avoids re-reading registry.json from disk for filesystem children.
-    if let Some(ref child_registry) = outcome.child_registry {
-        gremlin
-            .registry
-            .merge_registry(
-                child_registry.as_ref(),
-                Collision::Ignore,
-                Some(&outcome.child_name),
-            )
-            .await
-            .map_err(|e| RunError::Message(format!("artifact merge failed: {e}")))?;
-        return Ok(());
-    }
-
-    // Fallback: construct a FileSystemArtifactRegistry from disk.
     let child_artifact_dir = state_root.join(&outcome.child_id).join("artifacts");
     if !child_artifact_dir.exists() {
         return Ok(());
@@ -539,8 +457,6 @@ async fn merge_child_artifacts(
 
 /// Aggregate token usage and subprocess cost from a child into the parent.
 fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
-    // Derive the child state path from the parent's state directory, matching
-    // the layout `fork` uses (`state_dir.parent() / child_id`).
     let parent_state_root = gremlin
         .state_dir
         .parent()
@@ -576,11 +492,6 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
 }
 
 /// Remove everything a successfully-completed child owns.
-///
-/// Reconstructs a cheap handle with [`Gremlin::from`] — which reads paths only
-/// and never loads a definition — and hands it to [`Gremlin::clean`]. Failure is
-/// expected when the child's state directory is already gone; it is logged and
-/// swallowed, because a group that succeeded must not fail on cleanup.
 fn cleanup_child_fully(child_name: &str, child_id: &str) {
     match Gremlin::from(child_id) {
         Ok(child) => child.clean(true),
@@ -591,15 +502,9 @@ fn cleanup_child_fully(child_name: &str, child_id: &str) {
 }
 
 /// Clean up a child's worktree, best-effort.
-///
-/// Calls `git worktree remove` first so git can clean up its internal
-/// metadata; falls back to manual filesystem deletion only if the git
-/// command fails or the directory still exists afterward.
 fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &str) {
     use crate::core::git;
 
-    // Derive the child state path from the parent's state directory, matching
-    // the layout `fork` uses.
     let parent_state_root = gremlin
         .state_dir
         .parent()
@@ -625,11 +530,8 @@ fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &st
         return;
     }
 
-    // Let git unregister (and remove) the worktree first.
     git::remove_worktree(&gremlin.project_root, &worktree_path.to_string_lossy());
 
-    // If the directory still exists (e.g. git failed or we're not in a repo),
-    // remove it manually as a fallback.
     if worktree_path.is_dir() {
         if let Err(e) = std::fs::remove_dir_all(&worktree_path) {
             log::warn!("parallel group: failed to clean up worktree for {child_name}: {e}");
@@ -814,7 +716,6 @@ mod tests {
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
-        // One success is enough with All policy.
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -849,12 +750,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_on_error_aborts_siblings_on_first_failure() {
-        // With max_concurrent=1, children run one at a time. The "bad"
-        // child is listed first and fails quickly. The "slow" child is
-        // either still waiting on the semaphore (in which case the cancel
-        // flag makes it exit immediately) or has already started (in which
-        // case it runs to completion). Either way, the group returns the
-        // correct error and all threads are joined.
         let stages = vec![ParallelBuilder::new("group")
             .cancel_on_error(true)
             .error_policy(crate::definition::ErrorPolicy::Any)
@@ -888,8 +783,6 @@ mod tests {
 
     #[tokio::test]
     async fn max_concurrent_bounds_concurrency() {
-        // With max_concurrent=1, children run sequentially. We use `sleep 0.1`
-        // commands and check that total time is at least N * 0.1s.
         let stages = vec![ParallelBuilder::new("group")
             .max_concurrent(1)
             .stage(
@@ -918,7 +811,6 @@ mod tests {
         let result = run_parallel(&stage, &mut gremlin, None).await;
         let elapsed = start.elapsed();
         assert!(result.is_ok(), "expected Ok, got {result:?}");
-        // With max_concurrent=1, 3 × 0.1s ≈ 0.3s minimum.
         assert!(
             elapsed >= std::time::Duration::from_millis(250),
             "max_concurrent=1 should serialize, but took only {elapsed:?}"
@@ -946,7 +838,6 @@ mod tests {
             .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
-        // Mark child "a" as already done in the registry.
         let scope = stage_key(&gremlin.loop_iter, "group");
         mark_child_done(gremlin.registry.as_ref(), &scope, "a").await;
 
@@ -954,7 +845,6 @@ mod tests {
         let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
-        // Child "a" was skipped; both children are now marked done.
         assert!(
             gremlin
                 .registry
@@ -990,14 +880,12 @@ mod tests {
             .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
-        // Mark both children done — the group is fully complete.
         let scope = stage_key(&gremlin.loop_iter, "group");
         mark_child_done(gremlin.registry.as_ref(), &scope, "a").await;
         mark_child_done(gremlin.registry.as_ref(), &scope, "b").await;
 
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
-        // Should succeed without running any child (which would fail).
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -1005,8 +893,6 @@ mod tests {
 
     #[tokio::test]
     async fn child_worktrees_are_cleaned_up() {
-        // Without a git repo, children won't have worktrees — the test
-        // verifies that cleanup is best-effort and does not crash.
         let stages = vec![ParallelBuilder::new("group")
             .stage(
                 ExecBuilder::new("a")
@@ -1028,9 +914,6 @@ mod tests {
     async fn child_artifacts_are_merged_into_parent() {
         use crate::test_support::EnvGuard;
 
-        // The child runs an exec stage that produces an artifact via
-        // `bind`. After the parallel group succeeds, the parent registry
-        // must contain the merged artifact, prefixed with the child name.
         let stages = vec![ParallelBuilder::new("group")
             .stage(
                 ExecBuilder::new("writer")
@@ -1043,10 +926,6 @@ mod tests {
             .unwrap()];
         let (_tmp, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
-        // Point config::state_root() at the temp dir so the fallback
-        // path in merge_child_artifacts finds the child's artifact
-        // directory. Without this, config::state_root() returns the
-        // system default and the merge silently skips every child.
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_SANDBOX_ROOT", _tmp.path());
 
@@ -1054,7 +933,6 @@ mod tests {
         let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
-        // The parent registry must contain the merged artifact.
         let merged_key = "writer/out.txt";
         let registered = gremlin
             .registry
@@ -1080,17 +958,12 @@ mod tests {
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
-        // Cost aggregation is best-effort; the test just verifies no panic.
     }
 
     // --- Client inheritance ---
 
     #[tokio::test]
     async fn parallel_with_explicit_client_succeeds() {
-        // Smoke test: a parallel with an explicit `client:` propagates it
-        // to child definitions so resolve_client_spec's step-4 fallback
-        // picks it up. An exec child doesn't call resolve_client, so this
-        // just proves the new code path doesn't crash.
         let stages = vec![ParallelBuilder::new("group")
             .client("cmd:true")
             .stage(

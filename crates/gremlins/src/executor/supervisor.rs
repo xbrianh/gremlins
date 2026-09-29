@@ -6,12 +6,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Map, Value};
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::watch;
 
 use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
@@ -37,8 +37,15 @@ pub struct RunState {
 }
 
 // ---------------------------------------------------------------------------
-// Supervisor
+// Global run_map — shared between the supervisor socket loop and the
+// parallel executor so that forked children are first-class gremlins.
 // ---------------------------------------------------------------------------
+
+static RUN_MAP: OnceLock<Arc<Mutex<HashMap<String, RunHandle>>>> = OnceLock::new();
+
+fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
+    RUN_MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
 
 /// The `_lock` file holds the executor's exclusive advisory flock for the
 /// lifetime of the supervisor. When the process exits (after the last
@@ -49,7 +56,8 @@ pub async fn run_supervisor(
     state_root: PathBuf,
     _lock: GremlinsDaemonLock,
 ) {
-    let run_map: Arc<Mutex<HashMap<String, RunHandle>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Initialise the global run_map so launch_child/stop_child work.
+    get_run_map();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
     loop {
@@ -62,11 +70,10 @@ pub async fn run_supervisor(
             result = listener.accept() => {
                 match result {
                     Ok((stream, _addr)) => {
-                        let run_map = run_map.clone();
                         let state_root = state_root.clone();
                         let shutdown_tx = shutdown_tx.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, run_map, state_root, shutdown_tx).await;
+                            handle_connection(stream, state_root, shutdown_tx).await;
                         });
                     }
                     Err(e) => {
@@ -84,7 +91,6 @@ pub async fn run_supervisor(
 
 async fn handle_connection(
     stream: tokio::net::UnixStream,
-    run_map: Arc<Mutex<HashMap<String, RunHandle>>>,
     state_root: PathBuf,
     shutdown_tx: watch::Sender<bool>,
 ) {
@@ -107,14 +113,16 @@ async fn handle_connection(
             .unwrap_or("")
             .to_string();
 
-        let response = dispatch_op(&op, &request, &run_map, &state_root, &shutdown_tx).await;
+        let response = dispatch_op(&op, &request, &state_root, &shutdown_tx).await;
 
         if let Err(e) = socket::write_json_line(&mut write_half, &response).await {
             log::warn!("supervisor: write error: {e}");
             break;
         }
 
-        if matches!(op.as_str(), "launch" | "stop" | "resume") && run_map.lock().await.is_empty() {
+        if matches!(op.as_str(), "launch" | "stop" | "resume")
+            && get_run_map().lock().unwrap().is_empty()
+        {
             let _ = shutdown_tx.send(true);
         }
     }
@@ -127,17 +135,16 @@ async fn handle_connection(
 async fn dispatch_op(
     op: &str,
     request: &Value,
-    run_map: &Arc<Mutex<HashMap<String, RunHandle>>>,
     state_root: &Path,
     shutdown_tx: &watch::Sender<bool>,
 ) -> Value {
     match op {
-        "launch" => handle_launch(request, run_map, state_root, shutdown_tx).await,
-        "stop" => handle_stop(request, run_map).await,
-        "resume" => handle_resume(request, run_map, state_root, shutdown_tx).await,
-        "ls" => handle_ls(request, run_map, state_root).await,
-        "status" => handle_status(request, run_map, state_root).await,
-        "info" => handle_info(request, run_map, state_root).await,
+        "launch" => handle_launch(request, state_root, shutdown_tx).await,
+        "stop" => handle_stop(request).await,
+        "resume" => handle_resume(request, state_root, shutdown_tx).await,
+        "ls" => handle_ls(request, state_root).await,
+        "status" => handle_status(request, state_root).await,
+        "info" => handle_info(request, state_root).await,
         _ => error_response(&format!("unknown op: {op:?}")),
     }
 }
@@ -164,7 +171,6 @@ fn error_response(message: &str) -> Value {
 
 async fn handle_launch(
     request: &Value,
-    run_map: &Arc<Mutex<HashMap<String, RunHandle>>>,
     _state_root: &Path,
     shutdown_tx: &watch::Sender<bool>,
 ) -> Value {
@@ -289,21 +295,21 @@ async fn handle_launch(
         started_at: state::now_stamp(),
     });
 
-    let run_map_clone = run_map.clone();
+    let run_map = get_run_map().clone();
     let id_clone = id.clone();
     let state_tx_clone = state_tx.clone();
     let shutdown_tx_clone = shutdown_tx.clone();
 
     tokio::spawn(async move {
         let result = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
-        run_map_clone.lock().await.remove(&id_clone);
+        run_map.lock().unwrap().remove(&id_clone);
         let _ = state_tx_clone.send(RunState {
             id: id_clone.clone(),
             status: if result == 0 { "done" } else { "stopped" }.to_string(),
             stage: String::new(),
             started_at: String::new(),
         });
-        if run_map_clone.lock().await.is_empty() {
+        if run_map.lock().unwrap().is_empty() {
             let _ = shutdown_tx_clone.send(true);
         }
     });
@@ -312,7 +318,7 @@ async fn handle_launch(
         cancel: cancel_tx,
         state_tx,
     };
-    run_map.lock().await.insert(id.clone(), handle);
+    get_run_map().lock().unwrap().insert(id.clone(), handle);
 
     ok_response(serde_json::json!({"id": id}))
 }
@@ -321,7 +327,7 @@ async fn handle_launch(
 // stop
 // ---------------------------------------------------------------------------
 
-async fn handle_stop(request: &Value, run_map: &Arc<Mutex<HashMap<String, RunHandle>>>) -> Value {
+async fn handle_stop(request: &Value) -> Value {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
         return error_response("missing 'id' field");
@@ -331,13 +337,15 @@ async fn handle_stop(request: &Value, run_map: &Arc<Mutex<HashMap<String, RunHan
         return error_response(&format!("invalid gremlin id {id:?}"));
     }
 
-    let map = run_map.lock().await;
+    let run_map = get_run_map();
+    let map = run_map.lock().unwrap();
     match map.get(id) {
         Some(handle) => {
             let _ = handle.cancel.send(true);
             ok_response(serde_json::json!({"id": id, "status": "stopping"}))
         }
         None => {
+            drop(map);
             let state_dir = config::state_root().join(id);
             let state_file = state_dir.join("state.json");
             if state_file.is_file() {
@@ -365,7 +373,6 @@ async fn handle_stop(request: &Value, run_map: &Arc<Mutex<HashMap<String, RunHan
 
 async fn handle_resume(
     request: &Value,
-    run_map: &Arc<Mutex<HashMap<String, RunHandle>>>,
     state_root: &Path,
     shutdown_tx: &watch::Sender<bool>,
 ) -> Value {
@@ -379,7 +386,7 @@ async fn handle_resume(
     }
 
     {
-        let map = run_map.lock().await;
+        let map = get_run_map().lock().unwrap();
         if map.contains_key(id) {
             return error_response(&format!("gremlin {id} is already running"));
         }
@@ -441,21 +448,21 @@ async fn handle_resume(
         started_at: state::now_stamp(),
     });
 
-    let run_map_clone = run_map.clone();
+    let run_map = get_run_map().clone();
     let id_clone = id.to_string();
     let state_tx_clone = state_tx.clone();
     let shutdown_tx_clone = shutdown_tx.clone();
 
     tokio::spawn(async move {
         let result = run_gremlin_task(gremlin, Some(cancel_rx), Some(&resume_stage)).await;
-        run_map_clone.lock().await.remove(&id_clone);
+        run_map.lock().unwrap().remove(&id_clone);
         let _ = state_tx_clone.send(RunState {
             id: id_clone.clone(),
             status: if result == 0 { "done" } else { "stopped" }.to_string(),
             stage: String::new(),
             started_at: String::new(),
         });
-        if run_map_clone.lock().await.is_empty() {
+        if run_map.lock().unwrap().is_empty() {
             let _ = shutdown_tx_clone.send(true);
         }
     });
@@ -464,7 +471,7 @@ async fn handle_resume(
         cancel: cancel_tx,
         state_tx,
     };
-    run_map.lock().await.insert(id.to_string(), handle);
+    get_run_map().lock().unwrap().insert(id.to_string(), handle);
 
     ok_response(serde_json::json!({"id": id, "resume_from": resume_stage_for_response}))
 }
@@ -473,13 +480,9 @@ async fn handle_resume(
 // ls
 // ---------------------------------------------------------------------------
 
-async fn handle_ls(
-    _request: &Value,
-    run_map: &Arc<Mutex<HashMap<String, RunHandle>>>,
-    state_root: &Path,
-) -> Value {
+async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
     let live: HashMap<String, String> = {
-        let map = run_map.lock().await;
+        let map = get_run_map().lock().unwrap();
         map.keys()
             .map(|id| (id.clone(), "running".to_string()))
             .collect()
@@ -589,11 +592,7 @@ async fn handle_ls(
 // status
 // ---------------------------------------------------------------------------
 
-async fn handle_status(
-    request: &Value,
-    run_map: &Arc<Mutex<HashMap<String, RunHandle>>>,
-    state_root: &Path,
-) -> Value {
+async fn handle_status(request: &Value, state_root: &Path) -> Value {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
         return error_response("missing 'id' field");
@@ -614,7 +613,7 @@ async fn handle_status(
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
 
-    let is_live = run_map.lock().await.contains_key(id);
+    let is_live = get_run_map().lock().unwrap().contains_key(id);
 
     let status = if is_live {
         "running".to_string()
@@ -645,11 +644,7 @@ async fn handle_status(
 // info
 // ---------------------------------------------------------------------------
 
-async fn handle_info(
-    request: &Value,
-    run_map: &Arc<Mutex<HashMap<String, RunHandle>>>,
-    state_root: &Path,
-) -> Value {
+async fn handle_info(request: &Value, state_root: &Path) -> Value {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
         return error_response("missing 'id' field");
@@ -670,7 +665,7 @@ async fn handle_info(
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
 
-    let is_live = run_map.lock().await.contains_key(id);
+    let is_live = get_run_map().lock().unwrap().contains_key(id);
 
     let status = if is_live {
         "running".to_string()
@@ -800,6 +795,77 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
         map.insert(key.to_string(), value);
     }
     Ok(map)
+}
+
+// ---------------------------------------------------------------------------
+// launch_child / stop_child — public API for the parallel executor
+// ---------------------------------------------------------------------------
+
+/// Launch a pre-configured child gremlin, registering it in the run_map so
+/// it appears in `gremlins ls` with live status.
+///
+/// The child must already be forked (artifacts copied, worktree branched,
+/// state written). This function creates cancel and state-watch channels,
+/// spawns a tokio task for [`run_gremlin_task`], inserts a [`RunHandle`]
+/// into the global run map, and returns a receiver that fires when the
+/// child reaches a terminal state.
+///
+/// Unlike [`handle_launch`], this does *not* generate an id, resolve a
+/// definition, or call [`Gremlin::init`] — the gremlin is ready before the
+/// call and is consumed by it.
+///
+/// This function is synchronous (no `.await`) so its caller — the parallel
+/// executor — does not produce a non-`Send` future. The run_map uses a
+/// `std::sync::Mutex` so `lock()` never blocks on an async runtime.
+pub(crate) fn launch_child(gremlin: Gremlin) -> watch::Receiver<RunState> {
+    let id = gremlin.id.to_string();
+
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (state_tx, state_rx) = watch::channel(RunState {
+        id: id.clone(),
+        status: "running".to_string(),
+        stage: "starting".to_string(),
+        started_at: state::now_stamp(),
+    });
+
+    let run_map = get_run_map().clone();
+    let id_clone = id.clone();
+    let state_tx_clone = state_tx.clone();
+
+    tokio::spawn(async move {
+        let result = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
+        run_map.lock().unwrap().remove(&id_clone);
+        let _ = state_tx_clone.send(RunState {
+            id: id_clone.clone(),
+            status: if result == 0 { "done" } else { "stopped" }.to_string(),
+            stage: String::new(),
+            started_at: String::new(),
+        });
+        // Don't signal shutdown — the parent gremlin is still running.
+    });
+
+    let handle = RunHandle {
+        cancel: cancel_tx,
+        state_tx,
+    };
+    get_run_map().lock().unwrap().insert(id, handle);
+
+    state_rx
+}
+
+/// Stop a child gremlin by sending on its cancel channel.
+///
+/// A no-op when the child is not in the run map (already finished or never
+/// launched).
+pub(crate) async fn stop_child(id: &str) {
+    let run_map = get_run_map();
+    let handle = {
+        let map = run_map.lock().unwrap();
+        map.get(id).map(|h| h.cancel.clone())
+    };
+    if let Some(cancel) = handle {
+        let _ = cancel.send(true);
+    }
 }
 
 fn validate_launch_inputs(
