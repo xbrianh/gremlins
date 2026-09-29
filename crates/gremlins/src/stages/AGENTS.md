@@ -22,13 +22,14 @@ per-stage builder (`AgentBuilder`, `ExecBuilder`, `SequenceBuilder`,
 | `builders/agent.rs` | `AgentBuilder` — builder pattern for `BuilderStage::Agent`. Validates interpolation syntax, framework-key collisions, bind/interpolation key collisions, and unused keys. |
 | `builders/exec.rs` | `ExecBuilder` — builder pattern for `BuilderStage::Exec`. Validates interpolation syntax, bind/interpolation key collisions, and unused keys. Unlike `AgentBuilder`, rejects **all** `FRAMEWORK_KEYS` in options (including `model`). |
 | `builders/composite.rs` | `SequenceBuilder`, `ParallelBuilder` — builder patterns for composite stages. Validates empty-body rejection, max-iterations, nested-parallel rejection, and child-name uniqueness/validity. |
-| `builders/definition.rs` | `DefinitionBuilder` — top-level YAML ingestion. `from_yaml` expands, then `stage_from_yaml` dispatches to the per-stage builders. Also `BootstrapBuilder` and `LandBuilder`. |
+| `builders/definition.rs` | `DefinitionBuilder` — programmatic (non-YAML) builder for `StaticDefinition`. Also `BootstrapBuilder` and `LandBuilder`. |
+| `definition/static/yaml.rs` | YAML ingestion — `StaticDefinition::from_yaml_file` expands, then `stage_from_yaml` dispatches to the per-stage builders. |
 
 ## Architecture
 
 Parsing happens in two layers:
 
-1. **Builder layer** (`builders/definition.rs::stage_from_yaml`). Runs
+1. **YAML layer** (`definition/static/yaml.rs::stage_from_yaml`). Runs
    first. Matches `type` to the correct builder (`AgentBuilder`,
    `ExecBuilder`, `SequenceBuilder`, `ParallelBuilder`), calls
    `.build()` → `BuilderStage`, and descends into composite bodies
@@ -40,8 +41,8 @@ Parsing happens in two layers:
 2. **Name-filling pass** (`builders/definition.rs::fill_builder_names`).
    Runs after the `BuilderStage` tree is built (inside
    `DefinitionBuilder::build`). Converts each stage to a `StageEntry`
-   (with `auto_name: None`), calls `schemas/loader::fill_names` to
-   assign auto-generated names to unnamed stages and disambiguate
+   (with `auto_name: None`), calls `definition/static/loader::fill_names`
+   to assign auto-generated names to unnamed stages and disambiguate
    duplicates, then writes the resolved names back via `set_name()`.
    Recurses into composite bodies.
 
@@ -59,7 +60,8 @@ bare `parallel:` sugar.
 - **`skip_if_exists` is composite-only.** Set on `Sequence` and `Parallel`
   via the builder; leaf `BuilderStage` accessors return `""`.
 - **Composite bodies are fully parsed.** Children are `Vec<BuilderStage>`,
-  not raw YAML. Descent happens in `stage_from_yaml` via `yaml_children`.
+  not raw YAML. Descent happens in `definition/static/yaml.rs::stage_from_yaml`
+  via `yaml_children`.
 - **Framework-key filtering.** `cwd` and `base_ref` are stripped from
   `options` during `to_yaml` serialization — they're runtime-injected,
   not user-visible.
@@ -80,8 +82,8 @@ bare `parallel:` sugar.
 | You want to … | Look at |
 |---|---|
 | Add a new stage type | Recipe below; `builders/agent.rs` for leaf, `builders/composite.rs` for composite |
-| Understand parse flow | `builders/definition.rs` — `DefinitionBuilder::from_yaml` → `stage_from_yaml` → per-type builder → `BuilderStage` |
-| Understand name-filling | `builders/definition.rs::fill_builder_names` → `schemas/loader::fill_names` |
+| Understand parse flow | `definition/static/yaml.rs` — `StaticDefinition::from_yaml_file` → `stage_from_yaml` → per-type builder → `BuilderStage` |
+| Understand name-filling | `builders/definition.rs::fill_builder_names` → `definition/static/loader::fill_names` |
 | Change serialization shape | `node.rs` — `to_yaml` / `*_to_yaml` helpers |
 | Add a composite-only attribute | `composite.rs` (struct), `node.rs` (serialize), `builders/composite.rs` (builder) |
 | Understand variable substitution | `base.rs::substitute_vars` |
@@ -98,7 +100,7 @@ bare `parallel:` sugar.
    For composites, include `StageAttrs`, `client: Option<ClientSpec>`,
    and `body: Vec<BuilderStage>`.
 4. **Wire into `stage_from_yaml`.** Add a match arm and a `foo_from_yaml`
-   helper in `builders/definition.rs`.
+   helper in `definition/static/yaml.rs`.
 5. **Serialization.** Add a `*_to_yaml` helper and a match arm in
    `BuilderStage::to_yaml`. Add a match arm in `to_stage_node` for
    bind/interpolation propagation.

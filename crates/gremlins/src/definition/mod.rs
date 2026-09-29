@@ -4,8 +4,9 @@
 //!
 //! This module defines the trait and the `ExecutorStage` enum the trait
 //! returns.  `StaticDefinition` is a cursor-driven implementation that owns
-//! the definition data directly and converts one top-level [`BuilderStage`]
-//! into an [`ExecutorStage`] per `next_stage()` call.
+//! the definition data directly and converts one top-level
+//! [`crate::stages::node::BuilderStage`] into an [`ExecutorStage`] per
+//! `next_stage()` call.
 
 use std::path::Path;
 
@@ -54,7 +55,8 @@ pub struct Sequence {
 // ---------------------------------------------------------------------------
 
 /// The next stage (or stages) the executor should run.
-/// Converted from [`BuilderStage`] by [`StaticDefinition::convert_stage`].
+/// Converted from [`crate::stages::node::BuilderStage`] by
+/// [`StaticDefinition::convert_stage`].
 pub enum ExecutorStage {
     /// Run an agent stage.
     Agent {
