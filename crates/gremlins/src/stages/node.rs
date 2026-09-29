@@ -10,9 +10,10 @@ use serde_yaml::{Mapping, Value};
 use thiserror::Error;
 
 use crate::definition::r#static::loader::{StageEntry, StageNode};
+use crate::definition::ClientSpec;
 use crate::schemas::error::SchemaError;
 use crate::stages::agent::Agent;
-use crate::stages::composite::{ClientSpec, StageAttrs};
+use crate::stages::composite::StageAttrs;
 use crate::stages::exec::Exec;
 use crate::stages::parallel::ErrorPolicy;
 

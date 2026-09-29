@@ -1,6 +1,7 @@
 use serde_json::Value;
 
-use crate::stages::composite::{ClientSpec, StageAttrs};
+use crate::definition::ClientSpec;
+use crate::stages::composite::StageAttrs;
 
 #[derive(Debug, Clone)]
 pub struct Sequence {

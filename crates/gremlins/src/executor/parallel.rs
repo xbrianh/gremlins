@@ -135,8 +135,7 @@ pub(crate) async fn run_parallel(
     for child in children {
         // Resolve the effective client for this parallel group (must come
         // first so it can be baked into the child provider).
-        let enclosing_spec =
-            enclosing_client.map(|c| crate::stages::composite::ClientSpec(c.to_string()));
+        let enclosing_spec = enclosing_client.map(|c| crate::definition::ClientSpec(c.to_string()));
         let effective_client: Option<&str> = client
             .as_ref()
             .or(enclosing_spec.as_ref())
@@ -644,11 +643,10 @@ mod tests {
     use crate::builders::artifacts::artifact;
     use crate::builders::composite::ParallelBuilder;
     use crate::builders::exec::ExecBuilder;
-    use crate::definition::{ExecutorStage, StaticDefinition};
+    use crate::definition::{BuilderStage, ExecutorStage, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::stages::node::BuilderStage;
 
     /// Convert the first parsed stage to an ExecutorStage for dispatch.
     fn first_executor_stage(stages: &[BuilderStage]) -> ExecutorStage {

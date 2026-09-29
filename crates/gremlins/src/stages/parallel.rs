@@ -8,7 +8,8 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::stages::composite::{ClientSpec, StageAttrs};
+use crate::definition::ClientSpec;
+use crate::stages::composite::StageAttrs;
 
 /// How a group decides to fail once individual children have errored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
