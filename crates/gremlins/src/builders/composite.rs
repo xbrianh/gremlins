@@ -2,15 +2,15 @@
 
 use crate::definition::ClientSpec;
 use crate::schemas::error::SchemaError;
-use crate::stages::composite::StageAttrs;
-use crate::stages::node::BuilderStage;
-use crate::stages::parallel::{validate_child_names, ErrorPolicy};
+use crate::stage_spec::composite::StageAttrs;
+use crate::stage_spec::node::StageSpec;
+use crate::stage_spec::parallel::{validate_child_names, ErrorPolicy};
 
 // ---------------------------------------------------------------------------
 // SequenceBuilder
 // ---------------------------------------------------------------------------
 
-/// Build a [`BuilderStage::Sequence`].
+/// Build a [`StageSpec::Sequence`].
 ///
 /// # Example
 ///
@@ -25,7 +25,7 @@ use crate::stages::parallel::{validate_child_names, ErrorPolicy};
 #[derive(Debug, Clone)]
 pub struct SequenceBuilder {
     name: String,
-    body: Vec<BuilderStage>,
+    body: Vec<StageSpec>,
     skip_if_exists: String,
     client: Option<ClientSpec>,
     max_iterations: u32,
@@ -52,13 +52,13 @@ impl SequenceBuilder {
     }
 
     /// Append a child stage.
-    pub fn stage(mut self, stage: BuilderStage) -> Self {
+    pub fn stage(mut self, stage: StageSpec) -> Self {
         self.body.push(stage);
         self
     }
 
     /// Append many child stages.
-    pub fn stages(mut self, stages: Vec<BuilderStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<StageSpec>) -> Self {
         self.body.extend(stages);
         self
     }
@@ -87,8 +87,8 @@ impl SequenceBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`BuilderStage::Sequence`].
-    pub fn build(mut self) -> Result<BuilderStage, SchemaError> {
+    /// Consume the builder and produce a [`StageSpec::Sequence`].
+    pub fn build(mut self) -> Result<StageSpec, SchemaError> {
         let name = self.name.clone();
 
         if self.body.is_empty() {
@@ -112,7 +112,7 @@ impl SequenceBuilder {
         attrs.stage_type = "sequence".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        Ok(BuilderStage::Sequence {
+        Ok(StageSpec::Sequence {
             attrs,
             max_iterations: self.max_iterations,
             interval: self.interval,
@@ -126,7 +126,7 @@ impl SequenceBuilder {
 // ParallelBuilder
 // ---------------------------------------------------------------------------
 
-/// Build a [`BuilderStage::Parallel`].
+/// Build a [`StageSpec::Parallel`].
 ///
 /// # Example
 ///
@@ -142,7 +142,7 @@ impl SequenceBuilder {
 #[derive(Debug, Clone)]
 pub struct ParallelBuilder {
     name: String,
-    body: Vec<BuilderStage>,
+    body: Vec<StageSpec>,
     max_concurrent: Option<u32>,
     cancel_on_error: bool,
     error_policy: ErrorPolicy,
@@ -171,13 +171,13 @@ impl ParallelBuilder {
     }
 
     /// Append a child stage.
-    pub fn stage(mut self, stage: BuilderStage) -> Self {
+    pub fn stage(mut self, stage: StageSpec) -> Self {
         self.body.push(stage);
         self
     }
 
     /// Append many child stages.
-    pub fn stages(mut self, stages: Vec<BuilderStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<StageSpec>) -> Self {
         self.body.extend(stages);
         self
     }
@@ -212,8 +212,8 @@ impl ParallelBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`BuilderStage::Parallel`].
-    pub fn build(mut self) -> Result<BuilderStage, SchemaError> {
+    /// Consume the builder and produce a [`StageSpec::Parallel`].
+    pub fn build(mut self) -> Result<StageSpec, SchemaError> {
         let name = self.name.clone();
 
         // Reject max_concurrent(0) — YAML rejects it, and the executor
@@ -249,7 +249,7 @@ impl ParallelBuilder {
         attrs.stage_type = "parallel".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        Ok(BuilderStage::Parallel {
+        Ok(StageSpec::Parallel {
             attrs,
             max_concurrent: self.max_concurrent,
             cancel_on_error: self.cancel_on_error,

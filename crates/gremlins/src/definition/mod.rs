@@ -5,7 +5,7 @@
 //! This module defines the trait and the `ExecutorStage` enum the trait
 //! returns.  `StaticDefinition` is a cursor-driven implementation that owns
 //! the definition data directly and converts one top-level
-//! [`crate::stages::node::BuilderStage`] into an [`ExecutorStage`] per
+//! [`crate::stage_spec::node::StageSpec`] into an [`ExecutorStage`] per
 //! `next_stage()` call.
 
 use std::path::Path;
@@ -15,10 +15,10 @@ use thiserror::Error;
 
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
-pub use crate::stages::agent::Agent;
-pub use crate::stages::exec::Exec;
-pub use crate::stages::node::BuilderStage;
-pub use crate::stages::parallel::ErrorPolicy;
+pub use crate::stage_spec::agent::Agent;
+pub use crate::stage_spec::exec::Exec;
+pub use crate::stage_spec::node::StageSpec;
+pub use crate::stage_spec::parallel::ErrorPolicy;
 
 /// Parsed client descriptor from a stage dict's `client` key.
 /// A plain String so gremlins-core stays free of PyO3.
@@ -60,7 +60,7 @@ pub struct Sequence {
 // ---------------------------------------------------------------------------
 
 /// The next stage (or stages) the executor should run.
-/// Converted from [`crate::stages::node::BuilderStage`] by
+/// Converted from [`crate::stage_spec::node::StageSpec`] by
 /// [`StaticDefinition::convert_stage`].
 pub enum ExecutorStage {
     /// Run an agent stage.

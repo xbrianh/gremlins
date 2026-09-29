@@ -8,7 +8,7 @@ pub mod definition;
 pub mod executor;
 pub mod prelude;
 pub mod schemas;
-pub mod stages;
+pub mod stage_spec;
 
 #[cfg(test)]
 mod test_support;

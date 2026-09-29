@@ -20,8 +20,8 @@ use crate::definition::r#static::expand;
 use crate::definition::ClientSpec;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
-use crate::stages::node::BuilderStage;
-use crate::stages::parallel::ErrorPolicy;
+use crate::stage_spec::node::StageSpec;
+use crate::stage_spec::parallel::ErrorPolicy;
 
 use super::StaticDefinition;
 
@@ -128,7 +128,7 @@ fn from_expanded_value(
     let raw_stages = stages_from_yaml(root)?;
 
     // Parse stages through the per-type YAML→builder dispatch.
-    let mut stages: Vec<BuilderStage> = Vec::new();
+    let mut stages: Vec<StageSpec> = Vec::new();
     for raw in &raw_stages {
         let mapping = raw
             .as_mapping()
@@ -172,7 +172,7 @@ fn from_expanded_value(
 // ---------------------------------------------------------------------------
 
 /// Dispatch a single stage mapping to the appropriate per-type builder.
-fn stage_from_yaml(mapping: &Mapping) -> Result<BuilderStage, SchemaError> {
+fn stage_from_yaml(mapping: &Mapping) -> Result<StageSpec, SchemaError> {
     let name = mapping
         .get("name")
         .and_then(Value::as_str)
@@ -277,7 +277,7 @@ fn yaml_client(mapping: &Mapping) -> Option<ClientSpec> {
 }
 
 /// Build an [`AgentBuilder`] from a YAML stage mapping.
-fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<BuilderStage, SchemaError> {
+fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
     let prompts = yaml_string_list(mapping, "prompt")?;
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
@@ -305,7 +305,7 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<BuilderStage, Schema
 }
 
 /// Build an [`ExecBuilder`] from a YAML stage mapping.
-fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<BuilderStage, SchemaError> {
+fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
@@ -329,7 +329,7 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<BuilderStage, SchemaE
 }
 
 /// Build a [`SequenceBuilder`] from a YAML stage mapping.
-fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<BuilderStage, SchemaError> {
+fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
     let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
         None => 1u32,
         Some(v) => {
@@ -378,7 +378,7 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<BuilderStage, Sch
 }
 
 /// Build a [`ParallelBuilder`] from a YAML stage mapping.
-fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<BuilderStage, SchemaError> {
+fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
     let max_concurrent = match mapping.get("max_concurrent").filter(|v| !v.is_null()) {
         None => None,
         Some(v) => {
@@ -438,7 +438,7 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<BuilderStage, Sch
 
 /// Parse children from a composite's `key` ("body") through
 /// the same per-type dispatch.
-fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<BuilderStage>, SchemaError> {
+fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<StageSpec>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(Vec::new());
     };
@@ -458,7 +458,7 @@ fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<BuilderStage>, Sche
 
 /// Build the land stage from its YAML mapping, forcing name=land and
 /// type=exec through [`LandBuilder`].
-fn land_from_yaml_builder(mapping: &Mapping) -> Result<BuilderStage, SchemaError> {
+fn land_from_yaml_builder(mapping: &Mapping) -> Result<StageSpec, SchemaError> {
     let interpolation_map = yaml_string_map(mapping, "interpolation")?;
     let bind_map = yaml_string_map(mapping, "bind")?;
     let options = yaml_options(mapping)?;
@@ -578,15 +578,15 @@ mod tests {
     use crate::builders::artifacts::artifact;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
-    use crate::stages::parallel::ErrorPolicy;
+    use crate::stage_spec::parallel::ErrorPolicy;
 
     // ------------------------------------------------------------------
     // to_yaml / from_yaml round-trip symmetry
     // ------------------------------------------------------------------
 
-    /// Helper: serialize a BuilderStage to a YAML Mapping and parse it back
+    /// Helper: serialize a StageSpec to a YAML Mapping and parse it back
     /// through stage_from_yaml, asserting the two are equal.
-    fn assert_round_trip(stage: &BuilderStage) {
+    fn assert_round_trip(stage: &StageSpec) {
         let yaml_val = stage.to_yaml();
         let mapping = yaml_val
             .as_mapping()
