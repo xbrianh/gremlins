@@ -567,8 +567,8 @@ mod tests {
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
-        // {string_k} is substituted; {num_k} is not a string option and remains
-        assert!(prepared.prompt.contains("v {num_k}"));
+        // {string_k} and {num_k} are both substituted
+        assert!(prepared.prompt.contains("v 42"));
     }
 
     #[tokio::test]
