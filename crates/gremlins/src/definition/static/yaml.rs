@@ -80,9 +80,8 @@ impl StaticDefinition {
         path: &Path,
         client_override: Option<&str>,
     ) -> Result<Self, SchemaError> {
-        let data = std::fs::read(path).map_err(|e| {
-            SchemaError::Generic(format!("failed to read {}: {e}", path.display()))
-        })?;
+        let data = std::fs::read(path)
+            .map_err(|e| SchemaError::Generic(format!("failed to read {}: {e}", path.display())))?;
         Self::from_expanded_bytes(&data, client_override)
     }
 }
