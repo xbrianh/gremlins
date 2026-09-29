@@ -1,6 +1,6 @@
 //! The typed stage tree.
 //!
-//! A parsed stage tree is a [`BuilderStage`] — one variant per stage type,
+//! A parsed stage tree is a [`StageSpec`] — one variant per stage type,
 //! with composites holding their fully parsed children. The tree is pure
 //! data: nothing here touches a client, a worktree, or the network.
 
@@ -12,10 +12,10 @@ use thiserror::Error;
 use crate::definition::r#static::loader::{StageEntry, StageNode};
 use crate::definition::ClientSpec;
 use crate::schemas::error::SchemaError;
-use crate::stages::agent::Agent;
-use crate::stages::composite::StageAttrs;
-use crate::stages::exec::Exec;
-use crate::stages::parallel::ErrorPolicy;
+use crate::stage_spec::agent::Agent;
+use crate::stage_spec::composite::StageAttrs;
+use crate::stage_spec::exec::Exec;
+use crate::stage_spec::parallel::ErrorPolicy;
 
 /// Why a stage failed to parse.
 #[derive(Error, Debug)]
@@ -46,7 +46,7 @@ impl From<StageError> for SchemaError {
 /// reuse the composite stage's parsed data and replace its raw
 /// `Vec<serde_json::Value>` body with the fully parsed children.
 #[derive(Debug, Clone, PartialEq)]
-pub enum BuilderStage {
+pub enum StageSpec {
     Agent {
         stage: Agent,
         client: Option<ClientSpec>,
@@ -60,7 +60,7 @@ pub enum BuilderStage {
         max_iterations: u32,
         interval: Option<f64>,
         client: Option<ClientSpec>,
-        body: Vec<BuilderStage>,
+        body: Vec<StageSpec>,
     },
     Parallel {
         attrs: StageAttrs,
@@ -68,28 +68,26 @@ pub enum BuilderStage {
         cancel_on_error: bool,
         error_policy: ErrorPolicy,
         client: Option<ClientSpec>,
-        body: Vec<BuilderStage>,
+        body: Vec<StageSpec>,
     },
 }
 
-impl BuilderStage {
+impl StageSpec {
     /// The stage's name — its identity in state, artifacts, and errors.
     pub fn name(&self) -> &str {
         match self {
-            BuilderStage::Agent { stage, .. } => &stage.name,
-            BuilderStage::Exec { stage, .. } => &stage.name,
-            BuilderStage::Sequence { attrs, .. } | BuilderStage::Parallel { attrs, .. } => {
-                &attrs.name
-            }
+            StageSpec::Agent { stage, .. } => &stage.name,
+            StageSpec::Exec { stage, .. } => &stage.name,
+            StageSpec::Sequence { attrs, .. } | StageSpec::Parallel { attrs, .. } => &attrs.name,
         }
     }
 
     /// The stage's type, as declared (`parallel` for a bare `parallel:` block).
     pub fn stage_type(&self) -> &str {
         match self {
-            BuilderStage::Agent { .. } => "agent",
-            BuilderStage::Exec { .. } => "exec",
-            BuilderStage::Sequence { attrs, .. } | BuilderStage::Parallel { attrs, .. } => {
+            StageSpec::Agent { .. } => "agent",
+            StageSpec::Exec { .. } => "exec",
+            StageSpec::Sequence { attrs, .. } | StageSpec::Parallel { attrs, .. } => {
                 &attrs.stage_type
             }
         }
@@ -98,28 +96,28 @@ impl BuilderStage {
     /// The stage's own client, if it declared one.
     pub fn client(&self) -> Option<&ClientSpec> {
         match self {
-            BuilderStage::Agent { client, .. }
-            | BuilderStage::Exec { client, .. }
-            | BuilderStage::Sequence { client, .. }
-            | BuilderStage::Parallel { client, .. } => client.as_ref(),
+            StageSpec::Agent { client, .. }
+            | StageSpec::Exec { client, .. }
+            | StageSpec::Sequence { client, .. }
+            | StageSpec::Parallel { client, .. } => client.as_ref(),
         }
     }
 
     /// The artifact guard that makes the stage a conditional producer.
     pub fn skip_if_exists(&self) -> &str {
         match self {
-            BuilderStage::Agent { .. } | BuilderStage::Exec { .. } => "",
-            BuilderStage::Sequence { attrs, .. } | BuilderStage::Parallel { attrs, .. } => {
+            StageSpec::Agent { .. } | StageSpec::Exec { .. } => "",
+            StageSpec::Sequence { attrs, .. } | StageSpec::Parallel { attrs, .. } => {
                 &attrs.skip_if_exists
             }
         }
     }
 
     /// The stage's children — empty for leaves.
-    pub fn body(&self) -> &[BuilderStage] {
+    pub fn body(&self) -> &[StageSpec] {
         match self {
-            BuilderStage::Agent { .. } | BuilderStage::Exec { .. } => &[],
-            BuilderStage::Sequence { body, .. } | BuilderStage::Parallel { body, .. } => body,
+            StageSpec::Agent { .. } | StageSpec::Exec { .. } => &[],
+            StageSpec::Sequence { body, .. } | StageSpec::Parallel { body, .. } => body,
         }
     }
 
@@ -140,9 +138,9 @@ impl BuilderStage {
     /// Overwrite the stage's name.
     pub fn set_name(&mut self, name: String) {
         match self {
-            BuilderStage::Agent { stage, .. } => stage.name = name,
-            BuilderStage::Exec { stage, .. } => stage.name = name,
-            BuilderStage::Sequence { attrs, .. } | BuilderStage::Parallel { attrs, .. } => {
+            StageSpec::Agent { stage, .. } => stage.name = name,
+            StageSpec::Exec { stage, .. } => stage.name = name,
+            StageSpec::Sequence { attrs, .. } | StageSpec::Parallel { attrs, .. } => {
                 attrs.name = name
             }
         }
@@ -152,16 +150,16 @@ impl BuilderStage {
     /// [`serde_yaml::Value`] matching the canonical expanded-YAML shape.
     pub fn to_yaml(&self) -> Value {
         match self {
-            BuilderStage::Agent { stage, client } => agent_to_yaml(stage, client),
-            BuilderStage::Exec { stage, client } => exec_to_yaml(stage, client),
-            BuilderStage::Sequence {
+            StageSpec::Agent { stage, client } => agent_to_yaml(stage, client),
+            StageSpec::Exec { stage, client } => exec_to_yaml(stage, client),
+            StageSpec::Sequence {
                 attrs,
                 max_iterations,
                 interval,
                 client,
                 body,
             } => sequence_to_yaml(attrs, *max_iterations, *interval, client, body),
-            BuilderStage::Parallel {
+            StageSpec::Parallel {
                 attrs,
                 max_concurrent,
                 cancel_on_error,
@@ -187,13 +185,13 @@ impl BuilderStage {
     /// mappings never receive their filled names.
     pub(crate) fn to_stage_node(&self) -> StageNode {
         let (bind_map, interpolation_map) = match self {
-            BuilderStage::Agent { stage, .. } => {
+            StageSpec::Agent { stage, .. } => {
                 (stage.bind_map.clone(), stage.interpolation_map.clone())
             }
-            BuilderStage::Exec { stage, .. } => {
+            StageSpec::Exec { stage, .. } => {
                 (stage.bind_map.clone(), stage.interpolation_map.clone())
             }
-            BuilderStage::Sequence { .. } | BuilderStage::Parallel { .. } => {
+            StageSpec::Sequence { .. } | StageSpec::Parallel { .. } => {
                 (HashMap::new(), HashMap::new())
             }
         };
@@ -204,11 +202,7 @@ impl BuilderStage {
             bind_map,
             interpolation_map,
             skip_if_exists: self.skip_if_exists().to_string(),
-            body: self
-                .body()
-                .iter()
-                .map(BuilderStage::to_stage_node)
-                .collect(),
+            body: self.body().iter().map(StageSpec::to_stage_node).collect(),
         }
     }
 }
@@ -345,7 +339,7 @@ fn sequence_to_yaml(
     max_iterations: u32,
     interval: Option<f64>,
     client: &Option<ClientSpec>,
-    body: &[BuilderStage],
+    body: &[StageSpec],
 ) -> Value {
     let mut m = Mapping::new();
     m.insert(
@@ -372,7 +366,7 @@ fn sequence_to_yaml(
         m.insert(Value::String("client".to_string()), client_val);
     }
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
-    let children: Vec<Value> = body.iter().map(BuilderStage::to_yaml).collect();
+    let children: Vec<Value> = body.iter().map(StageSpec::to_yaml).collect();
     m.insert(Value::String("body".to_string()), Value::Sequence(children));
     Value::Mapping(m)
 }
@@ -383,7 +377,7 @@ fn parallel_to_yaml(
     cancel_on_error: bool,
     error_policy: ErrorPolicy,
     client: &Option<ClientSpec>,
-    body: &[BuilderStage],
+    body: &[StageSpec],
 ) -> Value {
     let mut m = Mapping::new();
     m.insert(
@@ -416,7 +410,7 @@ fn parallel_to_yaml(
         m.insert(Value::String("client".to_string()), client_val);
     }
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
-    let children: Vec<Value> = body.iter().map(BuilderStage::to_yaml).collect();
+    let children: Vec<Value> = body.iter().map(StageSpec::to_yaml).collect();
     m.insert(Value::String("body".to_string()), Value::Sequence(children));
     Value::Mapping(m)
 }

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_yaml::{Mapping, Value};
 
 use crate::schemas::bootstrap::Bootstrap;
-use crate::stages::node::BuilderStage;
+use crate::stage_spec::node::StageSpec;
 
 use super::{DefinitionError, ExecutorStage, GremlinDefinition, Sequence, UNLOADED_NAME};
 
@@ -29,7 +29,7 @@ pub(crate) mod yaml;
 /// data directly.
 ///
 /// All accessors read the struct fields. `next_stage()` walks the top-level
-/// stage list one [`BuilderStage`] at a time, converting each into an
+/// stage list one [`StageSpec`] at a time, converting each into an
 /// [`ExecutorStage`] via a pure recursive projection.
 #[derive(Debug, Clone)]
 pub struct StaticDefinition {
@@ -44,9 +44,9 @@ pub struct StaticDefinition {
     /// Bootstrap commands and input sources.
     pub bootstrap: Bootstrap,
     /// The stage tree, in declaration order.
-    pub(crate) stages: Vec<BuilderStage>,
+    pub(crate) stages: Vec<StageSpec>,
     /// The optional `land` stage — always an exec stage named `land`.
-    pub(crate) land: Option<BuilderStage>,
+    pub(crate) land: Option<StageSpec>,
     /// The fully expanded YAML tree, kept for round-tripping via
     /// [`to_expanded_yaml`](StaticDefinition::to_expanded_yaml).
     pub(crate) expanded_yaml: Value,
@@ -62,8 +62,8 @@ impl StaticDefinition {
         default_client: String,
         base_ref: String,
         bootstrap: Bootstrap,
-        stages: Vec<BuilderStage>,
-        land: Option<BuilderStage>,
+        stages: Vec<StageSpec>,
+        land: Option<StageSpec>,
         expanded_yaml: Value,
     ) -> Self {
         StaticDefinition {
@@ -110,7 +110,7 @@ impl StaticDefinition {
     /// field (name, path, default_client, base_ref, bootstrap) from the
     /// parent. `land` is cleared so parallel children never duplicate the
     /// parent's land side effects.
-    pub(crate) fn clone_with_stages(&self, stages: Vec<BuilderStage>) -> Self {
+    pub(crate) fn clone_with_stages(&self, stages: Vec<StageSpec>) -> Self {
         StaticDefinition {
             stages,
             cursor: 0,
@@ -178,7 +178,7 @@ impl StaticDefinition {
         }
 
         // stages
-        let stages: Vec<Value> = self.stages.iter().map(BuilderStage::to_yaml).collect();
+        let stages: Vec<Value> = self.stages.iter().map(StageSpec::to_yaml).collect();
         root.insert(Value::String("stages".to_string()), Value::Sequence(stages));
 
         Value::Mapping(root)
@@ -195,12 +195,12 @@ impl StaticDefinition {
     // Stage conversion
     // -----------------------------------------------------------------------
 
-    /// Recursively convert one [`BuilderStage`] into an [`ExecutorStage`].
-    pub(crate) fn convert_stage(&self, stage: BuilderStage) -> ExecutorStage {
+    /// Recursively convert one [`StageSpec`] into an [`ExecutorStage`].
+    pub(crate) fn convert_stage(&self, stage: StageSpec) -> ExecutorStage {
         match stage {
-            BuilderStage::Agent { stage, client } => ExecutorStage::Agent { stage, client },
-            BuilderStage::Exec { stage, client } => ExecutorStage::Exec { stage, client },
-            BuilderStage::Sequence {
+            StageSpec::Agent { stage, client } => ExecutorStage::Agent { stage, client },
+            StageSpec::Exec { stage, client } => ExecutorStage::Exec { stage, client },
+            StageSpec::Sequence {
                 attrs,
                 max_iterations,
                 interval,
@@ -219,7 +219,7 @@ impl StaticDefinition {
                     interval,
                 })
             }
-            BuilderStage::Parallel {
+            StageSpec::Parallel {
                 attrs,
                 max_concurrent,
                 cancel_on_error,
@@ -412,10 +412,10 @@ fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
 mod tests {
     use super::*;
     use crate::definition::ClientSpec;
-    use crate::stages::agent::Agent;
-    use crate::stages::composite::StageAttrs;
-    use crate::stages::exec::Exec;
-    use crate::stages::parallel::ErrorPolicy;
+    use crate::stage_spec::agent::Agent;
+    use crate::stage_spec::composite::StageAttrs;
+    use crate::stage_spec::exec::Exec;
+    use crate::stage_spec::parallel::ErrorPolicy;
 
     fn stub_definition() -> StaticDefinition {
         StaticDefinition::stub()
@@ -663,9 +663,9 @@ mod tests {
 
     // ---- StaticDefinition cursor / goto / next_stage tests ----
 
-    /// Build a minimal Agent BuilderStage for use in test definitions.
-    fn parsed_agent(name: &str) -> BuilderStage {
-        BuilderStage::Agent {
+    /// Build a minimal Agent StageSpec for use in test definitions.
+    fn parsed_agent(name: &str) -> StageSpec {
+        StageSpec::Agent {
             stage: Agent {
                 name: name.to_string(),
                 prompts: vec![],
@@ -677,9 +677,9 @@ mod tests {
         }
     }
 
-    /// Build a minimal Exec BuilderStage.
-    fn parsed_exec(name: &str) -> BuilderStage {
-        BuilderStage::Exec {
+    /// Build a minimal Exec StageSpec.
+    fn parsed_exec(name: &str) -> StageSpec {
+        StageSpec::Exec {
             stage: Exec {
                 name: name.to_string(),
                 options: std::collections::HashMap::new(),
@@ -690,8 +690,8 @@ mod tests {
         }
     }
 
-    /// Build a multi-stage StaticDefinition from BuilderStage entries.
-    fn definition_with(stages: Vec<BuilderStage>) -> StaticDefinition {
+    /// Build a multi-stage StaticDefinition from StageSpec entries.
+    fn definition_with(stages: Vec<StageSpec>) -> StaticDefinition {
         StaticDefinition {
             name: "test-def".into(),
             path: "/tmp/test.yaml".into(),
@@ -790,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn convert_stage_sequence() {
-        let seq = BuilderStage::Sequence {
+        let seq = StageSpec::Sequence {
             attrs: StageAttrs {
                 name: "outer".into(),
                 skip_if_exists: "artifact://guard".into(),
@@ -821,7 +821,7 @@ mod tests {
     #[tokio::test]
     async fn convert_stage_sequence_with_max_iterations() {
         // A Sequence with max_iterations > 1 stays an ExecutorStage::Sequence.
-        let seq = BuilderStage::Sequence {
+        let seq = StageSpec::Sequence {
             attrs: StageAttrs {
                 name: "retry".into(),
                 skip_if_exists: "artifact://retry-guard".into(),
@@ -854,7 +854,7 @@ mod tests {
 
     #[tokio::test]
     async fn convert_stage_parallel_children_inherit_metadata() {
-        let par = BuilderStage::Parallel {
+        let par = StageSpec::Parallel {
             attrs: StageAttrs::new("reviews".into()),
             max_concurrent: Some(4),
             cancel_on_error: true,
@@ -895,7 +895,7 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_child_yields_its_own_stage_then_done() {
-        let par = BuilderStage::Parallel {
+        let par = StageSpec::Parallel {
             attrs: StageAttrs::new("group".into()),
             max_concurrent: None,
             cancel_on_error: false,

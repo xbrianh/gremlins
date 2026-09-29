@@ -946,7 +946,7 @@ mod tests {
     use crate::builders::artifacts::artifact;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
-    use crate::definition::BuilderStage;
+    use crate::definition::StageSpec;
     use crate::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
@@ -955,15 +955,12 @@ mod tests {
 
     /// A gremlin with no git, no worktree, and a seeded state directory: the
     /// smallest thing `run_stage` needs to dispatch a stage.
-    fn test_gremlin(
-        stages: Vec<BuilderStage>,
-        default_client: &str,
-    ) -> (tempfile::TempDir, Gremlin) {
+    fn test_gremlin(stages: Vec<StageSpec>, default_client: &str) -> (tempfile::TempDir, Gremlin) {
         test_gremlin_with_bootstrap(stages, default_client, Bootstrap::default())
     }
 
     fn test_gremlin_with_bootstrap(
-        stages: Vec<BuilderStage>,
+        stages: Vec<StageSpec>,
         default_client: &str,
         bootstrap: Bootstrap,
     ) -> (tempfile::TempDir, Gremlin) {
@@ -971,8 +968,8 @@ mod tests {
     }
 
     fn test_gremlin_full(
-        stages: Vec<BuilderStage>,
-        land: Option<BuilderStage>,
+        stages: Vec<StageSpec>,
+        land: Option<StageSpec>,
         default_client: &str,
         bootstrap: Bootstrap,
     ) -> (tempfile::TempDir, Gremlin) {

@@ -10,8 +10,8 @@ use crate::definition::r#static::loader::{self, StageEntry, StageNode};
 use crate::definition::r#static::StaticDefinition;
 use crate::schemas::bootstrap::{Bootstrap, InputSource, InputSources};
 use crate::schemas::error::SchemaError;
-use crate::stages::constants::FRAMEWORK_KEYS;
-use crate::stages::node::BuilderStage;
+use crate::stage_spec::constants::FRAMEWORK_KEYS;
+use crate::stage_spec::node::StageSpec;
 
 // ---------------------------------------------------------------------------
 // BootstrapBuilder
@@ -241,8 +241,8 @@ impl LandBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`BuilderStage::Exec`] named `land`.
-    pub fn build(self) -> Result<BuilderStage, SchemaError> {
+    /// Consume the builder and produce a [`StageSpec::Exec`] named `land`.
+    pub fn build(self) -> Result<StageSpec, SchemaError> {
         let name = "land".to_string();
 
         crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
@@ -331,13 +331,13 @@ impl LandBuilder {
             }
         }
 
-        let stage = crate::stages::exec::Exec {
+        let stage = crate::stage_spec::exec::Exec {
             name,
             options: self.options,
             interpolation_map: self.interpolation_map,
             bind_map: self.bind_map,
         };
-        Ok(BuilderStage::Exec {
+        Ok(StageSpec::Exec {
             stage,
             client: self.client,
         })
@@ -383,8 +383,8 @@ pub struct DefinitionBuilder {
     pub(crate) default_client: String,
     pub(crate) prompt_dir: Option<PathBuf>,
     pub(crate) bootstrap: Bootstrap,
-    pub(crate) stages: Vec<BuilderStage>,
-    pub(crate) land: Option<BuilderStage>,
+    pub(crate) stages: Vec<StageSpec>,
+    pub(crate) land: Option<StageSpec>,
 }
 
 impl DefinitionBuilder {
@@ -434,19 +434,19 @@ impl DefinitionBuilder {
     }
 
     /// Append a stage.
-    pub fn stage(mut self, stage: BuilderStage) -> Self {
+    pub fn stage(mut self, stage: StageSpec) -> Self {
         self.stages.push(stage);
         self
     }
 
     /// Append many stages.
-    pub fn stages(mut self, stages: Vec<BuilderStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<StageSpec>) -> Self {
         self.stages.extend(stages);
         self
     }
 
     /// Set the land stage.
-    pub fn land(mut self, land: BuilderStage) -> Self {
+    pub fn land(mut self, land: StageSpec) -> Self {
         self.land = Some(land);
         self
     }
@@ -493,11 +493,7 @@ impl DefinitionBuilder {
         fill_builder_names(&mut self.stages);
 
         // Build the node list for validation, including land.
-        let mut nodes: Vec<StageNode> = self
-            .stages
-            .iter()
-            .map(BuilderStage::to_stage_node)
-            .collect();
+        let mut nodes: Vec<StageNode> = self.stages.iter().map(StageSpec::to_stage_node).collect();
         if let Some(ref land) = self.land {
             nodes.push(land.to_stage_node());
         }
@@ -549,7 +545,7 @@ impl StaticDefinition {
 /// Mirrors the YAML path: unnamed stages get auto-generated names based on
 /// their stage type, and duplicate explicit names are disambiguated with
 /// `-N` suffixes.
-pub(crate) fn fill_builder_names(stages: &mut [BuilderStage]) {
+pub(crate) fn fill_builder_names(stages: &mut [StageSpec]) {
     let mut entries: Vec<StageEntry> = stages.iter().map(|s| s.to_stage_entry()).collect();
     // fill_names is infallible for well-formed stages.
     if loader::fill_names(&mut entries).is_ok() {
@@ -563,7 +559,7 @@ pub(crate) fn fill_builder_names(stages: &mut [BuilderStage]) {
     // Recurse into composite bodies.
     for stage in stages.iter_mut() {
         match stage {
-            BuilderStage::Sequence { body, .. } | BuilderStage::Parallel { body, .. } => {
+            StageSpec::Sequence { body, .. } | StageSpec::Parallel { body, .. } => {
                 fill_builder_names(body);
             }
             _ => {}
