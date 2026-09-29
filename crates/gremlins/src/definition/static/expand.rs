@@ -252,11 +252,12 @@ pub(crate) fn resolve_placeholder(
     }
 
     match val {
-        serde_yaml::Value::Mapping(_) | serde_yaml::Value::Sequence(_) => Ok(val.clone()),
+        serde_yaml::Value::Mapping(_)
+        | serde_yaml::Value::Sequence(_)
+        | serde_yaml::Value::Number(_)
+        | serde_yaml::Value::Bool(_)
+        | serde_yaml::Value::Null => Ok(val.clone()),
         serde_yaml::Value::String(s) => Ok(serde_yaml::Value::String(s.clone())),
-        serde_yaml::Value::Number(n) => Ok(serde_yaml::Value::String(n.to_string())),
-        serde_yaml::Value::Bool(b) => Ok(serde_yaml::Value::String(b.to_string())),
-        serde_yaml::Value::Null => Ok(serde_yaml::Value::String("null".to_string())),
         other => Ok(serde_yaml::Value::String(format!("{other:?}"))),
     }
 }
@@ -269,6 +270,13 @@ pub(crate) fn parse_default(raw: &str) -> serde_yaml::Value {
         if first == last && (first == '"' || first == '\'') {
             return serde_yaml::Value::String(s[1..s.len() - 1].to_string());
         }
+    }
+    // Try integer first, then float, then fall back to string.
+    if let Ok(n) = s.parse::<i64>() {
+        return serde_yaml::Value::Number(serde_yaml::Number::from(n));
+    }
+    if let Ok(n) = s.parse::<f64>() {
+        return serde_yaml::Value::Number(serde_yaml::Number::from(n));
     }
     serde_yaml::Value::String(s.to_string())
 }
