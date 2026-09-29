@@ -131,8 +131,8 @@ impl GremlinsDaemonLock {
     /// Dup the lock fd to a safe range (≥ 3) and clear `FD_CLOEXEC` so
     /// it can be passed to a child process via fork+exec.
     ///
-    /// Returns the dup'd fd number. The caller must either close or
-    /// leak the returned fd after the child has been spawned.
+    /// Returns the dup'd fd number. The caller must close the returned
+    /// fd after the child has been spawned.
     fn handoff_fd(&self) -> Result<i32, String> {
         let raw = self.file.as_raw_fd();
 
@@ -192,10 +192,11 @@ impl GremlinsDaemonLock {
 
         // The daemon now holds the lock via the dup'd fd referring to
         // the same open file description. Once the child is spawned it
-        // has its own reference, so we can safely close safe_fd — but
-        // leaking is harmless and avoids a close race.
-        let _leak = unsafe { std::fs::File::from_raw_fd(safe_fd) };
-        std::mem::forget(_leak);
+        // has its own reference, so we can safely close safe_fd.
+        // Closing drops the parent's reference to the open file
+        // description; the child still holds its own, so the flock
+        // is never released.
+        drop(unsafe { std::fs::File::from_raw_fd(safe_fd) });
 
         Ok(())
     }
