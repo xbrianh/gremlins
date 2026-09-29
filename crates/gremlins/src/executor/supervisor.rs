@@ -40,7 +40,11 @@ pub struct RunState {
 // Supervisor
 // ---------------------------------------------------------------------------
 
-pub async fn run_supervisor(listener: UnixListener, state_root: PathBuf) {
+/// The `_lock` file holds the executor's exclusive advisory flock for the
+/// lifetime of the supervisor. When the process exits (after the last
+/// gremlin drains), the file descriptor closes and the kernel releases the
+/// lock automatically.
+pub async fn run_supervisor(listener: UnixListener, state_root: PathBuf, _lock: std::fs::File) {
     let run_map: Arc<Mutex<HashMap<String, RunHandle>>> = Arc::new(Mutex::new(HashMap::new()));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 

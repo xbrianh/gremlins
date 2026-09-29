@@ -3,6 +3,7 @@
 //! The socket lives at `$state_root/executor.sock`.
 //! All I/O is async via tokio.
 
+use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use serde_json::Value;
@@ -14,16 +15,49 @@ pub fn socket_path(state_root: &Path) -> std::path::PathBuf {
     state_root.join("executor.sock")
 }
 
+/// Path to the executor lock file.
+pub fn lock_path(state_root: &Path) -> std::path::PathBuf {
+    state_root.join("executor.lock")
+}
+
+/// Try to acquire the executor's advisory lock without blocking.
+///
+/// Returns `Ok(Some(file))` when the lock was acquired (it is held for the
+/// lifetime of the returned handle), `Ok(None)` when another process holds
+/// it, and `Err(_)` on I/O failure.
+pub fn try_acquire_lock(state_root: &Path) -> Result<Option<std::fs::File>, String> {
+    let path = lock_path(state_root);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("failed to open executor lock {}: {e}", path.display()))?;
+
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Ok(None);
+        }
+        return Err(format!(
+            "failed to lock executor lock {}: {err}",
+            path.display()
+        ));
+    }
+
+    Ok(Some(file))
+}
+
 /// Bind the executor socket.
 ///
-/// The caller must have already confirmed no executor is listening
-/// (i.e. `connect_socket` returned ECONNREFUSED or ENOENT). Any
-/// stale socket file is unlinked before binding.
+/// The caller must hold the executor advisory lock. Any stale socket file
+/// from a crashed executor is unlinked before binding.
 pub fn bind_socket(state_root: &Path) -> Result<UnixListener, String> {
     let path = socket_path(state_root);
 
-    // If a socket file is left over from a crashed executor, remove it.
-    // We know it's stale because the caller already tried connect().
+    // The caller holds the executor lock, so no live executor exists and any
+    // socket file here is stale.
     if path.exists() {
         let _ = std::fs::remove_file(&path);
     }
