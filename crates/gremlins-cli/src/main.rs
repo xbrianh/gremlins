@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -157,12 +157,17 @@ async fn serve_daemon(lock_fd: i32) -> Result<(), String> {
 
     config::init_global().map_err(|e| e.to_string())?;
 
+    let state_root = config::state_root();
+
+    // Validate the inherited fd before trusting it.
+    validate_lock_fd(lock_fd, &state_root)?;
+
     // Reconstruct the lock file from the inherited fd. The parent
     // acquired the exclusive advisory lock; we now hold it for our
     // lifetime. When this process exits, the fd closes and the kernel
     // releases the lock.
-    // Safety: the fd is valid and was passed from the parent via
-    // fork+exec with FD_CLOEXEC cleared.
+    // Safety: validate_lock_fd just confirmed the fd is open, refers to
+    // the canonical lock file, and holds an exclusive lock.
     let _lock = unsafe { std::fs::File::from_raw_fd(lock_fd) };
 
     let state_root = config::state_root();
@@ -174,6 +179,60 @@ async fn serve_daemon(lock_fd: i32) -> Result<(), String> {
     );
 
     supervisor::run_supervisor(listener, state_root, _lock).await;
+    Ok(())
+}
+
+/// Validate that a user-supplied lock file descriptor actually refers to
+/// the canonical executor lock file and holds an exclusive lock.
+///
+/// The `gremlins serve <fd>` subcommand is an internal handoff mechanism
+/// but is invocation-accessible. This function rejects arbitrary fds that
+/// might otherwise let an attacker bind the socket without holding the
+/// lock or wrap stdin/stdout.
+fn validate_lock_fd(lock_fd: i32, state_root: &Path) -> Result<(), String> {
+    // 1. Check the fd is open.
+    if unsafe { libc::fcntl(lock_fd, libc::F_GETFD) } < 0 {
+        return Err(format!(
+            "invalid lock fd {lock_fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // 2. Check the fd refers to the canonical lock file.
+    let lock_path = socket::lock_path(state_root);
+    let mut fd_stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(lock_fd, &mut fd_stat) } < 0 {
+        return Err(format!(
+            "fstat on lock fd {lock_fd} failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // Stat the lock file on disk — if it exists, inode/dev must match.
+    let lock_path_c = std::ffi::CString::new(lock_path.as_os_str().as_encoded_bytes())
+        .map_err(|_| "lock path contains nul byte".to_string())?;
+    let mut path_stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(lock_path_c.as_ptr(), &mut path_stat) } == 0
+        && (fd_stat.st_ino != path_stat.st_ino || fd_stat.st_dev != path_stat.st_dev)
+    {
+        return Err(format!(
+            "lock fd {lock_fd} does not refer to the executor lock file"
+        ));
+    }
+
+    // 3. Check the fd holds an exclusive lock.
+    // Open the lock file again (separate file description) and try a
+    // non-blocking exclusive lock. It must fail with EWOULDBLOCK — if it
+    // succeeds, the original fd was not locked.
+    let probe = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open lock file for validation: {e}"))?;
+    let ret = unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret == 0 {
+        unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_UN) };
+        return Err("lock fd does not hold the executor lock".to_string());
+    }
+
     Ok(())
 }
 
