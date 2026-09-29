@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
 use crate::definition::r#static::expand::key_referenced_in_text;
+use crate::definition::ClientSpec;
 use crate::schemas::error::SchemaError;
-use crate::stages::composite::ClientSpec;
 use crate::stages::constants::FRAMEWORK_KEYS;
 use crate::stages::exec::Exec;
 use crate::stages::node::BuilderStage;

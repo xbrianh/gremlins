@@ -1,7 +1,8 @@
 //! Builders for composite stages: [`SequenceBuilder`], [`ParallelBuilder`].
 
+use crate::definition::ClientSpec;
 use crate::schemas::error::SchemaError;
-use crate::stages::composite::{ClientSpec, StageAttrs};
+use crate::stages::composite::StageAttrs;
 use crate::stages::node::BuilderStage;
 use crate::stages::parallel::{validate_child_names, ErrorPolicy};
 

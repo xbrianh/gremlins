@@ -17,9 +17,9 @@ use crate::builders::definition::{fill_builder_names, DefinitionBuilder, LandBui
 use crate::builders::exec::ExecBuilder;
 use crate::config;
 use crate::definition::r#static::expand;
+use crate::definition::ClientSpec;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
-use crate::stages::composite::ClientSpec;
 use crate::stages::node::BuilderStage;
 use crate::stages::parallel::ErrorPolicy;
 

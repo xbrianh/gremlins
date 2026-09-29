@@ -16,9 +16,14 @@ use thiserror::Error;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 pub use crate::stages::agent::Agent;
-use crate::stages::composite::ClientSpec;
 pub use crate::stages::exec::Exec;
+pub use crate::stages::node::BuilderStage;
 pub use crate::stages::parallel::ErrorPolicy;
+
+/// Parsed client descriptor from a stage dict's `client` key.
+/// A plain String so gremlins-core stays free of PyO3.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientSpec(pub String);
 
 pub(crate) mod r#static;
 pub use r#static::StaticDefinition;

@@ -411,8 +411,9 @@ fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::definition::ClientSpec;
     use crate::stages::agent::Agent;
-    use crate::stages::composite::{ClientSpec, StageAttrs};
+    use crate::stages::composite::StageAttrs;
     use crate::stages::exec::Exec;
     use crate::stages::parallel::ErrorPolicy;
 

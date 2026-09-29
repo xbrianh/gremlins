@@ -153,7 +153,7 @@ pub struct LandBuilder {
     options: HashMap<String, serde_json::Value>,
     interpolation_map: HashMap<String, String>,
     bind_map: HashMap<String, String>,
-    client: Option<crate::stages::composite::ClientSpec>,
+    client: Option<crate::definition::ClientSpec>,
 }
 
 impl LandBuilder {
@@ -237,7 +237,7 @@ impl LandBuilder {
 
     /// Set the stage's own client spec.
     pub fn client(mut self, client: impl Into<String>) -> Self {
-        self.client = Some(crate::stages::composite::ClientSpec(client.into()));
+        self.client = Some(crate::definition::ClientSpec(client.into()));
         self
     }
 
