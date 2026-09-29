@@ -946,10 +946,11 @@ mod tests {
     use crate::builders::artifacts::artifact;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
-    use crate::definition::{BuilderStage, ExecutorStage, GremlinDefinition, StaticDefinition};
+    use crate::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
+    use crate::stages::node::BuilderStage;
     use crate::test_support::GitSandbox;
 
     /// A gremlin with no git, no worktree, and a seeded state directory: the
