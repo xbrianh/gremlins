@@ -945,26 +945,25 @@ mod tests {
     use crate::builders::agent::AgentBuilder;
     use crate::builders::artifacts::artifact;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
-    use crate::builders::definition::DefinitionBuilder;
     use crate::builders::exec::ExecBuilder;
     use crate::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::stages::node::ParsedStage;
+    use crate::stages::node::BuilderStage;
     use crate::test_support::GitSandbox;
 
     /// A gremlin with no git, no worktree, and a seeded state directory: the
     /// smallest thing `run_stage` needs to dispatch a stage.
     fn test_gremlin(
-        stages: Vec<ParsedStage>,
+        stages: Vec<BuilderStage>,
         default_client: &str,
     ) -> (tempfile::TempDir, Gremlin) {
         test_gremlin_with_bootstrap(stages, default_client, Bootstrap::default())
     }
 
     fn test_gremlin_with_bootstrap(
-        stages: Vec<ParsedStage>,
+        stages: Vec<BuilderStage>,
         default_client: &str,
         bootstrap: Bootstrap,
     ) -> (tempfile::TempDir, Gremlin) {
@@ -972,8 +971,8 @@ mod tests {
     }
 
     fn test_gremlin_full(
-        stages: Vec<ParsedStage>,
-        land: Option<ParsedStage>,
+        stages: Vec<BuilderStage>,
+        land: Option<BuilderStage>,
         default_client: &str,
         bootstrap: Bootstrap,
     ) -> (tempfile::TempDir, Gremlin) {
@@ -1024,7 +1023,6 @@ mod tests {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
-            definition_is_expanded: false,
         };
         (tmp, gremlin)
     }
@@ -1733,7 +1731,7 @@ mod tests {
             return;
         }
 
-        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let mut gremlin = Gremlin::init(
             "gr-e2e",
             fx.definition_path(),

@@ -35,7 +35,6 @@ use crate::artifacts::registry::{
     ArtifactRegistry, DryRunArtifactRegistry, FileSystemArtifactRegistry,
 };
 use crate::artifacts::uri::Uri;
-use crate::builders::definition::DefinitionBuilder;
 use crate::clients::client::Client;
 use crate::config;
 use crate::core::{discovery, env_file, git};
@@ -147,9 +146,6 @@ pub struct Gremlin {
     /// absent or empty is an optional source with nothing to bind.
     pub stage_inputs: HashMap<String, String>,
     pub dry_run: bool,
-    /// When true, `init_runtime` loads the definition via [`DefinitionBuilder::from_expanded_yaml`]
-    /// instead of the full expansion path.
-    pub(crate) definition_is_expanded: bool,
 }
 
 impl Gremlin {
@@ -365,7 +361,6 @@ impl Gremlin {
                 loop_iter: "1".to_string(),
                 stage_inputs: stage_inputs.clone(),
                 dry_run: false,
-                definition_is_expanded: true,
             })
         };
 
@@ -454,8 +449,7 @@ impl Gremlin {
         // run actually used; otherwise fall back to resolving the kind. Either
         // way the path is only recorded here — `init_runtime` reads it.
         let hermetic = state_dir.join("definition.yaml");
-        let definition_is_expanded = hermetic.is_file();
-        let definition_path = if definition_is_expanded {
+        let definition_path = if hermetic.is_file() {
             Some(hermetic)
         } else if !kind.is_empty() {
             resolve_definition_in_project(&kind, &project_root)
@@ -516,7 +510,6 @@ impl Gremlin {
             loop_iter: "1".to_string(),
             stage_inputs,
             dry_run: false,
-            definition_is_expanded,
         })
     }
 
@@ -590,7 +583,6 @@ impl Gremlin {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: true,
-            definition_is_expanded: false,
         }
     }
 
@@ -625,13 +617,9 @@ impl Gremlin {
             )));
         };
 
-        let mut definition = if self.definition_is_expanded {
-            DefinitionBuilder::from_expanded_yaml(&definition_path, self.client_override.as_deref())
-                .map_err(|error| RunError::Message(error.to_string()))?
-        } else {
-            DefinitionBuilder::from_yaml(&definition_path, self.client_override.as_deref())
-                .map_err(|error| RunError::Message(error.to_string()))?
-        };
+        let mut definition =
+            StaticDefinition::from_yaml_file(&definition_path, self.client_override.as_deref())
+                .map_err(|error| RunError::Message(error.to_string()))?;
 
         // Write the hermetic definition.yaml snapshot so every entry point
         // that calls run() gets one — resume, fork, and fresh launch alike.
@@ -890,7 +878,6 @@ impl Gremlin {
             // the same inputs the parent launched with.
             stage_inputs: self.stage_inputs.clone(),
             dry_run: self.dry_run,
-            definition_is_expanded: false,
         })
     }
 
@@ -1525,7 +1512,7 @@ mod tests {
             return;
         }
 
-        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let mut gremlin = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1586,7 +1573,7 @@ mod tests {
             return;
         }
 
-        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let mut launched = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1621,7 +1608,7 @@ mod tests {
             return;
         }
 
-        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let created = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1660,7 +1647,7 @@ mod tests {
             return;
         }
 
-        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let launched = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1692,7 +1679,7 @@ mod tests {
             return;
         }
 
-        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let parent = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1707,7 +1694,7 @@ mod tests {
 
         std::fs::write(parent.artifact_dir.join("note.txt"), "hello").unwrap();
 
-        let child_def = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
         let child = parent
             .fork("gr-child", "", "", "", None, child_provider, None)
@@ -1750,7 +1737,7 @@ mod tests {
             return;
         }
 
-        let definition = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let definition = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let parent = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1766,13 +1753,13 @@ mod tests {
         // Mirrors the reference implementation: an empty argument falls
         // back to whatever the parent state carries (usually the parent's
         // own parent, or nothing at all), never to the parent's own id.
-        let child_def_a = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let child_def_a = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let child_provider_a: Box<dyn GremlinDefinition> = Box::new(child_def_a);
         parent
             .fork("gr-a", "", "", "", None, child_provider_a, None)
             .await
             .unwrap();
-        let child_def_b = DefinitionBuilder::from_yaml(fx.definition_path(), None).unwrap();
+        let child_def_b = StaticDefinition::from_yaml_file(fx.definition_path(), None).unwrap();
         let child_provider_b: Box<dyn GremlinDefinition> = Box::new(child_def_b);
         parent
             .fork(
@@ -1852,7 +1839,6 @@ mod tests {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
-            definition_is_expanded: false,
         }
     }
 
@@ -2102,10 +2088,6 @@ stages:
         assert!(state_dir.join("definition.yaml").is_file());
 
         let mut gremlin = Gremlin::from("gr-hermetic").unwrap();
-        assert!(
-            gremlin.definition_is_expanded,
-            "definition_is_expanded must be true when definition.yaml exists"
-        );
         assert_eq!(gremlin.project_root, project_root);
         assert!(gremlin.definition.is_stub());
 
@@ -2142,7 +2124,6 @@ stages:
         assert!(state_dir.join("definition.yaml").is_file());
 
         let mut gremlin = Gremlin::from("gr-hermetic-nosent").unwrap();
-        assert!(gremlin.definition_is_expanded);
 
         gremlin.init_runtime(None).await.unwrap();
 
@@ -2191,10 +2172,6 @@ stages:
         .unwrap();
 
         let mut gremlin = Gremlin::from("gr-noherm").unwrap();
-        assert!(
-            !gremlin.definition_is_expanded,
-            "definition_is_expanded must be false when no definition.yaml was written"
-        );
         assert!(gremlin.definition.is_stub());
 
         gremlin.init_runtime(None).await.unwrap();

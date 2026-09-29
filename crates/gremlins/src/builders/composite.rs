@@ -2,14 +2,14 @@
 
 use crate::schemas::error::SchemaError;
 use crate::stages::composite::{ClientSpec, StageAttrs};
-use crate::stages::node::ParsedStage;
+use crate::stages::node::BuilderStage;
 use crate::stages::parallel::{validate_child_names, ErrorPolicy};
 
 // ---------------------------------------------------------------------------
 // SequenceBuilder
 // ---------------------------------------------------------------------------
 
-/// Build a [`ParsedStage::Sequence`].
+/// Build a [`BuilderStage::Sequence`].
 ///
 /// # Example
 ///
@@ -24,7 +24,7 @@ use crate::stages::parallel::{validate_child_names, ErrorPolicy};
 #[derive(Debug, Clone)]
 pub struct SequenceBuilder {
     name: String,
-    body: Vec<ParsedStage>,
+    body: Vec<BuilderStage>,
     skip_if_exists: String,
     client: Option<ClientSpec>,
     max_iterations: u32,
@@ -51,13 +51,13 @@ impl SequenceBuilder {
     }
 
     /// Append a child stage.
-    pub fn stage(mut self, stage: ParsedStage) -> Self {
+    pub fn stage(mut self, stage: BuilderStage) -> Self {
         self.body.push(stage);
         self
     }
 
     /// Append many child stages.
-    pub fn stages(mut self, stages: Vec<ParsedStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<BuilderStage>) -> Self {
         self.body.extend(stages);
         self
     }
@@ -86,8 +86,8 @@ impl SequenceBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`ParsedStage::Sequence`].
-    pub fn build(mut self) -> Result<ParsedStage, SchemaError> {
+    /// Consume the builder and produce a [`BuilderStage::Sequence`].
+    pub fn build(mut self) -> Result<BuilderStage, SchemaError> {
         let name = self.name.clone();
 
         if self.body.is_empty() {
@@ -111,7 +111,7 @@ impl SequenceBuilder {
         attrs.stage_type = "sequence".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        Ok(ParsedStage::Sequence {
+        Ok(BuilderStage::Sequence {
             attrs,
             max_iterations: self.max_iterations,
             interval: self.interval,
@@ -125,7 +125,7 @@ impl SequenceBuilder {
 // ParallelBuilder
 // ---------------------------------------------------------------------------
 
-/// Build a [`ParsedStage::Parallel`].
+/// Build a [`BuilderStage::Parallel`].
 ///
 /// # Example
 ///
@@ -141,7 +141,7 @@ impl SequenceBuilder {
 #[derive(Debug, Clone)]
 pub struct ParallelBuilder {
     name: String,
-    body: Vec<ParsedStage>,
+    body: Vec<BuilderStage>,
     max_concurrent: Option<u32>,
     cancel_on_error: bool,
     error_policy: ErrorPolicy,
@@ -170,13 +170,13 @@ impl ParallelBuilder {
     }
 
     /// Append a child stage.
-    pub fn stage(mut self, stage: ParsedStage) -> Self {
+    pub fn stage(mut self, stage: BuilderStage) -> Self {
         self.body.push(stage);
         self
     }
 
     /// Append many child stages.
-    pub fn stages(mut self, stages: Vec<ParsedStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<BuilderStage>) -> Self {
         self.body.extend(stages);
         self
     }
@@ -211,8 +211,8 @@ impl ParallelBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`ParsedStage::Parallel`].
-    pub fn build(mut self) -> Result<ParsedStage, SchemaError> {
+    /// Consume the builder and produce a [`BuilderStage::Parallel`].
+    pub fn build(mut self) -> Result<BuilderStage, SchemaError> {
         let name = self.name.clone();
 
         // Reject max_concurrent(0) — YAML rejects it, and the executor
@@ -248,7 +248,7 @@ impl ParallelBuilder {
         attrs.stage_type = "parallel".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
         attrs.client_explicit = self.client.is_some();
-        Ok(ParsedStage::Parallel {
+        Ok(BuilderStage::Parallel {
             attrs,
             max_concurrent: self.max_concurrent,
             cancel_on_error: self.cancel_on_error,

@@ -3,14 +3,14 @@ use std::collections::{HashMap, HashSet};
 use crate::schemas::error::SchemaError;
 
 /// A flattened stage descriptor used for name-filling.
-pub struct StageEntry {
+pub(crate) struct StageEntry {
     pub name: Option<String>,
     pub auto_name: Option<String>,
     pub stage_type: Option<String>,
 }
 
 /// A stage node for duplicate-producer checking.
-pub struct StageNode {
+pub(crate) struct StageNode {
     pub name: String,
     pub stage_type: String,
     pub bind_map: HashMap<String, String>,
@@ -19,7 +19,7 @@ pub struct StageNode {
     pub body: Vec<StageNode>,
 }
 
-pub fn fill_names(stages: &mut [StageEntry]) -> Result<(), SchemaError> {
+pub(crate) fn fill_names(stages: &mut [StageEntry]) -> Result<(), SchemaError> {
     let mut used: HashSet<String> = HashSet::new();
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     for stage in stages.iter() {
@@ -85,7 +85,7 @@ pub fn fill_names(stages: &mut [StageEntry]) -> Result<(), SchemaError> {
     Ok(())
 }
 
-pub fn check_duplicate_producers(
+pub(crate) fn check_duplicate_producers(
     stages: &[StageNode],
     extra_out: &HashMap<String, String>,
 ) -> Result<(), SchemaError> {
@@ -181,7 +181,7 @@ fn extract_artifact_uris(raw: &str) -> Vec<(String, bool)> {
 /// Bootstrap-produced URIs come from `launch_cmds` (parsed gremlins:bind_artifact
 /// calls) and `cli_out` values.  `artifact://base_sha` and `artifact://base_ref`
 /// are always available.
-pub fn check_unresolved_consumers(
+pub(crate) fn check_unresolved_consumers(
     stages: &[StageNode],
     launch_cmds: &[String],
     cli_out: &HashMap<String, String>,
