@@ -35,7 +35,7 @@ const MISSING_DEFAULT_CLIENT: &str = "gremlin definition is missing 'default_cli
      'default-client' in config.json";
 
 // ---------------------------------------------------------------------------
-// Public constructor
+// Public constructors
 // ---------------------------------------------------------------------------
 
 impl StaticDefinition {
@@ -55,28 +55,46 @@ impl StaticDefinition {
 
         from_expanded_value(expanded, &path, client_override)
     }
+
+    /// Parse already-expanded YAML bytes directly — no file I/O, no
+    /// project-root walk.
+    ///
+    /// Strips the `__gremlins_expanded__` sentinel if present, but tolerates
+    /// its absence.
+    pub fn from_expanded_bytes(
+        data: &[u8],
+        client_override: Option<&str>,
+    ) -> Result<Self, SchemaError> {
+        let expanded = parse_expanded_yaml(data)?;
+        from_expanded_value(expanded, Path::new("definition.yaml"), client_override)
+    }
+
+    /// Read an already-expanded YAML file — no expansion, no project-root
+    /// walk. Strips the `__gremlins_expanded__` sentinel before dispatching.
+    pub fn from_expanded_yaml_file(
+        path: &Path,
+        client_override: Option<&str>,
+    ) -> Result<Self, SchemaError> {
+        let data = std::fs::read(path)
+            .map_err(|e| SchemaError::Generic(format!("failed to read {}: {e}", path.display())))?;
+        let expanded = parse_expanded_yaml(&data)?;
+        from_expanded_value(expanded, path, client_override)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Free functions
+// Private: parse_expanded_yaml
 // ---------------------------------------------------------------------------
 
-/// Parse already-expanded YAML bytes directly — no file I/O, no
-/// project-root walk.
-///
-/// Strips the `__gremlins_expanded__` sentinel if present, but tolerates
-/// its absence.
-pub(crate) fn from_expanded_bytes(
-    data: &[u8],
-    client_override: Option<&str>,
-) -> Result<StaticDefinition, SchemaError> {
+/// Parse YAML bytes and strip the `__gremlins_expanded__` sentinel.
+fn parse_expanded_yaml(data: &[u8]) -> Result<Value, SchemaError> {
     let mut expanded: Value = serde_yaml::from_slice(data)
         .map_err(|e| SchemaError::Generic(format!("failed to parse definition YAML: {e}")))?;
     if let Some(mapping) = expanded.as_mapping_mut() {
         let sentinel = Value::from("__gremlins_expanded__");
         mapping.remove(&sentinel);
     }
-    from_expanded_value(expanded, Path::new("definition.yaml"), client_override)
+    Ok(expanded)
 }
 
 // ---------------------------------------------------------------------------
