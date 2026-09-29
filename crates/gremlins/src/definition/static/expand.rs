@@ -276,7 +276,9 @@ pub(crate) fn parse_default(raw: &str) -> serde_yaml::Value {
         return serde_yaml::Value::Number(serde_yaml::Number::from(n));
     }
     if let Ok(n) = s.parse::<f64>() {
-        return serde_yaml::Value::Number(serde_yaml::Number::from(n));
+        if n.is_finite() {
+            return serde_yaml::Value::Number(serde_yaml::Number::from(n));
+        }
     }
     serde_yaml::Value::String(s.to_string())
 }

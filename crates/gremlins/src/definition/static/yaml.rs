@@ -363,8 +363,19 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
     let client = yaml_client(mapping);
 
     // Interval from top-level key.  Only accepts numbers (YAML integers
-    // coerce to f64 via as_f64).
-    let interval = mapping.get("interval").and_then(|v| v.as_f64());
+    // coerce to f64 via as_f64).  Reject non-numeric values with a
+    // SchemaError.
+    let interval = match mapping.get("interval") {
+        None | Some(serde_yaml::Value::Null) => None,
+        Some(v) => match v.as_f64() {
+            Some(f) => Some(f),
+            None => {
+                return Err(SchemaError::Generic(format!(
+                    "'interval' must be a number, got {v:?}"
+                )));
+            }
+        },
+    };
 
     let body = yaml_children(mapping, "body")?;
 
@@ -717,14 +728,12 @@ mod tests {
             serde_yaml::Value::String("body".into()),
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
         );
-        // String interval should be silently ignored (None), not parsed.
-        let stage = stage_from_yaml(&m).expect("stage should parse");
-        let yaml = stage.to_yaml();
-        let mapping = yaml.as_mapping().unwrap();
-        let interval = mapping.get("interval").and_then(|v| v.as_f64());
-        assert_eq!(
-            interval, None,
-            "string interval '60' must be ignored, not coerced"
+        // String interval must produce a SchemaError.
+        let err = stage_from_yaml(&m).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("interval"),
+            "error must mention 'interval', got: {msg}"
         );
     }
 
