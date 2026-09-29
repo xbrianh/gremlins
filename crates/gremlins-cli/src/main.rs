@@ -12,7 +12,9 @@ use gremlins::core::proc::run_shell_async;
 use gremlins::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
 use gremlins::executor::exec_runner::prepare_exec;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
+use gremlins::executor::socket::{self, GremlinsDaemonLock};
 use gremlins::executor::state::{self, StateData};
+use gremlins::executor::supervisor;
 use gremlins::schemas::bootstrap;
 use serde_json::Value;
 
@@ -84,6 +86,12 @@ enum Cmds {
         /// Gremlin definition: a bare name (resolved under .gremlins/) or a path.
         definition: String,
     },
+    #[command(hide = true, name = "serve")]
+    Serve {
+        /// Lock file descriptor (internal, inherited from parent).
+        #[arg(hide = true)]
+        lock_fd: i32,
+    },
     /// `gremlins <id>` — print detailed status for one gremlin.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -103,6 +111,7 @@ async fn main() {
         Some(Cmds::Rm { id }) => rm(&id),
         Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::Validate { definition }) => validate(&definition).await,
+        Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::External(args)) => status_external(&args).await,
         None => {
             let mut cmd = <Cli as clap::CommandFactory>::command();
@@ -131,6 +140,38 @@ async fn ensure_executor() -> Result<tokio::net::UnixStream, String> {
 async fn executor_request(request: serde_json::Value) -> Result<serde_json::Value, String> {
     let mut stream = ensure_executor().await?;
     spawn::send_request(&mut stream, request).await
+}
+
+/// Run the executor daemon.
+///
+/// Called via `gremlins serve <lock_fd>` (a hidden subcommand, spawned as a
+/// detached child by the first CLI that claims the executor lock).
+/// Reconstructs the lock file from the inherited fd, binds the socket, and
+/// runs the supervisor accept loop until the last gremlin drains.
+async fn serve_daemon(lock_fd: i32) -> Result<(), String> {
+    let level = std::env::var("GREMLINS_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&level))
+        .format_timestamp_millis()
+        .init();
+
+    config::init_global().map_err(|e| e.to_string())?;
+
+    let state_root = config::state_root();
+
+    // Validate the inherited fd and reconstruct the lock. When this
+    // process exits the lock file descriptor closes and the kernel
+    // releases the lock.
+    let _lock = GremlinsDaemonLock::from_inherited_fd(lock_fd, &state_root)?;
+
+    let listener = socket::bind_socket(&state_root)?;
+
+    log::info!(
+        "executor: listening on {}",
+        socket::socket_path(&state_root).display()
+    );
+
+    supervisor::run_supervisor(listener, state_root, _lock).await;
+    Ok(())
 }
 
 /// Check if a response is an error.

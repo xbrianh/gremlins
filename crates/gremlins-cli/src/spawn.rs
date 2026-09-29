@@ -1,15 +1,15 @@
-//! Single-instance executor: bind-or-connect and serve.
+//! Single-instance executor: bind-or-connect and daemon spawn.
 //!
-//! `bind_or_connect()` implements the atomic claim from `single-instance-forward.md`:
-//! try `connect()` to the executor socket; if that fails, `bind()` it and
-//! become the executor. `EADDRINUSE` means another process won the race —
-//! retry connect.
-//!
-//! `serve()` runs the accept loop, calling into the supervisor.
+//! `bind_or_connect()` is the atomic claim: try `connect()` to the
+//! executor socket; if that fails, try to acquire the executor's advisory
+//! lock. The process that gets the lock spawns a detached `gremlins serve`
+//! daemon (inheriting the lock fd) and then poll-connects like any other
+//! client. Lock losers retry the full connect+acquire decision every poll
+//! iteration so a waiter can take over if the current holder exits before
+//! publishing the socket.
 
 use gremlins::config;
-use gremlins::executor::socket;
-use gremlins::executor::supervisor;
+use gremlins::executor::socket::{self, GremlinsDaemonLock};
 
 /// Try to connect to an existing executor. Returns `Ok(stream)` on success,
 /// or an error if no executor is running.
@@ -19,49 +19,39 @@ pub(crate) async fn connect() -> Result<tokio::net::UnixStream, String> {
 }
 
 /// Atomically claim the executor socket: try `connect()`, fall back to
-/// `bind()`, and retry `connect()` on `EADDRINUSE`. Returns a connected
-/// stream to the executor (either an existing one or the one we just
-/// started).
+/// acquiring the advisory lock. The lock winner spawns a detached
+/// `gremlins serve` daemon (passing the lock fd) and then poll-connects.
+/// Lock losers retry the full connect+acquire decision every iteration
+/// so a waiter can take over if the holder exits before binding.
 pub(crate) async fn bind_or_connect() -> Result<tokio::net::UnixStream, String> {
-    // Fast path: an executor is already running.
-    match connect().await {
-        Ok(stream) => return Ok(stream),
-        Err(e) if is_no_socket(&e) || is_connection_refused(&e) => {
-            // No executor — try to become one.
-        }
-        Err(e) => return Err(e),
-    }
-
     let state_root = config::state_root();
 
-    // Write pidfile and try to bind.
-    socket::write_pidfile(&state_root)?;
-    let listener = match socket::bind_socket(&state_root) {
-        Ok(l) => l,
-        Err(e) if is_addr_in_use(&e) => {
-            // Another process won the race — retry connect.
-            return connect().await;
-        }
-        Err(e) => return Err(e),
-    };
-
-    log::info!(
-        "executor: listening on {}",
-        socket::socket_path(&state_root).display()
-    );
-
-    // We won the race — spawn the supervisor in the background.
-    tokio::spawn(async move {
-        supervisor::run_supervisor(listener, state_root).await;
-    });
-
-    // Poll until our own supervisor is accepting connections.
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    for _ in 0..100 {
+        // Fast path: an executor is already running.
         match connect().await {
             Ok(stream) => return Ok(stream),
-            Err(_) => continue,
+            Err(e) if is_no_socket(&e) || is_connection_refused(&e) => {
+                // No executor — try to claim the lock below.
+            }
+            Err(e) => return Err(e),
         }
+
+        // Try to acquire the lock.
+        match GremlinsDaemonLock::try_acquire(&state_root) {
+            Ok(Some(lock)) => {
+                lock.spawn_daemon()?;
+                // Daemon spawned — continue polling until it is
+                // accepting. If the daemon exits before binding, the
+                // next iteration will see ECONNREFUSED, re-acquire the
+                // now-free lock, and spawn a replacement.
+            }
+            Ok(None) => {
+                // Another process is (or is becoming) the executor.
+            }
+            Err(e) => return Err(e),
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
     Err("executor failed to start".to_string())
@@ -90,11 +80,4 @@ pub(crate) fn is_connection_refused(error: &str) -> bool {
 /// Check if the error is "no such file" (socket doesn't exist).
 pub(crate) fn is_no_socket(error: &str) -> bool {
     error.contains("No such file") || error.contains("ENOENT") || error.contains("not found")
-}
-
-/// Check if the error is "address in use" (another process bound first).
-pub(crate) fn is_addr_in_use(error: &str) -> bool {
-    error.contains("Address already in use")
-        || error.contains("address already in use")
-        || error.contains("EADDRINUSE")
 }
