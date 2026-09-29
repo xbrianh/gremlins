@@ -15,21 +15,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use indexmap::IndexMap;
 use regex::Regex;
-use rig_core::http_client::ReqwestClient;
-use rig_core::providers::openai;
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cmd_backend::CmdBackend;
 use crate::clients::openai_backend::{OpenAiBackend, OpenAiProvider};
-use crate::clients::openrouter_backend::OpenRouterBackend;
+use crate::clients::openrouter_backend::{self, OpenRouterBackend};
 use crate::clients::protocol::CompletedRun;
-use crate::config::{api_key, user_config_root};
-
-/// OpenRouter is OpenAI-compatible but not an [`OpenAiProvider`]; it gets its
-/// own env var, provider key in `providers.json`, and base URL.
-const OPENROUTER_PROVIDER_NAME: &str = "openrouter";
-const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
-const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// The six tools every native agent may call.
 ///
@@ -125,152 +116,9 @@ pub fn parse_spec(s: &str) -> Result<(String, String, IndexMap<String, String>),
     Ok((provider.to_string(), model, extra_params))
 }
 
-/// Resolve the API key for `kind`, preferring the provider's env var and
-/// falling back to `providers.json`.
-fn resolve_api_key(kind: OpenAiProvider) -> Option<String> {
-    api_key(kind.api_key_env(), kind.name())
-}
-
-// ---------------------------------------------------------------------------
-// Module-level pools
-// ---------------------------------------------------------------------------
-
 fn backend_pool() -> &'static Mutex<HashMap<String, Arc<dyn Backend>>> {
     static POOL: OnceLock<Mutex<HashMap<String, Arc<dyn Backend>>>> = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn http_client_pool() -> &'static Mutex<HashMap<(String, String), ReqwestClient>> {
-    static POOL: OnceLock<Mutex<HashMap<(String, String), ReqwestClient>>> = OnceLock::new();
-    POOL.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Return the last `n` characters of `s`, or the whole string if it's shorter.
-///
-/// This is character-aware: it will never split a multi-byte UTF-8 sequence.
-fn last_n_chars(s: &str, n: usize) -> &str {
-    let char_count = s.chars().count();
-    if char_count <= n {
-        s
-    } else {
-        let skip = char_count - n;
-        s.char_indices()
-            .nth(skip)
-            .map(|(idx, _)| &s[idx..])
-            .unwrap_or(s)
-    }
-}
-
-/// Build the rig OpenAI-compatible client shared by openai, xai and openrouter.
-///
-/// HTTP clients are pooled by `(base_url, api_key)` so that every backend
-/// targeting the same provider endpoint shares one connection pool.  The pool
-/// lock is held across construction so that concurrent callers cannot race to
-/// build duplicate clients.
-fn build_openai_client(api_key: &str, base_url: &str) -> Result<openai::CompletionsClient, String> {
-    let cache_key = (base_url.to_string(), api_key.to_string());
-
-    let http_client = {
-        let mut pool = http_client_pool()
-            .lock()
-            .expect("http client pool poisoned");
-        if let Some(client) = pool.get(&cache_key) {
-            log::debug!(
-                "HTTP client cache hit for {base_url} (key ...{})",
-                last_n_chars(api_key, 4)
-            );
-            client.clone()
-        } else {
-            log::info!("Creating new HTTP client for provider at {base_url}");
-            let client = ReqwestClient::builder()
-                .build()
-                .map_err(|e| e.to_string())?;
-            pool.insert(cache_key, client.clone());
-            client
-        }
-    };
-
-    openai::Client::builder()
-        .api_key(rig_core::client::BearerAuth::from(api_key.to_string()))
-        .base_url(base_url)
-        .http_client(http_client)
-        .build()
-        .map(|client| client.completions_api())
-        .map_err(|e| e.to_string())
-}
-
-/// The `allowed_tools` entry of `native_block`, if any.
-fn tool_filter(native_block: &HashMap<String, Vec<String>>) -> Option<Vec<String>> {
-    native_block.get("allowed_tools").cloned()
-}
-
-/// Copy an insertion-ordered param map into the plain map the backends take.
-fn string_map(params: &IndexMap<String, String>) -> HashMap<String, String> {
-    params.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-}
-
-/// Where a missing credential should be added, for the error message.
-fn providers_json_path() -> std::path::PathBuf {
-    user_config_root().join("providers.json")
-}
-
-/// Build an OpenAI or xAI backend from a spec.
-///
-/// Fails when no credential is available: constructing the backend is the
-/// first point at which the harness genuinely needs one, so this is where the
-/// operator gets told which env var or config entry to set.
-pub fn build_openai_backend(
-    kind: OpenAiProvider,
-    model: &str,
-    native_block: &HashMap<String, Vec<String>>,
-    extra_params: &IndexMap<String, String>,
-) -> Result<Arc<dyn Backend>, String> {
-    let key = resolve_api_key(kind).ok_or_else(|| {
-        format!(
-            "no API key for provider '{}': set {} or add an entry in {}",
-            kind.name(),
-            kind.api_key_env(),
-            providers_json_path().display(),
-        )
-    })?;
-    let client = build_openai_client(&key, kind.base_url())?;
-    Ok(Arc::new(OpenAiBackend::new(
-        kind,
-        client,
-        model.to_string(),
-        tool_filter(native_block),
-        string_map(extra_params),
-    )))
-}
-
-/// Build an OpenRouter backend from a spec.
-///
-/// An empty model falls back to `gpt-4o`, matching the provider's own default
-/// routing; the spec grammar already rejects an empty model, so this is a
-/// belt-and-braces path for programmatic callers.
-pub fn build_openrouter_backend(
-    model: &str,
-    native_block: &HashMap<String, Vec<String>>,
-    extra_params: &IndexMap<String, String>,
-) -> Result<Arc<dyn Backend>, String> {
-    let key = api_key(OPENROUTER_API_KEY_ENV, OPENROUTER_PROVIDER_NAME).ok_or_else(|| {
-        format!(
-            "no API key for provider '{OPENROUTER_PROVIDER_NAME}': set {OPENROUTER_API_KEY_ENV} or add an entry in {}",
-            providers_json_path().display(),
-        )
-    })?;
-    let client = build_openai_client(&key, OPENROUTER_BASE_URL)?;
-    let model = if model.is_empty() {
-        "gpt-4o".to_string()
-    } else {
-        model.to_string()
-    };
-    Ok(Arc::new(OpenRouterBackend::new(
-        client,
-        model,
-        tool_filter(native_block),
-        string_map(extra_params),
-    )))
 }
 
 /// A resolved `provider:model` spec.
@@ -352,7 +200,7 @@ impl Client {
         let base_url = match self.provider.as_str() {
             "openai" => OpenAiProvider::OpenAi.base_url(),
             "xai" => OpenAiProvider::Xai.base_url(),
-            "openrouter" => OPENROUTER_BASE_URL,
+            "openrouter" => openrouter_backend::BASE_URL,
             "cmd" => "(shell)",
             _ => "(unknown)",
         };
@@ -377,20 +225,10 @@ impl Client {
     fn build_backend(&self) -> Result<Arc<dyn Backend>, String> {
         match self.provider.as_str() {
             "cmd" => Ok(Arc::new(CmdBackend::new(&self.model)?)),
-            "openai" => build_openai_backend(
-                OpenAiProvider::OpenAi,
-                &self.model,
-                &self.native_block,
-                &self.extra_params,
-            ),
-            "xai" => build_openai_backend(
-                OpenAiProvider::Xai,
-                &self.model,
-                &self.native_block,
-                &self.extra_params,
-            ),
+            "openai" => OpenAiBackend::build(&self.model, &self.native_block, &self.extra_params),
+            "xai" => OpenAiBackend::build_xai(&self.model, &self.native_block, &self.extra_params),
             "openrouter" => {
-                build_openrouter_backend(&self.model, &self.native_block, &self.extra_params)
+                OpenRouterBackend::build(&self.model, &self.native_block, &self.extra_params)
             }
             other => Err(format!("unknown provider '{other}'")),
         }

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use indexmap::IndexMap;
 use rig_core::client::CompletionClient;
+use rig_core::http_client::ReqwestClient;
 use rig_core::providers::openai;
 
 use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
@@ -186,6 +188,80 @@ pub(crate) fn reap_openai_compat(state: &OpenAiRunState, gremlin_id: &str) {
             token.cancel();
         }
     }
+}
+
+// ── HTTP client pool + builder ──────────────────────────────────────────
+
+fn http_client_pool() -> &'static Mutex<HashMap<(String, String), ReqwestClient>> {
+    static POOL: OnceLock<Mutex<HashMap<(String, String), ReqwestClient>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Return the last `n` characters of `s`, or the whole string if it's shorter.
+///
+/// This is character-aware: it will never split a multi-byte UTF-8 sequence.
+fn last_n_chars(s: &str, n: usize) -> &str {
+    let char_count = s.chars().count();
+    if char_count <= n {
+        s
+    } else {
+        let skip = char_count - n;
+        s.char_indices()
+            .nth(skip)
+            .map(|(idx, _)| &s[idx..])
+            .unwrap_or(s)
+    }
+}
+
+/// Build the rig OpenAI-compatible client shared by openai, xai and openrouter.
+///
+/// HTTP clients are pooled by `(base_url, api_key)` so that every backend
+/// targeting the same provider endpoint shares one connection pool.  The pool
+/// lock is held across construction so that concurrent callers cannot race to
+/// build duplicate clients.
+pub(crate) fn build_openai_client(
+    api_key: &str,
+    base_url: &str,
+) -> Result<openai::CompletionsClient, String> {
+    let cache_key = (base_url.to_string(), api_key.to_string());
+
+    let http_client = {
+        let mut pool = http_client_pool()
+            .lock()
+            .expect("http client pool poisoned");
+        if let Some(client) = pool.get(&cache_key) {
+            log::debug!(
+                "HTTP client cache hit for {base_url} (key ...{})",
+                last_n_chars(api_key, 4)
+            );
+            client.clone()
+        } else {
+            log::info!("Creating new HTTP client for provider at {base_url}");
+            let client = ReqwestClient::builder()
+                .build()
+                .map_err(|e| e.to_string())?;
+            pool.insert(cache_key, client.clone());
+            client
+        }
+    };
+
+    openai::Client::builder()
+        .api_key(rig_core::client::BearerAuth::from(api_key.to_string()))
+        .base_url(base_url)
+        .http_client(http_client)
+        .build()
+        .map(|client| client.completions_api())
+        .map_err(|e| e.to_string())
+}
+
+/// The `allowed_tools` entry of `native_block`, if any.
+pub(crate) fn tool_filter(native_block: &HashMap<String, Vec<String>>) -> Option<Vec<String>> {
+    native_block.get("allowed_tools").cloned()
+}
+
+/// Copy an insertion-ordered param map into the plain map the backends take.
+pub(crate) fn string_map(params: &IndexMap<String, String>) -> HashMap<String, String> {
+    params.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
 // ── shared helpers ───────────────────────────────────────────────────────
