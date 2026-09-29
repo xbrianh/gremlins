@@ -352,12 +352,6 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
         Some(v) => {
             if let Some(n) = v.as_u64().and_then(|n| u32::try_from(n).ok()) {
                 n
-            } else if let Some(s) = v.as_str() {
-                s.parse::<u32>().map_err(|_| {
-                    SchemaError::Generic(format!(
-                        "'max-iterations' must be a positive integer, got {s:?}"
-                    ))
-                })?
             } else {
                 return Err(SchemaError::Generic(format!(
                     "'max-iterations' must be a positive integer, got {v:?}"
@@ -368,13 +362,20 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
     let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
-    // Interval from top-level key.  Accept both numbers and strings
-    // (string-valued intervals come from template expansion, e.g.
-    // `"{{options.interval | default(60)}}"` → `"60"`).
-    let interval = mapping.get("interval").and_then(|v| {
-        v.as_f64()
-            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
-    });
+    // Interval from top-level key.  Only accepts numbers (YAML integers
+    // coerce to f64 via as_f64).  Reject non-numeric values with a
+    // SchemaError.
+    let interval = match mapping.get("interval") {
+        None | Some(serde_yaml::Value::Null) => None,
+        Some(v) => match v.as_f64() {
+            Some(f) => Some(f),
+            None => {
+                return Err(SchemaError::Generic(format!(
+                    "'interval' must be a number, got {v:?}"
+                )));
+            }
+        },
+    };
 
     let body = yaml_children(mapping, "body")?;
 
@@ -682,10 +683,8 @@ mod tests {
     }
 
     #[test]
-    fn sequence_interval_from_string() {
-        // Regression: interval parsed from a string must work — template
-        // expansion always produces strings, e.g. "{{options.interval | default(60)}}"
-        // resolves to Value::String("60") via parse_default.
+    fn sequence_interval_from_string_is_rejected() {
+        // String-valued interval must be rejected — only YAML numbers accepted.
         use serde_yaml::Mapping;
         let mut m = Mapping::new();
         m.insert(
@@ -729,14 +728,68 @@ mod tests {
             serde_yaml::Value::String("body".into()),
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
         );
-        let stage = stage_from_yaml(&m).expect("string interval should parse");
+        // String interval must produce a SchemaError.
+        let err = stage_from_yaml(&m).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("interval"),
+            "error must mention 'interval', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn sequence_interval_from_number() {
+        // YAML float interval must be accepted.
+        use serde_yaml::Mapping;
+        let mut m = Mapping::new();
+        m.insert(
+            serde_yaml::Value::String("name".into()),
+            serde_yaml::Value::String("poll".into()),
+        );
+        m.insert(
+            serde_yaml::Value::String("type".into()),
+            serde_yaml::Value::String("sequence".into()),
+        );
+        m.insert(
+            serde_yaml::Value::String("max-iterations".into()),
+            serde_yaml::Value::Number(serde_yaml::Number::from(20)),
+        );
+        m.insert(
+            serde_yaml::Value::String("interval".into()),
+            serde_yaml::Value::Number(serde_yaml::Number::from(60)),
+        );
+        let mut child = Mapping::new();
+        child.insert(
+            serde_yaml::Value::String("name".into()),
+            serde_yaml::Value::String("poll".into()),
+        );
+        child.insert(
+            serde_yaml::Value::String("type".into()),
+            serde_yaml::Value::String("exec".into()),
+        );
+        child.insert(
+            serde_yaml::Value::String("options".into()),
+            serde_yaml::Value::Mapping({
+                let mut opts = Mapping::new();
+                opts.insert(
+                    serde_yaml::Value::String("cmds".into()),
+                    serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("true".into())]),
+                );
+                opts
+            }),
+        );
+        m.insert(
+            serde_yaml::Value::String("body".into()),
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
+        );
+        let stage = stage_from_yaml(&m).expect("numeric interval should parse");
         let yaml = stage.to_yaml();
         let mapping = yaml.as_mapping().unwrap();
         let interval = mapping.get("interval").and_then(|v| v.as_f64());
         assert_eq!(
             interval,
             Some(60.0),
-            "string interval '60' must round-trip as float 60.0"
+            "numeric interval 60 must round-trip as float 60.0"
         );
     }
 
