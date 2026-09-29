@@ -300,8 +300,14 @@ async fn handle_launch(
     let state_tx_clone = state_tx.clone();
     let shutdown_tx_clone = shutdown_tx.clone();
 
+    let handle = RunHandle {
+        cancel: cancel_tx,
+        state_tx,
+    };
+    get_run_map().lock().unwrap().insert(id.clone(), handle);
+
     tokio::spawn(async move {
-        let result = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
+        let (result, _registry) = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
         run_map.lock().unwrap().remove(&id_clone);
         let _ = state_tx_clone.send(RunState {
             id: id_clone.clone(),
@@ -313,12 +319,6 @@ async fn handle_launch(
             let _ = shutdown_tx_clone.send(true);
         }
     });
-
-    let handle = RunHandle {
-        cancel: cancel_tx,
-        state_tx,
-    };
-    get_run_map().lock().unwrap().insert(id.clone(), handle);
 
     ok_response(serde_json::json!({"id": id}))
 }
@@ -453,8 +453,15 @@ async fn handle_resume(
     let state_tx_clone = state_tx.clone();
     let shutdown_tx_clone = shutdown_tx.clone();
 
+    let handle = RunHandle {
+        cancel: cancel_tx,
+        state_tx,
+    };
+    get_run_map().lock().unwrap().insert(id.to_string(), handle);
+
     tokio::spawn(async move {
-        let result = run_gremlin_task(gremlin, Some(cancel_rx), Some(&resume_stage)).await;
+        let (result, _registry) =
+            run_gremlin_task(gremlin, Some(cancel_rx), Some(&resume_stage)).await;
         run_map.lock().unwrap().remove(&id_clone);
         let _ = state_tx_clone.send(RunState {
             id: id_clone.clone(),
@@ -466,12 +473,6 @@ async fn handle_resume(
             let _ = shutdown_tx_clone.send(true);
         }
     });
-
-    let handle = RunHandle {
-        cancel: cancel_tx,
-        state_tx,
-    };
-    get_run_map().lock().unwrap().insert(id.to_string(), handle);
 
     ok_response(serde_json::json!({"id": id, "resume_from": resume_stage_for_response}))
 }
@@ -705,18 +706,19 @@ async fn run_gremlin_task(
     mut gremlin: Gremlin,
     cancel: Option<watch::Receiver<bool>>,
     resume_from: Option<&str>,
-) -> i32 {
+) -> (i32, Box<dyn crate::artifacts::registry::ArtifactRegistry>) {
     let log_path = gremlin.state_dir.join("log");
     redirect_stdio_to_log(&log_path);
 
-    match gremlin.run(resume_from, cancel).await {
+    let exit_code = match gremlin.run(resume_from, cancel).await {
         Ok(ec) => ec,
         Err(e) => {
             log::error!("gremlin {}: {e}", gremlin.id.as_str());
             gremlin.state.write_terminal_state(1);
             1
         }
-    }
+    };
+    (exit_code, gremlin.registry)
 }
 
 fn redirect_stdio_to_log(log_path: &std::path::Path) {
@@ -801,14 +803,23 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
 // launch_child / stop_child — public API for the parallel executor
 // ---------------------------------------------------------------------------
 
+/// Result of [`launch_child`]: a state watch receiver and a oneshot for the
+/// child's artifact registry (sent after the child reaches a terminal state).
+pub(crate) struct LaunchResult {
+    pub state_rx: watch::Receiver<RunState>,
+    pub registry_rx: tokio::sync::oneshot::Receiver<
+        Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
+    >,
+}
+
 /// Launch a pre-configured child gremlin, registering it in the run_map so
 /// it appears in `gremlins ls` with live status.
 ///
 /// The child must already be forked (artifacts copied, worktree branched,
 /// state written). This function creates cancel and state-watch channels,
 /// spawns a tokio task for [`run_gremlin_task`], inserts a [`RunHandle`]
-/// into the global run map, and returns a receiver that fires when the
-/// child reaches a terminal state.
+/// into the global run map, and returns a [`LaunchResult`] with receivers
+/// that fire when the child reaches a terminal state.
 ///
 /// Unlike [`handle_launch`], this does *not* generate an id, resolve a
 /// definition, or call [`Gremlin::init`] — the gremlin is ready before the
@@ -817,7 +828,7 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
 /// This function is synchronous (no `.await`) so its caller — the parallel
 /// executor — does not produce a non-`Send` future. The run_map uses a
 /// `std::sync::Mutex` so `lock()` never blocks on an async runtime.
-pub(crate) fn launch_child(gremlin: Gremlin) -> watch::Receiver<RunState> {
+pub(crate) fn launch_child(gremlin: Gremlin) -> LaunchResult {
     let id = gremlin.id.to_string();
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -828,12 +839,25 @@ pub(crate) fn launch_child(gremlin: Gremlin) -> watch::Receiver<RunState> {
         started_at: state::now_stamp(),
     });
 
-    let run_map = get_run_map().clone();
-    let id_clone = id.clone();
+    let (registry_tx, registry_rx) = tokio::sync::oneshot::channel();
+
     let state_tx_clone = state_tx.clone();
 
+    let handle = RunHandle {
+        cancel: cancel_tx,
+        state_tx,
+    };
+    // Insert into RUN_MAP *before* spawning so a fast child cannot finish
+    // and call remove before the insert.
+    get_run_map().lock().unwrap().insert(id.clone(), handle);
+
+    let run_map = get_run_map().clone();
+    let id_clone = id.clone();
+
     tokio::spawn(async move {
-        let result = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
+        let (result, registry) = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
+        // Send the registry before updating state so the parent can read it.
+        let _ = registry_tx.send(Some(registry));
         run_map.lock().unwrap().remove(&id_clone);
         let _ = state_tx_clone.send(RunState {
             id: id_clone.clone(),
@@ -844,13 +868,10 @@ pub(crate) fn launch_child(gremlin: Gremlin) -> watch::Receiver<RunState> {
         // Don't signal shutdown — the parent gremlin is still running.
     });
 
-    let handle = RunHandle {
-        cancel: cancel_tx,
-        state_tx,
-    };
-    get_run_map().lock().unwrap().insert(id, handle);
-
-    state_rx
+    LaunchResult {
+        state_rx,
+        registry_rx,
+    }
 }
 
 /// Stop a child gremlin by sending on its cancel channel.

@@ -27,7 +27,7 @@ use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::stage_key;
 use crate::executor::state;
-use crate::executor::supervisor::{self, RunState};
+use crate::executor::supervisor::{self, LaunchResult, RunState};
 use crate::executor::RunError;
 
 /// The registry URI marking `child_name` as done under `scope`.
@@ -103,13 +103,17 @@ pub(crate) async fn run_parallel(
     //
     // Each child is forked (artifacts copied, worktree branched, state
     // written) then launched via supervisor::launch_child, which registers
-    // it in the run_map and spawns its tokio task. The semaphore is
-    // acquired *before* launch_child so max_concurrent bounds in-flight
-    // children.
+    // it in the run_map and spawns its tokio task. The semaphore permit is
+    // acquired inside the spawned monitoring task so the launch loop never
+    // blocks — max_concurrent bounds in-flight children without deadlocking
+    // the parent.
     struct LaunchedChild {
         child_name: String,
         child_id: String,
         state_rx: watch::Receiver<RunState>,
+        registry_rx: tokio::sync::oneshot::Receiver<
+            Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
+        >,
     }
 
     let mut launched: Vec<LaunchedChild> = Vec::with_capacity(children.len());
@@ -137,12 +141,6 @@ pub(crate) async fn run_parallel(
             "parallel group {group_name}: forking child {child_name} (child_id={child_id})"
         );
 
-        // Acquire semaphore permit before launching.
-        let _permit = match &semaphore {
-            Some(sem) => Some(sem.clone().acquire_owned().await),
-            None => None,
-        };
-
         // Fork the child gremlin.
         let child_gremlin = gremlin
             .fork(
@@ -164,12 +162,16 @@ pub(crate) async fn run_parallel(
 
         // Launch the child via the supervisor — it becomes a first-class
         // gremlin visible in `gremlins ls`.
-        let state_rx = supervisor::launch_child(child_gremlin);
+        let LaunchResult {
+            state_rx,
+            registry_rx,
+        } = supervisor::launch_child(child_gremlin);
 
         launched.push(LaunchedChild {
             child_name,
             child_id,
             state_rx,
+            registry_rx,
         });
 
         log::debug!("parallel group {group_name}: launched child via supervisor");
@@ -186,12 +188,8 @@ pub(crate) async fn run_parallel(
     let mut child_results: Vec<ChildOutcome> = Vec::with_capacity(launched.len());
     let mut first_error: Option<RunError> = None;
 
-    // Build a map from child_id → index for quick lookup.
-    let child_id_to_idx: HashMap<String, usize> = launched
-        .iter()
-        .enumerate()
-        .map(|(i, lc)| (lc.child_id.clone(), i))
-        .collect();
+    // Indexed by position in `launched` — O(1) lookup for cancel_on_error.
+    let child_ids: Vec<String> = launched.iter().map(|lc| lc.child_id.clone()).collect();
 
     // Track which children are still running (for cancel_on_error).
     let mut running: HashSet<usize> = (0..launched.len()).collect();
@@ -199,13 +197,21 @@ pub(crate) async fn run_parallel(
     // Spawn a future for each child that waits for its state_rx to change
     // to a terminal status, then reads the child's state.json to determine
     // the real outcome (exit code, error message).
-    type ChildResult = (usize, String, String, Result<(), RunError>);
+    type ChildResult = (
+        usize,
+        String,
+        String,
+        Result<(), RunError>,
+        Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
+    );
     let mut futs: FuturesUnordered<tokio::task::JoinHandle<ChildResult>> = FuturesUnordered::new();
 
     for (idx, lc) in launched.into_iter().enumerate() {
         let child_name = lc.child_name.clone();
         let child_id = lc.child_id.clone();
         let mut state_rx = lc.state_rx;
+        let registry_rx = lc.registry_rx;
+        let sem = semaphore.clone();
         // Derive the child state dir from the parent's state_dir parent —
         // this is the same layout `fork()` uses and works regardless of
         // whether `state_root` was overridden in tests.
@@ -216,38 +222,64 @@ pub(crate) async fn run_parallel(
             .to_path_buf();
 
         let handle = tokio::spawn(async move {
+            // Acquire semaphore permit inside the spawned task so the
+            // launch loop never blocks on max_concurrent.
+            let _permit = match sem {
+                Some(s) => Some(s.acquire_owned().await.expect("semaphore closed")),
+                None => None,
+            };
             // Wait for the state to change to a terminal status.
             loop {
-                state_rx.changed().await.ok();
-                let state = state_rx.borrow().clone();
-                if state.status == "done" || state.status == "stopped" {
-                    // Read the child's state.json to get the real outcome.
-                    let child_state_dir = parent_state_root.join(&child_id);
-                    let child_state_file = child_state_dir.join("state.json");
-                    let outcome = if child_state_file.is_file() {
-                        let raw = state::read_state_json(Some(&child_state_file));
-                        let exit_code = raw.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1);
-                        if exit_code == 0 {
-                            Ok(())
-                        } else {
-                            // Try to get a meaningful error from the bail file or state.
-                            let reason = raw
-                                .get("stage")
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty() && *s != "starting")
-                                .map(|s| format!("stage {s}: exited {exit_code}"))
-                                .unwrap_or_else(|| format!("exited {exit_code}"));
-                            Err(RunError::StageFailed {
-                                stage: child_name.clone(),
-                                message: reason,
-                            })
+                match state_rx.changed().await {
+                    Ok(()) => {
+                        let state = state_rx.borrow().clone();
+                        if state.status == "done" || state.status == "stopped" {
+                            // Read the child's state.json to get the real outcome.
+                            let child_state_dir = parent_state_root.join(&child_id);
+                            let child_state_file = child_state_dir.join("state.json");
+                            let outcome = if child_state_file.is_file() {
+                                let raw = state::read_state_json(Some(&child_state_file));
+                                let exit_code =
+                                    raw.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1);
+                                if exit_code == 0 {
+                                    Ok(())
+                                } else {
+                                    // Try to get a meaningful error from the bail file or state.
+                                    let reason = raw
+                                        .get("stage")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty() && *s != "starting")
+                                        .map(|s| format!("stage {s}: exited {exit_code}"))
+                                        .unwrap_or_else(|| format!("exited {exit_code}"));
+                                    Err(RunError::StageFailed {
+                                        stage: child_name.clone(),
+                                        message: reason,
+                                    })
+                                }
+                            } else {
+                                Err(RunError::Message(format!(
+                                    "child {child_name} state file not found"
+                                )))
+                            };
+                            // Collect the child's registry (for dry-run support).
+                            let registry = registry_rx.await.unwrap_or(None);
+                            return (idx, child_name, child_id, outcome, registry);
                         }
-                    } else {
-                        Err(RunError::Message(format!(
-                            "child {child_name} state file not found"
-                        )))
-                    };
-                    return (idx, child_name, child_id, outcome);
+                    }
+                    Err(_) => {
+                        // The sender dropped — the child task panicked or was
+                        // cancelled before sending a terminal state. Treat as
+                        // a failure so the parent doesn't hang.
+                        return (
+                            idx,
+                            child_name.clone(),
+                            child_id,
+                            Err(RunError::Message(format!(
+                                "child {child_name} terminated without reporting status"
+                            ))),
+                            None,
+                        );
+                    }
                 }
             }
         });
@@ -257,7 +289,7 @@ pub(crate) async fn run_parallel(
 
     while let Some(result) = futs.next().await {
         match result {
-            Ok((idx, child_name, child_id, outcome)) => {
+            Ok((idx, child_name, child_id, outcome, child_registry)) => {
                 running.remove(&idx);
                 log::debug!(
                     "parallel group {group_name}: child {child_name} completed (outcome={})",
@@ -273,6 +305,7 @@ pub(crate) async fn run_parallel(
                             child_name,
                             child_id,
                             outcome: Ok(()),
+                            child_registry,
                         });
                     }
                     Err(err) => {
@@ -281,29 +314,25 @@ pub(crate) async fn run_parallel(
                                 stage: child_name.clone(),
                                 message: err.to_string(),
                             });
-                            // Cancel all remaining running children.
+                            // Cancel all remaining running children — O(1)
+                            // lookup via the child_ids vec.
                             for &running_idx in &running {
-                                let running_id = child_id_to_idx.iter().find_map(|(id, &i)| {
-                                    if i == running_idx {
-                                        Some(id.clone())
-                                    } else {
-                                        None
-                                    }
-                                });
-                                if let Some(rid) = running_id {
-                                    supervisor::stop_child(&rid).await;
+                                if let Some(rid) = child_ids.get(running_idx) {
+                                    supervisor::stop_child(rid).await;
                                 }
                             }
                             child_results.push(ChildOutcome {
                                 child_name,
                                 child_id,
                                 outcome: Err(err),
+                                child_registry,
                             });
                         } else {
                             child_results.push(ChildOutcome {
                                 child_name,
                                 child_id,
                                 outcome: Err(err),
+                                child_registry,
                             });
                         }
                     }
@@ -403,15 +432,24 @@ pub(crate) async fn run_parallel(
     }
 
     // --- Clean up child worktrees (best-effort) ---
+    //
+    // Iterate over all launched child IDs (not just those with results) so
+    // worktrees for panicked or cancelled children are still cleaned up.
     log::debug!(
         "parallel group {group_name}: cleaning up worktrees for {} children",
-        child_results.len()
+        child_ids.len()
     );
-    for outcome in &child_results {
+    for child_id in &child_ids {
+        // Find the child_name from child_results, or use the id as fallback.
+        let child_name = child_results
+            .iter()
+            .find(|o| &o.child_id == child_id)
+            .map(|o| o.child_name.as_str())
+            .unwrap_or(child_id);
         if group_error.is_none() {
-            cleanup_child_fully(&outcome.child_name, &outcome.child_id);
+            cleanup_child_fully(child_name, child_id);
         } else {
-            cleanup_child_worktree(gremlin, &outcome.child_name, &outcome.child_id);
+            cleanup_child_worktree(gremlin, child_name, child_id);
         }
     }
 
@@ -426,6 +464,7 @@ struct ChildOutcome {
     child_name: String,
     child_id: String,
     outcome: Result<(), RunError>,
+    child_registry: Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
 }
 
 /// Merge artifacts from a successful child into the parent registry.
@@ -436,6 +475,23 @@ async fn merge_child_artifacts(
 ) -> Result<(), RunError> {
     use crate::artifacts::registry::{Collision, FileSystemArtifactRegistry};
 
+    // Prefer the in-memory registry the child passed back. This handles
+    // dry-run children (whose DryRunArtifactRegistry never writes files)
+    // and avoids re-reading registry.json from disk for filesystem children.
+    if let Some(ref child_registry) = outcome.child_registry {
+        gremlin
+            .registry
+            .merge_registry(
+                child_registry.as_ref(),
+                Collision::Ignore,
+                Some(&outcome.child_name),
+            )
+            .await
+            .map_err(|e| RunError::Message(format!("artifact merge failed: {e}")))?;
+        return Ok(());
+    }
+
+    // Fallback: construct a FileSystemArtifactRegistry from disk.
     let child_artifact_dir = state_root.join(&outcome.child_id).join("artifacts");
     if !child_artifact_dir.exists() {
         return Ok(());
