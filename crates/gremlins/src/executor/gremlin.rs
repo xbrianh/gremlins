@@ -118,7 +118,7 @@ pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
 }
 
 /// Snapshot of process-global configuration needed by the run loop.
-/// Populated once in [`Gremlin::init_runtime`] so multiple `Gremlin::run()`
+/// Populated once at construction time so multiple `Gremlin::run()`
 /// invocations can coexist in one process without reading global state.
 #[derive(Clone)]
 pub(crate) struct RuntimeConfig {
@@ -139,6 +139,39 @@ pub(crate) struct RuntimeConfig {
     /// The base process environment captured at startup, before any
     /// bootstrap or system vars are layered on.
     pub base_process_env: HashMap<String, String>,
+}
+
+impl RuntimeConfig {
+    /// Snapshot the current global config and process environment.
+    ///
+    /// `gremlin_id` seeds the scratch directory path.
+    pub(crate) fn snapshot(gremlin_id: &str) -> Self {
+        let cfg = config::get_global();
+        let (stage_exact, stage_prefix) = cfg
+            .as_ref()
+            .map(|c| c.default_client_by_stage())
+            .map(|(e, p)| (e.clone(), p.clone()))
+            .unwrap_or_default();
+        let (task_exact, task_prefix) = cfg
+            .as_ref()
+            .map(|c| c.task_clients())
+            .map(|(e, p)| (e.clone(), p.clone()))
+            .unwrap_or_default();
+        let default_client = cfg
+            .as_ref()
+            .and_then(|c| c.default_client().map(String::from));
+        let base_process_env: HashMap<String, String> = std::env::vars().collect();
+        Self {
+            scratch_dir: config::scratch_root(Some(gremlin_id)),
+            state_root: config::state_root(),
+            stage_clients_exact: stage_exact,
+            stage_clients_prefix: stage_prefix,
+            task_clients_exact: task_exact,
+            task_clients_prefix: task_prefix,
+            default_client,
+            base_process_env,
+        }
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -381,6 +414,9 @@ impl Gremlin {
             stub.path = hermetic.clone();
             let stub: Box<dyn GremlinDefinition> = Box::new(stub);
 
+            // Snapshot the runtime config before gremlin_id is moved.
+            let runtime_config = RuntimeConfig::snapshot(gremlin_id.as_str());
+
             Ok(Gremlin {
                 id: gremlin_id,
                 state_dir: state_dir.to_path_buf(),
@@ -401,7 +437,7 @@ impl Gremlin {
                 loop_iter: "1".to_string(),
                 stage_inputs: stage_inputs.clone(),
                 dry_run: false,
-                runtime_config: RuntimeConfig::default(),
+                runtime_config,
             })
         };
 
@@ -532,6 +568,9 @@ impl Gremlin {
         }
         let definition: Box<dyn GremlinDefinition> = Box::new(stub);
 
+        // Snapshot the runtime config before gremlin_id is moved.
+        let runtime_config = RuntimeConfig::snapshot(gremlin_id.as_str());
+
         Ok(Gremlin {
             id: gremlin_id,
             state_dir,
@@ -551,7 +590,7 @@ impl Gremlin {
             loop_iter: "1".to_string(),
             stage_inputs,
             dry_run: false,
-            runtime_config: RuntimeConfig::default(),
+            runtime_config,
         })
     }
 
@@ -625,7 +664,7 @@ impl Gremlin {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: true,
-            runtime_config: RuntimeConfig::default(),
+            runtime_config: RuntimeConfig::snapshot("dry-run"),
         }
     }
 
@@ -651,33 +690,12 @@ impl Gremlin {
             self.definition.goto(name);
         }
 
-        // Snapshot global config once so the rest of the run loop never reads it.
+        // RuntimeConfig is already populated by the constructor; this guard
+        // catches a handle that was somehow constructed without one.
         if self.runtime_config.scratch_dir.as_os_str().is_empty() {
-            let cfg = config::get_global();
-            let (stage_exact, stage_prefix) = cfg
-                .as_ref()
-                .map(|c| c.default_client_by_stage())
-                .map(|(e, p)| (e.clone(), p.clone()))
-                .unwrap_or_default();
-            let (task_exact, task_prefix) = cfg
-                .as_ref()
-                .map(|c| c.task_clients())
-                .map(|(e, p)| (e.clone(), p.clone()))
-                .unwrap_or_default();
-            let default_client = cfg
-                .as_ref()
-                .and_then(|c| c.default_client().map(String::from));
-            let base_process_env: HashMap<String, String> = std::env::vars().collect();
-            self.runtime_config = RuntimeConfig {
-                scratch_dir: config::scratch_root(Some(self.id.as_str())),
-                state_root: config::state_root(),
-                stage_clients_exact: stage_exact,
-                stage_clients_prefix: stage_prefix,
-                task_clients_exact: task_exact,
-                task_clients_prefix: task_prefix,
-                default_client,
-                base_process_env,
-            };
+            return Err(RunError::Message(
+                "gremlin runtime_config is uninitialized — construct the handle through Gremlin::init, from, or for_dry_run".to_string(),
+            ));
         }
 
         if !self.definition.is_stub() {

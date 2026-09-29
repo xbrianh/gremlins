@@ -636,7 +636,7 @@ mod tests {
             stage_inputs,
             loop_iter: "1".to_string(),
             dry_run: false,
-            runtime_config: crate::executor::gremlin::RuntimeConfig::default(),
+            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot("gr-test"),
         };
         (tmp, gremlin)
     }

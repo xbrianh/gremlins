@@ -1024,7 +1024,7 @@ mod tests {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
-            runtime_config: crate::executor::gremlin::RuntimeConfig::default(),
+            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot("gr-test"),
         };
         (tmp, gremlin)
     }

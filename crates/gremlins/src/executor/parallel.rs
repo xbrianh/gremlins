@@ -714,9 +714,10 @@ mod tests {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
-            runtime_config: RuntimeConfig {
-                state_root: tmp.path().join("state"),
-                ..RuntimeConfig::default()
+            runtime_config: {
+                let mut rc = RuntimeConfig::snapshot("gr-test");
+                rc.state_root = tmp.path().join("state");
+                rc
             },
         };
         (tmp, gremlin)

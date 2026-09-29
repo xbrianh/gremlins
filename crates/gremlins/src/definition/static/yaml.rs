@@ -55,7 +55,8 @@ impl StaticDefinition {
         }
 
         let project_root = project_root_for(&path);
-        let expanded = expand::parse_definition_file(&path, &project_root)?;
+        let overlay_dir = config::overlay_dir_without_env(&project_root);
+        let expanded = expand::parse_definition_file(&path, &project_root, &overlay_dir)?;
 
         from_expanded_value(expanded, &path, client_override, config_default_client)
     }
