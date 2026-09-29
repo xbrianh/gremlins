@@ -351,8 +351,13 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<BuilderStage, Sch
     let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping);
 
-    // Interval from top-level key.
-    let interval = mapping.get("interval").and_then(|v| v.as_f64());
+    // Interval from top-level key.  Accept both numbers and strings
+    // (string-valued intervals come from template expansion, e.g.
+    // `"{{options.interval | default(60)}}"` → `"60"`).
+    let interval = mapping.get("interval").and_then(|v| {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+    });
 
     let body = yaml_children(mapping, "body")?;
 
@@ -657,6 +662,65 @@ mod tests {
             .build()
             .unwrap();
         assert_round_trip(&stage);
+    }
+
+    #[test]
+    fn sequence_interval_from_string() {
+        // Regression: interval parsed from a string must work — template
+        // expansion always produces strings, e.g. "{{options.interval | default(60)}}"
+        // resolves to Value::String("60") via parse_default.
+        use serde_yaml::Mapping;
+        let mut m = Mapping::new();
+        m.insert(
+            serde_yaml::Value::String("name".into()),
+            serde_yaml::Value::String("poll".into()),
+        );
+        m.insert(
+            serde_yaml::Value::String("type".into()),
+            serde_yaml::Value::String("sequence".into()),
+        );
+        m.insert(
+            serde_yaml::Value::String("max-iterations".into()),
+            serde_yaml::Value::Number(serde_yaml::Number::from(20)),
+        );
+        m.insert(
+            serde_yaml::Value::String("interval".into()),
+            serde_yaml::Value::String("60".into()),
+        );
+        // body: one minimal exec child
+        let mut child = Mapping::new();
+        child.insert(
+            serde_yaml::Value::String("name".into()),
+            serde_yaml::Value::String("poll".into()),
+        );
+        child.insert(
+            serde_yaml::Value::String("type".into()),
+            serde_yaml::Value::String("exec".into()),
+        );
+        child.insert(
+            serde_yaml::Value::String("options".into()),
+            serde_yaml::Value::Mapping({
+                let mut opts = Mapping::new();
+                opts.insert(
+                    serde_yaml::Value::String("cmds".into()),
+                    serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("true".into())]),
+                );
+                opts
+            }),
+        );
+        m.insert(
+            serde_yaml::Value::String("body".into()),
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
+        );
+        let stage = stage_from_yaml(&m).expect("string interval should parse");
+        let yaml = stage.to_yaml();
+        let mapping = yaml.as_mapping().unwrap();
+        let interval = mapping.get("interval").and_then(|v| v.as_f64());
+        assert_eq!(
+            interval,
+            Some(60.0),
+            "string interval '60' must round-trip as float 60.0"
+        );
     }
 
     #[test]

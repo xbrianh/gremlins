@@ -29,6 +29,8 @@ stages:
               if gh_ci_await "{pr_url}" "{fix_head}" {startup_grace_secs} {poll_interval} {sync_timeout} 2>&1 | tee "$TMP_OUT"; then
                 if [ "$(tail -n 1 "$TMP_OUT")" = "skipped" ]; then
                   touch "{done}"
+                elif ! grep -q 'status=IN_PROGRESS' "$TMP_OUT" && grep -q 'conclusion=SUCCESS' "$TMP_OUT"; then
+                  touch "{done}"
                 fi
               else
                 exit 2
