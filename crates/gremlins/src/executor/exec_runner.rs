@@ -221,6 +221,39 @@ fn sanitize_log_filename(name: &str) -> String {
         .replace("..", "__")
 }
 
+/// Resolve `${VAR}` references in `s` using the substitution env.
+/// `${GREMLINS_FOO}` → the value of `GREMLINS_FOO` in the env map;
+/// unknown variables are left as-is.
+fn resolve_cmd_for_log(s: &str, env: &HashMap<String, String>) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(dollar) = rest.find("${") {
+        result.push_str(&rest[..dollar]);
+        rest = &rest[dollar + 2..];
+        let close = rest.find('}');
+        match close {
+            Some(end) => {
+                let var = &rest[..end];
+                if let Some(val) = env.get(var) {
+                    result.push_str(val);
+                } else {
+                    // Unknown variable — keep the `${VAR}` verbatim.
+                    result.push_str("${");
+                    result.push_str(&rest[..end + 1]);
+                }
+                rest = &rest[end + 1..];
+            }
+            None => {
+                // Unclosed `${` — put back what we consumed.
+                result.push_str("${");
+                break;
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
 /// Phase 2: run the shell commands. Uses only the prepared data; no registry access.
 pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError> {
     if prepared.cmds.is_empty() {
@@ -231,6 +264,7 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
     }
 
     let joined = prepared.cmds.join(" && ");
+    let resolved_cmd = resolve_cmd_for_log(&joined, &prepared.substitution_env);
     // A prepared env is authoritative when present; otherwise inherit ours.
     let mut env: HashMap<String, String> = if prepared.env.is_empty() {
         std::env::vars().collect()
@@ -297,7 +331,7 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
             "=== exec stage: {} ===\ncwd: {}\ncommand: {}\n--- output ---\n",
             prepared.name,
             prepared.cwd.display(),
-            joined
+            resolved_cmd
         );
         let _ = std::fs::OpenOptions::new()
             .create(true)
@@ -599,6 +633,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_shell_resolves_env_vars_in_command_line() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let mut substitution_env = HashMap::new();
+        substitution_env.insert("GREMLINS_INPUT".to_string(), "/tmp/input.md".to_string());
+        let prepared = ExecPrepared {
+            name: "resolved".to_string(),
+            cmds: vec!["echo \"${GREMLINS_INPUT}\"".to_string()],
+            substitution_env,
+            ..make_prepared("resolved", vec!["echo ok"], &state_dir)
+        };
+        let result = run_shell(&prepared).await.unwrap();
+        assert_eq!(result.output, "/tmp/input.md");
+
+        let log = read_log(&state_dir, "resolved");
+        assert!(
+            log.contains("command: echo \"/tmp/input.md\""),
+            "log should contain resolved command, got: {log}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_run_shell_writes_header_and_footer() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state_dir = tmp.path().join("state");
@@ -755,6 +813,43 @@ mod tests {
         let canon_log_dir = log_dir.canonicalize().unwrap();
         let canon_log = log_path.canonicalize().unwrap();
         assert!(canon_log.starts_with(&canon_log_dir));
+    }
+
+    // --- resolve_cmd_for_log ---
+
+    #[test]
+    fn test_resolve_cmd_for_log_substitutes_known_vars() {
+        let env = HashMap::from([
+            ("GREMLINS_PLAN".to_string(), "/tmp/plan.md".to_string()),
+            ("GREMLINS_ISSUE".to_string(), "42".to_string()),
+        ]);
+        let resolved = resolve_cmd_for_log(
+            "gh publish \"${GREMLINS_PLAN}\" > \"${GREMLINS_ISSUE}\"",
+            &env,
+        );
+        assert_eq!(resolved, "gh publish \"/tmp/plan.md\" > \"42\"");
+    }
+
+    #[test]
+    fn test_resolve_cmd_for_log_unknown_var_left_as_is() {
+        let env = HashMap::new();
+        let resolved = resolve_cmd_for_log("echo ${NOT_SET}", &env);
+        assert_eq!(resolved, "echo ${NOT_SET}");
+    }
+
+    #[test]
+    fn test_resolve_cmd_for_log_no_braces_untouched() {
+        let env = HashMap::from([("GREMLINS_X".to_string(), "val".to_string())]);
+        // $VAR without braces is not the pattern the substitution layer emits.
+        let resolved = resolve_cmd_for_log("echo $GREMLINS_X", &env);
+        assert_eq!(resolved, "echo $GREMLINS_X");
+    }
+
+    #[test]
+    fn test_resolve_cmd_for_log_unclosed_brace_kept_verbatim() {
+        let env = HashMap::new();
+        let resolved = resolve_cmd_for_log("echo ${oops", &env);
+        assert_eq!(resolved, "echo ${oops");
     }
 
     #[test]

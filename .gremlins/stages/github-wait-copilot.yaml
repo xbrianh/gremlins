@@ -6,8 +6,8 @@ stages:
   - { type: github-discover-repo }
   - name: github-wait-copilot
     type: sequence
-    max-iterations: "{{options.max_iterations | default(40)}}"
-    interval: "{{options.interval | default(20)}}"
+    max-iterations: "{{options.max_iterations | default(20)}}"
+    interval: "{{options.interval | default(60)}}"
     skip_if_exists: "artifact://{loop_iter}/status"
     body:
       - name: poll

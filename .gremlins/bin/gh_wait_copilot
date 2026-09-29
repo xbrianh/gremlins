@@ -21,14 +21,18 @@ fi
 info "copilot: checking for Copilot review on PR #${pr_number} in ${repo}..."
 
 api_stderr=$(mktemp)
-review=$(gh api "repos/$repo/pulls/$pr_number/reviews" \
+review=$(gh api "repos/$repo/pulls/$pr_number/reviews" --paginate \
     --jq '.[] | select(.user.login | test("[Cc]opilot")) | .state | select(. != "PENDING")' 2>"$api_stderr") && api_ok=1 || true
+
+# Capture all review user+state pairs for debugging when no match found.
+all_reviews=$(gh api "repos/$repo/pulls/$pr_number/reviews" --paginate \
+    --jq '[.[] | {user: .user.login, state: .state, submitted_at: .submitted_at}]' 2>/dev/null) || true
 
 if [ -n "$review" ]; then
     info "copilot: review found — state=${review}"
     printf '%s' "$review"
 elif [ -n "${api_ok:-}" ]; then
-    info "copilot: no non-PENDING Copilot review yet"
+    info "copilot: no non-PENDING Copilot review yet (all reviews: ${all_reviews})"
 else
     info "copilot: API call failed: $(cat "$api_stderr")"
 fi
