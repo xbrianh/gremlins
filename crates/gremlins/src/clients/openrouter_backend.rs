@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rig_core::completion::CompletionError;
@@ -6,11 +7,16 @@ use rig_core::providers::openai;
 
 use super::agent_loop::ErrorClassifier;
 use super::backend::{Backend, ClientError, RunParams};
-use super::openai_protocol::{reap_openai_compat, run_openai_compat, OpenAiRunState};
+use super::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
 use super::protocol::CompletedRun;
+
+/// Base URL for OpenRouter's OpenAI-compatible API.
+pub(crate) const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// Provider name this backend answers to, used to match `task-clients` specs.
 const PROVIDER_NAME: &str = "openrouter";
+
+const API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 
 const TRANSIENT_SUBSTRINGS: &[&str] = &[
     "capacity",
@@ -93,6 +99,35 @@ impl OpenRouterBackend {
                 "OpenRouterBackend".to_string(),
             ),
         }
+    }
+
+    /// Build an OpenRouter backend. Resolves `OPENROUTER_API_KEY` → `providers.json`.
+    pub fn build(
+        model: &str,
+        native_block: &HashMap<String, Vec<String>>,
+        extra_params: &indexmap::IndexMap<String, String>,
+    ) -> Result<Arc<dyn Backend>, String> {
+        let key =
+            crate::config::api_key(API_KEY_ENV, PROVIDER_NAME).ok_or_else(|| {
+                format!(
+                    "no API key for provider '{PROVIDER_NAME}': set {API_KEY_ENV} or add an entry in {}",
+                    crate::config::user_config_root()
+                        .join("providers.json")
+                        .display(),
+                )
+            })?;
+        let client = openai_protocol::build_openai_client(&key, BASE_URL)?;
+        let model = if model.is_empty() {
+            "gpt-4o".to_string()
+        } else {
+            model.to_string()
+        };
+        Ok(Arc::new(Self::new(
+            client,
+            model,
+            openai_protocol::tool_filter(native_block),
+            openai_protocol::string_map(extra_params),
+        )))
     }
 }
 

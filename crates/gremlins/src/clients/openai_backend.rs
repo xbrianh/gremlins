@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rig_core::providers::openai;
 
 use super::backend::{Backend, ClientError, RunParams};
-use super::openai_protocol::{reap_openai_compat, run_openai_compat, OpenAiRunState};
+use super::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
 use super::protocol::CompletedRun;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,50 @@ impl OpenAiBackend {
                 "OpenAiBackend".to_string(),
             ),
         }
+    }
+
+    /// Build an OpenAI backend. Resolves `OPENAI_API_KEY` → `providers.json`.
+    pub fn build(
+        model: &str,
+        native_block: &HashMap<String, Vec<String>>,
+        extra_params: &indexmap::IndexMap<String, String>,
+    ) -> Result<Arc<dyn Backend>, String> {
+        Self::build_inner(OpenAiProvider::OpenAi, model, native_block, extra_params)
+    }
+
+    /// Build an xAI backend. Resolves `XAI_API_KEY` → `providers.json`.
+    pub fn build_xai(
+        model: &str,
+        native_block: &HashMap<String, Vec<String>>,
+        extra_params: &indexmap::IndexMap<String, String>,
+    ) -> Result<Arc<dyn Backend>, String> {
+        Self::build_inner(OpenAiProvider::Xai, model, native_block, extra_params)
+    }
+
+    fn build_inner(
+        kind: OpenAiProvider,
+        model: &str,
+        native_block: &HashMap<String, Vec<String>>,
+        extra_params: &indexmap::IndexMap<String, String>,
+    ) -> Result<Arc<dyn Backend>, String> {
+        let key = crate::config::api_key(kind.api_key_env(), kind.name()).ok_or_else(|| {
+            format!(
+                "no API key for provider '{}': set {} or add an entry in {}",
+                kind.name(),
+                kind.api_key_env(),
+                crate::config::user_config_root()
+                    .join("providers.json")
+                    .display(),
+            )
+        })?;
+        let client = openai_protocol::build_openai_client(&key, kind.base_url())?;
+        Ok(Arc::new(Self::new(
+            kind,
+            client,
+            model.to_string(),
+            openai_protocol::tool_filter(native_block),
+            openai_protocol::string_map(extra_params),
+        )))
     }
 }
 
