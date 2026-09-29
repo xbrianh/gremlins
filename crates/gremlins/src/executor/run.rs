@@ -764,12 +764,18 @@ impl Gremlin {
     /// Drive every stage from the definition to the end, returning the exit code.
     ///
     /// `resume_from` names a stage to resume from; pass `None` for a fresh start.
+    /// `cancel` is an optional watch receiver — when it fires, the run exits
+    /// cleanly with `write_terminal_state` and status `"stopped"`.
     ///
     /// Mirrors the Python `run_definition` walk: a bail records `bail_<attempt>.json`
     /// and yields exit code 1, any other failure is recorded and propagated, and
     /// the terminal state is written either way so `status` and the `finished`
     /// marker always agree with what actually happened.
-    pub async fn run(&mut self, resume_from: Option<&str>) -> Result<i32, RunError> {
+    pub async fn run(
+        &mut self,
+        resume_from: Option<&str>,
+        cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Result<i32, RunError> {
         // Loading the definition, building the registry, creating the client and
         // resolving the environment are all deferred out of the constructors so
         // that a handle nobody runs is cheap. This is the one place they happen
@@ -816,6 +822,15 @@ impl Gremlin {
 
             if matches!(stage, ExecutorStage::Done) {
                 break;
+            }
+
+            // Check for cancellation before each stage.
+            if let Some(ref cancel) = cancel {
+                if *cancel.borrow() {
+                    log::info!("gremlin {}: cancelled", self.id.as_str());
+                    self.finish(-1);
+                    return Ok(-1);
+                }
             }
 
             self.state.set_stage(stage.name(), None, "");
@@ -1426,7 +1441,7 @@ mod tests {
         let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let state_dir = tmp.path().join("state").join("gr-test");
 
-        assert_eq!(gremlin.run(None).await.unwrap(), 0);
+        assert_eq!(gremlin.run(None, None).await.unwrap(), 0);
         assert!(state_dir.join("finished").is_file());
         let raw: Value =
             serde_json::from_str(&std::fs::read_to_string(state_dir.join("state.json")).unwrap())
@@ -1447,7 +1462,7 @@ mod tests {
         let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let state_dir = tmp.path().join("state").join("gr-test");
 
-        assert_eq!(gremlin.run(None).await.unwrap(), 1);
+        assert_eq!(gremlin.run(None, None).await.unwrap(), 1);
 
         let bail_file = std::fs::read_dir(&state_dir)
             .unwrap()
@@ -1488,7 +1503,7 @@ mod tests {
         ];
         let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
 
-        assert_eq!(gremlin.run(Some("second")).await.unwrap(), 0);
+        assert_eq!(gremlin.run(Some("second"), None).await.unwrap(), 0);
         assert!(!tmp.path().join("first.marker").exists());
         assert!(tmp.path().join("second.marker").exists());
         assert!(tmp.path().join("third.marker").exists());
@@ -1519,7 +1534,7 @@ mod tests {
         let state_dir = tmp.path().join("state").join("gr-test");
 
         // First run: group fails because "bad" exits non-zero.
-        match gremlin.run(None).await {
+        match gremlin.run(None, None).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "bad"),
             other => panic!("expected StageFailed, got {other:?}"),
         }
@@ -1563,7 +1578,7 @@ mod tests {
 
         // Resume: "bad" fails again, but the attempt is reused so "good" is
         // skipped rather than re-run.
-        match gremlin.run(Some("group")).await {
+        match gremlin.run(Some("group"), None).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "bad"),
             other => panic!("expected StageFailed on resume, got {other:?}"),
         }
@@ -1598,7 +1613,7 @@ mod tests {
         let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
         let state_dir = tmp.path().join("state").join("gr-test");
 
-        match gremlin.run(None).await {
+        match gremlin.run(None, None).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "broken"),
             other => panic!("expected StageFailed, got {other:?}"),
         }
@@ -1637,7 +1652,7 @@ mod tests {
         gremlin.worktree = Some(worktree.clone());
         let state_dir = tmp.path().join("state").join("gr-test");
 
-        assert_eq!(gremlin.run(None).await.unwrap(), 1);
+        assert_eq!(gremlin.run(None, None).await.unwrap(), 1);
         assert!(!worktree.join("never.marker").exists());
 
         let raw: Value =
@@ -1676,7 +1691,7 @@ mod tests {
 
         // The stage `cat`s a file only the bootstrap wrote: a non-zero exit
         // here would mean the ordering was wrong.
-        assert_eq!(gremlin.run(None).await.unwrap(), 0);
+        assert_eq!(gremlin.run(None, None).await.unwrap(), 0);
         assert!(worktree.join("marker.txt").is_file());
         assert!(worktree.join("read.txt").is_file());
     }
@@ -1699,7 +1714,7 @@ mod tests {
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
 
-        assert_eq!(gremlin.run(Some("only")).await.unwrap(), 0);
+        assert_eq!(gremlin.run(Some("only"), None).await.unwrap(), 0);
         assert!(!worktree.join("bootstrap.marker").exists());
     }
 
@@ -1746,7 +1761,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let code = gremlin.run(None).await.unwrap();
+        let code = gremlin.run(None, None).await.unwrap();
         // Read back through the handle's own state dir. The sandbox
         // override is shared process state, and the pre-existing
         // config tests clear it for their own duration; the path the

@@ -8,14 +8,13 @@ use clap::{Parser, Subcommand};
 use gremlins::artifacts::registry::FileSystemArtifactRegistry;
 use gremlins::config;
 use gremlins::core::discovery;
-use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
 use gremlins::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
 use gremlins::executor::exec_runner::prepare_exec;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
 use gremlins::schemas::bootstrap;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 mod spawn;
 
@@ -35,14 +34,6 @@ enum Cmds {
         /// Free-form --key value pairs passed to bootstrap sources.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-    },
-    #[command(hide = true, name = "spawn")]
-    Run {
-        /// Gremlin id to resume or start fresh.
-        id: String,
-        /// Stage to resume from (internal use).
-        #[arg(long, hide = true)]
-        resume_from: Option<String>,
     },
     /// List gremlins from the state root as a plain-column table.
     Ls {
@@ -103,19 +94,17 @@ async fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Cmds::Launch { definition, args }) => launch(&definition, &args).await,
-        Some(Cmds::Run { id, resume_from }) => run_gremlin(&id, resume_from.as_deref()).await,
-        Some(Cmds::Ls { here }) => ls(here),
-        Some(Cmds::Info { id }) => info(&id),
-        Some(Cmds::Stop { id }) => stop(&id),
+        Some(Cmds::Ls { here }) => ls(here).await,
+        Some(Cmds::Info { id }) => info(&id).await,
+        Some(Cmds::Stop { id }) => stop(&id).await,
         Some(Cmds::Resume { id }) => resume(&id).await,
         Some(Cmds::Log { id }) => log_gremlin(&id),
         Some(Cmds::Clean { id, keep }) => clean(&id, keep),
         Some(Cmds::Rm { id }) => rm(&id),
         Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::Validate { definition }) => validate(&definition).await,
-        Some(Cmds::External(args)) => status_external(&args),
+        Some(Cmds::External(args)) => status_external(&args).await,
         None => {
-            // No subcommand — print help and exit 0.
             let mut cmd = <Cli as clap::CommandFactory>::command();
             cmd.print_help().unwrap();
             return;
@@ -128,21 +117,105 @@ async fn main() {
 }
 
 // ---------------------------------------------------------------------------
+// Socket helpers
+// ---------------------------------------------------------------------------
+
+/// Ensure an executor is running, becoming one if needed.
+/// Returns a connected stream.
+async fn ensure_executor() -> Result<tokio::net::UnixStream, String> {
+    config::init_global().map_err(|e| e.to_string())?;
+    spawn::bind_or_connect().await
+}
+
+/// Send a request to the executor and return the response.
+async fn executor_request(request: serde_json::Value) -> Result<serde_json::Value, String> {
+    let mut stream = ensure_executor().await?;
+    spawn::send_request(&mut stream, request).await
+}
+
+/// Check if a response is an error.
+fn check_error(response: &Value) -> Result<(), String> {
+    if response.get("type").and_then(|v| v.as_str()) == Some("error") {
+        let msg = response
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(msg.to_string());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // ls & status
 // ---------------------------------------------------------------------------
 
-/// List gremlins whose state directories contain a `state.json`.
-///
-/// Closed gremlins (those with a `closed` marker next to the state file) are
-/// skipped without comment: they were cleaned with `remove_state_dir=false` and
-/// no longer represent live runs.
-fn ls(here: bool) -> Result<(), String> {
+async fn ls(here: bool) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     let cwd = std::env::current_dir()
         .map(|path| path.canonicalize().unwrap_or(path))
         .unwrap_or_else(|_| PathBuf::from("."));
 
+    // Try the executor first — but only connect, don't become one.
+    let response = match spawn::connect().await {
+        Ok(mut stream) => {
+            match spawn::send_request(&mut stream, serde_json::json!({"op": "ls"})).await {
+                Ok(r) => r,
+                Err(_) => return ls_direct(here, &cwd),
+            }
+        }
+        Err(_) => return ls_direct(here, &cwd),
+    };
+
+    check_error(&response)?;
+
+    let gremlins = response
+        .get("gremlins")
+        .and_then(|v| v.as_array())
+        .ok_or("invalid ls response")?;
+
+    let headers = ["ID", "STATUS", "STAGE", "DATE", "PROJECT", "LAUNCH"];
+    let mut rows: Vec<Vec<String>> = Vec::new();
+
+    for entry in gremlins {
+        let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let stage = entry.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+        let started_at = entry
+            .get("started_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let project = entry.get("project").and_then(|v| v.as_str()).unwrap_or("");
+        let launch = entry.get("launch").and_then(|v| v.as_str()).unwrap_or("");
+
+        if here {
+            if project.is_empty() {
+                continue;
+            }
+            let Ok(project_path) = PathBuf::from(project).canonicalize() else {
+                continue;
+            };
+            if project_path != cwd {
+                continue;
+            }
+        }
+
+        rows.push(vec![
+            id.to_string(),
+            status.to_string(),
+            stage.to_string(),
+            started_at.to_string(),
+            project.to_string(),
+            launch.to_string(),
+        ]);
+    }
+
+    print_table(&headers, &rows);
+    Ok(())
+}
+
+/// Fallback: scan state directories directly (no executor running).
+fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
     let headers = ["ID", "STATUS", "STAGE", "DATE", "PROJECT", "LAUNCH"];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
@@ -154,15 +227,9 @@ fn ls(here: bool) -> Result<(), String> {
             continue;
         }
 
-        // A directory with a state.json is only listable when that file is a
-        // non-empty JSON object. Malformed or mid-write files are skipped
-        // silently, matching the "missing state.json is not fatal" guardrail.
         let Some(state_map) = read_state_object(&state_json_path) else {
             continue;
         };
-
-        let mut data = StateData::new(Some(id.clone()));
-        data.state_file = Some(state_json_path.clone());
 
         let project = state_map
             .get("project_root")
@@ -175,7 +242,7 @@ fn ls(here: bool) -> Result<(), String> {
             let Ok(project_path) = PathBuf::from(project).canonicalize() else {
                 continue;
             };
-            if project_path != cwd {
+            if project_path != *cwd {
                 continue;
             }
         }
@@ -204,25 +271,123 @@ fn ls(here: bool) -> Result<(), String> {
 
 /// The fallback arm for `gremlins <id>`: an unknown subcommand is exactly the
 /// single-id status command, provided it was given exactly one token.
-fn status_external(args: &[OsString]) -> Result<(), String> {
+async fn status_external(args: &[OsString]) -> Result<(), String> {
     if args.len() != 1 {
         return Err("expected exactly one gremlin id".to_string());
     }
     let id = args[0].to_string_lossy();
-    status(&id)
+    status(&id).await
 }
 
 /// Print the detailed status block for one gremlin.
-fn status(id: &str) -> Result<(), String> {
+async fn status(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    // Distinguish a missing id from a malformed one without parsing
-    // `Gremlin::from`'s error text: absence of the state directory/file is
-    // the only case that gets the `gremlins ls` suggestion.
+    // Try executor first — but only connect, don't become one.
+    let response = match spawn::connect().await {
+        Ok(mut stream) => {
+            match spawn::send_request(&mut stream, serde_json::json!({"op": "status", "id": id}))
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => return status_direct(id),
+            }
+        }
+        Err(_) => return status_direct(id),
+    };
+
+    check_error(&response)?;
+
+    println!(
+        "id:            {}",
+        response.get("id").and_then(|v| v.as_str()).unwrap_or("")
+    );
+    println!(
+        "status:        {}",
+        response
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    );
+    println!(
+        "stage:         {}",
+        response.get("stage").and_then(|v| v.as_str()).unwrap_or("")
+    );
+    println!(
+        "definition:    {}",
+        response
+            .get("definition")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    );
+    println!(
+        "project_root:  {}",
+        response
+            .get("project_root")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    );
+    println!(
+        "workdir:       {}",
+        response
+            .get("workdir")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    );
+    println!(
+        "state_dir:     {}",
+        response
+            .get("state_dir")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    );
+    println!(
+        "artifact_dir:  {}",
+        response
+            .get("artifact_dir")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    );
+    println!(
+        "started_at:    {}",
+        response
+            .get("started_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    );
+    println!("ended_at:      {}", value_display(response.get("ended_at")));
+    println!(
+        "exit_code:     {}",
+        value_display(response.get("exit_code"))
+    );
+    println!("pid:           {}", value_display(response.get("pid")));
+    println!(
+        "client:        {}",
+        response
+            .get("client")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    );
+    println!(
+        "attempt:       {}",
+        response
+            .get("attempt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    );
+    println!(
+        "kind:          {}",
+        response.get("kind").and_then(|v| v.as_str()).unwrap_or("")
+    );
+    Ok(())
+}
+
+/// Fallback: read status directly from state.json.
+fn status_direct(id: &str) -> Result<(), String> {
     let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
@@ -274,18 +439,36 @@ fn status(id: &str) -> Result<(), String> {
 // info
 // ---------------------------------------------------------------------------
 
-/// Print the full runtime state of one gremlin as pretty-printed JSON.
-///
-/// Uses `Gremlin::from` — the cheap constructor — so the definition is never
-/// parsed and no client is built.  The log path is reported even if the log
-/// file has not been created yet.
-fn info(id: &str) -> Result<(), String> {
+async fn info(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
+    // Try executor first — but only connect, don't become one.
+    let response = match spawn::connect().await {
+        Ok(mut stream) => {
+            match spawn::send_request(&mut stream, serde_json::json!({"op": "info", "id": id}))
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => return info_direct(id),
+            }
+        }
+        Err(_) => return info_direct(id),
+    };
+
+    check_error(&response)?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).map_err(|e| format!("failed to serialize: {e}"))?
+    );
+    Ok(())
+}
+
+fn info_direct(id: &str) -> Result<(), String> {
     let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
@@ -341,150 +524,30 @@ fn info(id: &str) -> Result<(), String> {
 // stop
 // ---------------------------------------------------------------------------
 
-/// Stop a running gremlin.
-///
-/// Sends SIGTERM to the process recorded in `pid`, waits a short grace period,
-/// then SIGKILL if it is still alive. After the process is confirmed gone,
-/// patches `status` to `"stopped"`, sets `ended_at` and `exit_code`, and touches
-/// the `finished` marker. Idempotent: a gremlin whose status is already
-/// `done` or `stopped` is reported and exits 0 without signalling.
-fn stop(id: &str) -> Result<(), String> {
-    #[cfg(not(unix))]
-    {
-        return Err("stop is not implemented on this platform".to_string());
-    }
-
+async fn stop(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let state_dir = config::state_root().join(id);
-    let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
-        ));
+    let response = executor_request(serde_json::json!({"op": "stop", "id": id})).await?;
+    check_error(&response)?;
+
+    let status = response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let message = response
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if !message.is_empty() {
+        println!("gremlin {id}: {message}");
+    } else {
+        println!("gremlin {id} {status}");
     }
-
-    let gremlin = Gremlin::from(id).map_err(|e| format!("gremlin {id}: {e}"))?;
-
-    let status = gremlin.state.read_str("status");
-    if status == "done" || status == "stopped" {
-        println!("gremlin {id} is already {status}");
-        return Ok(());
-    }
-
-    let pid_raw = gremlin
-        .state
-        .read_field("pid")
-        .and_then(|v| v.as_i64())
-        .filter(|&n| n > 0 && n <= libc::pid_t::MAX as i64)
-        .unwrap_or(0);
-
-    if pid_raw == 0 {
-        // No OS process to signal.
-        let parent_id = gremlin.state.read_str("parent_id");
-        if !parent_id.is_empty() {
-            // This is a parallel child running in the parent's process.
-            // Writing terminal state here would let rm/clean delete the
-            // child's resources while the parent's worker thread is still
-            // using them. Try to signal the parent instead.
-            if let Ok(parent) = Gremlin::from(&parent_id) {
-                let parent_pid = parent
-                    .state
-                    .read_field("pid")
-                    .and_then(|v| v.as_i64())
-                    .filter(|&n| n > 0 && n <= libc::pid_t::MAX as i64)
-                    .unwrap_or(0);
-                let parent_status = parent.state.read_str("status");
-                if parent_pid > 0 && parent_status == "running" {
-                    eprintln!(
-                        "gremlin {id} is a parallel child — stopping parent \
-                         {parent_id} instead"
-                    );
-                    unsafe {
-                        libc::kill(-(parent_pid as libc::pid_t), libc::SIGTERM);
-                    }
-                    return Ok(());
-                }
-                // Parent is already terminal or has no process itself.
-                // In either case the child's worker thread is done.
-            }
-            // Parent state is gone — child is orphaned, safe to mark.
-        }
-        // No parent, or parent gone / already terminal.
-        eprintln!("warning: gremlin {id} has no process — marking stopped in state only");
-        gremlin.state.write_terminal_state(-1);
-        return Ok(());
-    }
-
-    let pid = pid_raw as libc::pid_t;
-
-    // Send SIGTERM to the entire process group so child processes
-    // (agent commands, shell tools) are signalled alongside the runner.
-    let mut exit_code = -15i32;
-    unsafe {
-        let ret = libc::kill(-pid, libc::SIGTERM);
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::ESRCH) {
-                // ESRCH: the process is already gone — treat the same as
-                // the pid_raw == 0 case above.
-                let parent_id = gremlin.state.read_str("parent_id");
-                if !parent_id.is_empty() {
-                    // The child has no process of its own — just mark it
-                    // terminal. The parent owns the real process group.
-                    eprintln!(
-                        "warning: gremlin {id} has no process — marking stopped in state only"
-                    );
-                    gremlin.state.write_terminal_state(-1);
-                    return Ok(());
-                }
-                println!("gremlin {id} has already exited");
-                gremlin.state.write_terminal_state(-1);
-                return Ok(());
-            }
-            return Err(format!("failed to signal gremlin {id}: {err}"));
-        }
-    }
-
-    // Grace period for SIGTERM.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    unsafe {
-        // kill(-pgid, 0) checks whether any process in the group is still
-        // alive — fails with ESRCH when the group is empty.
-        if libc::kill(-pid, 0) == 0 {
-            let ret = libc::kill(-pid, libc::SIGKILL);
-            if ret != 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(format!("failed to kill gremlin {id}: {err}"));
-                }
-                // ESRCH after SIGKILL: process died between the liveness
-                // check and the signal — that's fine, SIGTERM did the job.
-            } else {
-                exit_code = -9;
-                // Poll until the process exits (bounded).
-                for _ in 0..10 {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    if libc::kill(-pid, 0) != 0 {
-                        break;
-                    }
-                }
-                if libc::kill(-pid, 0) == 0 {
-                    return Err(format!(
-                        "gremlin {id}: process group {pid} did not exit after SIGKILL"
-                    ));
-                }
-            }
-        }
-    }
-
-    gremlin.state.write_terminal_state(exit_code);
-    println!("gremlin {id} stopped");
     Ok(())
 }
 
@@ -492,12 +555,6 @@ fn stop(id: &str) -> Result<(), String> {
 // resume
 // ---------------------------------------------------------------------------
 
-/// Resume a stopped or bailed gremlin from its last recorded stage.
-///
-/// Validates the id, confirms the state directory exists, checks that the
-/// gremlin is resumable (not running, not done), patches the state to
-/// `"running"`, bumps the attempt suffix, and spawns `_run --resume-from`
-/// as a detached child.
 async fn resume(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
@@ -505,85 +562,17 @@ async fn resume(id: &str) -> Result<(), String> {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let state_dir = config::state_root().join(id);
-    let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
-        ));
-    }
-
-    let gremlin = Gremlin::from(id).map_err(|e| format!("gremlin {id}: {e}"))?;
-
-    let status = gremlin.state.read_str("status");
-
-    // A running gremlin must not be resumed — two processes driving the same
-    // state directory would corrupt it.
-    if status == "running" {
-        return Err(format!(
-            "gremlin {id} is already running — use `gremlins stop {id}` first"
-        ));
-    }
-
-    // A done gremlin has no stages left to run.
-    if status == "done" {
-        return Err(format!("gremlin {id} is already done — nothing to resume"));
-    }
-
-    // Only stopped gremlins or those carrying a bail record are resumable.
-    let has_bail = gremlin.state.read_bail_info().is_some();
-    if status != "stopped" && !has_bail {
-        return Err(format!(
-            "gremlin {id} cannot be resumed — status is {status:?} with no bail record"
-        ));
-    }
-
-    // Read the last recorded stage — this is the resume point.
-    let stage = gremlin.state.read_str("stage");
-    if stage.is_empty() || stage == "starting" {
-        return Err(format!("gremlin {id} has no recorded stage to resume from"));
-    }
-
-    // Remove the finished marker if present.
-    let finished = state_dir.join("finished");
-    if finished.is_file() {
-        let _ = std::fs::remove_file(&finished);
-    }
-
-    // Patch state to "running" *before* spawning the child.  When the child
-    // finishes quickly it writes terminal fields (status=done, ended_at,
-    // exit_code), and a parent patch after that would overwrite them with
-    // stale values.  Publishing first means the child's terminal write is
-    // the final word.
-    let mut fields = serde_json::Map::new();
-    fields.insert(
-        "status".to_string(),
-        serde_json::Value::String("running".to_string()),
-    );
-    fields.insert("ended_at".to_string(), serde_json::Value::Null);
-    fields.insert("exit_code".to_string(), serde_json::Value::Null);
-    let current_attempt = gremlin.state.read_str("attempt");
-    let new_attempt = format!("{current_attempt}-resume-{}", state::token_hex(2));
-    fields.insert(
-        "attempt".to_string(),
-        serde_json::Value::String(new_attempt),
-    );
-    gremlin.state.patch(&[], &fields);
-
-    spawn::spawn_gremlin(id, Some(&stage))?;
+    let response = executor_request(serde_json::json!({"op": "resume", "id": id})).await?;
+    check_error(&response)?;
 
     println!("{id}");
     Ok(())
 }
 
 /// Follow a gremlin's log file interactively with `less +F`.
-///
-/// `less` takes over the terminal (foreground) so the user can scroll,
-/// search, and toggle follow mode.  stdin/stdout/stderr are inherited.
 fn log_gremlin(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
-    // Treat invalid ids the same as nonexistent — both are "unknown gremlin".
     let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
     if validate_gremlin_id(id).is_err() || !state_dir.is_dir() || !state_file.is_file() {
@@ -616,11 +605,6 @@ fn log_gremlin(id: &str) -> Result<(), String> {
 // rm
 // ---------------------------------------------------------------------------
 
-/// Remove a gremlin and all its filesystem assets.
-///
-/// This is a simpler variant of `clean` that always removes the state
-/// directory — there is no `--keep` option.  A running gremlin is rejected;
-/// stop it first.  Nonexistent gremlins produce an error.
 fn rm(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
@@ -663,15 +647,6 @@ fn rm(id: &str) -> Result<(), String> {
 // clean
 // ---------------------------------------------------------------------------
 
-/// Remove a gremlin's filesystem assets.
-///
-/// By default the worktree, scratch directory, and state directory are all
-/// removed.  With `--keep` the state directory is preserved (with a `closed`
-/// marker) so fleet viewers can still see the run record.
-///
-/// A running gremlin is rejected — stop it first.  Nonexistent gremlins
-/// produce an error.  Already-cleaned gremlins (state directory gone due to
-/// a concurrent clean) are not an error: print a message and exit 0.
 fn clean(id: &str, keep: bool) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
@@ -690,8 +665,6 @@ fn clean(id: &str, keep: bool) -> Result<(), String> {
     let gremlin = match Gremlin::from(id) {
         Ok(g) => g,
         Err(e) => {
-            // If the state directory disappeared between our check and
-            // reconstruction, another process already cleaned it.
             if !state_dir.is_dir() || !state_file.is_file() {
                 println!("gremlin {id} is already cleaned");
                 return Ok(());
@@ -716,7 +689,6 @@ fn clean(id: &str, keep: bool) -> Result<(), String> {
 // land
 // ---------------------------------------------------------------------------
 
-/// Run the definition's `land` block in the current working directory.
 async fn land(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
@@ -732,7 +704,6 @@ async fn land(id: &str) -> Result<(), String> {
         ));
     }
 
-    // Load the definition from the hermetic snapshot.
     let definition_path = state_dir.join("definition.yaml");
     if !definition_path.is_file() {
         return Err(format!(
@@ -747,7 +718,6 @@ async fn land(id: &str) -> Result<(), String> {
         StaticDefinition::from_yaml_file(&definition_path, None, default_client.as_deref())
             .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
 
-    // Extract the Exec from the land stage.
     let exec = match definition.land() {
         Some(ExecutorStage::Exec { stage, .. }) => stage,
         Some(_) => {
@@ -760,11 +730,8 @@ async fn land(id: &str) -> Result<(), String> {
         }
     };
 
-    // Read project_root and workdir from state.json for system_env.
     let raw = state::read_state_json(Some(&state_file));
 
-    // A running gremlin must not be landed — its worktree is still being
-    // mutated by the agent process.
     if raw.get("status").and_then(Value::as_str) == Some("running") {
         return Err(format!(
             "gremlin {id} is running — use `gremlins stop {id}` first"
@@ -786,11 +753,9 @@ async fn land(id: &str) -> Result<(), String> {
     let worktree = (!workdir.is_empty()).then(|| PathBuf::from(workdir));
     let overlay_dir = config::project_overlay_dir(&project_root);
 
-    // Build a read-only artifact registry from the artifact directory.
     let artifact_dir = state_dir.join("artifacts");
     let registry = FileSystemArtifactRegistry::new(artifact_dir.clone());
 
-    // Resolve interpolation references.
     let prepared = prepare_exec(&exec, &registry, &registry, "", &HashMap::new())
         .await
         .map_err(|e| format!("gremlin {id}: {e}"))?;
@@ -813,8 +778,6 @@ async fn land(id: &str) -> Result<(), String> {
         &overlay_dir,
         &scratch_dir,
     ));
-    // Merge substitution env vars (GREMLINS_<KEY> → value) so that
-    // {key} tokens in command templates resolve to their actual values.
     for (k, v) in &prepared.substitution_env {
         env.insert(k.clone(), v.clone());
     }
@@ -823,7 +786,6 @@ async fn land(id: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("gremlin {id}: land: {e}"))?;
 
-    // Stream captured output to the terminal.
     {
         use std::io::Write;
         let stdout = std::io::stdout();
@@ -843,7 +805,6 @@ async fn land(id: &str) -> Result<(), String> {
 // validate
 // ---------------------------------------------------------------------------
 
-/// Validate a definition without executing anything.
 async fn validate(definition: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
@@ -860,7 +821,7 @@ async fn validate(definition: &str) -> Result<(), String> {
 
     let mut gremlin = Gremlin::for_dry_run(gremlin_def);
 
-    match gremlin.run(None).await {
+    match gremlin.run(None, None).await {
         Ok(0) => Ok(()),
         Ok(exit_code) => {
             let stage = gremlin.state.read_str("stage");
@@ -894,12 +855,14 @@ async fn validate(definition: &str) -> Result<(), String> {
     }
 }
 
-/// Read a state field for display, treating null/absent as empty.
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 fn field_display(state: &StateData, field: &str) -> String {
     value_display(state.read_field(field).as_ref())
 }
 
-/// Read a field from an already-parsed state map for display.
 fn map_field_display(state: &serde_json::Map<String, Value>, field: &str) -> String {
     value_display(state.get(field))
 }
@@ -912,7 +875,6 @@ fn value_display(value: Option<&Value>) -> String {
     }
 }
 
-/// Parse a state file into a non-empty JSON object, if it is one.
 fn read_state_object(path: &Path) -> Option<serde_json::Map<String, Value>> {
     let text = fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
@@ -922,12 +884,6 @@ fn read_state_object(path: &Path) -> Option<serde_json::Map<String, Value>> {
     }
 }
 
-/// The definition column: the persisted `definition_path` file stem when recorded,
-/// else the `kind` recorded in state.json.
-///
-/// The hermetic snapshot is always copied to `state_dir/definition.yaml`, so its
-/// own stem would collapse every row to "definition". The recorded
-/// `definition_path` is the original definition path and preserves the real name.
 fn definition_display_name(state: &StateData) -> String {
     let recorded = field_display(state, "definition_path");
     if let Some(stem) = Path::new(&recorded)
@@ -940,10 +896,6 @@ fn definition_display_name(state: &StateData) -> String {
     field_display(state, "kind")
 }
 
-/// Print `headers` and `rows` as a plain-column table.
-///
-/// Each column is padded to the width of its widest cell, and columns are
-/// separated by two spaces. No ANSI, no color.
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
     for row in rows {
@@ -1006,7 +958,6 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     match &gremlin_def.bootstrap.source {
         Some(source) => {
-            // Reject any --key that is not a declared source.
             let declared: Vec<String> = source.all_sources();
             for key in stage_inputs.keys() {
                 if !declared.iter().any(|d| d == key) {
@@ -1016,7 +967,6 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
                     ));
                 }
             }
-            // Validate required sources are present and filepath sources exist.
             bootstrap::validate_source_values(source, &stage_inputs).map_err(|e| format!("{e}"))?;
         }
         None => {
@@ -1028,105 +978,22 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         }
     }
 
-    // The definition name is the YAML file stem.
-    let definition_name = definition_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("gremlin");
+    // Send launch request to executor.
+    let response = executor_request(serde_json::json!({
+        "op": "launch",
+        "definition": definition,
+        "args": raw_args,
+        "project_root": project_root.to_string_lossy(),
+    }))
+    .await?;
 
-    // Resolve the definition's base_ref so the worktree branches from the
-    // configured branch/tag rather than always from HEAD.
-    let base_ref = gremlin_def.base_ref.clone();
-    let base_ref_sha = if base_ref.is_empty() || base_ref == "HEAD" {
-        String::new()
-    } else {
-        git::resolve_base_ref(&base_ref, Some(&project_root))
-            .map(|(_name, sha)| sha)
-            .map_err(|e| format!("failed to resolve base_ref {base_ref:?}: {e}"))?
-    };
-    let base_ref_opt = if base_ref.is_empty() {
-        None
-    } else {
-        Some(base_ref.as_str())
-    };
-    let base_ref_sha_opt = if base_ref_sha.is_empty() {
-        None
-    } else {
-        Some(base_ref_sha.as_str())
-    };
+    check_error(&response)?;
 
-    // Create the gremlin: id generation, state dir, worktree, state.json,
-    // hermetic definition.yaml, and empty log — all owned by the library.
-    let gremlin = Gremlin::init(
-        definition_name,
-        &definition_path,
-        &gremlin_def,
-        &stage_inputs,
-        None,
-        None,
-        base_ref_opt,
-        base_ref_sha_opt,
-    )
-    .map_err(|e| format!("failed to create gremlin: {e}"))?;
-
-    // Record the launch command in metadata so `gremlins ls` can show it.
-    {
-        let launch_cmd = std::iter::once(definition.to_string())
-            .chain(raw_args.iter().cloned())
-            .map(|arg| shell_escape(&arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let mut cli_meta = Map::new();
-        cli_meta.insert("launch_cmd".to_string(), Value::String(launch_cmd));
-        let mut meta_field = Map::new();
-        meta_field.insert("cli".to_string(), Value::Object(cli_meta));
-        let mut outer = Map::new();
-        outer.insert("metadata".to_string(), Value::Object(meta_field));
-        gremlin.state.patch(&[], &outer);
-    }
-
-    // Spawn the child process.
-    spawn::spawn_gremlin(gremlin.id.as_str(), None)?;
-
-    println!("{}", gremlin.id);
+    let id = response.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    println!("{id}");
     Ok(())
 }
 
-/// Quote a single argv element so the launch command can be re-displayed
-/// unambiguously on one line. Values with whitespace or shell-significant
-/// characters are wrapped in double quotes; embedded quotes, backslashes, and
-/// control characters are backslash-escaped so newlines can't corrupt the
-/// plain-column `ls` output.
-fn shell_escape(arg: &str) -> String {
-    let needs_quoting = arg.is_empty()
-        || arg
-            .chars()
-            .any(|c| c.is_whitespace() || matches!(c, '"' | '\\' | '$' | '`' | '\''));
-    if !needs_quoting {
-        return arg.to_string();
-    }
-    let mut out = String::with_capacity(arg.len() + 2);
-    out.push('"');
-    for c in arg.chars() {
-        match c {
-            '"' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Turn `["--key1", "value1", "--key2", "value2"]` into a map.
-///
-/// Every key must be followed by a value.  A `--key` that is the final
-/// argument or followed by another `--key` is rejected.
 fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String> {
     let mut map = HashMap::new();
     let mut i = 0;
@@ -1155,117 +1022,4 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
         map.insert(key.to_string(), value);
     }
     Ok(map)
-}
-
-// ---------------------------------------------------------------------------
-// _run
-// ---------------------------------------------------------------------------
-
-async fn run_gremlin(id: &str, resume_from: Option<&str>) -> Result<(), String> {
-    // Wire up logging: respect GREMLINS_LOG_LEVEL (default: INFO).
-    // _run redirects stderr to the log file, so per-stage DEBUG logs end up
-    // captured in the gremlin's log.
-    let level = std::env::var("GREMLINS_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&level))
-        .format_timestamp_millis()
-        .init();
-
-    config::init_global().map_err(|e| e.to_string())?;
-
-    // Reconstruct the handle from the persisted state directory.
-    let mut gremlin = Gremlin::from(id).map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("no state at") || msg.contains("gremlin_id contains illegal") {
-            format!("unknown gremlin {id:?} — use `gremlins ls` to list gremlins")
-        } else {
-            format!("gremlin {id}: {msg}")
-        }
-    })?;
-
-    // When resuming, the run loop positions the definition cursor via goto.
-    // init_runtime handles loading from the hermetic snapshot and applying
-    // the resume position.
-    let resume = resume_from;
-
-    // Write our PID — the launcher wrote its own, but we are the process
-    // that actually runs the definition.
-    let mut fields = serde_json::Map::new();
-    fields.insert(
-        "pid".to_string(),
-        serde_json::Value::from(std::process::id() as i64),
-    );
-    gremlin.state.patch(&[], &fields);
-
-    // Put ourselves in our own process group so `stop` can signal the
-    // entire group and reach any child processes spawned by the definition.
-    #[cfg(unix)]
-    unsafe {
-        libc::setpgid(0, 0);
-    }
-
-    // Redirect stdout and stderr to the gremlin's log file so all output
-    // is captured.
-    let log_path = gremlin.state_dir.join("log");
-    redirect_stdio_to_log(&log_path)?;
-
-    // Run every stage to completion.  The library's run loop handles
-    // terminal-state bookkeeping regardless of outcome.
-    let exit_code = match gremlin.run(resume).await {
-        Ok(ec) => ec,
-        Err(e) => {
-            // A failure before the stage loop (bootstrap, definition loading)
-            // returns through `run()` without calling `finish`, leaving
-            // `state.json` as "running" with no terminal marker.  Write
-            // terminal state here so the run does not appear permanently
-            // live.
-            gremlin.state.write_terminal_state(1);
-            return Err(format!("gremlin {id}: {e}"));
-        }
-    };
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// stdio redirection
-// ---------------------------------------------------------------------------
-
-/// Redirect stdout and stderr to the gremlin's log file.
-///
-/// On Unix the file descriptor is dup'd directly via `dup2`.  On other
-/// platforms logging to file is unimplemented for now — stderr is
-/// captured by the parent process.
-fn redirect_stdio_to_log(log_path: &std::path::Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let log_file = fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(log_path)
-            .map_err(|e| format!("failed to open log: {e}"))?;
-
-        // SAFETY: This is the standard POSIX dup2 dance for output redirection.
-        // The log file descriptor is leaked intentionally — it must outlive
-        // the process's own stdout/stderr.
-        use std::os::fd::AsRawFd;
-        let log_fd = log_file.as_raw_fd();
-        if unsafe { libc::dup2(log_fd, libc::STDOUT_FILENO) } < 0 {
-            return Err("failed to redirect stdout".to_string());
-        }
-        if unsafe { libc::dup2(log_fd, libc::STDERR_FILENO) } < 0 {
-            return Err("failed to redirect stderr".to_string());
-        }
-        // The log_file handle is dropped here, but the fd was dup'd so it
-        // remains open via fds 1 and 2.
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = log_path;
-        // Non-Unix redirection not yet implemented — stderr is captured by
-        // the parent process.
-        Ok(())
-    }
 }

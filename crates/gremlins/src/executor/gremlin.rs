@@ -1788,7 +1788,7 @@ mod tests {
 
         // The resume path: reconstruct cheaply, then drive the run. The
         // definition must have been loaded by the time `run` returns.
-        assert_eq!(handle.run(None).await.unwrap(), 0);
+        assert_eq!(handle.run(None, None).await.unwrap(), 0);
         assert_eq!(handle.definition.name(), "demo");
     }
 
