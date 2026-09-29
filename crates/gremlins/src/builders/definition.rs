@@ -493,11 +493,7 @@ impl DefinitionBuilder {
         fill_builder_names(&mut self.stages);
 
         // Build the node list for validation, including land.
-        let mut nodes: Vec<StageNode> = self
-            .stages
-            .iter()
-            .map(StageSpec::to_stage_node)
-            .collect();
+        let mut nodes: Vec<StageNode> = self.stages.iter().map(StageSpec::to_stage_node).collect();
         if let Some(ref land) = self.land {
             nodes.push(land.to_stage_node());
         }

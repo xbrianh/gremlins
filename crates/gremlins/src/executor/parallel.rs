@@ -666,10 +666,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    fn test_gremlin(
-        stages: Vec<StageSpec>,
-        default_client: &str,
-    ) -> (tempfile::TempDir, Gremlin) {
+    fn test_gremlin(stages: Vec<StageSpec>, default_client: &str) -> (tempfile::TempDir, Gremlin) {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().join("state").join("gr-test");
         let artifact_dir = state_dir.join("artifacts");

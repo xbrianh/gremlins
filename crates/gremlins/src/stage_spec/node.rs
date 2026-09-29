@@ -78,9 +78,7 @@ impl StageSpec {
         match self {
             StageSpec::Agent { stage, .. } => &stage.name,
             StageSpec::Exec { stage, .. } => &stage.name,
-            StageSpec::Sequence { attrs, .. } | StageSpec::Parallel { attrs, .. } => {
-                &attrs.name
-            }
+            StageSpec::Sequence { attrs, .. } | StageSpec::Parallel { attrs, .. } => &attrs.name,
         }
     }
 
@@ -204,11 +202,7 @@ impl StageSpec {
             bind_map,
             interpolation_map,
             skip_if_exists: self.skip_if_exists().to_string(),
-            body: self
-                .body()
-                .iter()
-                .map(StageSpec::to_stage_node)
-                .collect(),
+            body: self.body().iter().map(StageSpec::to_stage_node).collect(),
         }
     }
 }
