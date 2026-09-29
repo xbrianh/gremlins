@@ -17,7 +17,9 @@ pub mod exec_runner;
 pub mod gremlin;
 pub mod parallel;
 pub mod run;
+pub mod socket;
 pub mod state;
+pub mod supervisor;
 pub mod vars;
 
 /// Why a gremlin run failed.
