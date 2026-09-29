@@ -5,6 +5,7 @@ pub mod cmd_backend;
 pub(crate) mod config;
 pub(crate) mod log_util;
 pub mod openai_backend;
+pub mod openai_protocol;
 pub mod openrouter_backend;
 pub mod protocol;
 pub(crate) mod retry;

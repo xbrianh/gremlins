@@ -1,16 +1,13 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rig_core::completion::CompletionError;
 use rig_core::providers::openai;
 
-use super::agent_loop::{CancelToken, ErrorClassifier, RunContext};
+use super::agent_loop::ErrorClassifier;
 use super::backend::{Backend, ClientError, RunParams};
-use super::openai_backend::{build_extra_params, run_with_agent_loop, task_model_selector};
+use super::openai_protocol::{reap_openai_compat, run_openai_compat, OpenAiRunState};
 use super::protocol::CompletedRun;
-use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 
 /// Provider name this backend answers to, used to match `task-clients` specs.
 const PROVIDER_NAME: &str = "openrouter";
@@ -72,13 +69,7 @@ fn body_contains_transient(body: &str) -> bool {
 }
 
 pub struct OpenRouterBackend {
-    client: openai::CompletionsClient,
-    model: String,
-    tool_filter: Option<Vec<String>>,
-    client_params: HashMap<String, String>,
-    last_ctx: Mutex<Option<RunContext>>,
-    cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
-    next_id: AtomicU64,
+    state: OpenAiRunState,
 }
 
 impl OpenRouterBackend {
@@ -94,148 +85,27 @@ impl OpenRouterBackend {
             model
         };
         Self {
-            client,
-            model,
-            tool_filter,
-            client_params,
-            last_ctx: Mutex::new(None),
-            cancels: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
-        }
-    }
-
-    fn extra_params(&self) -> Option<serde_json::Value> {
-        build_extra_params(&self.client_params)
-    }
-
-    fn effective_model(&self, override_model: Option<&str>) -> String {
-        match override_model {
-            Some(m) if !m.is_empty() => m.to_string(),
-            _ => self.model.clone(),
-        }
-    }
-
-    async fn attempt(&self, prompt: &str, ctx: &RunContext) -> Result<CompletedRun, ClientError> {
-        let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let cancel = CancelToken::new();
-        self.cancels
-            .lock()
-            .unwrap()
-            .entry(gremlin_id.clone())
-            .or_default()
-            .insert(id, cancel.clone());
-        let result = self.attempt_inner(prompt, ctx, cancel).await;
-        if let Ok(mut guard) = self.cancels.lock() {
-            if let Some(inner) = guard.get_mut(&gremlin_id) {
-                inner.remove(&id);
-                if inner.is_empty() {
-                    guard.remove(&gremlin_id);
-                }
-            }
-        }
-        result
-    }
-
-    async fn attempt_inner(
-        &self,
-        prompt: &str,
-        ctx: &RunContext,
-        cancel: Arc<CancelToken>,
-    ) -> Result<CompletedRun, ClientError> {
-        let model_name = self.effective_model(ctx.params.model.as_deref());
-        let classify: ErrorClassifier = classify_openrouter_error;
-        run_with_agent_loop(
-            &self.client,
-            &model_name,
-            prompt,
-            ctx,
-            cancel,
-            self.extra_params(),
-            self.tool_filter.as_deref(),
-            Some(classify),
-            task_model_selector(
-                &self.client,
-                PROVIDER_NAME,
-                &ctx.params.task_clients_exact,
-                &ctx.params.task_clients_prefix,
+            state: OpenAiRunState::new(
+                client,
+                model,
+                tool_filter,
+                client_params,
+                "OpenRouterBackend".to_string(),
             ),
-        )
-        .await
-    }
-}
-
-fn classify_retryable(e: &ClientError) -> bool {
-    matches!(
-        e,
-        ClientError::Timeout { .. } | ClientError::ApiServerError { .. }
-    )
-}
-
-fn retry_prompt(err: &ClientError, prompt: &str, on_timeout_prompt: Option<&str>) -> String {
-    match err {
-        ClientError::Timeout { .. } => on_timeout_prompt.unwrap_or(prompt).to_string(),
-        _ => prompt.to_string(),
+        }
     }
 }
 
 #[async_trait]
 impl Backend for OpenRouterBackend {
     async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError> {
-        validate_max_retries(params.max_retries)
-            .map_err(|m| ClientError::Runtime { message: m })?;
-
-        let idle_timeout = params
-            .idle_timeout
-            .unwrap_or_else(crate::config::stream_idle_timeout);
-        let prefix = if params.label.is_empty() {
-            String::new()
-        } else {
-            format!("[{}] ", params.label)
-        };
-        let ctx = RunContext {
-            params: params.clone(),
-            prefix: prefix.clone(),
-            idle_timeout,
-            expected_artifact_paths: params.expected_artifact_paths.clone(),
-            reminder_budget: crate::config::artifact_reminder_budget(),
-            completion_nudge_budget: crate::config::completion_nudge_budget(),
-        };
-        *self.last_ctx.lock().unwrap() = Some(ctx.clone());
-
-        let prompt = Mutex::new(params.prompt.clone());
-        let timeout_prompt = params.on_timeout_prompt.clone();
-        let backoff = &STREAM_IDLE_BACKOFF[..params.max_retries];
-
-        retry::with_retry(
-            backoff,
-            classify_retryable,
-            |attempt, e, wait| {
-                let next = retry_prompt(e, &prompt.lock().unwrap(), timeout_prompt.as_deref());
-                *prompt.lock().unwrap() = next;
-                let cause = match e {
-                    ClientError::Timeout { .. } => "stream idle timeout",
-                    ClientError::ApiServerError { .. } => "transient-error",
-                    _ => "error",
-                };
-                log::warn!(
-                    "{prefix}stream {cause}, retrying in {wait}s ({}/{})...",
-                    attempt + 1,
-                    params.max_retries
-                );
-            },
-            || {
-                let p = prompt.lock().unwrap().clone();
-                let ctx = ctx.clone();
-                async move { self.attempt(&p, &ctx).await }
-            },
-        )
-        .await
+        let classify: ErrorClassifier = classify_openrouter_error;
+        run_openai_compat(&self.state, params, Some(classify), PROVIDER_NAME).await
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
         let params = {
-            let guard = self.last_ctx.lock().unwrap();
+            let guard = self.state.last_ctx.lock().unwrap();
             let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
                 message: "resume() called before run()".into(),
             })?;
@@ -245,21 +115,7 @@ impl Backend for OpenRouterBackend {
     }
 
     fn reap_all(&self, gremlin_id: &str) {
-        if let Ok(mut guard) = self.cancels.lock() {
-            let tokens: Vec<_> = guard
-                .remove(gremlin_id)
-                .into_iter()
-                .flat_map(|m| m.into_values())
-                .collect();
-            let count = tokens.len();
-            log::debug!(
-                "OpenRouterBackend::reap_all: cancelling {count} in-flight token(s) for gremlin_id={gremlin_id} (model={})",
-                self.model,
-            );
-            for token in &tokens {
-                token.cancel();
-            }
-        }
+        reap_openai_compat(&self.state, gremlin_id);
     }
 
     fn total_cost_usd(&self) -> Option<f64> {
