@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Collect CI failure logs for a PR into a file.
+# Usage: ci_failure_log <pr_url> <output_file>
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+pr_url="${1:-}"
+output_file="${2:-}"
+
+if [ -z "$pr_url" ] || [ -z "$output_file" ]; then
+    die "Usage: ci_failure_log <pr_url> <output_file>"
+fi
+
+mkdir -p "$(dirname "$output_file")"
+
+gh_ci_failure_log "$pr_url" | tee "$output_file"

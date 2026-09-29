@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Push HEAD to a PR branch if it differs from the remote.
+# Usage: ci_push_fix <branch>
+#
+# Guards against pushing an already-pushed HEAD — if the remote already
+# has the same commit, nothing happens.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+branch="${1:-}"
+
+if [ -z "$branch" ]; then
+    die "Usage: ci_push_fix <branch>"
+fi
+
+REMOTE_SHA="$(git ls-remote origin "$branch" | cut -f1 || true)"
+LOCAL_SHA="$(git rev-parse HEAD)"
+
+if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
+    info "ci_push_fix: HEAD already on remote, nothing to push"
+    exit 0
+fi
+
+info "ci_push_fix: pushing HEAD to origin/${branch}..."
+git push origin "HEAD:refs/heads/$branch"
