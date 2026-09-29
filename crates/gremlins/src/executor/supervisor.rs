@@ -15,7 +15,7 @@ use tokio::sync::{watch, Mutex};
 
 use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
-use crate::executor::socket;
+use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state;
 
 // ---------------------------------------------------------------------------
@@ -44,7 +44,11 @@ pub struct RunState {
 /// lifetime of the supervisor. When the process exits (after the last
 /// gremlin drains), the file descriptor closes and the kernel releases the
 /// lock automatically.
-pub async fn run_supervisor(listener: UnixListener, state_root: PathBuf, _lock: std::fs::File) {
+pub async fn run_supervisor(
+    listener: UnixListener,
+    state_root: PathBuf,
+    _lock: GremlinsDaemonLock,
+) {
     let run_map: Arc<Mutex<HashMap<String, RunHandle>>> = Arc::new(Mutex::new(HashMap::new()));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
