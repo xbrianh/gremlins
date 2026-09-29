@@ -1,6 +1,6 @@
 //! The parallel fan-out / fan-in executor.
 //!
-//! [`run_parallel`] destructures a [`ParsedStage::Parallel`], guards against
+//! [`run_parallel`] destructures a [`BuilderStage::Parallel`], guards against
 //! already-completed groups, spawns one tokio task per child (bounded by a
 //! [`Semaphore`]), collects results from a [`JoinSet`], applies the group's
 //! [`ErrorPolicy`], merges artifacts from successful children into the parent
@@ -648,10 +648,10 @@ mod tests {
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::stages::node::ParsedStage;
+    use crate::stages::node::BuilderStage;
 
     /// Convert the first parsed stage to an ExecutorStage for dispatch.
-    fn first_executor_stage(stages: &[ParsedStage]) -> ExecutorStage {
+    fn first_executor_stage(stages: &[BuilderStage]) -> ExecutorStage {
         let def = StaticDefinition::new(
             "test".to_string(),
             PathBuf::from("test.yaml"),
@@ -668,7 +668,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_gremlin(
-        stages: Vec<ParsedStage>,
+        stages: Vec<BuilderStage>,
         default_client: &str,
     ) -> (tempfile::TempDir, Gremlin) {
         let tmp = tempfile::tempdir().unwrap();
@@ -718,7 +718,6 @@ mod tests {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
-            definition_is_expanded: false,
         };
         (tmp, gremlin)
     }

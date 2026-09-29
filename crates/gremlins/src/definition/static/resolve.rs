@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::discovery;
+use crate::definition::r#static::expand::DefinitionResolver;
 use crate::schemas::error::SchemaError;
-use crate::schemas::expand::DefinitionResolver;
 
 /// Resolves gremlin definition names to file paths by searching project overlay
 /// directories. Since bundled gremlin definitions were removed, only project overlays

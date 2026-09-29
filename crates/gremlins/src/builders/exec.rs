@@ -1,14 +1,14 @@
-//! Builder for [`ParsedStage::Exec`].
+//! Builder for [`BuilderStage::Exec`].
 
 use std::collections::{HashMap, HashSet};
 
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
+use crate::definition::r#static::expand::key_referenced_in_text;
 use crate::schemas::error::SchemaError;
-use crate::schemas::expand::key_referenced_in_text;
 use crate::stages::composite::ClientSpec;
 use crate::stages::constants::FRAMEWORK_KEYS;
 use crate::stages::exec::Exec;
-use crate::stages::node::ParsedStage;
+use crate::stages::node::BuilderStage;
 
 /// Build an [`Exec`] stage.
 ///
@@ -133,8 +133,8 @@ impl ExecBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`ParsedStage::Exec`].
-    pub fn build(self) -> Result<ParsedStage, SchemaError> {
+    /// Consume the builder and produce a [`BuilderStage::Exec`].
+    pub fn build(self) -> Result<BuilderStage, SchemaError> {
         let name = self.name.clone();
 
         crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
@@ -229,7 +229,7 @@ impl ExecBuilder {
             interpolation_map: self.interpolation_map,
             bind_map: self.bind_map,
         };
-        Ok(ParsedStage::Exec {
+        Ok(BuilderStage::Exec {
             stage,
             client: self.client,
         })

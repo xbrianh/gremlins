@@ -6,12 +6,11 @@ use std::process::Command;
 
 use clap::{Parser, Subcommand};
 use gremlins::artifacts::registry::FileSystemArtifactRegistry;
-use gremlins::builders::definition::DefinitionBuilder;
 use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::git;
 use gremlins::core::proc::run_shell_async;
-use gremlins::definition::{ExecutorStage, GremlinDefinition};
+use gremlins::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
 use gremlins::executor::exec_runner::prepare_exec;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::state::{self, StateData};
@@ -741,7 +740,7 @@ async fn land(id: &str) -> Result<(), String> {
             definition_path.display()
         ));
     }
-    let definition = DefinitionBuilder::from_expanded_yaml(&definition_path, None)
+    let definition = StaticDefinition::from_expanded_yaml(&definition_path, None)
         .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
 
     // Extract the Exec from the land stage.
@@ -846,7 +845,7 @@ async fn validate(definition: &str) -> Result<(), String> {
     let definition_path = discovery::resolve_definition_path(definition, project_root.clone())
         .map_err(|e| format!("definition not found: {e}"))?;
 
-    let gremlin_def = DefinitionBuilder::from_yaml(&definition_path, None)
+    let gremlin_def = StaticDefinition::from_yaml_file(&definition_path, None)
         .map_err(|e| format!("invalid definition: {e}"))?;
 
     let mut gremlin = Gremlin::for_dry_run(gremlin_def);
@@ -988,7 +987,7 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
 
     // Load the definition just enough to validate --key args against
     // bootstrap.source.
-    let gremlin_def = DefinitionBuilder::from_yaml(&definition_path, None)
+    let gremlin_def = StaticDefinition::from_yaml_file(&definition_path, None)
         .map_err(|e| format!("invalid definition: {e}"))?;
 
     match &gremlin_def.bootstrap.source {

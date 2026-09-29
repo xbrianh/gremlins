@@ -2,14 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use crate::definition::r#static::prompts;
+use crate::definition::r#static::resolve::BuiltinResolver;
 use crate::schemas::error::SchemaError;
-use crate::schemas::prompts;
-use crate::schemas::resolve::BuiltinResolver;
 
 /// Trait for resolving gremlin definition names to file paths.
 /// The built-in implementation looks up gremlin definitions by name;
 /// callers can supply custom resolution logic (e.g. from a registry).
-pub trait DefinitionResolver {
+pub(crate) trait DefinitionResolver {
     fn resolve(&self, name: &str, project_root: &std::path::Path) -> Result<PathBuf, SchemaError>;
 }
 
@@ -271,7 +271,10 @@ pub(crate) fn parse_default(raw: &str) -> serde_yaml::Value {
 /// By the time this runs, all bundled recipe call-sites have already been
 /// inlined by `_expand_stage_def`, so the validator only ever sees fully
 /// expanded stages — no recipe-skipping logic is needed.
-pub fn validate_stage_keys(expanded_yaml: &serde_yaml::Value) -> Result<(), Vec<SchemaError>> {
+#[allow(dead_code)]
+pub(crate) fn validate_stage_keys(
+    expanded_yaml: &serde_yaml::Value,
+) -> Result<(), Vec<SchemaError>> {
     let mut errors = Vec::new();
 
     // Validate the `land` stage if present
@@ -293,6 +296,7 @@ pub fn validate_stage_keys(expanded_yaml: &serde_yaml::Value) -> Result<(), Vec<
     }
 }
 
+#[allow(dead_code)]
 fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<SchemaError>) {
     let mapping = match stage.as_mapping() {
         Some(m) => m,
@@ -434,6 +438,7 @@ pub(crate) fn key_referenced_in_text(key_str: &str, text: &str) -> bool {
 }
 
 /// Recursively collect all prompt and command text from a stage and its descendants.
+#[allow(dead_code)]
 fn collect_stage_text(stage: &serde_yaml::Value, out: &mut String) {
     let mapping = match stage.as_mapping() {
         Some(m) => m,
@@ -469,7 +474,7 @@ fn collect_stage_text(stage: &serde_yaml::Value, out: &mut String) {
 
 /// Parse a gremlin definition YAML file from disk, expanding includes, stage-definitions,
 /// and prompts. Returns the fully expanded YAML tree.
-pub fn parse_definition_file(
+pub(crate) fn parse_definition_file(
     yaml_path: &Path,
     project_root: &Path,
 ) -> Result<serde_yaml::Value, SchemaError> {
@@ -478,7 +483,7 @@ pub fn parse_definition_file(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn expand_definition(
+pub(crate) fn expand_definition(
     yaml_path: &Path,
     project_root: Option<&Path>,
     resolver: &dyn DefinitionResolver,

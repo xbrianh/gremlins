@@ -2,27 +2,16 @@
 //! [`LandBuilder`].
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use serde_yaml::{Mapping, Value};
-
-use crate::builders::agent::AgentBuilder;
 use crate::builders::artifacts::{BindTarget, InterpolationValue};
-use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
-use crate::builders::exec::ExecBuilder;
-use crate::definition::{
-    base_ref_from_yaml, default_client_from_yaml, project_root_for, resolve_default_client,
-    stages_from_yaml, StaticDefinition,
-};
+use crate::definition::r#static::expand::key_referenced_in_text;
+use crate::definition::r#static::loader::{self, StageEntry, StageNode};
+use crate::definition::r#static::StaticDefinition;
 use crate::schemas::bootstrap::{Bootstrap, InputSource, InputSources};
 use crate::schemas::error::SchemaError;
-use crate::schemas::expand;
-use crate::schemas::expand::key_referenced_in_text;
-use crate::schemas::loader::{self, StageEntry, StageNode};
-use crate::stages::composite::ClientSpec;
 use crate::stages::constants::FRAMEWORK_KEYS;
-use crate::stages::node::ParsedStage;
-use crate::stages::parallel::ErrorPolicy;
+use crate::stages::node::BuilderStage;
 
 // ---------------------------------------------------------------------------
 // BootstrapBuilder
@@ -252,8 +241,8 @@ impl LandBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`ParsedStage::Exec`] named `land`.
-    pub fn build(self) -> Result<ParsedStage, SchemaError> {
+    /// Consume the builder and produce a [`BuilderStage::Exec`] named `land`.
+    pub fn build(self) -> Result<BuilderStage, SchemaError> {
         let name = "land".to_string();
 
         crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
@@ -348,7 +337,7 @@ impl LandBuilder {
             interpolation_map: self.interpolation_map,
             bind_map: self.bind_map,
         };
-        Ok(ParsedStage::Exec {
+        Ok(BuilderStage::Exec {
             stage,
             client: self.client,
         })
@@ -389,13 +378,13 @@ impl Default for LandBuilder {
 /// ```
 #[derive(Debug, Clone)]
 pub struct DefinitionBuilder {
-    name: String,
-    base_ref: String,
-    default_client: String,
-    prompt_dir: Option<PathBuf>,
-    bootstrap: Bootstrap,
-    stages: Vec<ParsedStage>,
-    land: Option<ParsedStage>,
+    pub(crate) name: String,
+    pub(crate) base_ref: String,
+    pub(crate) default_client: String,
+    pub(crate) prompt_dir: Option<PathBuf>,
+    pub(crate) bootstrap: Bootstrap,
+    pub(crate) stages: Vec<BuilderStage>,
+    pub(crate) land: Option<BuilderStage>,
 }
 
 impl DefinitionBuilder {
@@ -445,19 +434,19 @@ impl DefinitionBuilder {
     }
 
     /// Append a stage.
-    pub fn stage(mut self, stage: ParsedStage) -> Self {
+    pub fn stage(mut self, stage: BuilderStage) -> Self {
         self.stages.push(stage);
         self
     }
 
     /// Append many stages.
-    pub fn stages(mut self, stages: Vec<ParsedStage>) -> Self {
+    pub fn stages(mut self, stages: Vec<BuilderStage>) -> Self {
         self.stages.extend(stages);
         self
     }
 
     /// Set the land stage.
-    pub fn land(mut self, land: ParsedStage) -> Self {
+    pub fn land(mut self, land: BuilderStage) -> Self {
         self.land = Some(land);
         self
     }
@@ -504,8 +493,11 @@ impl DefinitionBuilder {
         fill_builder_names(&mut self.stages);
 
         // Build the node list for validation, including land.
-        let mut nodes: Vec<StageNode> =
-            self.stages.iter().map(ParsedStage::to_stage_node).collect();
+        let mut nodes: Vec<StageNode> = self
+            .stages
+            .iter()
+            .map(BuilderStage::to_stage_node)
+            .collect();
         if let Some(ref land) = self.land {
             nodes.push(land.to_stage_node());
         }
@@ -557,7 +549,7 @@ impl StaticDefinition {
 /// Mirrors the YAML path: unnamed stages get auto-generated names based on
 /// their stage type, and duplicate explicit names are disambiguated with
 /// `-N` suffixes.
-pub(crate) fn fill_builder_names(stages: &mut [ParsedStage]) {
+pub(crate) fn fill_builder_names(stages: &mut [BuilderStage]) {
     let mut entries: Vec<StageEntry> = stages.iter().map(|s| s.to_stage_entry()).collect();
     // fill_names is infallible for well-formed stages.
     if loader::fill_names(&mut entries).is_ok() {
@@ -571,7 +563,7 @@ pub(crate) fn fill_builder_names(stages: &mut [ParsedStage]) {
     // Recurse into composite bodies.
     for stage in stages.iter_mut() {
         match stage {
-            ParsedStage::Sequence { body, .. } | ParsedStage::Parallel { body, .. } => {
+            BuilderStage::Sequence { body, .. } | BuilderStage::Parallel { body, .. } => {
                 fill_builder_names(body);
             }
             _ => {}
@@ -580,466 +572,8 @@ pub(crate) fn fill_builder_names(stages: &mut [ParsedStage]) {
 }
 
 // ---------------------------------------------------------------------------
-// DefinitionBuilder::from_yaml — YAML ingestion through builders
+// Tests
 // ---------------------------------------------------------------------------
-
-impl DefinitionBuilder {
-    /// Load a definition from an expanded YAML file, routing every stage
-    /// through the typed builder constructors so builder-level validation
-    /// fires.
-    ///
-    /// `default_client_override` is the CLI `--client` value; consulted only
-    /// when the YAML declares none.
-    pub fn from_yaml(
-        path: impl AsRef<Path>,
-        default_client_override: Option<&str>,
-    ) -> Result<StaticDefinition, SchemaError> {
-        let path = path.as_ref();
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if !path.exists() {
-            return Err(SchemaError::DefinitionFileNotFound {
-                path: path.display().to_string(),
-            });
-        }
-
-        let project_root = project_root_for(&path);
-        let expanded = expand::parse_definition_file(&path, &project_root)?;
-
-        Self::from_expanded_value(expanded, &path, default_client_override)
-    }
-
-    /// Load an already-expanded YAML file directly — no expansion, no
-    /// project-root walk. Used when a hermetic `definition.yaml` exists
-    /// alongside the state directory.
-    ///
-    /// Strips the `__gremlins_expanded__` sentinel if present, but tolerates
-    /// its absence.
-    pub fn from_expanded_yaml(
-        path: impl AsRef<Path>,
-        default_client_override: Option<&str>,
-    ) -> Result<StaticDefinition, SchemaError> {
-        let path = path.as_ref();
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if !path.exists() {
-            return Err(SchemaError::DefinitionFileNotFound {
-                path: path.display().to_string(),
-            });
-        }
-
-        let mut expanded = expand::load_yaml_file(&path)?;
-        // Strip the sentinel if present — the file may lack it but still be
-        // fully expanded.
-        if let Some(mapping) = expanded.as_mapping_mut() {
-            let sentinel = Value::from("__gremlins_expanded__");
-            mapping.remove(&sentinel);
-        }
-
-        Self::from_expanded_value(expanded, &path, default_client_override)
-    }
-
-    /// Parse already-expanded YAML bytes directly — no file I/O, no
-    /// project-root walk. Used by [`StaticDefinition::deserialize`] so the
-    /// round-trip doesn't need an intermediate temp file.
-    ///
-    /// Strips the `__gremlins_expanded__` sentinel if present, but tolerates
-    /// its absence. Passes through the same validation pipeline as
-    /// [`from_expanded_yaml`](Self::from_expanded_yaml).
-    pub fn from_expanded_bytes(
-        data: &[u8],
-        default_client_override: Option<&str>,
-    ) -> Result<StaticDefinition, SchemaError> {
-        let mut expanded: Value = serde_yaml::from_slice(data)
-            .map_err(|e| SchemaError::Generic(format!("failed to parse definition YAML: {e}")))?;
-        if let Some(mapping) = expanded.as_mapping_mut() {
-            let sentinel = Value::from("__gremlins_expanded__");
-            mapping.remove(&sentinel);
-        }
-        // Use a stable label so error messages are meaningful even though
-        // there is no real file path.
-        Self::from_expanded_value(
-            expanded,
-            Path::new("definition.yaml"),
-            default_client_override,
-        )
-    }
-
-    /// Shared extraction: turn an already-expanded YAML [`Value`] into a
-    /// [`StaticDefinition`] via the builder path. Both [`from_yaml`] and
-    /// [`from_expanded_yaml`] funnel through here once they have the
-    /// expanded tree.
-    fn from_expanded_value(
-        expanded: Value,
-        path: &Path,
-        default_client_override: Option<&str>,
-    ) -> Result<StaticDefinition, SchemaError> {
-        let root = expanded
-            .as_mapping()
-            .ok_or_else(|| SchemaError::YamlNotMapping {
-                label: path.display().to_string(),
-                got: format!("{expanded:?}"),
-            })?;
-
-        let name = root
-            .get("name")
-            .and_then(Value::as_str)
-            .map(String::from)
-            .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(String::from))
-            .unwrap_or_default();
-
-        let yaml_default_client = default_client_from_yaml(root)?;
-        let base_ref = base_ref_from_yaml(root)?;
-
-        let raw_stages = stages_from_yaml(root)?;
-
-        // Parse stages through the per-type YAML→builder dispatch.
-        let mut stages: Vec<ParsedStage> = Vec::new();
-        for raw in &raw_stages {
-            let mapping = raw
-                .as_mapping()
-                .ok_or_else(|| SchemaError::Generic("each stage must be a mapping".to_string()))?;
-            stages.push(stage_from_yaml(mapping)?);
-        }
-
-        // Bootstrap.
-        let bootstrap = match root.get("bootstrap") {
-            None | Some(Value::Null) => Bootstrap::default(),
-            Some(value) => Bootstrap::from_yaml(Some(value))?,
-        };
-
-        // Land.
-        let land = if let Some(land_val) = root.get("land").filter(|v| !v.is_null()) {
-            let land_mapping = land_val
-                .as_mapping()
-                .ok_or_else(|| SchemaError::Generic("'land' must be a mapping".to_string()))?;
-            Some(land_from_yaml_builder(land_mapping)?)
-        } else {
-            None
-        };
-
-        let default_client = resolve_default_client(yaml_default_client, default_client_override)?;
-
-        let builder = DefinitionBuilder {
-            name,
-            base_ref,
-            default_client,
-            prompt_dir: path.parent().map(Path::to_path_buf),
-            bootstrap,
-            stages,
-            land,
-        };
-
-        builder.build()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Per-stage YAML → builder conversion
-// ---------------------------------------------------------------------------
-
-/// Dispatch a single stage mapping to the appropriate per-type builder.
-fn stage_from_yaml(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
-    let name = mapping
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-
-    let stage_type = mapping.get("type").and_then(Value::as_str).unwrap_or("");
-    if stage_type.is_empty() {
-        return Err(SchemaError::Generic(format!(
-            "stage {name:?}: must have a 'type' field"
-        )));
-    }
-
-    match stage_type {
-        "agent" => agent_from_yaml(mapping, &name),
-        "exec" => exec_from_yaml(mapping, &name),
-        "sequence" => sequence_from_yaml(mapping, &name),
-        "parallel" => parallel_from_yaml(mapping, &name),
-        other => Err(SchemaError::Generic(format!(
-            "stage {name:?}: unknown type {other:?}"
-        ))),
-    }
-}
-
-/// Read a YAML string key, returning `None` when absent or null.
-fn yaml_str(mapping: &Mapping, key: &str) -> Option<String> {
-    mapping
-        .get(key)
-        .filter(|v| !v.is_null())
-        .and_then(Value::as_str)
-        .map(String::from)
-}
-
-/// Read a YAML string→string mapping, returning an empty map when absent.
-fn yaml_string_map(mapping: &Mapping, key: &str) -> Result<HashMap<String, String>, SchemaError> {
-    let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
-        return Ok(HashMap::new());
-    };
-    let map = raw
-        .as_mapping()
-        .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a mapping")))?;
-    let mut result = HashMap::new();
-    for (k, v) in map {
-        let ks = k
-            .as_str()
-            .ok_or_else(|| SchemaError::Generic(format!("'{key}' keys must be strings")))?;
-        let vs = v
-            .as_str()
-            .ok_or_else(|| SchemaError::Generic(format!("'{key}' values must be strings")))?;
-        result.insert(ks.to_string(), vs.to_string());
-    }
-    Ok(result)
-}
-
-/// Read a YAML sequence of strings.
-fn yaml_string_list(mapping: &Mapping, key: &str) -> Result<Vec<String>, SchemaError> {
-    let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
-        return Ok(Vec::new());
-    };
-    let seq = raw
-        .as_sequence()
-        .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a sequence")))?;
-    let mut result = Vec::new();
-    for (i, v) in seq.iter().enumerate() {
-        let s = v
-            .as_str()
-            .ok_or_else(|| SchemaError::Generic(format!("'{key}'[{i}] must be a string")))?;
-        result.push(s.to_string());
-    }
-    Ok(result)
-}
-
-/// Read `options` as a `HashMap<String, serde_json::Value>`.
-fn yaml_options(mapping: &Mapping) -> Result<HashMap<String, serde_json::Value>, SchemaError> {
-    let Some(raw) = mapping.get("options").filter(|v| !v.is_null()) else {
-        return Ok(HashMap::new());
-    };
-    let opts = raw
-        .as_mapping()
-        .ok_or_else(|| SchemaError::Generic("'options' must be a mapping".to_string()))?;
-    let mut result = HashMap::new();
-    for (k, v) in opts {
-        let ks = k
-            .as_str()
-            .ok_or_else(|| SchemaError::Generic("'options' keys must be strings".to_string()))?;
-        let jv = serde_json::to_value(v).map_err(|e| {
-            SchemaError::Generic(format!("'options' value for '{ks}' is not valid: {e}"))
-        })?;
-        result.insert(ks.to_string(), jv);
-    }
-    Ok(result)
-}
-
-/// Read `skip_if_exists` — empty string when absent.
-fn yaml_skip_if_exists(mapping: &Mapping) -> String {
-    yaml_str(mapping, "skip_if_exists").unwrap_or_default()
-}
-
-/// Read `client` — None when absent.
-fn yaml_client(mapping: &Mapping) -> Option<ClientSpec> {
-    yaml_str(mapping, "client").map(ClientSpec)
-}
-
-/// Build an [`AgentBuilder`] from a YAML stage mapping.
-fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
-    let prompts = yaml_string_list(mapping, "prompt")?;
-    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
-    let bind_map = yaml_string_map(mapping, "bind")?;
-    let options = yaml_options(mapping)?;
-    let client = yaml_client(mapping);
-
-    let mut builder = AgentBuilder::new(name);
-    for p in prompts {
-        builder = builder.prompt(p);
-    }
-    for (k, v) in interpolation_map {
-        builder = builder.interpolate(k, InterpolationValue(v));
-    }
-    for (k, v) in bind_map {
-        builder = builder.bind(k, BindTarget(v));
-    }
-    for (k, v) in options {
-        builder = builder.option(k, v);
-    }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
-    }
-
-    builder.build()
-}
-
-/// Build an [`ExecBuilder`] from a YAML stage mapping.
-fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
-    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
-    let bind_map = yaml_string_map(mapping, "bind")?;
-    let options = yaml_options(mapping)?;
-    let client = yaml_client(mapping);
-
-    let mut builder = ExecBuilder::new(name);
-    for (k, v) in interpolation_map {
-        builder = builder.interpolate(k, InterpolationValue(v));
-    }
-    for (k, v) in bind_map {
-        builder = builder.bind(k, BindTarget(v));
-    }
-    for (k, v) in options {
-        builder = builder.option(k, v);
-    }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
-    }
-
-    builder.build()
-}
-
-/// Build a [`SequenceBuilder`] from a YAML stage mapping.
-fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
-    let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
-        None => 1u32,
-        Some(v) => {
-            if let Some(n) = v.as_u64().and_then(|n| u32::try_from(n).ok()) {
-                n
-            } else if let Some(s) = v.as_str() {
-                s.parse::<u32>().map_err(|_| {
-                    SchemaError::Generic(format!(
-                        "'max-iterations' must be a positive integer, got {s:?}"
-                    ))
-                })?
-            } else {
-                return Err(SchemaError::Generic(format!(
-                    "'max-iterations' must be a positive integer, got {v:?}"
-                )));
-            }
-        }
-    };
-    let skip_if_exists = yaml_skip_if_exists(mapping);
-    let client = yaml_client(mapping);
-
-    // Interval from top-level key.
-    let interval = mapping.get("interval").and_then(|v| v.as_f64());
-
-    let body = yaml_children(mapping, "body")?;
-
-    let mut builder = SequenceBuilder::new(name)
-        .max_iterations(max_iterations)
-        .stages(body);
-    if let Some(secs) = interval {
-        builder = builder.interval(secs);
-    }
-    if !skip_if_exists.is_empty() {
-        builder = builder.skip_if_exists(skip_if_exists);
-    }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
-    }
-
-    builder.build()
-}
-
-/// Build a [`ParallelBuilder`] from a YAML stage mapping.
-fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<ParsedStage, SchemaError> {
-    let max_concurrent = match mapping.get("max_concurrent").filter(|v| !v.is_null()) {
-        None => None,
-        Some(v) => {
-            let n = v
-                .as_u64()
-                .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| {
-                    SchemaError::Generic(format!(
-                        "'max_concurrent' must be a positive integer, got {v:?}"
-                    ))
-                })?;
-            Some(n)
-        }
-    };
-    let cancel_on_error = match mapping.get("cancel_on_error").filter(|v| !v.is_null()) {
-        None => false,
-        Some(v) => v.as_bool().ok_or_else(|| {
-            SchemaError::Generic(format!("'cancel_on_error' must be a boolean, got {v:?}"))
-        })?,
-    };
-    let error_policy = match mapping.get("error_policy").filter(|v| !v.is_null()) {
-        None => ErrorPolicy::Any,
-        Some(v) => {
-            let raw = v.as_str().ok_or_else(|| {
-                SchemaError::Generic(format!(
-                    "'error_policy' must be a string (\"any\" or \"all\"), got {v:?}"
-                ))
-            })?;
-            ErrorPolicy::parse(raw).ok_or_else(|| {
-                SchemaError::Generic(format!(
-                    "'error_policy' must be \"any\" or \"all\", got {raw:?}"
-                ))
-            })?
-        }
-    };
-    let skip_if_exists = yaml_skip_if_exists(mapping);
-    let client = yaml_client(mapping);
-
-    let body = yaml_children(mapping, "body")?;
-
-    let mut builder = ParallelBuilder::new(name)
-        .stages(body)
-        .cancel_on_error(cancel_on_error)
-        .error_policy(error_policy);
-    if let Some(mc) = max_concurrent {
-        builder = builder.max_concurrent(mc);
-    }
-    if !skip_if_exists.is_empty() {
-        builder = builder.skip_if_exists(skip_if_exists);
-    }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
-    }
-
-    builder.build()
-}
-
-/// Parse children from a composite's `key` ("body") through
-/// the same per-type dispatch.
-fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<ParsedStage>, SchemaError> {
-    let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
-        return Ok(Vec::new());
-    };
-    let seq = raw
-        .as_sequence()
-        .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a sequence")))?;
-    let mut children = Vec::new();
-    for entry in seq {
-        let child_map = entry.as_mapping().ok_or_else(|| {
-            SchemaError::Generic("each child stage must be a mapping".to_string())
-        })?;
-        children.push(stage_from_yaml(child_map)?);
-    }
-    fill_builder_names(&mut children);
-    Ok(children)
-}
-
-/// Build the land stage from its YAML mapping, forcing name=land and
-/// type=exec through [`LandBuilder`].
-fn land_from_yaml_builder(mapping: &Mapping) -> Result<ParsedStage, SchemaError> {
-    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
-    let bind_map = yaml_string_map(mapping, "bind")?;
-    let options = yaml_options(mapping)?;
-    let client = yaml_client(mapping);
-
-    let mut builder = LandBuilder::new();
-    for (k, v) in interpolation_map {
-        builder = builder.interpolate(k, InterpolationValue(v));
-    }
-    for (k, v) in bind_map {
-        builder = builder.bind(k, BindTarget(v));
-    }
-    for (k, v) in options {
-        builder = builder.option(k, v);
-    }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
-    }
-
-    builder.build()
-}
 
 #[cfg(test)]
 mod tests {
@@ -1048,7 +582,6 @@ mod tests {
     use crate::builders::artifacts::{artifact, content};
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
-    use crate::stages::parallel::ErrorPolicy;
     use serde_yaml::Value;
 
     #[test]
@@ -1539,133 +1072,5 @@ mod tests {
         // Both unnamed exec children should get auto-filled names.
         assert_eq!(body[0].name(), "exec");
         assert_eq!(body[1].name(), "exec-2");
-    }
-
-    // ------------------------------------------------------------------
-    // to_yaml / from_yaml round-trip symmetry
-    // ------------------------------------------------------------------
-
-    /// Helper: serialize a ParsedStage to a YAML Mapping and parse it back
-    /// through stage_from_yaml, asserting the two are equal.
-    fn assert_round_trip(stage: &ParsedStage) {
-        let yaml_val = stage.to_yaml();
-        let mapping = yaml_val
-            .as_mapping()
-            .expect("to_yaml must produce a mapping");
-        let round_tripped =
-            stage_from_yaml(mapping).expect("stage_from_yaml must accept to_yaml output");
-        assert_eq!(
-            stage,
-            &round_tripped,
-            "round-trip mismatch for stage {} (type {})",
-            stage.name(),
-            stage.stage_type()
-        );
-    }
-
-    #[test]
-    fn agent_to_yaml_round_trip() {
-        let stage = AgentBuilder::new("plan")
-            .prompt("write the plan using {input} to {plan}")
-            .interpolate(
-                "input",
-                crate::builders::artifacts::InterpolationValue::from(
-                    "content(\"artifact://input.md\")",
-                ),
-            )
-            .bind("plan", artifact("artifact://plan.md"))
-            .option("model", "xai:grok-4")
-            .client("xai:grok-4")
-            .build()
-            .unwrap();
-        assert_round_trip(&stage);
-    }
-
-    #[test]
-    fn agent_to_yaml_round_trip_minimal() {
-        let stage = AgentBuilder::new("min").prompt("hi").build().unwrap();
-        assert_round_trip(&stage);
-    }
-
-    #[test]
-    fn exec_to_yaml_round_trip() {
-        let stage = ExecBuilder::new("run")
-            .cmd("echo {input} > {out}")
-            .interpolate(
-                "input",
-                crate::builders::artifacts::InterpolationValue::from(
-                    "content(\"artifact://in.txt\")",
-                ),
-            )
-            .bind("out", artifact("artifact://out.txt"))
-            .option("timeout", "30")
-            .client("local")
-            .build()
-            .unwrap();
-        assert_round_trip(&stage);
-    }
-
-    #[test]
-    fn exec_to_yaml_round_trip_minimal() {
-        let stage = ExecBuilder::new("cmd").cmd("true").build().unwrap();
-        assert_round_trip(&stage);
-    }
-
-    #[test]
-    fn sequence_to_yaml_round_trip() {
-        let stage = SequenceBuilder::new("workflow")
-            .stage(ExecBuilder::new("step-a").cmd("echo a").build().unwrap())
-            .stage(ExecBuilder::new("step-b").cmd("echo b").build().unwrap())
-            .max_iterations(3)
-            .interval(1.5)
-            .skip_if_exists("artifact://done.txt")
-            .client("xai:grok-4")
-            .build()
-            .unwrap();
-        assert_round_trip(&stage);
-    }
-
-    #[test]
-    fn sequence_to_yaml_round_trip_minimal() {
-        let stage = SequenceBuilder::new("seq")
-            .stage(ExecBuilder::new("x").cmd("true").build().unwrap())
-            .build()
-            .unwrap();
-        assert_round_trip(&stage);
-    }
-
-    #[test]
-    fn parallel_to_yaml_round_trip() {
-        let stage = ParallelBuilder::new("reviews")
-            .stage(
-                AgentBuilder::new("review-a")
-                    .prompt("review")
-                    .build()
-                    .unwrap(),
-            )
-            .stage(
-                AgentBuilder::new("review-b")
-                    .prompt("review")
-                    .build()
-                    .unwrap(),
-            )
-            .max_concurrent(2)
-            .cancel_on_error(true)
-            .error_policy(ErrorPolicy::All)
-            .skip_if_exists("artifact://reviews-done")
-            .client("xai:grok-4")
-            .build()
-            .unwrap();
-        assert_round_trip(&stage);
-    }
-
-    #[test]
-    fn parallel_to_yaml_round_trip_minimal() {
-        let stage = ParallelBuilder::new("par")
-            .stage(ExecBuilder::new("a").cmd("true").build().unwrap())
-            .stage(ExecBuilder::new("b").cmd("true").build().unwrap())
-            .build()
-            .unwrap();
-        assert_round_trip(&stage);
     }
 }

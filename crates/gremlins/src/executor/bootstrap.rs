@@ -636,7 +636,6 @@ mod tests {
             stage_inputs,
             loop_iter: "1".to_string(),
             dry_run: false,
-            definition_is_expanded: false,
         };
         (tmp, gremlin)
     }
