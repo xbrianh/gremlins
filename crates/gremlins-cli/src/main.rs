@@ -262,6 +262,7 @@ async fn ls(here: bool) -> Result<(), String> {
         ]);
     }
 
+    rows.sort_by(|a, b| a[3].cmp(&b[3]));
     print_table(&headers, &rows);
     Ok(())
 }
@@ -317,6 +318,7 @@ fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
         ]);
     }
 
+    rows.sort_by(|a, b| a[3].cmp(&b[3]));
     print_table(&headers, &rows);
     Ok(())
 }

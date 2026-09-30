@@ -766,6 +766,12 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
         }));
     }
 
+    rows.sort_by(|a, b| {
+        a["started_at"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["started_at"].as_str().unwrap_or(""))
+    });
     ok_response(serde_json::json!({"gremlins": rows}))
 }
 
