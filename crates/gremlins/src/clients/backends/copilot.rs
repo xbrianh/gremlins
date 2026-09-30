@@ -31,8 +31,12 @@ pub(crate) enum CopilotAuthSource {
     CopilotGitHubAccessToken,
     /// `GITHUB_TOKEN` env var.
     GitHubToken,
-    /// `providers.json` `"copilot"` entry.
+    /// `providers.json` `"copilot"` entry (`api-key` field).
     ProvidersJson,
+    /// `providers.json` `"copilot"` entry (`pat` field).
+    ProvidersJsonPat,
+    /// Auto-discovered from `~/.config/github-copilot/apps.json`.
+    AppsJson,
 }
 
 /// Resolve credentials and build a Copilot client, returning the client and
@@ -41,7 +45,8 @@ pub(crate) enum CopilotAuthSource {
 ///
 /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
 /// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.json`
-/// `"copilot"` entry → error.
+/// `"copilot"` entry (`api-key` then `pat`) →
+/// `~/.config/github-copilot/apps.json` → error.
 fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
     let api_key = crate::config::copilot_api_key();
     let github_token = crate::config::copilot_github_token();
@@ -83,6 +88,7 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
         return Ok((client, source));
     }
 
+    // providers.json: try api-key first, then pat.
     if let Some(key) = crate::config::api_key("", PROVIDER_NAME) {
         let client = copilot::Client::builder()
             .api_key(key)
@@ -92,9 +98,29 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
         return Ok((client, CopilotAuthSource::ProvidersJson));
     }
 
+    if let Some(token) = crate::config::pat(PROVIDER_NAME) {
+        let client = copilot::Client::builder()
+            .github_access_token(token)
+            .allow_device_flow(false)
+            .build()
+            .map_err(|e| format!("{e}"))?;
+        return Ok((client, CopilotAuthSource::ProvidersJsonPat));
+    }
+
+    // Auto-discover OAuth token from the Copilot extension's apps.json.
+    if let Some(token) = crate::config::copilot_oauth_token() {
+        let client = copilot::Client::builder()
+            .github_access_token(token)
+            .allow_device_flow(false)
+            .build()
+            .map_err(|e| format!("{e}"))?;
+        return Ok((client, CopilotAuthSource::AppsJson));
+    }
+
     Err(format!(
         "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
-         COPILOT_API_KEY, COPILOT_GITHUB_ACCESS_TOKEN, GITHUB_TOKEN, or add an entry in {}",
+         COPILOT_API_KEY, COPILOT_GITHUB_ACCESS_TOKEN, GITHUB_TOKEN, or add an \
+         entry with \"api-key\" or \"pat\" in {}",
         crate::config::user_config_root()
             .join("providers.json")
             .display(),
@@ -406,6 +432,7 @@ mod tests {
         guard.remove("COPILOT_API_KEY");
         guard.remove("COPILOT_GITHUB_ACCESS_TOKEN");
         guard.remove("GITHUB_TOKEN");
+        guard.remove("XDG_CONFIG_HOME");
     }
 
     /// Set up an isolated sandbox with no providers.json and return the guard.
@@ -414,6 +441,7 @@ mod tests {
         scrub_copilot_env(&mut guard);
         let tmp = tempfile::tempdir().unwrap();
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        guard.set("HOME", tmp.path());
         guard
     }
 
@@ -585,6 +613,79 @@ mod tests {
             source,
             CopilotAuthSource::ProvidersJson,
             "providers.json should be the fallback when no env vars are set"
+        );
+    }
+
+    #[test]
+    fn auth_precedence_providers_json_pat_fallback() {
+        let mut guard = isolated_env();
+        // No env vars set — only providers.json with a pat field.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let providers_path = config_dir.join("providers.json");
+        std::fs::write(
+            &providers_path,
+            r#"{"copilot": {"pat": "ghp_fake_pat_token"}}"#,
+        )
+        .unwrap();
+        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+
+        let (_, source) = resolve_auth().unwrap();
+        assert_eq!(
+            source,
+            CopilotAuthSource::ProvidersJsonPat,
+            "providers.json pat field should be the fallback when no env vars are set"
+        );
+    }
+
+    #[test]
+    fn auth_precedence_providers_json_api_key_wins_over_pat() {
+        let mut guard = isolated_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let providers_path = config_dir.join("providers.json");
+        std::fs::write(
+            &providers_path,
+            format!(
+                r#"{{"copilot": {{"api-key": "{FAKE_API_KEY}", "pat": "ghp_fake_pat_token"}}}}"#
+            ),
+        )
+        .unwrap();
+        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+
+        let (_, source) = resolve_auth().unwrap();
+        assert_eq!(
+            source,
+            CopilotAuthSource::ProvidersJson,
+            "providers.json api-key should win over pat when both are present"
+        );
+    }
+
+    #[test]
+    fn auth_precedence_apps_json_auto_discovery() {
+        let mut guard = isolated_env();
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Simulate the Copilot extension's apps.json under $HOME/.config.
+        let copilot_config_dir = tmp.path().join(".config").join("github-copilot");
+        std::fs::create_dir_all(&copilot_config_dir).unwrap();
+        std::fs::write(
+            copilot_config_dir.join("apps.json"),
+            r#"{"github.com:app-id": {"oauth_token": "ghu_auto_token"}}"#,
+        )
+        .unwrap();
+
+        // Point $HOME at the temp dir so copilot_oauth_token() finds it.
+        guard.set("HOME", tmp.path());
+        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+
+        let (_, source) = resolve_auth().unwrap();
+        assert_eq!(
+            source,
+            CopilotAuthSource::AppsJson,
+            "should auto-discover oauth_token from apps.json"
         );
     }
 
