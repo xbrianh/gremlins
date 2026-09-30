@@ -432,6 +432,7 @@ mod tests {
         guard.remove("COPILOT_API_KEY");
         guard.remove("COPILOT_GITHUB_ACCESS_TOKEN");
         guard.remove("GITHUB_TOKEN");
+        guard.remove("XDG_CONFIG_HOME");
     }
 
     /// Set up an isolated sandbox with no providers.json and return the guard.
