@@ -121,6 +121,17 @@ impl GremlinsDaemonLock {
             return Err("lock fd does not hold the executor lock".to_string());
         }
 
+        // 4. Set FD_CLOEXEC so grandchildren (git, make, cargo, …)
+        //    spawned by the daemon don't inherit the lock fd.  The
+        //    parent intentionally cleared it so we could receive the
+        //    fd across exec; now that we own it, re-hide it.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 {
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+
         // Safety: we've validated the fd is open, refers to the right
         // file, and holds the lock.
         Ok(Self {
