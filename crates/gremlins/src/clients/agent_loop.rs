@@ -525,12 +525,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
                             Err(e) => return Err(e),
                         }
                     }
-                    Ok(InteractiveCommand::Inject(text)) => {
-                        let msg = format!("[operator]: {text}");
-                        history.push(Message::user(msg));
-                        next_prompt = Message::user(text);
-                    }
-                    Ok(InteractiveCommand::Quit)
+                    // Ignore non-Pause commands while idle — only Pause
+                    // enters interactive mode.
+                    Ok(InteractiveCommand::Inject(_))
+                    | Ok(InteractiveCommand::Quit)
                     | Ok(InteractiveCommand::Bail(_))
                     | Ok(InteractiveCommand::RunTurn) => {}
                     Err(mpsc::error::TryRecvError::Empty) => {}
@@ -636,6 +634,21 @@ async fn run_agent_loop_core<M: CompletionModel>(
             reasoning.len(),
             tool_calls.len(),
         );
+
+        // Emit TurnComplete if interactive mode is active, before text/tool_calls
+        // are consumed by the rest of the turn processing.
+        if interactive_active {
+            if let Some(ref session) = interactive {
+                let _ = session.evt_tx.send(InteractiveEvent::TurnComplete {
+                    turn: turn_num,
+                    text: text.clone(),
+                    tool_calls: tool_calls
+                        .iter()
+                        .map(|tc| tc.function.name.clone())
+                        .collect(),
+                });
+            }
+        }
 
         if !reasoning.is_empty() {
             let msg = format!("think: {}", trunc(&reasoning, 200));
@@ -794,6 +807,13 @@ async fn run_agent_loop_core<M: CompletionModel>(
                         total_cache_creation_tokens,
                         if total_completion_tokens > 0 { (total_reasoning_tokens as f64 / total_completion_tokens as f64) * 100.0 } else { 0.0 },
                     ));
+                }
+                // Emit Done if interactive mode is active.
+                if let Some(ref session) = interactive {
+                    let _ = session.evt_tx.send(InteractiveEvent::Done {
+                        text: result_text.clone(),
+                        usage: Some(usage.clone()),
+                    });
                 }
                 return Ok(completed_run(Some(result_text), captured, usage));
             }

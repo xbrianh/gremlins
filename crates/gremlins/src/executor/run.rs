@@ -382,23 +382,27 @@ async fn run_agent(
         task_clients_prefix: gremlin.runtime_config.task_clients_prefix.clone(),
         cancel_token: gremlin.cancel_token.clone(),
         interactive: {
-            // Create a fresh cmd channel pair per agent stage so the
-            // receiver is not consumed by take() for subsequent stages.
-            // The evt_tx is shared from the pre-created interactive handle.
-            let (tx, rx) = tokio::sync::mpsc::channel(8);
-            if let Ok(mut map) = get_run_map().lock() {
-                if let Some(handle) = map.get_mut(gremlin.id.as_str()) {
-                    handle.interactive.cmd_tx = tx;
+            // Use the pre-created session from launch time if available.
+            // The handle's cmd_tx is already paired with this session's
+            // cmd_rx from the original split().
+            // If the session was already consumed (subsequent stages),
+            // create a fresh cmd channel pair and swap the handle's cmd_tx.
+            gremlin.interactive_session.take().or_else(|| {
+                let (tx, rx) = tokio::sync::mpsc::channel(8);
+                if let Ok(mut map) = get_run_map().lock() {
+                    if let Some(handle) = map.get_mut(gremlin.id.as_str()) {
+                        handle.interactive.cmd_tx = tx;
+                    }
                 }
-            }
-            let evt_tx = gremlin
-                .runtime_config
-                .interactive
-                .as_ref()
-                .map(|h| h.evt_tx.clone());
-            evt_tx.map(|evt_tx| crate::clients::interactive::InteractiveSession {
-                cmd_rx: rx,
-                evt_tx,
+                let evt_tx = gremlin
+                    .runtime_config
+                    .interactive
+                    .as_ref()
+                    .map(|h| h.evt_tx.clone());
+                evt_tx.map(|evt_tx| crate::clients::interactive::InteractiveSession {
+                    cmd_rx: rx,
+                    evt_tx,
+                })
             })
         },
     };
@@ -1138,6 +1142,7 @@ mod tests {
             dry_run: false,
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot("gr-test"),
             cancel_token: None,
+            interactive_session: None,
         };
         (tmp, gremlin)
     }

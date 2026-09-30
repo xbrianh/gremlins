@@ -38,7 +38,7 @@ use crate::artifacts::registry::{
 use crate::artifacts::uri::Uri;
 use crate::clients::agent_loop::CancelToken;
 use crate::clients::client::Client;
-use crate::clients::interactive::InteractiveHandle;
+use crate::clients::interactive::{InteractiveHandle, InteractiveSession};
 use crate::config;
 use crate::core::{discovery, env_file, git};
 use crate::definition::{GremlinDefinition, StaticDefinition};
@@ -249,6 +249,9 @@ pub struct Gremlin {
     /// Supervisor-owned cancel token. When set, the run loop passes it to the
     /// backend so `gremlins stop` cancels in-flight agent loops.
     pub(crate) cancel_token: Option<Arc<CancelToken>>,
+    /// Interactive session, stored at launch time so run_agent can reuse
+    /// the pre-created command receiver for the first agent stage.
+    pub(crate) interactive_session: Option<InteractiveSession>,
 }
 
 impl Gremlin {
@@ -469,6 +472,7 @@ impl Gremlin {
                 dry_run: false,
                 runtime_config,
                 cancel_token: None,
+                interactive_session: None,
             })
         };
 
@@ -623,6 +627,7 @@ impl Gremlin {
             dry_run: false,
             runtime_config,
             cancel_token: None,
+            interactive_session: None,
         })
     }
 
@@ -698,6 +703,7 @@ impl Gremlin {
             dry_run: true,
             runtime_config: RuntimeConfig::snapshot("dry-run"),
             cancel_token: None,
+            interactive_session: None,
         }
     }
 
@@ -1021,6 +1027,7 @@ impl Gremlin {
                 child_runtime_config
             },
             cancel_token: self.cancel_token.clone(),
+            interactive_session: None,
         })
     }
 
@@ -2009,6 +2016,7 @@ mod tests {
                 ..RuntimeConfig::default()
             },
             cancel_token: None,
+            interactive_session: None,
         }
     }
 

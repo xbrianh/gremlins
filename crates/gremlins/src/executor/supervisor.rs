@@ -344,8 +344,9 @@ async fn handle_launch(
 
     // Set up interactive channels (idle until a debug session connects).
     let channels = InteractiveChannels::new();
-    let (interactive_handle, _interactive_session) = channels.split();
+    let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer: reads from the channel, appends to $state_dir/log,
     // and broadcasts to live subscribers.
@@ -530,8 +531,9 @@ async fn handle_resume(
 
     // Set up interactive channels (idle until a debug session connects).
     let channels = InteractiveChannels::new();
-    let (interactive_handle, _interactive_session) = channels.split();
+    let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.
     let log_path = gremlin.state_dir.join("log");
@@ -1096,6 +1098,10 @@ async fn handle_debug(
             // Read events from the agent loop.
             result = evt_rx.recv() => {
                 match result {
+                    Ok(InteractiveEvent::Ready { .. }) => {
+                        // Agent re-entered interactive mode (after RunOneTurn).
+                        // No action needed — we're already in the interactive loop.
+                    }
                     Ok(InteractiveEvent::TurnComplete { .. }) => {
                         let payload = serde_json::json!({"type": "debug_turn_complete"});
                         if socket::write_json_line(write_half, &payload).await.is_err() {
@@ -1117,7 +1123,6 @@ async fn handle_debug(
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
-                    _ => continue,
                 }
             }
         }
@@ -1302,8 +1307,9 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
 
     // Set up interactive channels (idle until a debug session connects).
     let channels = InteractiveChannels::new();
-    let (interactive_handle, _interactive_session) = channels.split();
+    let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.
     let log_path = gremlin.state_dir.join("log");
