@@ -13,6 +13,7 @@ use crate::executor::state::StateError;
 
 pub mod agent_runner;
 pub mod bootstrap;
+pub mod debug;
 pub mod exec_runner;
 pub mod gremlin;
 pub mod parallel;

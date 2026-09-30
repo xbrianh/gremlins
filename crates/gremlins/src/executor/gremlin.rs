@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
+use tokio::sync::broadcast;
 
 use crate::artifacts::registry::{
     ArtifactRegistry, DryRunArtifactRegistry, FileSystemArtifactRegistry,
@@ -42,6 +43,7 @@ use crate::config;
 use crate::core::{discovery, env_file, git};
 use crate::definition::{GremlinDefinition, StaticDefinition};
 use crate::executor::bootstrap::parse_gremlins_command;
+use crate::executor::debug::{DebugCommand, DebugEvent};
 use crate::executor::state::{self, StateData};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
@@ -122,7 +124,6 @@ pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
 /// Snapshot of process-global configuration needed by the run loop.
 /// Populated once at construction time so multiple `Gremlin::run()`
 /// invocations can coexist in one process without reading global state.
-#[derive(Clone)]
 pub(crate) struct RuntimeConfig {
     /// Resolved scratch directory for this gremlin.
     pub scratch_dir: PathBuf,
@@ -143,6 +144,31 @@ pub(crate) struct RuntimeConfig {
     pub base_process_env: HashMap<String, String>,
     /// Per-gremlin log channel. Every gremlin-scoped log event is sent here.
     pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Debug command channel (supervisor → agent loop).
+    pub debug_cmd_tx: Option<tokio::sync::mpsc::Sender<DebugCommand>>,
+    /// Debug command receiver (supervisor → agent loop).
+    pub debug_cmd_rx: Option<tokio::sync::mpsc::Receiver<DebugCommand>>,
+    /// Debug event broadcast channel (agent loop → supervisor).
+    pub debug_evt_tx: Option<broadcast::Sender<DebugEvent>>,
+}
+
+impl Clone for RuntimeConfig {
+    fn clone(&self) -> Self {
+        Self {
+            scratch_dir: self.scratch_dir.clone(),
+            state_root: self.state_root.clone(),
+            stage_clients_exact: self.stage_clients_exact.clone(),
+            stage_clients_prefix: self.stage_clients_prefix.clone(),
+            task_clients_exact: self.task_clients_exact.clone(),
+            task_clients_prefix: self.task_clients_prefix.clone(),
+            default_client: self.default_client.clone(),
+            base_process_env: self.base_process_env.clone(),
+            log_tx: self.log_tx.clone(),
+            debug_cmd_tx: self.debug_cmd_tx.clone(),
+            debug_cmd_rx: None,
+            debug_evt_tx: self.debug_evt_tx.clone(),
+        }
+    }
 }
 
 impl RuntimeConfig {
@@ -175,6 +201,9 @@ impl RuntimeConfig {
             default_client,
             base_process_env,
             log_tx: None,
+            debug_cmd_tx: None,
+            debug_cmd_rx: None,
+            debug_evt_tx: None,
         }
     }
 }
@@ -191,6 +220,9 @@ impl Default for RuntimeConfig {
             default_client: None,
             base_process_env: HashMap::new(),
             log_tx: None,
+            debug_cmd_tx: None,
+            debug_cmd_rx: None,
+            debug_evt_tx: None,
         }
     }
 }

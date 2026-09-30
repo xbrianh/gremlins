@@ -12,10 +12,12 @@ use serde_json::{Map, Value};
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::clients::agent_loop::CancelToken;
 use crate::config;
+use crate::executor::debug::{DebugCommand, DebugEvent};
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state;
@@ -30,6 +32,10 @@ pub(crate) struct RunHandle {
     pub state_tx: watch::Sender<RunState>,
     /// Broadcast sender for live log subscribers (Op::Log with follow:true).
     pub log_broadcast: broadcast::Sender<String>,
+    /// Debug command channel (supervisor → agent loop).
+    pub debug_cmd_tx: mpsc::Sender<DebugCommand>,
+    /// Debug event broadcast channel (agent loop → supervisor).
+    pub debug_evt_tx: broadcast::Sender<DebugEvent>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -47,7 +53,7 @@ pub struct RunState {
 
 static RUN_MAP: OnceLock<Arc<Mutex<HashMap<String, RunHandle>>>> = OnceLock::new();
 
-fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
+pub(crate) fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
     RUN_MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
@@ -121,6 +127,11 @@ async fn handle_connection(
         // directly so they can monitor the read half for disconnect.
         if op == "log" {
             handle_log(&request, &state_root, reader, &mut write_half).await;
+            break;
+        }
+
+        if op == "debug" {
+            handle_debug(&request, &state_root, reader, &mut write_half).await;
             break;
         }
 
@@ -332,6 +343,13 @@ async fn handle_launch(
     let (log_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.log_tx = Some(log_tx.clone());
 
+    // Set up debug channels (idle until a debug session connects).
+    let (debug_cmd_tx, debug_cmd_rx) = mpsc::channel(8);
+    let (debug_evt_tx, _) = broadcast::channel(16);
+    gremlin.runtime_config.debug_cmd_tx = Some(debug_cmd_tx.clone());
+    gremlin.runtime_config.debug_cmd_rx = Some(debug_cmd_rx);
+    gremlin.runtime_config.debug_evt_tx = Some(debug_evt_tx.clone());
+
     // Spawn the log writer: reads from the channel, appends to $state_dir/log,
     // and broadcasts to live subscribers.
     let log_path = gremlin.state_dir.join("log");
@@ -354,6 +372,8 @@ async fn handle_launch(
         cancel: cancel_token.clone(),
         state_tx,
         log_broadcast,
+        debug_cmd_tx: debug_cmd_tx.clone(),
+        debug_evt_tx: debug_evt_tx.clone(),
     };
     get_run_map().lock().unwrap().insert(id.clone(), handle);
 
@@ -512,6 +532,13 @@ async fn handle_resume(
     let (log_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.log_tx = Some(log_tx.clone());
 
+    // Set up debug channels (idle until a debug session connects).
+    let (debug_cmd_tx, debug_cmd_rx) = mpsc::channel(8);
+    let (debug_evt_tx, _) = broadcast::channel(16);
+    gremlin.runtime_config.debug_cmd_tx = Some(debug_cmd_tx.clone());
+    gremlin.runtime_config.debug_cmd_rx = Some(debug_cmd_rx);
+    gremlin.runtime_config.debug_evt_tx = Some(debug_evt_tx.clone());
+
     // Spawn the log writer.
     let log_path = gremlin.state_dir.join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
@@ -533,6 +560,8 @@ async fn handle_resume(
         cancel: cancel_token.clone(),
         state_tx,
         log_broadcast,
+        debug_cmd_tx: debug_cmd_tx.clone(),
+        debug_evt_tx: debug_evt_tx.clone(),
     };
     get_run_map().lock().unwrap().insert(id.to_string(), handle);
 
@@ -880,6 +909,222 @@ async fn handle_log(
 }
 
 // ---------------------------------------------------------------------------
+// debug
+// ---------------------------------------------------------------------------
+
+async fn handle_debug(
+    request: &Value,
+    state_root: &Path,
+    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    write_half: &mut (impl tokio::io::AsyncWrite + Unpin),
+) {
+    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if id.is_empty() {
+        let resp = error_response("missing 'id' field");
+        let _ = socket::write_json_line(write_half, &resp).await;
+        return;
+    }
+
+    if validate_gremlin_id(id).is_err() {
+        let resp = error_response(&format!("invalid gremlin id {id:?}"));
+        let _ = socket::write_json_line(write_half, &resp).await;
+        return;
+    }
+
+    let state_dir = state_root.join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        let resp = error_response(&format!("unknown gremlin {id:?}"));
+        let _ = socket::write_json_line(write_half, &resp).await;
+        return;
+    }
+
+    // Validate that the gremlin is currently in an agent stage.
+    // Read the current stage name from state.json and cross-reference
+    // with the definition YAML to check its type.
+    {
+        let sf = state_dir.join("state.json");
+        let stage_name = if sf.is_file() {
+            std::fs::read_to_string(&sf)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("stage").and_then(|s| s.as_str()).map(String::from))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if stage_name.is_empty() {
+            let resp = error_response(&format!("gremlin {id} has no recorded stage"));
+            let _ = socket::write_json_line(write_half, &resp).await;
+            return;
+        }
+
+        let def_path = state_dir.join("definition.yaml");
+        let is_agent = def_path.is_file()
+            && std::fs::read_to_string(&def_path)
+                .ok()
+                .and_then(|s| serde_yaml::from_str::<serde_yaml::Value>(&s).ok())
+                .and_then(|root| {
+                    root.get("stages")
+                        .and_then(|stages| stages.as_sequence())
+                        .map(|seq| {
+                            seq.iter().any(|s| {
+                                s.get("name").and_then(|n| n.as_str()) == Some(&stage_name)
+                                    && s.get("type").and_then(|t| t.as_str()) == Some("agent")
+                            })
+                        })
+                })
+                .unwrap_or(false);
+
+        if !is_agent {
+            let resp = error_response(&format!(
+                "gremlin {id} is not in an agent stage (current: {stage_name})"
+            ));
+            let _ = socket::write_json_line(write_half, &resp).await;
+            return;
+        }
+    }
+
+    // Get the debug channels from the run map.
+    let channels = {
+        let map = get_run_map().lock().unwrap();
+        map.get(id)
+            .map(|h| (h.debug_cmd_tx.clone(), h.debug_evt_tx.clone()))
+    };
+
+    let (debug_cmd_tx, debug_evt_tx) = match channels {
+        Some(ch) => ch,
+        None => {
+            let resp = error_response(&format!("gremlin {id} is not running"));
+            let _ = socket::write_json_line(write_half, &resp).await;
+            return;
+        }
+    };
+
+    // Subscribe to debug events *before* sending Pause so we don't miss
+    // the Ready broadcast.
+    let mut evt_rx = debug_evt_tx.subscribe();
+
+    // Send Pause command to the agent loop.
+    if debug_cmd_tx.send(DebugCommand::Pause).await.is_err() {
+        let resp = error_response("failed to send pause command — agent loop may have exited");
+        let _ = socket::write_json_line(write_half, &resp).await;
+        return;
+    }
+
+    // Wait for Ready from the agent loop.
+    let ready = loop {
+        tokio::select! {
+            result = evt_rx.recv() => {
+                match result {
+                    Ok(DebugEvent::Ready) => break true,
+                    Ok(DebugEvent::Ended { .. }) => break false,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break false,
+                    _ => continue,
+                }
+            }
+            _ = socket::read_json_line(&mut reader) => {
+                // Client disconnected before Ready.
+                break false;
+            }
+        }
+    };
+
+    if !ready {
+        return;
+    }
+
+    // Send debug_ready to the client.
+    let ready_payload = serde_json::json!({
+        "type": "debug_ready",
+        "id": id,
+    });
+    if socket::write_json_line(write_half, &ready_payload)
+        .await
+        .is_err()
+    {
+        let _ = debug_cmd_tx.send(DebugCommand::Quit).await;
+        return;
+    }
+
+    // Bidirectional loop: read commands from client, forward to agent.
+    loop {
+        tokio::select! {
+            // Read from the client.
+            result = socket::read_json_line(&mut reader) => {
+                match result {
+                    Ok(Some(cmd)) => {
+                        let op = cmd.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                        match op {
+                            "talk" => {
+                                let text = cmd.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                                if debug_cmd_tx.send(DebugCommand::Talk(text.to_string())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            "continue" => {
+                                if debug_cmd_tx.send(DebugCommand::Continue).await.is_err() {
+                                    break;
+                                }
+                            }
+                            "bail" => {
+                                let reason = cmd.get("reason").and_then(|v| v.as_str()).unwrap_or("operator bailed");
+                                if debug_cmd_tx.send(DebugCommand::Bail(reason.to_string())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            "quit" => {
+                                if debug_cmd_tx.send(DebugCommand::Quit).await.is_err() {
+                                    break;
+                                }
+                            }
+                            _ => {
+                                let resp = error_response(&format!("unknown debug op: {op:?}"));
+                                let _ = socket::write_json_line(write_half, &resp).await;
+                            }
+                        }
+                    }
+                    Ok(None) | Err(_) => {
+                        // Client disconnected — send Quit so the agent resumes.
+                        let _ = debug_cmd_tx.send(DebugCommand::Quit).await;
+                        break;
+                    }
+                }
+            }
+            // Read events from the agent loop.
+            result = evt_rx.recv() => {
+                match result {
+                    Ok(DebugEvent::TurnComplete) => {
+                        let payload = serde_json::json!({"type": "debug_turn_complete"});
+                        if socket::write_json_line(write_half, &payload).await.is_err() {
+                            let _ = debug_cmd_tx.send(DebugCommand::Quit).await;
+                            break;
+                        }
+                    }
+                    Ok(DebugEvent::Paused) => {
+                        let payload = serde_json::json!({"type": "debug_paused"});
+                        if socket::write_json_line(write_half, &payload).await.is_err() {
+                            let _ = debug_cmd_tx.send(DebugCommand::Quit).await;
+                            break;
+                        }
+                    }
+                    Ok(DebugEvent::Ended { reason }) => {
+                        let payload = serde_json::json!({"type": "debug_ended", "reason": reason});
+                        let _ = socket::write_json_line(write_half, &payload).await;
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    _ => continue,
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1055,6 +1300,13 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     let (log_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.log_tx = Some(log_tx.clone());
 
+    // Set up debug channels (idle until a debug session connects).
+    let (debug_cmd_tx, debug_cmd_rx) = mpsc::channel(8);
+    let (debug_evt_tx, _) = broadcast::channel(16);
+    gremlin.runtime_config.debug_cmd_tx = Some(debug_cmd_tx.clone());
+    gremlin.runtime_config.debug_cmd_rx = Some(debug_cmd_rx);
+    gremlin.runtime_config.debug_evt_tx = Some(debug_evt_tx.clone());
+
     // Spawn the log writer.
     let log_path = gremlin.state_dir.join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
@@ -1080,6 +1332,8 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
         cancel: cancel_token.clone(),
         state_tx,
         log_broadcast,
+        debug_cmd_tx: debug_cmd_tx.clone(),
+        debug_evt_tx: debug_evt_tx.clone(),
     };
     // Insert into RUN_MAP *before* spawning so a fast child cannot finish
     // and call remove before the insert.

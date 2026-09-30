@@ -18,6 +18,7 @@ use super::backend::{ClientError, RunParams};
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
+use crate::executor::debug::{DebugCommand, DebugEvent, DebugResult};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
@@ -110,7 +111,7 @@ pub(crate) struct LoopOpts<'a> {
 pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 'static>(
     model: &M,
     prompt: &str,
-    ctx: &RunContext,
+    ctx: RunContext,
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
     task_model_selector: Option<super::task::TaskModelSelector<M>>,
@@ -225,6 +226,8 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
         &ctx.params.log_tx,
+        ctx.params.debug_cmd_rx,
+        ctx.params.debug_evt_tx.clone(),
     )
     .await
 }
@@ -277,6 +280,8 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         0,
         completion_nudge_budget,
         &log_tx,
+        None,
+        None,
     )
     .await;
     log::info!("{prefix}task: end");
@@ -284,6 +289,71 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         let _ = tx.send(format!("{prefix}task: end"));
     }
     result
+}
+
+// ── debug loop ────────────────────────────────────────────────────────────
+
+/// Interactive debug state machine. Called when the operator sends `Pause`
+/// or when re-entering after a `RunOneTurn`.
+///
+/// On entry, broadcasts `entry_event`. Then blocks reading `DebugCommand`s
+/// from `cmd_rx`. `Talk` and `Continue` return `RunOneTurn` so the outer
+/// turn loop executes exactly one turn and then re-enters this function.
+#[allow(clippy::too_many_arguments)]
+async fn debug_loop<M: CompletionModel>(
+    _model: &M,
+    history: &mut Vec<Message>,
+    next_prompt: &mut Message,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<DebugCommand>,
+    evt_tx: &Option<tokio::sync::broadcast::Sender<DebugEvent>>,
+    entry_event: DebugEvent,
+) -> DebugResult {
+    if let Some(tx) = evt_tx {
+        let _ = tx.send(entry_event);
+    }
+
+    loop {
+        let cmd = match cmd_rx.recv().await {
+            Some(cmd) => cmd,
+            None => {
+                if let Some(tx) = evt_tx {
+                    let _ = tx.send(DebugEvent::Ended {
+                        reason: "resumed".to_string(),
+                    });
+                }
+                return DebugResult::Resumed;
+            }
+        };
+
+        match cmd {
+            DebugCommand::Talk(text) => {
+                let msg = format!("[operator]: {text}");
+                history.push(Message::user(msg));
+                *next_prompt = Message::user(text);
+                return DebugResult::RunOneTurn(DebugEvent::TurnComplete);
+            }
+            DebugCommand::Continue => {
+                return DebugResult::RunOneTurn(DebugEvent::Paused);
+            }
+            DebugCommand::Bail(reason) => {
+                if let Some(tx) = evt_tx {
+                    let _ = tx.send(DebugEvent::Ended {
+                        reason: "bailed".to_string(),
+                    });
+                }
+                return DebugResult::Bailed(reason);
+            }
+            DebugCommand::Quit => {
+                if let Some(tx) = evt_tx {
+                    let _ = tx.send(DebugEvent::Ended {
+                        reason: "resumed".to_string(),
+                    });
+                }
+                return DebugResult::Resumed;
+            }
+            DebugCommand::Pause => {} // no-op: already paused
+        }
+    }
 }
 
 // ── helpers for completion-decision bookkeeping ───────────────────────────
@@ -361,7 +431,11 @@ async fn run_agent_loop_core<M: CompletionModel>(
     mut reminder_budget: usize,
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    mut debug_cmd_rx: Option<tokio::sync::mpsc::Receiver<DebugCommand>>,
+    debug_evt_tx: Option<tokio::sync::broadcast::Sender<DebugEvent>>,
 ) -> Result<CompletedRun, ClientError> {
+    let original_system_prompt = system_prompt.clone();
+    let mut system_prompt = system_prompt;
     let mut history: Vec<Message> = Vec::new();
     let mut next_prompt = Message::user(prompt.to_string());
     let mut turns: usize = 0;
@@ -387,12 +461,107 @@ async fn run_agent_loop_core<M: CompletionModel>(
         over_cap: bool,
     }
 
-    for _ in 0..max_turns {
+    let mut debug_active: Option<DebugEvent> = None;
+
+    let mut remaining_turns = max_turns;
+    while remaining_turns > 0 {
         if cancel.is_cancelled() {
             log::debug!("agent_loop: cancelled before turn (label={})", prefix);
             return Err(ClientError::Runtime {
                 message: "cancelled".into(),
             });
+        }
+
+        // ── debug turn boundary ──────────────────────────────────────────
+        //
+        // Two modes:
+        // 1. No active debug session — try_recv for Pause/Talk commands.
+        // 2. Active debug session (re-entering after RunOneTurn) — enter
+        //    debug_loop immediately with the pending event.
+        if let Some(mut rx) = debug_cmd_rx.take() {
+            match rx.try_recv() {
+                Ok(DebugCommand::Pause) => {
+                    // Amend system prompt with operator note.
+                    let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                    let amended_system = match &system_prompt {
+                        Some(sp) => format!("{sp}{debug_note}"),
+                        None => debug_note.trim_start().to_string(),
+                    };
+                    system_prompt = Some(amended_system);
+
+                    match debug_loop(
+                        model,
+                        &mut history,
+                        &mut next_prompt,
+                        &mut rx,
+                        &debug_evt_tx,
+                        DebugEvent::Ready,
+                    )
+                    .await
+                    {
+                        DebugResult::Resumed => {
+                            debug_cmd_rx = Some(rx);
+                            system_prompt = original_system_prompt.clone();
+                            continue;
+                        }
+                        DebugResult::RunOneTurn(evt) => {
+                            debug_active = Some(evt);
+                            debug_cmd_rx = Some(rx);
+                        }
+                        DebugResult::Bailed(reason) => {
+                            return Err(ClientError::Bail {
+                                reason: format!("operator bailed: {reason}"),
+                            });
+                        }
+                    }
+                }
+                Ok(DebugCommand::Talk(text)) => {
+                    let msg = format!("[operator]: {text}");
+                    history.push(Message::user(msg));
+                    next_prompt = Message::user(text);
+                    debug_cmd_rx = Some(rx);
+                }
+                Ok(DebugCommand::Quit) | Ok(DebugCommand::Bail(_)) | Ok(DebugCommand::Continue) => {
+                    debug_cmd_rx = Some(rx);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    debug_cmd_rx = Some(rx);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    system_prompt = original_system_prompt.clone();
+                }
+            }
+        }
+
+        // ── debug re-entry (after RunOneTurn) ───────────────────────────
+        if let Some(evt) = debug_active.take() {
+            if let Some(mut rx) = debug_cmd_rx.take() {
+                match debug_loop(
+                    model,
+                    &mut history,
+                    &mut next_prompt,
+                    &mut rx,
+                    &debug_evt_tx,
+                    evt,
+                )
+                .await
+                {
+                    DebugResult::Resumed => {
+                        debug_cmd_rx = Some(rx);
+                        system_prompt = original_system_prompt.clone();
+                        continue;
+                    }
+                    DebugResult::RunOneTurn(next_evt) => {
+                        debug_active = Some(next_evt);
+                        debug_cmd_rx = Some(rx);
+                    }
+                    DebugResult::Bailed(reason) => {
+                        return Err(ClientError::Bail {
+                            reason: format!("operator bailed: {reason}"),
+                        });
+                    }
+                }
+            }
         }
 
         // Snapshot before request construction so TTFT includes connection /
@@ -840,6 +1009,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // trailing the complete result block instead of splitting it.
         history.extend(result_msgs);
         next_prompt = Message::user(ledger_message(&ledger));
+        remaining_turns -= 1;
     }
 
     if !nested {
@@ -1330,6 +1500,8 @@ mod tests {
                 task_clients_exact: HashMap::new(),
                 task_clients_prefix: HashMap::new(),
                 cancel_token: None,
+                debug_cmd_rx: None,
+                debug_evt_tx: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -1380,9 +1552,16 @@ mod tests {
     async fn loop_idle_timeout_is_client_timeout() {
         let ctx = test_ctx(None, None);
         let cancel = CancelToken::new();
-        let err = run_agent_loop(&PendingModel, "hi", &ctx, cancel, loop_opts(None), None)
-            .await
-            .unwrap_err();
+        let err = run_agent_loop(
+            &PendingModel,
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ClientError::Timeout { .. }));
     }
 
@@ -1424,7 +1603,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -1479,9 +1658,16 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "where am i", &ctx, cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "where am i",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
         let events = result.events.unwrap();
         let result_evt = events
             .iter()
@@ -1543,7 +1729,7 @@ mod tests {
         let result = run_agent_loop(
             &model,
             "write",
-            &ctx,
+            ctx.clone(),
             cancel,
             loop_opts(Some(&filter)),
             None,
@@ -1607,7 +1793,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+        run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         let audit = dir.join("run.audit.jsonl");
@@ -1662,9 +1848,16 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "read both", &ctx, cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "read both",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("both read"));
         let events = result.events.unwrap();
         // Two tool_use events, then two tool_result events, in order
@@ -1741,7 +1934,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "mix", &ctx, cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "mix", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
@@ -1813,7 +2006,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.params.system_prompt = Some("you are a harness".into());
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
@@ -1854,7 +2047,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
@@ -1906,7 +2099,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "read", &ctx, cancel, loop_opts(None), None)
+        run_agent_loop(&model, "read", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
 
@@ -1983,7 +2176,7 @@ mod tests {
         run_agent_loop(
             &model,
             "read both",
-            &ctx,
+            ctx.clone(),
             CancelToken::new(),
             loop_opts(None),
             None,
@@ -2058,7 +2251,7 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
@@ -2101,7 +2294,7 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         // Returns normally — file is still missing (Python verify_produced catches it).
@@ -2145,7 +2338,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.completion_nudge_budget = 1;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "do it", &ctx, cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "do it", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         // Done succeeds; text is non-empty so it's the result.
@@ -2226,7 +2419,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", &ctx, cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         // File was written on the retry, not in the mixed turn.
@@ -2281,7 +2474,7 @@ mod tests {
         ctx.expected_artifact_paths = vec![];
         ctx.reminder_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", &ctx, cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("just text"));
@@ -2332,9 +2525,16 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "fan out", &ctx, cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        run_agent_loop(
+            &model,
+            "fan out",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
 
         let reqs = model.requests();
         // The outer loop's second request carries every Task result.
@@ -2426,7 +2626,7 @@ mod tests {
         run_agent_loop(
             &parent,
             "go",
-            &ctx,
+            ctx.clone(),
             CancelToken::new(),
             loop_opts(None),
             Some(selector),
