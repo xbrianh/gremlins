@@ -1440,6 +1440,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
         aborted: aborted.clone(),
         state_tx,
         log_broadcast,
+        interactive: interactive_handle,
     };
     // Insert into RUN_MAP *after* spawning so the JoinHandle is present
     // from the moment the entry exists.
