@@ -12,13 +12,14 @@ use rig_core::completion::{
 };
 use rig_core::streaming::StreamedAssistantContent;
 use rig_core::OneOrMany;
+use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
-use crate::executor::debug::{DebugCommand, DebugEvent, DebugResult};
+use super::interactive::{InteractiveCommand, InteractiveEvent, InteractiveSession};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
@@ -226,8 +227,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
         &ctx.params.log_tx,
-        ctx.params.debug_cmd_rx,
-        ctx.params.debug_evt_tx.clone(),
+        ctx.params.interactive,
     )
     .await
 }
@@ -281,7 +281,6 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         completion_nudge_budget,
         &log_tx,
         None,
-        None,
     )
     .await;
     log::info!("{prefix}task: end");
@@ -291,69 +290,70 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     result
 }
 
-// ── debug loop ────────────────────────────────────────────────────────────
+// ── interactive loop ─────────────────────────────────────────────────────
 
-/// Interactive debug state machine. Called when the operator sends `Pause`
-/// or when re-entering after a `RunOneTurn`.
+/// Interactive state machine. Called when the operator sends `Pause`
+/// or when re-entering after a `RunTurn`/`Inject`.
 ///
-/// On entry, broadcasts `entry_event`. Then blocks reading `DebugCommand`s
-/// from `cmd_rx`. `Talk` and `Continue` return `RunOneTurn` so the outer
-/// turn loop executes exactly one turn and then re-enters this function.
+/// On entry, broadcasts `Ready { turn }`. Then blocks reading
+/// `InteractiveCommand`s from the session's `cmd_rx`.
+/// `Inject` and `RunTurn` return so the outer turn loop executes exactly
+/// one turn and then re-enters this function.
 #[allow(clippy::too_many_arguments)]
-async fn debug_loop<M: CompletionModel>(
+async fn interactive_loop<M: CompletionModel>(
     _model: &M,
     history: &mut Vec<Message>,
     next_prompt: &mut Message,
-    cmd_rx: &mut tokio::sync::mpsc::Receiver<DebugCommand>,
-    evt_tx: &Option<tokio::sync::broadcast::Sender<DebugEvent>>,
-    entry_event: DebugEvent,
-) -> DebugResult {
-    if let Some(tx) = evt_tx {
-        let _ = tx.send(entry_event);
-    }
+    session: &mut InteractiveSession,
+    turn: usize,
+) -> Result<InteractiveLoopResult, ClientError> {
+    let _ = session.evt_tx.send(InteractiveEvent::Ready { turn });
 
     loop {
-        let cmd = match cmd_rx.recv().await {
+        let cmd = match session.cmd_rx.recv().await {
             Some(cmd) => cmd,
             None => {
-                if let Some(tx) = evt_tx {
-                    let _ = tx.send(DebugEvent::Ended {
-                        reason: "resumed".to_string(),
-                    });
-                }
-                return DebugResult::Resumed;
+                let _ = session.evt_tx.send(InteractiveEvent::Ended {
+                    reason: "disconnect".to_string(),
+                });
+                return Ok(InteractiveLoopResult::Resumed);
             }
         };
 
         match cmd {
-            DebugCommand::Talk(text) => {
+            InteractiveCommand::Inject(text) => {
                 let msg = format!("[operator]: {text}");
                 history.push(Message::user(msg));
                 *next_prompt = Message::user(text);
-                return DebugResult::RunOneTurn(DebugEvent::TurnComplete);
+                return Ok(InteractiveLoopResult::RunOneTurn);
             }
-            DebugCommand::Continue => {
-                return DebugResult::RunOneTurn(DebugEvent::Paused);
+            InteractiveCommand::RunTurn => {
+                return Ok(InteractiveLoopResult::RunOneTurn);
             }
-            DebugCommand::Bail(reason) => {
-                if let Some(tx) = evt_tx {
-                    let _ = tx.send(DebugEvent::Ended {
-                        reason: "bailed".to_string(),
-                    });
-                }
-                return DebugResult::Bailed(reason);
+            InteractiveCommand::Bail(reason) => {
+                let _ = session.evt_tx.send(InteractiveEvent::Ended {
+                    reason: "bailed".to_string(),
+                });
+                return Err(ClientError::Bail {
+                    reason: format!("operator bailed: {reason}"),
+                });
             }
-            DebugCommand::Quit => {
-                if let Some(tx) = evt_tx {
-                    let _ = tx.send(DebugEvent::Ended {
-                        reason: "resumed".to_string(),
-                    });
-                }
-                return DebugResult::Resumed;
+            InteractiveCommand::Quit => {
+                let _ = session.evt_tx.send(InteractiveEvent::Ended {
+                    reason: "resumed".to_string(),
+                });
+                return Ok(InteractiveLoopResult::Resumed);
             }
-            DebugCommand::Pause => {} // no-op: already paused
+            InteractiveCommand::Pause => {} // no-op: already paused
         }
     }
+}
+
+enum InteractiveLoopResult {
+    /// Quit — interactive session ended, resume normal operation.
+    Resumed,
+    /// Run one turn, then re-enter interactive_loop.
+    RunOneTurn,
 }
 
 // ── helpers for completion-decision bookkeeping ───────────────────────────
@@ -431,8 +431,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
     mut reminder_budget: usize,
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    mut debug_cmd_rx: Option<tokio::sync::mpsc::Receiver<DebugCommand>>,
-    debug_evt_tx: Option<tokio::sync::broadcast::Sender<DebugEvent>>,
+    mut interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
     let original_system_prompt = system_prompt.clone();
     let mut system_prompt = system_prompt;
@@ -461,7 +460,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         over_cap: bool,
     }
 
-    let mut debug_active: Option<DebugEvent> = None;
+    let mut interactive_active: bool = false;
 
     let mut remaining_turns = max_turns;
     while remaining_turns > 0 {
@@ -472,93 +471,77 @@ async fn run_agent_loop_core<M: CompletionModel>(
             });
         }
 
-        // ── debug turn boundary ──────────────────────────────────────────
+        // ── interactive turn boundary ──────────────────────────────────
         //
         // Two modes:
-        // 1. No active debug session — try_recv for Pause/Talk commands.
-        // 2. Active debug session (re-entering after RunOneTurn) — enter
-        //    debug_loop immediately with the pending event.
-        if let Some(mut rx) = debug_cmd_rx.take() {
-            match rx.try_recv() {
-                Ok(DebugCommand::Pause) => {
-                    // Amend system prompt with operator note.
-                    let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                    let amended_system = match &system_prompt {
-                        Some(sp) => format!("{sp}{debug_note}"),
-                        None => debug_note.trim_start().to_string(),
-                    };
-                    system_prompt = Some(amended_system);
-
-                    match debug_loop(
-                        model,
-                        &mut history,
-                        &mut next_prompt,
-                        &mut rx,
-                        &debug_evt_tx,
-                        DebugEvent::Ready,
-                    )
-                    .await
-                    {
-                        DebugResult::Resumed => {
-                            debug_cmd_rx = Some(rx);
-                            system_prompt = original_system_prompt.clone();
-                            continue;
-                        }
-                        DebugResult::RunOneTurn(evt) => {
-                            debug_active = Some(evt);
-                            debug_cmd_rx = Some(rx);
-                        }
-                        DebugResult::Bailed(reason) => {
-                            return Err(ClientError::Bail {
-                                reason: format!("operator bailed: {reason}"),
-                            });
-                        }
-                    }
-                }
-                Ok(DebugCommand::Talk(text)) => {
-                    let msg = format!("[operator]: {text}");
-                    history.push(Message::user(msg));
-                    next_prompt = Message::user(text);
-                    debug_cmd_rx = Some(rx);
-                }
-                Ok(DebugCommand::Quit) | Ok(DebugCommand::Bail(_)) | Ok(DebugCommand::Continue) => {
-                    debug_cmd_rx = Some(rx);
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    debug_cmd_rx = Some(rx);
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    system_prompt = original_system_prompt.clone();
-                }
-            }
-        }
-
-        // ── debug re-entry (after RunOneTurn) ───────────────────────────
-        if let Some(evt) = debug_active.take() {
-            if let Some(mut rx) = debug_cmd_rx.take() {
-                match debug_loop(
+        // 1. No active interactive session — try_recv for Pause.
+        // 2. Active interactive session (re-entering after RunOneTurn) —
+        //    enter interactive_loop immediately.
+        if let Some(ref mut session) = interactive {
+            if interactive_active {
+                // Re-enter interactive_loop after a RunOneTurn/Inject.
+                match interactive_loop(
                     model,
                     &mut history,
                     &mut next_prompt,
-                    &mut rx,
-                    &debug_evt_tx,
-                    evt,
+                    session,
+                    turn_num,
                 )
                 .await
                 {
-                    DebugResult::Resumed => {
-                        debug_cmd_rx = Some(rx);
+                    Ok(InteractiveLoopResult::Resumed) => {
+                        interactive_active = false;
                         system_prompt = original_system_prompt.clone();
                         continue;
                     }
-                    DebugResult::RunOneTurn(next_evt) => {
-                        debug_active = Some(next_evt);
-                        debug_cmd_rx = Some(rx);
+                    Ok(InteractiveLoopResult::RunOneTurn) => {
+                        // Fall through to execute one turn.
                     }
-                    DebugResult::Bailed(reason) => {
-                        return Err(ClientError::Bail {
-                            reason: format!("operator bailed: {reason}"),
-                        });
+                    Err(e) => return Err(e),
+                }
+            } else {
+                // Drain pending commands with try_recv. Only Pause matters.
+                match session.cmd_rx.try_recv() {
+                    Ok(InteractiveCommand::Pause) => {
+                        // Amend system prompt with operator note.
+                        let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                        let amended_system = match &system_prompt {
+                            Some(sp) => format!("{sp}{debug_note}"),
+                            None => debug_note.trim_start().to_string(),
+                        };
+                        system_prompt = Some(amended_system);
+
+                        match interactive_loop(
+                            model,
+                            &mut history,
+                            &mut next_prompt,
+                            session,
+                            turn_num,
+                        )
+                        .await
+                        {
+                            Ok(InteractiveLoopResult::Resumed) => {
+                                system_prompt = original_system_prompt.clone();
+                                continue;
+                            }
+                            Ok(InteractiveLoopResult::RunOneTurn) => {
+                                interactive_active = true;
+                                // Fall through to execute one turn.
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(InteractiveCommand::Inject(text)) => {
+                        let msg = format!("[operator]: {text}");
+                        history.push(Message::user(msg));
+                        next_prompt = Message::user(text);
+                    }
+                    Ok(InteractiveCommand::Quit)
+                    | Ok(InteractiveCommand::Bail(_))
+                    | Ok(InteractiveCommand::RunTurn) => {}
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        system_prompt = original_system_prompt.clone();
                     }
                 }
             }
@@ -1500,8 +1483,7 @@ mod tests {
                 task_clients_exact: HashMap::new(),
                 task_clients_prefix: HashMap::new(),
                 cancel_token: None,
-                debug_cmd_rx: None,
-                debug_evt_tx: None,
+                interactive: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,

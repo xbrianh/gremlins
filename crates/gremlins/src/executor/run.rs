@@ -381,19 +381,26 @@ async fn run_agent(
         task_clients_exact: gremlin.runtime_config.task_clients_exact.clone(),
         task_clients_prefix: gremlin.runtime_config.task_clients_prefix.clone(),
         cancel_token: gremlin.cancel_token.clone(),
-        debug_cmd_rx: {
-            // Create a fresh channel pair per agent stage so the receiver
-            // is not consumed by take() for subsequent stages.
+        interactive: {
+            // Create a fresh cmd channel pair per agent stage so the
+            // receiver is not consumed by take() for subsequent stages.
+            // The evt_tx is shared from the pre-created interactive handle.
             let (tx, rx) = tokio::sync::mpsc::channel(8);
-            gremlin.runtime_config.debug_cmd_tx = Some(tx.clone());
             if let Ok(mut map) = get_run_map().lock() {
                 if let Some(handle) = map.get_mut(gremlin.id.as_str()) {
-                    handle.debug_cmd_tx = tx;
+                    handle.interactive.cmd_tx = tx;
                 }
             }
-            Some(rx)
+            let evt_tx = gremlin
+                .runtime_config
+                .interactive
+                .as_ref()
+                .map(|h| h.evt_tx.clone());
+            evt_tx.map(|evt_tx| crate::clients::interactive::InteractiveSession {
+                cmd_rx: rx,
+                evt_tx,
+            })
         },
-        debug_evt_tx: gremlin.runtime_config.debug_evt_tx.clone(),
     };
 
     log::debug!(

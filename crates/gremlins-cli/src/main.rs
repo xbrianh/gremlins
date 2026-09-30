@@ -719,8 +719,8 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                         "debug_turn_complete" => {
                             eprintln!("debug: turn complete — agent paused");
                         }
-                        "debug_paused" => {
-                            eprintln!("debug: agent paused");
+                        "debug_done" => {
+                            eprintln!("debug: agent called Done");
                         }
                         "debug_ended" => {
                             let reason = line.get("reason").and_then(|v| v.as_str()).unwrap_or("");
