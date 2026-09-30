@@ -17,9 +17,7 @@ use indexmap::IndexMap;
 use regex::Regex;
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
-use crate::clients::cmd_backend::CmdBackend;
-use crate::clients::openai_backend::{OpenAiBackend, OpenAiProvider};
-use crate::clients::openrouter_backend::{self, OpenRouterBackend};
+use crate::clients::backends;
 use crate::clients::protocol::CompletedRun;
 
 /// The six tools every native agent may call.
@@ -41,39 +39,13 @@ pub fn default_native_block() -> HashMap<String, Vec<String>> {
     )])
 }
 
-/// The signature every provider's `build` function must match.
-///
-/// Adding a new backend means writing a module that exports a function with
-/// this signature and registering it in [`provider_registry`].
-type BuildFn = fn(
-    model: &str,
-    native_block: &HashMap<String, Vec<String>>,
-    extra_params: &IndexMap<String, String>,
-) -> Result<Arc<dyn Backend>, String>;
-
-/// Static registry mapping provider names to their constructors.
-///
-/// This is the single source of truth for which providers the harness can
-/// build.  [`is_known_provider`] and [`Client::build_backend`] both derive
-/// from it, so adding a new backend is a one-line insertion here (plus the
-/// backend module itself).
-fn provider_registry() -> &'static HashMap<&'static str, BuildFn> {
-    static REG: OnceLock<HashMap<&'static str, BuildFn>> = OnceLock::new();
-    REG.get_or_init(|| {
-        HashMap::from([
-            ("cmd", CmdBackend::build as BuildFn),
-            ("openai", OpenAiBackend::build as BuildFn),
-            ("xai", OpenAiBackend::build_xai as BuildFn),
-            ("openrouter", OpenRouterBackend::build as BuildFn),
-        ])
-    })
-}
-
 /// True when `provider` names a provider in the registry.
 ///
 /// Callers use this to reject a bad spec early, before any work is queued.
 pub fn is_known_provider(provider: &str) -> bool {
-    provider_registry().contains_key(provider)
+    backends::registry()
+        .iter()
+        .any(|(name, _)| *name == provider)
 }
 
 /// The regex matching a trailing `:k=v,k=v` parameter list.
@@ -226,9 +198,9 @@ impl Client {
         let backend = self.build_backend()?;
 
         let base_url = match self.provider.as_str() {
-            "openai" => OpenAiProvider::OpenAi.base_url(),
-            "xai" => OpenAiProvider::Xai.base_url(),
-            "openrouter" => openrouter_backend::BASE_URL,
+            "openai" => "https://api.openai.com/v1",
+            "xai" => "https://api.x.ai/v1",
+            "openrouter" => "https://openrouter.ai/api/v1",
             "cmd" => "(shell)",
             _ => "(unknown)",
         };
@@ -244,16 +216,17 @@ impl Client {
 
     /// Construct the backend this client's spec names, without memoising it.
     ///
-    /// Looks up the provider name in [`provider_registry`] and delegates to
+    /// Looks up the provider name in [`backends::registry`] and delegates to
     /// the registered `build` function.  An unknown provider is caught by
     /// [`Client::new`] long before this runs, so the fallthrough arm is a
     /// guard against a future constructor that forgets to validate.
     fn build_backend(&self) -> Result<Arc<dyn Backend>, String> {
-        if let Some(build) = provider_registry().get(self.provider.as_str()) {
-            build(&self.model, &self.native_block, &self.extra_params)
-        } else {
-            Err(format!("unknown provider '{}'", self.provider))
+        for (name, build) in backends::registry() {
+            if name == self.provider.as_str() {
+                return build(&self.model, &self.native_block, &self.extra_params);
+            }
         }
+        Err(format!("unknown provider '{}'", self.provider))
     }
 
     /// Cancel every in-flight process owned by the backend, if it has been
