@@ -32,6 +32,25 @@ struct CopilotRunState {
     log_label: String,
 }
 
+/// Parse Copilot-specific extra params from the client-spec parameter map.
+fn parse_extra_params(
+    extra_params: &indexmap::IndexMap<String, String>,
+) -> (Option<CopilotIntent>, bool, bool) {
+    let intent = extra_params.get("intent").map(|v| match v.as_str() {
+        "edits" => CopilotIntent::Edits,
+        _ => CopilotIntent::Panel,
+    });
+    let strict_tools = extra_params
+        .get("strict_tools")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let tool_result_array_content = extra_params
+        .get("tool_result_array_content")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    (intent, strict_tools, tool_result_array_content)
+}
+
 impl CopilotRunState {
     fn make_model(&self, override_model: Option<&str>) -> copilot::CompletionModel {
         let model_name = match override_model {
@@ -110,18 +129,8 @@ impl CopilotBackend {
 
         let tool_filter = openai_protocol::tool_filter(native_block);
 
-        let intent = extra_params.get("intent").map(|v| match v.as_str() {
-            "edits" => CopilotIntent::Edits,
-            _ => CopilotIntent::Panel,
-        });
-        let strict_tools = extra_params
-            .get("strict_tools")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-        let tool_result_array_content = extra_params
-            .get("tool_result_array_content")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let (intent, strict_tools, tool_result_array_content) =
+            parse_extra_params(extra_params);
 
         Ok(Arc::new(Self {
             state: CopilotRunState {
@@ -292,6 +301,28 @@ impl Backend for CopilotBackend {
 mod tests {
     use super::super::super::agent_loop::CancelToken;
     use super::*;
+    use crate::test_support::EnvGuard;
+
+    /// A fake API key that `copilot::Client::builder().api_key(…).build()`
+    /// accepts without making network calls.
+    const FAKE_API_KEY: &str = "tid=1;exp=9999999999";
+
+    /// Lock the process-state guard and scrub every Copilot credential source.
+    fn scrub_copilot_env(guard: &mut EnvGuard) {
+        guard.remove("GITHUB_COPILOT_API_KEY");
+        guard.remove("COPILOT_API_KEY");
+        guard.remove("COPILOT_GITHUB_ACCESS_TOKEN");
+        guard.remove("GITHUB_TOKEN");
+    }
+
+    /// Set up an isolated sandbox with no providers.json and return the guard.
+    fn isolated_env() -> EnvGuard {
+        let mut guard = EnvGuard::lock();
+        scrub_copilot_env(&mut guard);
+        let tmp = tempfile::tempdir().unwrap();
+        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        guard
+    }
 
     #[test]
     fn provider_constants() {
@@ -369,6 +400,8 @@ mod tests {
 
     #[test]
     fn build_rejects_missing_credentials() {
+        let _guard = isolated_env();
+
         let result = CopilotBackend::build(
             "gpt-4o",
             &HashMap::new(),
@@ -382,49 +415,131 @@ mod tests {
     }
 
     #[test]
-    fn build_parses_intent_from_extra_params() {
+    fn auth_precedence_api_key_over_github_token() {
+        let mut guard = isolated_env();
+        guard.set("GITHUB_COPILOT_API_KEY", FAKE_API_KEY);
+        guard.set("COPILOT_GITHUB_ACCESS_TOKEN", "ghp_fake_token");
+
+        let result = CopilotBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok(), "API key should take precedence");
+    }
+
+    #[test]
+    fn auth_precedence_copilot_api_key_fallback() {
+        let mut guard = isolated_env();
+        guard.set("COPILOT_API_KEY", FAKE_API_KEY);
+
+        let result = CopilotBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok(), "COPILOT_API_KEY should work as fallback");
+    }
+
+    #[test]
+    fn auth_precedence_github_token_over_providers_json() {
+        let mut guard = isolated_env();
+        guard.set("GITHUB_TOKEN", "ghp_fake_token");
+
+        let result = CopilotBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(
+            result.is_ok(),
+            "GITHUB_TOKEN should work as GitHub access token"
+        );
+    }
+
+    #[test]
+    fn auth_precedence_copilot_github_access_token_over_github_token() {
+        let mut guard = isolated_env();
+        guard.set("COPILOT_GITHUB_ACCESS_TOKEN", "ghp_copilot_token");
+        guard.set("GITHUB_TOKEN", "ghp_other_token");
+
+        let result = CopilotBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(
+            result.is_ok(),
+            "COPILOT_GITHUB_ACCESS_TOKEN should take precedence over GITHUB_TOKEN"
+        );
+    }
+
+    // ── parse_extra_params tests ─────────────────────────────────────
+
+    #[test]
+    fn extra_params_intent_edits() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("intent".into(), "edits".into());
-        let intent = ep.get("intent").map(|v: &String| match v.as_str() {
-            "edits" => CopilotIntent::Edits,
-            _ => CopilotIntent::Panel,
-        });
+        let (intent, _, _) = parse_extra_params(&ep);
         assert_eq!(intent, Some(CopilotIntent::Edits));
-
-        let ep2: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
-        let intent2 = ep2.get("intent").map(|v: &String| match v.as_str() {
-            "edits" => CopilotIntent::Edits,
-            _ => CopilotIntent::Panel,
-        });
-        assert_eq!(intent2, None);
     }
 
     #[test]
-    fn build_parses_strict_tools_from_extra_params() {
+    fn extra_params_intent_defaults_to_panel() {
+        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        ep.insert("intent".into(), "bogus".into());
+        let (intent, _, _) = parse_extra_params(&ep);
+        assert_eq!(intent, Some(CopilotIntent::Panel));
+    }
+
+    #[test]
+    fn extra_params_intent_missing_is_none() {
+        let (intent, _, _) = parse_extra_params(&indexmap::IndexMap::new());
+        assert_eq!(intent, None);
+    }
+
+    #[test]
+    fn extra_params_strict_tools_true() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("strict_tools".into(), "true".into());
-        let v = ep
-            .get("strict_tools")
-            .map(|v: &String| v == "true" || v == "1")
-            .unwrap_or(false);
-        assert!(v);
-
-        let ep2: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
-        let v2 = ep2
-            .get("strict_tools")
-            .map(|v: &String| v == "true" || v == "1")
-            .unwrap_or(false);
-        assert!(!v2);
+        let (_, strict_tools, _) = parse_extra_params(&ep);
+        assert!(strict_tools);
     }
 
     #[test]
-    fn build_parses_tool_result_array_content_from_extra_params() {
+    fn extra_params_strict_tools_one() {
+        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        ep.insert("strict_tools".into(), "1".into());
+        let (_, strict_tools, _) = parse_extra_params(&ep);
+        assert!(strict_tools);
+    }
+
+    #[test]
+    fn extra_params_strict_tools_false_by_default() {
+        let (_, strict_tools, _) = parse_extra_params(&indexmap::IndexMap::new());
+        assert!(!strict_tools);
+    }
+
+    #[test]
+    fn extra_params_tool_result_array_content_true() {
+        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        ep.insert("tool_result_array_content".into(), "true".into());
+        let (_, _, tool_result_array_content) = parse_extra_params(&ep);
+        assert!(tool_result_array_content);
+    }
+
+    #[test]
+    fn extra_params_tool_result_array_content_one() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("tool_result_array_content".into(), "1".into());
-        let v = ep
-            .get("tool_result_array_content")
-            .map(|v: &String| v == "true" || v == "1")
-            .unwrap_or(false);
-        assert!(v);
+        let (_, _, tool_result_array_content) = parse_extra_params(&ep);
+        assert!(tool_result_array_content);
+    }
+
+    #[test]
+    fn extra_params_tool_result_array_content_false_by_default() {
+        let (_, _, tool_result_array_content) =
+            parse_extra_params(&indexmap::IndexMap::new());
+        assert!(!tool_result_array_content);
     }
 }
