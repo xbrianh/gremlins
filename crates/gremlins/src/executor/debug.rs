@@ -40,8 +40,8 @@ pub enum DebugEvent {
 pub enum DebugResult {
     /// Quit — debug session ended, resume normal operation.
     Resumed,
-    /// Continue or Talk — run this turn then re-pause.
-    RunOneTurn,
+    /// Run one turn, then re-enter debug_loop and broadcast this event.
+    RunOneTurn(DebugEvent),
     /// Bail — terminate the run with this reason.
     Bailed(String),
 }

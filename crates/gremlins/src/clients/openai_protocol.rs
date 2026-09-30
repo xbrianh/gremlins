@@ -76,11 +76,15 @@ impl OpenAiRunState {
 /// `task-clients` specs).
 pub(crate) async fn run_openai_compat(
     state: &OpenAiRunState,
-    params: RunParams,
+    mut params: RunParams,
     classify_error: Option<ErrorClassifier>,
     provider_name: &str,
 ) -> Result<CompletedRun, ClientError> {
     validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
+
+    // Snatch debug channels before params.clone() drops the receiver.
+    let debug_cmd_rx = params.debug_cmd_rx.take();
+    let debug_evt_tx = params.debug_evt_tx.clone();
 
     let idle_timeout = params
         .idle_timeout
@@ -90,7 +94,7 @@ pub(crate) async fn run_openai_compat(
     } else {
         format!("[{}] ", params.label)
     };
-    let ctx = RunContext {
+    let mut ctx = RunContext {
         params: params.clone(),
         prefix: prefix.clone(),
         idle_timeout,
@@ -98,6 +102,8 @@ pub(crate) async fn run_openai_compat(
         reminder_budget: crate::config::artifact_reminder_budget(),
         completion_nudge_budget: crate::config::completion_nudge_budget(),
     };
+    ctx.params.debug_cmd_rx = debug_cmd_rx;
+    ctx.params.debug_evt_tx = debug_evt_tx;
     *state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
     let prompt = Mutex::new(params.prompt.clone());
@@ -295,7 +301,7 @@ pub(crate) async fn run_with_agent_loop(
     run_agent_loop(
         &model,
         prompt,
-        &ctx,
+        ctx,
         cancel,
         LoopOpts {
             extra,

@@ -53,7 +53,7 @@ pub struct RunState {
 
 static RUN_MAP: OnceLock<Arc<Mutex<HashMap<String, RunHandle>>>> = OnceLock::new();
 
-fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
+pub(crate) fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
     RUN_MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
@@ -939,6 +939,53 @@ async fn handle_debug(
         return;
     }
 
+    // Validate that the gremlin is currently in an agent stage.
+    // Read the current stage name from state.json and cross-reference
+    // with the definition YAML to check its type.
+    {
+        let sf = state_dir.join("state.json");
+        let stage_name = if sf.is_file() {
+            std::fs::read_to_string(&sf)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("stage").and_then(|s| s.as_str()).map(String::from))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if stage_name.is_empty() {
+            let resp = error_response(&format!("gremlin {id} has no recorded stage"));
+            let _ = socket::write_json_line(write_half, &resp).await;
+            return;
+        }
+
+        let def_path = state_dir.join("definition.yaml");
+        let is_agent = def_path.is_file()
+            && std::fs::read_to_string(&def_path)
+                .ok()
+                .and_then(|s| serde_yaml::from_str::<serde_yaml::Value>(&s).ok())
+                .and_then(|root| {
+                    root.get("stages")
+                        .and_then(|stages| stages.as_sequence())
+                        .map(|seq| {
+                            seq.iter().any(|s| {
+                                s.get("name").and_then(|n| n.as_str()) == Some(&stage_name)
+                                    && s.get("type").and_then(|t| t.as_str()) == Some("agent")
+                            })
+                        })
+                })
+                .unwrap_or(false);
+
+        if !is_agent {
+            let resp = error_response(&format!(
+                "gremlin {id} is not in an agent stage (current: {stage_name})"
+            ));
+            let _ = socket::write_json_line(write_half, &resp).await;
+            return;
+        }
+    }
+
     // Get the debug channels from the run map.
     let channels = {
         let map = get_run_map().lock().unwrap();
@@ -955,15 +1002,16 @@ async fn handle_debug(
         }
     };
 
+    // Subscribe to debug events *before* sending Pause so we don't miss
+    // the Ready broadcast.
+    let mut evt_rx = debug_evt_tx.subscribe();
+
     // Send Pause command to the agent loop.
     if debug_cmd_tx.send(DebugCommand::Pause).await.is_err() {
         let resp = error_response("failed to send pause command — agent loop may have exited");
         let _ = socket::write_json_line(write_half, &resp).await;
         return;
     }
-
-    // Subscribe to debug events.
-    let mut evt_rx = debug_evt_tx.subscribe();
 
     // Wait for Ready from the agent loop.
     let ready = loop {
@@ -1250,9 +1298,10 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     gremlin.runtime_config.log_tx = Some(log_tx.clone());
 
     // Set up debug channels (idle until a debug session connects).
-    let (debug_cmd_tx, _debug_cmd_rx) = mpsc::channel(8);
+    let (debug_cmd_tx, debug_cmd_rx) = mpsc::channel(8);
     let (debug_evt_tx, _) = broadcast::channel(16);
     gremlin.runtime_config.debug_cmd_tx = Some(debug_cmd_tx.clone());
+    gremlin.runtime_config.debug_cmd_rx = Some(debug_cmd_rx);
     gremlin.runtime_config.debug_evt_tx = Some(debug_evt_tx.clone());
 
     // Spawn the log writer.
