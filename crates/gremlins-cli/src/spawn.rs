@@ -105,6 +105,10 @@ async fn spawn_and_wait(
                 drop(lock);
                 return socket::connect_socket(state_root).await;
             }
+            // Kill the daemon before draining stderr — if it's still
+            // running, read_to_string would block forever.
+            let _ = child.kill();
+            let _ = child.wait();
             let err_text = drain_stderr(stderr).await;
             let detail = if err_text.is_empty() {
                 String::new()
@@ -116,6 +120,10 @@ async fn spawn_and_wait(
             ))
         }
         Ok(Err(e)) => {
+            // Kill the daemon before draining stderr — if it's still
+            // running, read_to_string would block forever.
+            let _ = child.kill();
+            let _ = child.wait();
             let err_text = drain_stderr(stderr).await;
             Err(if err_text.is_empty() {
                 format!("failed to read daemon stdout: {e}")
@@ -124,6 +132,11 @@ async fn spawn_and_wait(
             })
         }
         Err(_elapsed) => {
+            // Kill the daemon before draining stderr — the daemon is
+            // still running (it just didn't print "ready" within the
+            // timeout window), so read_to_string would block forever.
+            let _ = child.kill();
+            let _ = child.wait();
             let err_text = drain_stderr(stderr).await;
             Err(if err_text.is_empty() {
                 "executor daemon timed out waiting for readiness".to_string()
