@@ -700,10 +700,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
         loop {
             line_buf.clear();
             match std::io::BufRead::read_line(&mut stdin.lock(), &mut line_buf) {
-                Ok(0) => {
-                    let _ = stdin_tx.send("/quit".to_string());
-                    break;
-                }
+                Ok(0) => break,
                 Ok(_) => {
                     let trimmed = line_buf.trim().to_string();
                     if trimmed.is_empty() {
@@ -719,14 +716,37 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     });
 
     // Wait for debug_ready, but also watch for /quit from stdin.
+    // Use a channel-based socket reader so the read future is never
+    // dropped when stdin input wins the select — no buffered data is lost.
+    let (sock_tx, mut sock_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<Option<Value>, String>>();
+    tokio::spawn(async move {
+        loop {
+            let result = socket::read_json_line(&mut reader).await;
+            let done = result.as_ref().ok().is_none_or(|o| o.is_none());
+            let _ = sock_tx.send(result);
+            if done {
+                break;
+            }
+        }
+    });
+
     let mut stdin_closed = false;
     loop {
         let line = if stdin_closed {
-            socket::read_json_line(&mut reader).await?
+            match sock_rx.recv().await {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return Err(e),
+                None => return Err("connection closed before debug_ready".to_string()),
+            }
         } else {
             tokio::select! {
-                result = socket::read_json_line(&mut reader) => {
-                    result?
+                sock_result = sock_rx.recv() => {
+                    match sock_result {
+                        Some(Ok(v)) => v,
+                        Some(Err(e)) => return Err(e),
+                        None => return Err("connection closed before debug_ready".to_string()),
+                    }
                 }
                 stdin_line = stdin_rx.recv() => {
                     match stdin_line {
@@ -765,7 +785,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
 
     // Tail the last ~20 lines of the gremlin log for immediate context.
     let log_path = config::state_root().join(id).join("log");
-    if let Ok(content) = std::fs::read_to_string(&log_path) {
+    if let Ok(content) = tokio::fs::read_to_string(&log_path).await {
         let lines: Vec<&str> = content.lines().collect();
         let start = if lines.len() > 20 {
             lines.len() - 20
@@ -777,34 +797,32 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
         }
     }
 
-    // Spawn a reader task to print agent events.
+    // Drain any stdin lines queued during the ready-wait phase so they
+    // don't leak into the active-session loop as spurious commands.
+    while stdin_rx.try_recv().is_ok() {}
+
+    // Spawn a reader task to print agent events from the socket channel.
     let read_handle = tokio::spawn(async move {
-        loop {
-            match socket::read_json_line(&mut reader).await {
-                Ok(Some(line)) => {
-                    let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    match typ {
-                        "debug_turn_complete" => {
-                            eprintln!("debug: turn complete — agent paused");
-                        }
-                        "debug_done" => {
-                            eprintln!("debug: agent called Done");
-                        }
-                        "debug_ended" => {
-                            let reason = line.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                            eprintln!("debug: session ended ({reason})");
-                            break;
-                        }
-                        "error" => {
-                            let msg = line.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                            eprintln!("debug: error: {msg}");
-                            break;
-                        }
-                        _ => {}
-                    }
+        while let Some(Ok(Some(line))) = sock_rx.recv().await {
+            let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match typ {
+                "debug_turn_complete" => {
+                    eprintln!("debug: turn complete — agent paused");
                 }
-                Ok(None) => break,
-                Err(_) => break,
+                "debug_done" => {
+                    eprintln!("debug: agent called Done");
+                }
+                "debug_ended" => {
+                    let reason = line.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                    eprintln!("debug: session ended ({reason})");
+                    break;
+                }
+                "error" => {
+                    let msg = line.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    eprintln!("debug: error: {msg}");
+                    break;
+                }
+                _ => {}
             }
         }
     });
