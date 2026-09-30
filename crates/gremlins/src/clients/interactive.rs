@@ -29,23 +29,23 @@ impl PauseToken {
 
     /// Signal the agent loop to pause at the next yield point.
     pub fn pause(&self) {
-        self.flag.store(true, Ordering::Relaxed);
+        self.flag.store(true, Ordering::Release);
         self.notify.notify_waiters();
     }
 
     /// Clear the pause signal so the agent can resume normal operation.
     pub fn reset(&self) {
-        self.flag.store(false, Ordering::Relaxed);
+        self.flag.store(false, Ordering::Release);
     }
 
     pub fn is_paused(&self) -> bool {
-        self.flag.load(Ordering::Relaxed)
+        self.flag.load(Ordering::Acquire)
     }
 
     /// Future that resolves when `pause()` is called.
     pub async fn paused(&self) {
         let notified = self.notify.notified();
-        if self.flag.load(Ordering::Relaxed) {
+        if self.flag.load(Ordering::Acquire) {
             return;
         }
         notified.await;

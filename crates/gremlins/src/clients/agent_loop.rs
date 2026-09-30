@@ -470,6 +470,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
     }
 
     let mut interactive_active: bool = false;
+    let mut pending_run_one_turn: bool = false;
 
     let mut remaining_turns = max_turns;
     while remaining_turns > 0 {
@@ -487,7 +488,13 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // 2. Active interactive session (re-entering after RunOneTurn) —
         //    enter interactive_loop immediately.
         if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
-            if interactive_active {
+            if pending_run_one_turn {
+                // Came back from a mid-stream or mid-tool pause with
+                // RunOneTurn. Execute one turn, then re-enter interactive.
+                pending_run_one_turn = false;
+                interactive_active = true;
+                // Fall through to execute one turn.
+            } else if interactive_active {
                 // Re-enter interactive_loop after a RunOneTurn/Inject.
                 let mut session = InteractiveSession {
                     cmd_rx: cmd_rx.take().unwrap(),
@@ -615,6 +622,15 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     if let Some(ref p) = pause {
                         p.reset();
                     }
+
+                    // Amend system prompt with operator note (same as turn-boundary path).
+                    let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                    let amended_system = match &system_prompt {
+                        Some(sp) => format!("{sp}{debug_note}"),
+                        None => debug_note.trim_start().to_string(),
+                    };
+                    system_prompt = Some(amended_system);
+
                     // Enter interactive mode inline.
                     if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
                         let mut session = InteractiveSession {
@@ -632,6 +648,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                         .await
                         {
                             Ok(InteractiveLoopResult::Resumed) => {
+                                system_prompt = original_system_prompt.clone();
                                 cmd_rx = Some(session.cmd_rx);
                                 evt_tx = Some(session.evt_tx);
                                 interactive_active = false;
@@ -642,7 +659,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                             Ok(InteractiveLoopResult::RunOneTurn) => {
                                 cmd_rx = Some(session.cmd_rx);
                                 evt_tx = Some(session.evt_tx);
-                                interactive_active = true;
+                                pending_run_one_turn = true;
                                 break; // exit the stream loop, execute one turn
                             }
                             Err(e) => return Err(e),
@@ -1067,6 +1084,21 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 if let Some(ref p) = pause {
                     p.reset();
                 }
+
+                // Pop the two messages pushed at lines 1005-1006
+                // (next_prompt + assistant_tool_message) so the turn can be
+                // re-executed cleanly without duplicate history entries.
+                history.pop(); // assistant_tool_message
+                history.pop(); // next_prompt
+
+                // Amend system prompt with operator note.
+                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                let amended_system = match &system_prompt {
+                    Some(sp) => format!("{sp}{debug_note}"),
+                    None => debug_note.trim_start().to_string(),
+                };
+                system_prompt = Some(amended_system);
+
                 // Enter interactive mode.
                 if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
                     let mut session = InteractiveSession {
@@ -1084,6 +1116,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     .await
                     {
                         Ok(InteractiveLoopResult::Resumed) => {
+                            system_prompt = original_system_prompt.clone();
                             cmd_rx = Some(session.cmd_rx);
                             evt_tx = Some(session.evt_tx);
                             interactive_active = false;
@@ -1092,7 +1125,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                         Ok(InteractiveLoopResult::RunOneTurn) => {
                             cmd_rx = Some(session.cmd_rx);
                             evt_tx = Some(session.evt_tx);
-                            interactive_active = true;
+                            pending_run_one_turn = true;
                             continue; // re-execute the turn from scratch
                         }
                         Err(e) => return Err(e),
