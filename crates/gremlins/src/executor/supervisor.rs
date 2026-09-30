@@ -415,10 +415,14 @@ async fn handle_stop(request: &Value) -> Value {
                 }
                 // Orphaned: state says running but no executor entry.
                 // Clean up by marking it stopped so the user can rm it.
-                let _ = state::locked_update(&state_file, |data| {
+                if let Err(e) = state::locked_update(&state_file, |data| {
                     data.insert("status".to_string(), Value::String("stopped".to_string()));
                     data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
-                });
+                }) {
+                    return error_response(&format!(
+                        "failed to update state for orphaned gremlin {id}: {e}"
+                    ));
+                }
                 return ok_response(serde_json::json!({
                     "id": id,
                     "status": "stopped",

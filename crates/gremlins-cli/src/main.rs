@@ -689,10 +689,16 @@ async fn rm(id: &str) -> Result<(), String> {
     };
 
     let status = gremlin.state.read_str("status");
-    if status == "running" && is_live_in_executor(id).await {
-        return Err(format!(
-            "gremlin {id} is running — use `gremlins stop {id}` first"
-        ));
+    if status == "running" {
+        match is_live_in_executor(id).await {
+            Ok(true) => {
+                return Err(format!(
+                    "gremlin {id} is running — use `gremlins stop {id}` first"
+                ));
+            }
+            Err(e) => return Err(e),
+            Ok(false) => {}
+        }
     }
 
     gremlin.clean(true);
@@ -701,19 +707,16 @@ async fn rm(id: &str) -> Result<(), String> {
 }
 
 /// Check whether a gremlin is truly live in the executor's run_map.
-/// Returns false if the executor is unreachable or the gremlin is not running.
-async fn is_live_in_executor(id: &str) -> bool {
-    let mut stream = match spawn::connect().await {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let response =
-        match spawn::send_request(&mut stream, serde_json::json!({"op": "status", "id": id})).await
-        {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-    response.get("status").and_then(|v| v.as_str()) == Some("running")
+/// Returns `Ok(true)` if live, `Ok(false)` if confirmed not live,
+/// or `Err(...)` if the executor is unreachable and liveness cannot be determined.
+async fn is_live_in_executor(id: &str) -> Result<bool, String> {
+    let mut stream = spawn::connect()
+        .await
+        .map_err(|e| format!("cannot reach executor daemon to verify gremlin {id}: {e}"))?;
+    let response = spawn::send_request(&mut stream, serde_json::json!({"op": "status", "id": id}))
+        .await
+        .map_err(|e| format!("executor request failed while checking gremlin {id}: {e}"))?;
+    Ok(response.get("status").and_then(|v| v.as_str()) == Some("running"))
 }
 
 // ---------------------------------------------------------------------------
@@ -747,10 +750,16 @@ async fn clean(id: &str, keep: bool) -> Result<(), String> {
     };
 
     let status = gremlin.state.read_str("status");
-    if status == "running" && is_live_in_executor(id).await {
-        return Err(format!(
-            "gremlin {id} is running — use `gremlins stop {id}` first"
-        ));
+    if status == "running" {
+        match is_live_in_executor(id).await {
+            Ok(true) => {
+                return Err(format!(
+                    "gremlin {id} is running — use `gremlins stop {id}` first"
+                ));
+            }
+            Err(e) => return Err(e),
+            Ok(false) => {}
+        }
     }
 
     gremlin.clean(!keep);
@@ -805,11 +814,16 @@ async fn land(id: &str) -> Result<(), String> {
 
     let raw = state::read_state_json(Some(&state_file));
 
-    if raw.get("status").and_then(Value::as_str) == Some("running") && is_live_in_executor(id).await
-    {
-        return Err(format!(
-            "gremlin {id} is running — use `gremlins stop {id}` first"
-        ));
+    if raw.get("status").and_then(Value::as_str) == Some("running") {
+        match is_live_in_executor(id).await {
+            Ok(true) => {
+                return Err(format!(
+                    "gremlin {id} is running — use `gremlins stop {id}` first"
+                ));
+            }
+            Err(e) => return Err(e),
+            Ok(false) => {}
+        }
     }
 
     let project_root = {
