@@ -50,29 +50,30 @@ pub(crate) fn default_classify(err: CompletionError) -> ClientError {
 
 pub(crate) const DEFAULT_TEMPERATURE: f64 = 0.4;
 
-pub(crate) struct CancelToken {
+#[derive(Debug)]
+pub struct CancelToken {
     flag: AtomicBool,
     notify: Notify,
 }
 
 impl CancelToken {
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             flag: AtomicBool::new(false),
             notify: Notify::new(),
         })
     }
 
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.flag.store(true, Ordering::Relaxed);
         self.notify.notify_waiters();
     }
 
-    pub(crate) fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::Relaxed)
     }
 
-    pub(crate) async fn cancelled(&self) {
+    pub async fn cancelled(&self) {
         let notified = self.notify.notified();
         if self.flag.load(Ordering::Relaxed) {
             return;
@@ -1328,6 +1329,7 @@ mod tests {
                 base_env: None,
                 task_clients_exact: HashMap::new(),
                 task_clients_prefix: HashMap::new(),
+                cancel_token: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::agent_loop::CancelToken;
 use super::protocol::CompletedRun;
 
 #[derive(Debug, Clone)]
@@ -30,6 +32,9 @@ pub struct RunParams {
     /// When both are empty, task_model_selector returns None.
     pub task_clients_exact: HashMap<String, String>,
     pub task_clients_prefix: HashMap<String, String>,
+    /// Supervisor-owned cancel token. When set, the backend uses it instead of
+    /// creating its own, so `gremlins stop` cancels in-flight agent loops.
+    pub cancel_token: Option<Arc<CancelToken>>,
 }
 
 #[derive(Debug)]
