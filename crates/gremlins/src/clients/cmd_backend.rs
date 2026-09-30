@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -52,6 +52,16 @@ struct CmdContext {
 }
 
 impl CmdBackend {
+    /// Registry-compatible builder. `native_block` and `extra_params` are
+    /// ignored — a command backend's model *is* the shell command.
+    pub fn build(
+        model: &str,
+        _native_block: &HashMap<String, Vec<String>>,
+        _extra_params: &indexmap::IndexMap<String, String>,
+    ) -> Result<Arc<dyn Backend>, String> {
+        Ok(Arc::new(Self::new(model)?))
+    }
+
     pub fn new(command: &str) -> Result<Self, String> {
         let args =
             shlex::split(command).ok_or_else(|| format!("failed to parse command: {command}"))?;
