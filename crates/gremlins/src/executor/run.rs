@@ -29,6 +29,13 @@ use crate::executor::state;
 use crate::executor::vars;
 use crate::executor::RunError;
 
+/// Send a log line through the per-gremlin channel if one is configured.
+fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: String) {
+    if let Some(tx) = tx {
+        let _ = tx.send(msg);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scope bookkeeping
 // ---------------------------------------------------------------------------
@@ -74,6 +81,14 @@ async fn run_stage_scoped(
         stage.name(),
         gremlin.id.as_str(),
         stage.stage_type(),
+    );
+    send_log(
+        &gremlin.runtime_config.log_tx,
+        format!(
+            "stage '{}': entering (type={})",
+            stage.name(),
+            stage.stage_type()
+        ),
     );
 
     match stage {
@@ -194,6 +209,14 @@ async fn run_agent(
         agent.name,
         gremlin.id.as_str(),
         client.model()
+    );
+    send_log(
+        &gremlin.runtime_config.log_tx,
+        format!(
+            "[{}] agent: preparing (model={})",
+            agent.name,
+            client.model()
+        ),
     );
 
     // Compute checkout keys: bind_map keys + filepath-style interpolation keys.
@@ -352,6 +375,7 @@ async fn run_agent(
             .collect(),
         system_prompt: Some(prepared.system_prompt()),
         gremlin_id: Some(gremlin.id.to_string()),
+        log_tx: gremlin.runtime_config.log_tx.clone(),
         base_env: Some(gremlin.env.clone()),
         task_clients_exact: gremlin.runtime_config.task_clients_exact.clone(),
         task_clients_prefix: gremlin.runtime_config.task_clients_prefix.clone(),
@@ -377,6 +401,14 @@ async fn run_agent(
         prepared.name,
         gremlin.id.as_str(),
         completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
+    );
+    send_log(
+        &gremlin.runtime_config.log_tx,
+        format!(
+            "[{}] agent: completed (turns={})",
+            prepared.name,
+            completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
+        ),
     );
 
     if let Some(usage) = &completed.token_usage {
@@ -454,6 +486,10 @@ async fn run_exec(
         "exec stage '{}' (gremlin={}): preparing",
         exec.name,
         gremlin.id.as_str()
+    );
+    send_log(
+        &gremlin.runtime_config.log_tx,
+        format!("[{}] exec: preparing", exec.name),
     );
 
     // Compute checkout keys: bind_map keys + filepath-style interpolation keys.
@@ -585,6 +621,14 @@ async fn run_exec(
             prepared.cmds.len(),
             prepared.cmds
         );
+        send_log(
+            &gremlin.runtime_config.log_tx,
+            format!(
+                "[{}] exec: running {} command(s)",
+                prepared.name,
+                prepared.cmds.len()
+            ),
+        );
         // `run_shell` runs the commands and hands the result to
         // `process_shell_result`, which is what classifies the exit status: a
         // non-zero status is an error *unless* one of the stage's binds is a
@@ -664,6 +708,10 @@ async fn run_sequence(
             let resolved = skip_guard.replace("{loop_iter}", &gremlin.loop_iter);
             if is_registered_uri(gremlin.registry.as_ref(), &resolved).await {
                 log::info!("sequence '{}': skipped (artifact exists)", seq.name);
+                send_log(
+                    &gremlin.runtime_config.log_tx,
+                    format!("sequence '{}': skipped (artifact exists)", seq.name),
+                );
                 return Ok(());
             }
         }
@@ -696,10 +744,18 @@ async fn run_sequence(
             if is_registered_uri(gremlin.registry.as_ref(), &resolved).await {
                 if iteration == 1 {
                     log::info!("sequence '{}': skipped (artifact exists)", seq.name);
+                    send_log(
+                        &gremlin.runtime_config.log_tx,
+                        format!("sequence '{}': skipped (artifact exists)", seq.name),
+                    );
                     gremlin.loop_iter = saved_loop_iter;
                     return Ok(());
                 }
                 log::info!("sequence '{}': stopped (artifact exists)", seq.name);
+                send_log(
+                    &gremlin.runtime_config.log_tx,
+                    format!("sequence '{}': stopped (artifact exists)", seq.name),
+                );
                 stopped = true;
                 break;
             }
@@ -708,6 +764,13 @@ async fn run_sequence(
         log::info!(
             "sequence '{}': iteration {iteration}/{max_iterations} starting",
             seq.name
+        );
+        send_log(
+            &gremlin.runtime_config.log_tx,
+            format!(
+                "sequence '{}': iteration {iteration}/{max_iterations} starting",
+                seq.name
+            ),
         );
 
         for child in &seq.stages {
@@ -731,6 +794,10 @@ async fn run_sequence(
             let resolved = skip_guard.replace("{loop_iter}", &loop_iter);
             if is_registered_uri(gremlin.registry.as_ref(), &resolved).await {
                 log::info!("sequence '{}': stopped (artifact produced)", seq.name);
+                send_log(
+                    &gremlin.runtime_config.log_tx,
+                    format!("sequence '{}': stopped (artifact produced)", seq.name),
+                );
                 stopped = true;
                 break;
             }
@@ -795,6 +862,7 @@ impl Gremlin {
         if first_start && has_bootstrap {
             if let Err(error) = run_definition_bootstrap(self, is_fork).await {
                 log::error!("bootstrap failed");
+                send_log(&self.runtime_config.log_tx, "bootstrap failed".to_string());
                 self.state.write_bail_file(
                     "other",
                     &truncate(&format!("bootstrap failed: {error}"), 200),
@@ -828,6 +896,7 @@ impl Gremlin {
             if let Some(ref cancel) = cancel {
                 if *cancel.borrow() {
                     log::info!("gremlin {}: cancelled", self.id.as_str());
+                    send_log(&self.runtime_config.log_tx, "cancelled".to_string());
                     self.finish(-1);
                     return Ok(-1);
                 }
@@ -871,6 +940,14 @@ impl Gremlin {
                 stage.name(),
                 stage.stage_type()
             );
+            send_log(
+                &self.runtime_config.log_tx,
+                format!(
+                    "stage '{}': starting (type={})",
+                    stage.name(),
+                    stage.stage_type()
+                ),
+            );
 
             let stage_result = run_stage(&stage, self).await;
             // Restore loop_iter before any early exit so the next stage
@@ -913,6 +990,10 @@ impl Gremlin {
             self.id.as_str(),
             self.client.provider(),
             self.client.model(),
+        );
+        send_log(
+            &self.runtime_config.log_tx,
+            format!("finished (exit_code={})", exit_code),
         );
         self.client.reap_all(self.id.as_str());
         let mut total = self.client.total_cost_usd().unwrap_or(0.0);

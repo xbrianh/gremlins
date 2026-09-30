@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde_json::{Map, Value};
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
+use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::config;
@@ -26,6 +27,8 @@ pub(crate) struct RunHandle {
     pub cancel: watch::Sender<bool>,
     #[allow(dead_code)]
     pub state_tx: watch::Sender<RunState>,
+    /// Broadcast sender for live log subscribers (Op::Log with follow:true).
+    pub log_broadcast: broadcast::Sender<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -113,10 +116,9 @@ async fn handle_connection(
             .unwrap_or("")
             .to_string();
 
-        let response = dispatch_op(&op, &request, &state_root, &shutdown_tx).await;
+        let outcome = dispatch_op(&op, &request, &state_root, &shutdown_tx, &mut write_half).await;
 
-        if let Err(e) = socket::write_json_line(&mut write_half, &response).await {
-            log::warn!("supervisor: write error: {e}");
+        if matches!(outcome, DispatchOutcome::Close) {
             break;
         }
 
@@ -132,20 +134,57 @@ async fn handle_connection(
 // Op dispatch
 // ---------------------------------------------------------------------------
 
+enum DispatchOutcome {
+    /// Request-response: the handler wrote a reply; continue the request loop.
+    Continue,
+    /// Streaming: the handler took the write half; break the request loop.
+    Close,
+}
+
 async fn dispatch_op(
     op: &str,
     request: &Value,
     state_root: &Path,
     shutdown_tx: &watch::Sender<bool>,
-) -> Value {
+    write_half: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> DispatchOutcome {
     match op {
-        "launch" => handle_launch(request, state_root, shutdown_tx).await,
-        "stop" => handle_stop(request).await,
-        "resume" => handle_resume(request, state_root, shutdown_tx).await,
-        "ls" => handle_ls(request, state_root).await,
-        "status" => handle_status(request, state_root).await,
-        "info" => handle_info(request, state_root).await,
-        _ => error_response(&format!("unknown op: {op:?}")),
+        "launch" => {
+            let resp = handle_launch(request, state_root, shutdown_tx).await;
+            let _ = socket::write_json_line(write_half, &resp).await;
+            DispatchOutcome::Continue
+        }
+        "stop" => {
+            let resp = handle_stop(request).await;
+            let _ = socket::write_json_line(write_half, &resp).await;
+            DispatchOutcome::Continue
+        }
+        "resume" => {
+            let resp = handle_resume(request, state_root, shutdown_tx).await;
+            let _ = socket::write_json_line(write_half, &resp).await;
+            DispatchOutcome::Continue
+        }
+        "ls" => {
+            let resp = handle_ls(request, state_root).await;
+            let _ = socket::write_json_line(write_half, &resp).await;
+            DispatchOutcome::Continue
+        }
+        "status" => {
+            let resp = handle_status(request, state_root).await;
+            let _ = socket::write_json_line(write_half, &resp).await;
+            DispatchOutcome::Continue
+        }
+        "info" => {
+            let resp = handle_info(request, state_root).await;
+            let _ = socket::write_json_line(write_half, &resp).await;
+            DispatchOutcome::Continue
+        }
+        "log" => handle_log(request, state_root, write_half).await,
+        _ => {
+            let resp = error_response(&format!("unknown op: {op:?}"));
+            let _ = socket::write_json_line(write_half, &resp).await;
+            DispatchOutcome::Continue
+        }
     }
 }
 
@@ -255,7 +294,7 @@ async fn handle_launch(
         Some(base_ref_sha.as_str())
     };
 
-    let gremlin = match Gremlin::init(
+    let mut gremlin = match Gremlin::init(
         definition_name,
         &definition_path,
         &gremlin_def,
@@ -287,6 +326,16 @@ async fn handle_launch(
 
     let id = gremlin.id.to_string();
 
+    // Set up the per-gremlin log channel.
+    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (log_broadcast, _) = broadcast::channel(256);
+    gremlin.runtime_config.log_tx = Some(log_tx.clone());
+
+    // Spawn the log writer: reads from the channel, appends to $state_dir/log,
+    // and broadcasts to live subscribers.
+    let log_path = gremlin.state_dir.join("log");
+    spawn_log_writer(log_rx, log_path, log_broadcast.clone());
+
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let (state_tx, _state_rx) = watch::channel(RunState {
         id: id.clone(),
@@ -303,6 +352,7 @@ async fn handle_launch(
     let handle = RunHandle {
         cancel: cancel_tx,
         state_tx,
+        log_broadcast,
     };
     get_run_map().lock().unwrap().insert(id.clone(), handle);
 
@@ -398,7 +448,7 @@ async fn handle_resume(
         return error_response(&format!("unknown gremlin {id:?}"));
     }
 
-    let gremlin = match Gremlin::from(id) {
+    let mut gremlin = match Gremlin::from(id) {
         Ok(g) => g,
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
@@ -440,6 +490,15 @@ async fn handle_resume(
     let resume_stage = stage.clone();
     let resume_stage_for_response = resume_stage.clone();
 
+    // Set up the per-gremlin log channel.
+    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (log_broadcast, _) = broadcast::channel(256);
+    gremlin.runtime_config.log_tx = Some(log_tx.clone());
+
+    // Spawn the log writer.
+    let log_path = gremlin.state_dir.join("log");
+    spawn_log_writer(log_rx, log_path, log_broadcast.clone());
+
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let (state_tx, _state_rx) = watch::channel(RunState {
         id: id.to_string(),
@@ -456,6 +515,7 @@ async fn handle_resume(
     let handle = RunHandle {
         cancel: cancel_tx,
         state_tx,
+        log_broadcast,
     };
     get_run_map().lock().unwrap().insert(id.to_string(), handle);
 
@@ -699,6 +759,101 @@ async fn handle_info(request: &Value, state_root: &Path) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// log
+// ---------------------------------------------------------------------------
+
+async fn handle_log(
+    request: &Value,
+    state_root: &Path,
+    write_half: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> DispatchOutcome {
+    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if id.is_empty() {
+        let resp = error_response("missing 'id' field");
+        let _ = socket::write_json_line(write_half, &resp).await;
+        return DispatchOutcome::Continue;
+    }
+
+    if validate_gremlin_id(id).is_err() {
+        let resp = error_response(&format!("invalid gremlin id {id:?}"));
+        let _ = socket::write_json_line(write_half, &resp).await;
+        return DispatchOutcome::Continue;
+    }
+
+    let state_dir = state_root.join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        let resp = error_response(&format!("unknown gremlin {id:?}"));
+        let _ = socket::write_json_line(write_half, &resp).await;
+        return DispatchOutcome::Continue;
+    }
+
+    let follow = request
+        .get("follow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let log_path = state_dir.join("log");
+
+    // 1. Send historical lines from the log file.
+    if let Ok(content) = tokio::fs::read_to_string(&log_path).await {
+        for (offset, line) in (0_u64..).zip(content.lines()) {
+            let payload = serde_json::json!({
+                "type": "log_line",
+                "line": line,
+                "offset": offset,
+            });
+            if socket::write_json_line(write_half, &payload).await.is_err() {
+                return DispatchOutcome::Close;
+            }
+        }
+    }
+
+    // 2. If follow, subscribe to the broadcast channel and stream new lines.
+    if follow {
+        let rx = {
+            let map = get_run_map().lock().unwrap();
+            map.get(id).map(|h| h.log_broadcast.subscribe())
+        };
+
+        if let Some(mut rx) = rx {
+            let mut offset: u64 = 0;
+            // We don't know the exact offset after replay, but it doesn't
+            // matter for the streaming phase — the client just displays lines.
+            loop {
+                match rx.recv().await {
+                    Ok(line) => {
+                        let payload = serde_json::json!({
+                            "type": "log_line",
+                            "line": line,
+                            "offset": offset,
+                        });
+                        if socket::write_json_line(write_half, &payload).await.is_err() {
+                            break;
+                        }
+                        offset += 1;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let payload = serde_json::json!({
+                            "type": "log_line",
+                            "line": format!("[skipped {n} lines]"),
+                            "offset": offset,
+                        });
+                        if socket::write_json_line(write_half, &payload).await.is_err() {
+                            break;
+                        }
+                        offset += 1;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+
+    DispatchOutcome::Close
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -707,13 +862,13 @@ async fn run_gremlin_task(
     cancel: Option<watch::Receiver<bool>>,
     resume_from: Option<&str>,
 ) -> (i32, Box<dyn crate::artifacts::registry::ArtifactRegistry>) {
-    let log_path = gremlin.state_dir.join("log");
-    redirect_stdio_to_log(&log_path);
-
     let exit_code = match gremlin.run(resume_from, cancel).await {
         Ok(ec) => ec,
         Err(e) => {
             log::error!("gremlin {}: {e}", gremlin.id.as_str());
+            if let Some(tx) = &gremlin.runtime_config.log_tx {
+                let _ = tx.send(format!("error: {e}"));
+            }
             gremlin.state.write_terminal_state(1);
             1
         }
@@ -721,14 +876,33 @@ async fn run_gremlin_task(
     (exit_code, gremlin.registry)
 }
 
-fn redirect_stdio_to_log(log_path: &std::path::Path) {
-    // Per-task stdio redirection is not safe in a multi-gremlin address
-    // space — dup2 would corrupt other tasks' output. Instead, each
-    // gremlin's output is captured via the logging framework and the
-    // per-run log file. This stub remains as a no-op; per-gremlin output
-    // capture will be implemented with dedicated pipes/files in a
-    // follow-up.
-    let _ = log_path;
+/// Spawn a background task that reads from the log channel, appends each
+/// line to `log_path`, and broadcasts it to live subscribers.
+fn spawn_log_writer(
+    mut log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    log_path: PathBuf,
+    broadcast_tx: broadcast::Sender<String>,
+) {
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .await
+            .ok();
+
+        while let Some(line) = log_rx.recv().await {
+            if let Some(ref mut f) = file {
+                let _ = f.write_all(line.as_bytes()).await;
+                let _ = f.write_all(b"\n").await;
+                let _ = f.flush().await;
+            }
+            // Broadcast to live subscribers — ignore errors (no subscribers).
+            let _ = broadcast_tx.send(line);
+        }
+    });
 }
 
 fn definition_display_name(gremlin: &Gremlin) -> String {
@@ -828,8 +1002,17 @@ pub(crate) struct LaunchResult {
 /// This function is synchronous (no `.await`) so its caller — the parallel
 /// executor — does not produce a non-`Send` future. The run_map uses a
 /// `std::sync::Mutex` so `lock()` never blocks on an async runtime.
-pub(crate) fn launch_child(gremlin: Gremlin) -> LaunchResult {
+pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     let id = gremlin.id.to_string();
+
+    // Set up the per-gremlin log channel.
+    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (log_broadcast, _) = broadcast::channel(256);
+    gremlin.runtime_config.log_tx = Some(log_tx.clone());
+
+    // Spawn the log writer.
+    let log_path = gremlin.state_dir.join("log");
+    spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let (state_tx, state_rx) = watch::channel(RunState {
@@ -846,6 +1029,7 @@ pub(crate) fn launch_child(gremlin: Gremlin) -> LaunchResult {
     let handle = RunHandle {
         cancel: cancel_tx,
         state_tx,
+        log_broadcast,
     };
     // Insert into RUN_MAP *before* spawning so a fast child cannot finish
     // and call remove before the insert.

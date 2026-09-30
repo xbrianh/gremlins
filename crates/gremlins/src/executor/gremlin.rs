@@ -139,6 +139,8 @@ pub(crate) struct RuntimeConfig {
     /// The base process environment captured at startup, before any
     /// bootstrap or system vars are layered on.
     pub base_process_env: HashMap<String, String>,
+    /// Per-gremlin log channel. Every gremlin-scoped log event is sent here.
+    pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl RuntimeConfig {
@@ -170,6 +172,7 @@ impl RuntimeConfig {
             task_clients_prefix: task_prefix,
             default_client,
             base_process_env,
+            log_tx: None,
         }
     }
 }
@@ -185,6 +188,7 @@ impl Default for RuntimeConfig {
             task_clients_prefix: HashMap::new(),
             default_client: None,
             base_process_env: HashMap::new(),
+            log_tx: None,
         }
     }
 }

@@ -19,6 +19,12 @@ use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
 
+fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
+    if let Some(tx) = tx {
+        let _ = tx.send(msg.to_string());
+    }
+}
+
 pub(crate) type ErrorClassifier = fn(CompletionError) -> ClientError;
 
 pub(crate) fn default_classify(err: CompletionError) -> ClientError {
@@ -85,6 +91,14 @@ pub(crate) struct RunContext {
     pub(crate) completion_nudge_budget: usize,
 }
 
+impl RunContext {
+    pub(crate) fn send_log(&self, msg: &str) {
+        if let Some(ref tx) = self.params.log_tx {
+            let _ = tx.send(format!("{}{}", self.prefix, msg));
+        }
+    }
+}
+
 pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,
@@ -123,16 +137,18 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         .and_then(|v| v.get("reasoning"))
         .and_then(|r| r.get("effort"))
         .and_then(|e| e.as_str());
-    log::info!(
-        "{}using client model={} cwd={} reasoning_effort={}",
-        prefix,
+    let log_line = format!(
+        "using client model={} cwd={} reasoning_effort={}",
         model_name,
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
+    log::info!("{prefix}{log_line}");
+    ctx.send_log(&log_line);
 
     if cwd.is_none() {
         log::warn!("{prefix}warning: no cwd set for worktree enforcement");
+        ctx.send_log("warning: no cwd set for worktree enforcement");
     }
 
     let mut raw = raw_path
@@ -206,6 +222,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         &ctx.expected_artifact_paths,
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
+        &ctx.params.log_tx,
     )
     .await
 }
@@ -228,6 +245,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     completion_nudge_budget: usize,
 ) -> Result<CompletedRun, ClientError> {
     log::info!("{prefix}task: begin (max_turns={max_turns})");
+    // Nested tasks don't have a RunContext, so no log_tx — log crate only.
     let opts = LoopOpts {
         extra: None,
         tool_filter,
@@ -253,9 +271,11 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         &[],
         0,
         completion_nudge_budget,
+        &None,
     )
     .await;
     log::info!("{prefix}task: end");
+    // Nested tasks don't have a RunContext, so no log_tx — log crate only.
     result
 }
 
@@ -333,6 +353,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
     expected_artifact_paths: &[PathBuf],
     mut reminder_budget: usize,
     mut completion_nudge_budget: usize,
+    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<CompletedRun, ClientError> {
     let mut history: Vec<Message> = Vec::new();
     let mut next_prompt = Message::user(prompt.to_string());
@@ -464,10 +485,14 @@ async fn run_agent_loop_core<M: CompletionModel>(
         );
 
         if !reasoning.is_empty() {
-            log::info!("{prefix}think: {}", trunc(&reasoning, 200));
+            let msg = format!("think: {}", trunc(&reasoning, 200));
+            log::info!("{prefix}{msg}");
+            send_log(log_tx, &msg);
         }
         if !text.is_empty() {
-            log::info!("{prefix}text: {}", trunc(&text, 200));
+            let msg = format!("text: {}", trunc(&text, 200));
+            log::info!("{prefix}{msg}");
+            send_log(log_tx, &msg);
         }
         if !nested {
             if !text.is_empty() {
@@ -601,6 +626,17 @@ async fn run_agent_loop_core<M: CompletionModel>(
                         total_cache_creation_tokens,
                         total_reasoning_tokens,
                     );
+                    send_log(log_tx, &format!("final: turns={turns} cost=not-reported"));
+                    send_log(log_tx, &format!(
+                        "summary: turns={turn_num} wall={:.1}s token_total={} prompt_avg={} completion_avg={} cached_avg={}% cache_creation={} reasoning_pct={}%",
+                        loop_start.elapsed().as_secs_f64(),
+                        total_prompt_tokens + total_completion_tokens,
+                        if turn_num > 0 { total_prompt_tokens / turn_num as u64 } else { 0 },
+                        if turn_num > 0 { total_completion_tokens / turn_num as u64 } else { 0 },
+                        if total_prompt_tokens > 0 { (total_cached_tokens as f64 / total_prompt_tokens as f64) * 100.0 } else { 0.0 },
+                        total_cache_creation_tokens,
+                        if total_completion_tokens > 0 { (total_reasoning_tokens as f64 / total_completion_tokens as f64) * 100.0 } else { 0.0 },
+                    ));
                 }
                 return Ok(completed_run(Some(result_text), captured, usage));
             }
@@ -703,6 +739,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     total_cache_creation_tokens,
                     total_reasoning_tokens,
                 );
+                send_log(
+                    log_tx,
+                    &format!("final: turns={turns} cost=not-reported (exhausted)"),
+                );
             }
             return Ok(completed_run(Some(final_text), captured, usage));
         }
@@ -716,11 +756,13 @@ async fn run_agent_loop_core<M: CompletionModel>(
         for tc in &tool_calls {
             let args_json =
                 serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".into());
-            log::info!(
-                "{prefix}tool: {} {}",
+            let tool_msg = format!(
+                "tool: {} {}",
                 tc.function.name,
                 trunc(&key_arg(&tc.function.arguments), 200)
             );
+            log::info!("{prefix}{tool_msg}");
+            send_log(log_tx, &tool_msg);
             if !nested {
                 let tool_evt = tool_use_event(&tc.id, &tc.function.name, &tc.function.arguments);
                 write_raw(raw, &tool_evt);
@@ -763,7 +805,9 @@ async fn run_agent_loop_core<M: CompletionModel>(
         let mut result_msgs = Vec::new();
         let mut ledger = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
-            log::info!("{prefix}result: {}", trunc(&output, 200));
+            let result_msg = format!("result: {}", trunc(&output, 200));
+            log::info!("{prefix}{result_msg}");
+            send_log(log_tx, &result_msg);
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
                 write_raw(raw, &result_evt);
@@ -804,6 +848,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
             total_cached_tokens,
             total_cache_creation_tokens,
             total_reasoning_tokens,
+        );
+        send_log(
+            log_tx,
+            &format!("final: turns={turns} cost=not-reported{suffix}"),
         );
     }
 
@@ -1264,6 +1312,7 @@ mod tests {
                 expected_artifact_paths: vec![],
                 system_prompt: None,
                 gremlin_id: None,
+                log_tx: None,
                 base_env: None,
                 task_clients_exact: HashMap::new(),
                 task_clients_prefix: HashMap::new(),

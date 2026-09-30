@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use clap::{Parser, Subcommand};
 use gremlins::artifacts::registry::FileSystemArtifactRegistry;
@@ -106,7 +106,7 @@ async fn main() {
         Some(Cmds::Info { id }) => info(&id).await,
         Some(Cmds::Stop { id }) => stop(&id).await,
         Some(Cmds::Resume { id }) => resume(&id).await,
-        Some(Cmds::Log { id }) => log_gremlin(&id),
+        Some(Cmds::Log { id }) => log_gremlin(&id).await,
         Some(Cmds::Clean { id, keep }) => clean(&id, keep),
         Some(Cmds::Rm { id }) => rm(&id),
         Some(Cmds::Land { id }) => land(&id).await,
@@ -610,33 +610,41 @@ async fn resume(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Follow a gremlin's log file interactively with `less +F`.
-fn log_gremlin(id: &str) -> Result<(), String> {
+/// Stream a gremlin's log over the executor socket.
+///
+/// When stdout is a terminal, `follow:true` keeps the stream open (like `tail -f`).
+/// When stdout is a pipe, `follow:false` dumps existing lines and exits.
+async fn log_gremlin(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
-    let state_dir = config::state_root().join(id);
-    let state_file = state_dir.join("state.json");
-    if validate_gremlin_id(id).is_err() || !state_dir.is_dir() || !state_file.is_file() {
-        return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
-        ));
-    }
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
 
-    let log_path = state_dir.join("log");
-    if !log_path.is_file() {
-        return Err(format!(
-            "gremlin {id} has no log file yet — launch it and let it run first"
-        ));
-    }
+    let follow = std::io::stdout().is_terminal();
 
-    let status = Command::new("less")
-        .arg("+F")
-        .arg(&log_path)
-        .status()
-        .map_err(|e| format!("failed to spawn less: {e}"))?;
+    let mut stream = match spawn::connect().await {
+        Ok(s) => s,
+        Err(_) => {
+            return Err("no executor running — start one with `gremlins launch ...`".to_string())
+        }
+    };
 
-    if !status.success() {
-        return Err(format!("less exited with status {status}"));
+    let request = serde_json::json!({"op": "log", "id": id, "follow": follow});
+    socket::write_json_line(&mut stream, &request).await?;
+
+    let mut reader = tokio::io::BufReader::new(&mut stream);
+    while let Some(line) = socket::read_json_line(&mut reader).await? {
+        if line.get("type").and_then(|v| v.as_str()) == Some("error") {
+            let msg = line
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(msg.to_string());
+        }
+        if let Some(text) = line.get("line").and_then(|v| v.as_str()) {
+            println!("{text}");
+        }
     }
 
     Ok(())
