@@ -82,9 +82,8 @@ pub(crate) async fn run_openai_compat(
 ) -> Result<CompletedRun, ClientError> {
     validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
 
-    // Snatch debug channels before params.clone() drops the receiver.
-    let debug_cmd_rx = params.debug_cmd_rx.take();
-    let debug_evt_tx = params.debug_evt_tx.clone();
+    // Snatch interactive session before params.clone() drops the receiver.
+    let interactive = params.interactive.take();
 
     let idle_timeout = params
         .idle_timeout
@@ -102,8 +101,7 @@ pub(crate) async fn run_openai_compat(
         reminder_budget: crate::config::artifact_reminder_budget(),
         completion_nudge_budget: crate::config::completion_nudge_budget(),
     };
-    ctx.params.debug_cmd_rx = debug_cmd_rx;
-    ctx.params.debug_evt_tx = debug_evt_tx;
+    ctx.params.interactive = interactive;
     *state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
     let prompt = Mutex::new(params.prompt.clone());

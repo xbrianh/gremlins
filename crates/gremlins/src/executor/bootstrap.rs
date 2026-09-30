@@ -638,6 +638,7 @@ mod tests {
             dry_run: false,
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot("gr-test"),
             cancel_token: None,
+            interactive_session: None,
         };
         (tmp, gremlin)
     }

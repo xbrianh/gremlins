@@ -3,6 +3,7 @@ pub mod backend;
 pub mod client;
 pub mod cmd_backend;
 pub(crate) mod config;
+pub(crate) mod interactive;
 pub(crate) mod log_util;
 pub mod openai_backend;
 pub mod openai_protocol;

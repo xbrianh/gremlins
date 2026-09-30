@@ -678,6 +678,7 @@ mod tests {
                 rc
             },
             cancel_token: None,
+            interactive_session: None,
         };
         (tmp, gremlin)
     }
