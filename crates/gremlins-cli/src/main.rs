@@ -107,8 +107,8 @@ async fn main() {
         Some(Cmds::Stop { id }) => stop(&id).await,
         Some(Cmds::Resume { id }) => resume(&id).await,
         Some(Cmds::Log { id }) => log_gremlin(&id).await,
-        Some(Cmds::Clean { id, keep }) => clean(&id, keep),
-        Some(Cmds::Rm { id }) => rm(&id),
+        Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
+        Some(Cmds::Rm { id }) => rm(&id).await,
         Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::Validate { definition }) => validate(&definition).await,
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
@@ -303,7 +303,7 @@ fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
 
         rows.push(vec![
             id,
-            map_field_display(&state_map, "status"),
+            direct_status_display(&state_map, "status"),
             map_field_display(&state_map, "stage"),
             map_field_display(&state_map, "started_at"),
             project.to_string(),
@@ -445,7 +445,10 @@ fn status_direct(id: &str) -> Result<(), String> {
     let gremlin = Gremlin::from(id).map_err(|e| format!("gremlin {id}: {e}"))?;
 
     println!("id:            {}", gremlin.id);
-    println!("status:        {}", field_display(&gremlin.state, "status"));
+    println!(
+        "status:        {}",
+        direct_status_display_value(gremlin.state.read_field("status").as_ref())
+    );
     println!("stage:         {}", field_display(&gremlin.state, "stage"));
     println!("definition:    {}", definition_display_name(&gremlin.state));
     println!("project_root:  {}", gremlin.project_root.display());
@@ -533,7 +536,7 @@ fn info_direct(id: &str) -> Result<(), String> {
 
     let payload = serde_json::json!({
         "id": gremlin.id.as_str(),
-        "status": gremlin.state.read_str("status"),
+        "status": direct_status_display_value(Some(&gremlin.state.read_field("status").unwrap_or(Value::Null))),
         "stage": gremlin.state.read_str("stage"),
         "definition": definition_display_name(&gremlin.state),
         "project_root": gremlin.project_root.display().to_string(),
@@ -659,7 +662,7 @@ async fn log_gremlin(id: &str) -> Result<(), String> {
 // rm
 // ---------------------------------------------------------------------------
 
-fn rm(id: &str) -> Result<(), String> {
+async fn rm(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
@@ -687,9 +690,15 @@ fn rm(id: &str) -> Result<(), String> {
 
     let status = gremlin.state.read_str("status");
     if status == "running" {
-        return Err(format!(
-            "gremlin {id} is running — use `gremlins stop {id}` first"
-        ));
+        match is_live_in_executor(id).await {
+            Ok(true) => {
+                return Err(format!(
+                    "gremlin {id} is running — use `gremlins stop {id}` first"
+                ));
+            }
+            Err(e) => return Err(e),
+            Ok(false) => {}
+        }
     }
 
     gremlin.clean(true);
@@ -697,11 +706,24 @@ fn rm(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Check whether a gremlin is truly live in the executor's run_map.
+/// Returns `Ok(true)` if live, `Ok(false)` if confirmed not live,
+/// or `Err(...)` if the executor is unreachable and liveness cannot be determined.
+async fn is_live_in_executor(id: &str) -> Result<bool, String> {
+    let mut stream = spawn::connect()
+        .await
+        .map_err(|e| format!("cannot reach executor daemon to verify gremlin {id}: {e}"))?;
+    let response = spawn::send_request(&mut stream, serde_json::json!({"op": "status", "id": id}))
+        .await
+        .map_err(|e| format!("executor request failed while checking gremlin {id}: {e}"))?;
+    Ok(response.get("status").and_then(|v| v.as_str()) == Some("running"))
+}
+
 // ---------------------------------------------------------------------------
 // clean
 // ---------------------------------------------------------------------------
 
-fn clean(id: &str, keep: bool) -> Result<(), String> {
+async fn clean(id: &str, keep: bool) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
@@ -729,9 +751,15 @@ fn clean(id: &str, keep: bool) -> Result<(), String> {
 
     let status = gremlin.state.read_str("status");
     if status == "running" {
-        return Err(format!(
-            "gremlin {id} is running — use `gremlins stop {id}` first"
-        ));
+        match is_live_in_executor(id).await {
+            Ok(true) => {
+                return Err(format!(
+                    "gremlin {id} is running — use `gremlins stop {id}` first"
+                ));
+            }
+            Err(e) => return Err(e),
+            Ok(false) => {}
+        }
     }
 
     gremlin.clean(!keep);
@@ -787,9 +815,15 @@ async fn land(id: &str) -> Result<(), String> {
     let raw = state::read_state_json(Some(&state_file));
 
     if raw.get("status").and_then(Value::as_str) == Some("running") {
-        return Err(format!(
-            "gremlin {id} is running — use `gremlins stop {id}` first"
-        ));
+        match is_live_in_executor(id).await {
+            Ok(true) => {
+                return Err(format!(
+                    "gremlin {id} is running — use `gremlins stop {id}` first"
+                ));
+            }
+            Err(e) => return Err(e),
+            Ok(false) => {}
+        }
     }
 
     let project_root = {
@@ -912,6 +946,21 @@ async fn validate(definition: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// In the direct/fallback paths the executor isn't running, so any gremlin
+/// whose state.json says "running" is definitively orphaned.
+fn direct_status_display(state: &serde_json::Map<String, Value>, field: &str) -> String {
+    direct_status_display_value(state.get(field))
+}
+
+fn direct_status_display_value(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(s)) if s == "running" => "orphan".to_string(),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(v) => v.to_string(),
+    }
+}
 
 fn field_display(state: &StateData, field: &str) -> String {
     value_display(state.read_field(field).as_ref())
