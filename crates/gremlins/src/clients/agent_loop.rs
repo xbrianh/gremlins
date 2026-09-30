@@ -19,9 +19,9 @@ use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
 
-fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
+fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
-        let _ = tx.send(msg.to_string());
+        let _ = tx.send(format!("{prefix}{msg}"));
     }
 }
 
@@ -202,6 +202,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         idle_timeout,
         max_turns,
         ctx.completion_nudge_budget,
+        ctx.params.log_tx.clone(),
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -243,9 +244,12 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     idle_timeout: f64,
     max_turns: usize,
     completion_nudge_budget: usize,
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<CompletedRun, ClientError> {
     log::info!("{prefix}task: begin (max_turns={max_turns})");
-    // Nested tasks don't have a RunContext, so no log_tx — log crate only.
+    if let Some(ref tx) = log_tx {
+        let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
+    }
     let opts = LoopOpts {
         extra: None,
         tool_filter,
@@ -271,11 +275,13 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         &[],
         0,
         completion_nudge_budget,
-        &None,
+        &log_tx,
     )
     .await;
     log::info!("{prefix}task: end");
-    // Nested tasks don't have a RunContext, so no log_tx — log crate only.
+    if let Some(ref tx) = log_tx {
+        let _ = tx.send(format!("{prefix}task: end"));
+    }
     result
 }
 
@@ -487,12 +493,12 @@ async fn run_agent_loop_core<M: CompletionModel>(
         if !reasoning.is_empty() {
             let msg = format!("think: {}", trunc(&reasoning, 200));
             log::info!("{prefix}{msg}");
-            send_log(log_tx, &msg);
+            send_log(log_tx, prefix, &msg);
         }
         if !text.is_empty() {
             let msg = format!("text: {}", trunc(&text, 200));
             log::info!("{prefix}{msg}");
-            send_log(log_tx, &msg);
+            send_log(log_tx, prefix, &msg);
         }
         if !nested {
             if !text.is_empty() {
@@ -626,8 +632,12 @@ async fn run_agent_loop_core<M: CompletionModel>(
                         total_cache_creation_tokens,
                         total_reasoning_tokens,
                     );
-                    send_log(log_tx, &format!("final: turns={turns} cost=not-reported"));
-                    send_log(log_tx, &format!(
+                    send_log(
+                        log_tx,
+                        prefix,
+                        &format!("final: turns={turns} cost=not-reported"),
+                    );
+                    send_log(log_tx, prefix, &format!(
                         "summary: turns={turn_num} wall={:.1}s token_total={} prompt_avg={} completion_avg={} cached_avg={}% cache_creation={} reasoning_pct={}%",
                         loop_start.elapsed().as_secs_f64(),
                         total_prompt_tokens + total_completion_tokens,
@@ -741,6 +751,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 );
                 send_log(
                     log_tx,
+                    prefix,
                     &format!("final: turns={turns} cost=not-reported (exhausted)"),
                 );
             }
@@ -762,7 +773,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 trunc(&key_arg(&tc.function.arguments), 200)
             );
             log::info!("{prefix}{tool_msg}");
-            send_log(log_tx, &tool_msg);
+            send_log(log_tx, prefix, &tool_msg);
             if !nested {
                 let tool_evt = tool_use_event(&tc.id, &tc.function.name, &tc.function.arguments);
                 write_raw(raw, &tool_evt);
@@ -807,7 +818,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         for (job, output) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
             log::info!("{prefix}{result_msg}");
-            send_log(log_tx, &result_msg);
+            send_log(log_tx, prefix, &result_msg);
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
                 write_raw(raw, &result_evt);
@@ -851,6 +862,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         );
         send_log(
             log_tx,
+            prefix,
             &format!("final: turns={turns} cost=not-reported{suffix}"),
         );
     }

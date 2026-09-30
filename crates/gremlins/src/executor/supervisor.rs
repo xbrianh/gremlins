@@ -116,11 +116,14 @@ async fn handle_connection(
             .unwrap_or("")
             .to_string();
 
-        let outcome = dispatch_op(&op, &request, &state_root, &shutdown_tx, &mut write_half).await;
-
-        if matches!(outcome, DispatchOutcome::Close) {
+        // Streaming ops take ownership of the connection; handle them
+        // directly so they can monitor the read half for disconnect.
+        if op == "log" {
+            handle_log(&request, &state_root, reader, &mut write_half).await;
             break;
         }
+
+        let _outcome = dispatch_op(&op, &request, &state_root, &shutdown_tx, &mut write_half).await;
 
         if matches!(op.as_str(), "launch" | "stop" | "resume")
             && get_run_map().lock().unwrap().is_empty()
@@ -137,8 +140,6 @@ async fn handle_connection(
 enum DispatchOutcome {
     /// Request-response: the handler wrote a reply; continue the request loop.
     Continue,
-    /// Streaming: the handler took the write half; break the request loop.
-    Close,
 }
 
 async fn dispatch_op(
@@ -179,7 +180,6 @@ async fn dispatch_op(
             let _ = socket::write_json_line(write_half, &resp).await;
             DispatchOutcome::Continue
         }
-        "log" => handle_log(request, state_root, write_half).await,
         _ => {
             let resp = error_response(&format!("unknown op: {op:?}"));
             let _ = socket::write_json_line(write_half, &resp).await;
@@ -765,19 +765,20 @@ async fn handle_info(request: &Value, state_root: &Path) -> Value {
 async fn handle_log(
     request: &Value,
     state_root: &Path,
+    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     write_half: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> DispatchOutcome {
+) {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
         let resp = error_response("missing 'id' field");
         let _ = socket::write_json_line(write_half, &resp).await;
-        return DispatchOutcome::Continue;
+        return;
     }
 
     if validate_gremlin_id(id).is_err() {
         let resp = error_response(&format!("invalid gremlin id {id:?}"));
         let _ = socket::write_json_line(write_half, &resp).await;
-        return DispatchOutcome::Continue;
+        return;
     }
 
     let state_dir = state_root.join(id);
@@ -785,7 +786,7 @@ async fn handle_log(
     if !state_dir.is_dir() || !state_file.is_file() {
         let resp = error_response(&format!("unknown gremlin {id:?}"));
         let _ = socket::write_json_line(write_half, &resp).await;
-        return DispatchOutcome::Continue;
+        return;
     }
 
     let follow = request
@@ -795,62 +796,77 @@ async fn handle_log(
 
     let log_path = state_dir.join("log");
 
+    // Subscribe to the broadcast channel *before* replaying history so that
+    // lines emitted during replay are buffered and not lost.
+    let mut rx = if follow {
+        get_run_map()
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|h| h.log_broadcast.subscribe())
+    } else {
+        None
+    };
+
     // 1. Send historical lines from the log file.
+    let mut offset: u64 = 0;
     if let Ok(content) = tokio::fs::read_to_string(&log_path).await {
-        for (offset, line) in (0_u64..).zip(content.lines()) {
+        for line in content.lines() {
             let payload = serde_json::json!({
                 "type": "log_line",
                 "line": line,
                 "offset": offset,
             });
             if socket::write_json_line(write_half, &payload).await.is_err() {
-                return DispatchOutcome::Close;
+                return;
             }
+            offset += 1;
         }
     }
 
-    // 2. If follow, subscribe to the broadcast channel and stream new lines.
-    if follow {
-        let rx = {
-            let map = get_run_map().lock().unwrap();
-            map.get(id).map(|h| h.log_broadcast.subscribe())
-        };
+    // 2. If follow, drain duplicates (lines broadcast during file replay),
+    //    then stream new lines. Monitor the read half for client disconnect.
+    if let Some(ref mut rx) = rx {
+        // Drain lines that arrived during the file replay — they were already
+        // sent from the file above.
+        while rx.try_recv().is_ok() {}
 
-        if let Some(mut rx) = rx {
-            let mut offset: u64 = 0;
-            // We don't know the exact offset after replay, but it doesn't
-            // matter for the streaming phase — the client just displays lines.
-            loop {
-                match rx.recv().await {
-                    Ok(line) => {
-                        let payload = serde_json::json!({
-                            "type": "log_line",
-                            "line": line,
-                            "offset": offset,
-                        });
-                        if socket::write_json_line(write_half, &payload).await.is_err() {
-                            break;
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Ok(line) => {
+                            let payload = serde_json::json!({
+                                "type": "log_line",
+                                "line": line,
+                                "offset": offset,
+                            });
+                            if socket::write_json_line(write_half, &payload).await.is_err() {
+                                break;
+                            }
+                            offset += 1;
                         }
-                        offset += 1;
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        let payload = serde_json::json!({
-                            "type": "log_line",
-                            "line": format!("[skipped {n} lines]"),
-                            "offset": offset,
-                        });
-                        if socket::write_json_line(write_half, &payload).await.is_err() {
-                            break;
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            let payload = serde_json::json!({
+                                "type": "log_line",
+                                "line": format!("[skipped {n} lines]"),
+                                "offset": offset,
+                            });
+                            if socket::write_json_line(write_half, &payload).await.is_err() {
+                                break;
+                            }
+                            offset += 1;
                         }
-                        offset += 1;
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+                // Client disconnect: read half yields EOF.
+                _ = socket::read_json_line(&mut reader) => {
+                    break;
                 }
             }
         }
     }
-
-    DispatchOutcome::Close
 }
 
 // ---------------------------------------------------------------------------
@@ -886,12 +902,18 @@ fn spawn_log_writer(
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
 
-        let mut file = tokio::fs::OpenOptions::new()
+        let mut file = match tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
             .await
-            .ok();
+        {
+            Ok(f) => Some(f),
+            Err(e) => {
+                log::error!("log writer: failed to open {}: {e}", log_path.display());
+                None
+            }
+        };
 
         while let Some(line) = log_rx.recv().await {
             if let Some(ref mut f) = file {

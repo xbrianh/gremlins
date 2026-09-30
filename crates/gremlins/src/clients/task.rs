@@ -143,6 +143,7 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
     idle_timeout: f64,
     max_turns: usize,
     completion_nudge_budget: usize,
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
@@ -156,6 +157,7 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
         0,
         String::new(),
         completion_nudge_budget,
+        log_tx,
     )
 }
 
@@ -172,6 +174,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
     depth: u32,
     id_chain: String,
     completion_nudge_budget: usize,
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> tools::TaskFn {
     Arc::new(move |description: String, task: String| {
         let model = model.clone();
@@ -183,6 +186,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
         let id_chain = id_chain.clone();
 
         let task_cwd = ctx.cwd.clone();
+        let log_tx = log_tx.clone();
 
         Box::pin(async move {
             if depth >= MAX_DEPTH {
@@ -216,6 +220,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 depth + 1,
                 new_chain,
                 completion_nudge_budget,
+                log_tx.clone(),
             ));
 
             let work_root = tools::worktree_root(task_cwd.as_deref());
@@ -235,6 +240,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 idle_timeout,
                 max_turns,
                 completion_nudge_budget,
+                log_tx.clone(),
             )
             .await;
 
@@ -447,6 +453,7 @@ mod tests {
             5.0,
             10,
             0,
+            None,
         );
 
         // First invocation: depth 0 < 3, should succeed.
@@ -515,7 +522,18 @@ mod tests {
         // Hangs forever so all siblings overlap in time.
         let model = PendingModel;
         let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_task_runner(model, None, None, cancel, ctx, String::new(), 0.2, 10, 0);
+        let runner = make_task_runner(
+            model,
+            None,
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            0.2,
+            10,
+            0,
+            None,
+        );
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
         // "max depth" even though they overlap in time.
@@ -550,6 +568,7 @@ mod tests {
             MAX_DEPTH,
             String::new(),
             0,
+            None,
         );
 
         let blocked = runner("label".into(), "too deep".into()).await;
@@ -735,6 +754,7 @@ mod tests {
                 5.0,
                 10,
                 0,
+                None,
             )
         }
 
