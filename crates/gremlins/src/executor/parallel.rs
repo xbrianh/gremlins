@@ -677,6 +677,7 @@ mod tests {
                 rc.state_root = tmp.path().join("state");
                 rc
             },
+            cancel_token: None,
         };
         (tmp, gremlin)
     }

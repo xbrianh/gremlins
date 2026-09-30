@@ -104,6 +104,9 @@ pub(crate) async fn run_openai_compat(
     let timeout_prompt = params.on_timeout_prompt.clone();
     let backoff = &STREAM_IDLE_BACKOFF[..params.max_retries];
 
+    // Use the supervisor's cancel token when available; otherwise create one.
+    let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
+
     retry::with_retry(
         backoff,
         classify_retryable,
@@ -124,10 +127,17 @@ pub(crate) async fn run_openai_compat(
         || {
             let p = prompt.lock().unwrap().clone();
             let ctx = ctx.clone();
+            let cancel = cancel.clone();
             async move {
+                // Before each retry attempt, check if we've been cancelled.
+                if cancel.is_cancelled() {
+                    return Err(ClientError::Runtime {
+                        message: "cancelled".into(),
+                    });
+                }
+
                 let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
                 let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-                let cancel = CancelToken::new();
                 state
                     .cancels
                     .lock()

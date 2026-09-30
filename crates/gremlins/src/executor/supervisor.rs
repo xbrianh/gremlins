@@ -14,6 +14,7 @@ use tokio::net::UnixListener;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 
+use crate::clients::agent_loop::CancelToken;
 use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::socket::{self, GremlinsDaemonLock};
@@ -24,7 +25,7 @@ use crate::executor::state;
 // ---------------------------------------------------------------------------
 
 pub(crate) struct RunHandle {
-    pub cancel: watch::Sender<bool>,
+    pub cancel: Arc<CancelToken>,
     #[allow(dead_code)]
     pub state_tx: watch::Sender<RunState>,
     /// Broadcast sender for live log subscribers (Op::Log with follow:true).
@@ -336,7 +337,8 @@ async fn handle_launch(
     let log_path = gremlin.state_dir.join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
-    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
         id: id.clone(),
         status: "running".to_string(),
@@ -350,11 +352,15 @@ async fn handle_launch(
     let shutdown_tx_clone = shutdown_tx.clone();
 
     let handle = RunHandle {
-        cancel: cancel_tx,
+        cancel: cancel_token.clone(),
         state_tx,
         log_broadcast,
     };
     get_run_map().lock().unwrap().insert(id.clone(), handle);
+
+    // Thread the cancel token into the gremlin so the run loop can pass it
+    // to the backend.
+    gremlin.cancel_token = Some(cancel_token);
 
     tokio::spawn(async move {
         let (result, _registry) = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
@@ -391,7 +397,7 @@ async fn handle_stop(request: &Value) -> Value {
     let map = run_map.lock().unwrap();
     match map.get(id) {
         Some(handle) => {
-            let _ = handle.cancel.send(true);
+            handle.cancel.cancel();
             ok_response(serde_json::json!({"id": id, "status": "stopping"}))
         }
         None => {
@@ -499,7 +505,8 @@ async fn handle_resume(
     let log_path = gremlin.state_dir.join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
-    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
         id: id.to_string(),
         status: "running".to_string(),
@@ -513,11 +520,13 @@ async fn handle_resume(
     let shutdown_tx_clone = shutdown_tx.clone();
 
     let handle = RunHandle {
-        cancel: cancel_tx,
+        cancel: cancel_token.clone(),
         state_tx,
         log_broadcast,
     };
     get_run_map().lock().unwrap().insert(id.to_string(), handle);
+
+    gremlin.cancel_token = Some(cancel_token);
 
     tokio::spawn(async move {
         let (result, _registry) =
@@ -875,10 +884,10 @@ async fn handle_log(
 
 async fn run_gremlin_task(
     mut gremlin: Gremlin,
-    cancel: Option<watch::Receiver<bool>>,
+    _cancel: Option<watch::Receiver<bool>>,
     resume_from: Option<&str>,
 ) -> (i32, Box<dyn crate::artifacts::registry::ArtifactRegistry>) {
-    let exit_code = match gremlin.run(resume_from, cancel).await {
+    let exit_code = match gremlin.run(resume_from).await {
         Ok(ec) => ec,
         Err(e) => {
             log::error!("gremlin {}: {e}", gremlin.id.as_str());
@@ -1036,7 +1045,8 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     let log_path = gremlin.state_dir.join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
-    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let cancel_token = CancelToken::new();
     let (state_tx, state_rx) = watch::channel(RunState {
         id: id.clone(),
         status: "running".to_string(),
@@ -1049,13 +1059,16 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     let state_tx_clone = state_tx.clone();
 
     let handle = RunHandle {
-        cancel: cancel_tx,
+        cancel: cancel_token.clone(),
         state_tx,
         log_broadcast,
     };
     // Insert into RUN_MAP *before* spawning so a fast child cannot finish
     // and call remove before the insert.
     get_run_map().lock().unwrap().insert(id.clone(), handle);
+
+    // Thread the cancel token into the child gremlin.
+    gremlin.cancel_token = Some(cancel_token);
 
     let run_map = get_run_map().clone();
     let id_clone = id.clone();
@@ -1091,7 +1104,7 @@ pub(crate) async fn stop_child(id: &str) {
         map.get(id).map(|h| h.cancel.clone())
     };
     if let Some(cancel) = handle {
-        let _ = cancel.send(true);
+        cancel.cancel();
     }
 }
 

@@ -870,7 +870,7 @@ async fn validate(definition: &str) -> Result<(), String> {
 
     let mut gremlin = Gremlin::for_dry_run(gremlin_def);
 
-    match gremlin.run(None, None).await {
+    match gremlin.run(None).await {
         Ok(0) => Ok(()),
         Ok(exit_code) => {
             let stage = gremlin.state.read_str("stage");

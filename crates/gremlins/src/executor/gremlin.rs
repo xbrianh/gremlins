@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -35,6 +36,7 @@ use crate::artifacts::registry::{
     ArtifactRegistry, DryRunArtifactRegistry, FileSystemArtifactRegistry,
 };
 use crate::artifacts::uri::Uri;
+use crate::clients::agent_loop::CancelToken;
 use crate::clients::client::Client;
 use crate::config;
 use crate::core::{discovery, env_file, git};
@@ -223,6 +225,9 @@ pub struct Gremlin {
     pub stage_inputs: HashMap<String, String>,
     pub dry_run: bool,
     pub(crate) runtime_config: RuntimeConfig,
+    /// Supervisor-owned cancel token. When set, the run loop passes it to the
+    /// backend so `gremlins stop` cancels in-flight agent loops.
+    pub(crate) cancel_token: Option<Arc<CancelToken>>,
 }
 
 impl Gremlin {
@@ -442,6 +447,7 @@ impl Gremlin {
                 stage_inputs: stage_inputs.clone(),
                 dry_run: false,
                 runtime_config,
+                cancel_token: None,
             })
         };
 
@@ -595,6 +601,7 @@ impl Gremlin {
             stage_inputs,
             dry_run: false,
             runtime_config,
+            cancel_token: None,
         })
     }
 
@@ -669,6 +676,7 @@ impl Gremlin {
             stage_inputs: HashMap::new(),
             dry_run: true,
             runtime_config: RuntimeConfig::snapshot("dry-run"),
+            cancel_token: None,
         }
     }
 
@@ -991,6 +999,7 @@ impl Gremlin {
                 child_runtime_config.scratch_dir = child_scratch_dir;
                 child_runtime_config
             },
+            cancel_token: self.cancel_token.clone(),
         })
     }
 
@@ -1798,7 +1807,7 @@ mod tests {
 
         // The resume path: reconstruct cheaply, then drive the run. The
         // definition must have been loaded by the time `run` returns.
-        assert_eq!(handle.run(None, None).await.unwrap(), 0);
+        assert_eq!(handle.run(None).await.unwrap(), 0);
         assert_eq!(handle.definition.name(), "demo");
     }
 
@@ -1978,6 +1987,7 @@ mod tests {
                 scratch_dir: config::scratch_root(Some(id)),
                 ..RuntimeConfig::default()
             },
+            cancel_token: None,
         }
     }
 
