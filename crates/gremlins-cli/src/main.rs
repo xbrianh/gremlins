@@ -165,6 +165,11 @@ async fn serve_daemon(lock_fd: i32) -> Result<(), String> {
 
     let listener = socket::bind_socket(&state_root)?;
 
+    // Signal the parent CLI that we are ready. This must be the first
+    // and only output on stdout — the parent reads this line as a
+    // deterministic readiness signal.
+    println!("ready");
+
     log::info!(
         "executor: listening on {}",
         socket::socket_path(&state_root).display()
