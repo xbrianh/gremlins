@@ -3,15 +3,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rig_core::completion::CompletionError;
-use rig_core::providers::openai;
 
-use super::agent_loop::ErrorClassifier;
-use super::backend::{Backend, ClientError, RunParams};
-use super::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
-use super::protocol::CompletedRun;
+use crate::clients::agent_loop::ErrorClassifier;
+use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
+use crate::clients::protocol::CompletedRun;
 
 /// Base URL for OpenRouter's OpenAI-compatible API.
-pub(crate) const BASE_URL: &str = "https://openrouter.ai/api/v1";
+const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// Provider name this backend answers to, used to match `task-clients` specs.
 const PROVIDER_NAME: &str = "openrouter";
@@ -80,7 +79,7 @@ pub struct OpenRouterBackend {
 
 impl OpenRouterBackend {
     pub fn new(
-        client: openai::CompletionsClient,
+        client: rig_core::providers::openai::CompletionsClient,
         model: String,
         tool_filter: Option<Vec<String>>,
         client_params: HashMap<String, String>,

@@ -2,68 +2,33 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rig_core::providers::openai;
 
-use super::backend::{Backend, ClientError, RunParams};
-use super::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
-use super::protocol::CompletedRun;
+use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
+use crate::clients::protocol::CompletedRun;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenAiProvider {
-    OpenAi,
-    Xai,
-}
-
-impl OpenAiProvider {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::OpenAi => "openai",
-            Self::Xai => "xai",
-        }
-    }
-
-    pub fn api_key_env(self) -> &'static str {
-        match self {
-            Self::OpenAi => "OPENAI_API_KEY",
-            Self::Xai => "XAI_API_KEY",
-        }
-    }
-
-    pub fn base_url(self) -> &'static str {
-        match self {
-            Self::OpenAi => "https://api.openai.com/v1",
-            Self::Xai => "https://api.x.ai/v1",
-        }
-    }
-
-    pub(crate) fn default_model(self) -> &'static str {
-        match self {
-            Self::OpenAi => "gpt-4o",
-            Self::Xai => "grok-4",
-        }
-    }
-}
+const PROVIDER_NAME: &str = "openai";
+const API_KEY_ENV: &str = "OPENAI_API_KEY";
+const BASE_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_MODEL: &str = "gpt-4o";
 
 pub struct OpenAiBackend {
-    provider: OpenAiProvider,
     state: OpenAiRunState,
 }
 
 impl OpenAiBackend {
     pub fn new(
-        provider: OpenAiProvider,
-        client: openai::CompletionsClient,
+        client: rig_core::providers::openai::CompletionsClient,
         model: String,
         tool_filter: Option<Vec<String>>,
         client_params: HashMap<String, String>,
     ) -> Self {
         let model = if model.is_empty() {
-            provider.default_model().to_string()
+            DEFAULT_MODEL.to_string()
         } else {
             model
         };
         Self {
-            provider,
             state: OpenAiRunState::new(
                 client,
                 model,
@@ -80,37 +45,17 @@ impl OpenAiBackend {
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        Self::build_inner(OpenAiProvider::OpenAi, model, native_block, extra_params)
-    }
-
-    /// Build an xAI backend. Resolves `XAI_API_KEY` → `providers.json`.
-    pub fn build_xai(
-        model: &str,
-        native_block: &HashMap<String, Vec<String>>,
-        extra_params: &indexmap::IndexMap<String, String>,
-    ) -> Result<Arc<dyn Backend>, String> {
-        Self::build_inner(OpenAiProvider::Xai, model, native_block, extra_params)
-    }
-
-    fn build_inner(
-        kind: OpenAiProvider,
-        model: &str,
-        native_block: &HashMap<String, Vec<String>>,
-        extra_params: &indexmap::IndexMap<String, String>,
-    ) -> Result<Arc<dyn Backend>, String> {
-        let key = crate::config::api_key(kind.api_key_env(), kind.name()).ok_or_else(|| {
-            format!(
-                "no API key for provider '{}': set {} or add an entry in {}",
-                kind.name(),
-                kind.api_key_env(),
-                crate::config::user_config_root()
-                    .join("providers.json")
-                    .display(),
-            )
-        })?;
-        let client = openai_protocol::build_openai_client(&key, kind.base_url())?;
+        let key =
+            crate::config::api_key(API_KEY_ENV, PROVIDER_NAME).ok_or_else(|| {
+                format!(
+                    "no API key for provider '{PROVIDER_NAME}': set {API_KEY_ENV} or add an entry in {}",
+                    crate::config::user_config_root()
+                        .join("providers.json")
+                        .display(),
+                )
+            })?;
+        let client = openai_protocol::build_openai_client(&key, BASE_URL)?;
         Ok(Arc::new(Self::new(
-            kind,
             client,
             model.to_string(),
             openai_protocol::tool_filter(native_block),
@@ -122,7 +67,7 @@ impl OpenAiBackend {
 #[async_trait]
 impl Backend for OpenAiBackend {
     async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError> {
-        run_openai_compat(&self.state, params, None, self.provider.name()).await
+        run_openai_compat(&self.state, params, None, PROVIDER_NAME).await
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
@@ -147,34 +92,26 @@ impl Backend for OpenAiBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::super::agent_loop::CancelToken;
+    use super::super::super::agent_loop::CancelToken;
     use super::*;
 
     #[test]
-    fn provider_identity() {
-        assert_eq!(OpenAiProvider::OpenAi.name(), "openai");
-        assert_eq!(OpenAiProvider::Xai.name(), "xai");
-        assert_eq!(OpenAiProvider::OpenAi.api_key_env(), "OPENAI_API_KEY");
-        assert_eq!(OpenAiProvider::Xai.api_key_env(), "XAI_API_KEY");
-        assert_eq!(OpenAiProvider::Xai.base_url(), "https://api.x.ai/v1");
-        assert_eq!(OpenAiProvider::Xai.default_model(), "grok-4");
+    fn provider_constants() {
+        assert_eq!(PROVIDER_NAME, "openai");
+        assert_eq!(API_KEY_ENV, "OPENAI_API_KEY");
+        assert_eq!(BASE_URL, "https://api.openai.com/v1");
+        assert_eq!(DEFAULT_MODEL, "gpt-4o");
     }
 
     #[test]
     fn reap_all_cancels_only_own_tokens() {
-        let client = openai::Client::builder()
+        let client = rig_core::providers::openai::Client::builder()
             .api_key(rig_core::client::BearerAuth::from("sk-test"))
             .base_url("https://api.openai.com/v1")
             .build()
             .unwrap()
             .completions_api();
-        let backend = OpenAiBackend::new(
-            OpenAiProvider::OpenAi,
-            client,
-            "gpt-4o".into(),
-            None,
-            HashMap::new(),
-        );
+        let backend = OpenAiBackend::new(client, "gpt-4o".into(), None, HashMap::new());
         let a = CancelToken::new();
         let b = CancelToken::new();
         let sibling = CancelToken::new();

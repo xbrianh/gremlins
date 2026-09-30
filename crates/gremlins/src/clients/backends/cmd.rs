@@ -10,10 +10,10 @@ use regex::Regex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
-use super::backend::{Backend, ClientError, RunParams};
-use super::protocol::CompletedRun;
-use super::retry::{validate_max_retries, with_retry, STREAM_IDLE_BACKOFF};
-use super::stream_json::{self, StreamState};
+use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::protocol::CompletedRun;
+use crate::clients::retry::{validate_max_retries, with_retry, STREAM_IDLE_BACKOFF};
+use crate::clients::stream_json::{self, StreamState};
 
 fn footer_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
