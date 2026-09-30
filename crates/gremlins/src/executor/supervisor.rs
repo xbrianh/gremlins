@@ -15,7 +15,9 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::clients::agent_loop::CancelToken;
-use crate::clients::interactive::{InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle};
+use crate::clients::interactive::{
+    InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle,
+};
 use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::socket::{self, GremlinsDaemonLock};
@@ -997,7 +999,12 @@ async fn handle_debug(
     let mut evt_rx = interactive_handle.evt_tx.subscribe();
 
     // Send Pause command to the agent loop.
-    if interactive_handle.cmd_tx.send(InteractiveCommand::Pause).await.is_err() {
+    if interactive_handle
+        .cmd_tx
+        .send(InteractiveCommand::Pause)
+        .await
+        .is_err()
+    {
         let resp = error_response("failed to send pause command — agent loop may have exited");
         let _ = socket::write_json_line(write_half, &resp).await;
         return;
@@ -1035,7 +1042,10 @@ async fn handle_debug(
         .await
         .is_err()
     {
-        let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
+        let _ = interactive_handle
+            .cmd_tx
+            .send(InteractiveCommand::Quit)
+            .await;
         return;
     }
 

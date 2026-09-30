@@ -16,10 +16,10 @@ use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
+use super::interactive::{InteractiveCommand, InteractiveEvent, InteractiveSession};
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
-use super::interactive::{InteractiveCommand, InteractiveEvent, InteractiveSession};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
@@ -480,14 +480,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
         if let Some(ref mut session) = interactive {
             if interactive_active {
                 // Re-enter interactive_loop after a RunOneTurn/Inject.
-                match interactive_loop(
-                    model,
-                    &mut history,
-                    &mut next_prompt,
-                    session,
-                    turn_num,
-                )
-                .await
+                match interactive_loop(model, &mut history, &mut next_prompt, session, turn_num)
+                    .await
                 {
                     Ok(InteractiveLoopResult::Resumed) => {
                         interactive_active = false;
