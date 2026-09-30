@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::clients::agent_loop::CancelToken;
+use crate::clients::client::Client;
 use crate::clients::interactive::{
     InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle,
 };
@@ -49,10 +50,9 @@ impl RunHandle {
         state_tx: &watch::Sender<RunState>,
         shutdown_tx: Option<&watch::Sender<bool>>,
     ) {
-        // Send terminal state *before* removing from the run_map.
-        // If we remove first, the RunHandle (and its state_tx) is
-        // dropped, leaving only the caller's clone.  The receiver
-        // might see all senders gone before observing the change.
+        // Send terminal state before removing from the run_map.
+        // The state_tx argument is a clone held by the caller, so
+        // it outlives the RunHandle.
         let _ = state_tx.send(RunState {
             id: id.to_string(),
             status: if result == 0 { "done" } else { "stopped" }.to_string(),
@@ -63,9 +63,6 @@ impl RunHandle {
         let run_map = get_run_map();
         let is_empty = {
             let mut map = run_map.lock().unwrap();
-            // Only proceed if we actually removed an entry — duplicate
-            // finish calls (from handle_stop racing the spawned task) are
-            // harmless no-ops.
             if map.remove(id).is_none() {
                 return;
             }
@@ -446,7 +443,7 @@ async fn handle_launch(
 // stop
 // ---------------------------------------------------------------------------
 
-async fn handle_stop(request: &Value, shutdown_tx: &watch::Sender<bool>) -> Value {
+async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Value {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
         return error_response("missing 'id' field");
@@ -469,10 +466,7 @@ async fn handle_stop(request: &Value, shutdown_tx: &watch::Sender<bool>) -> Valu
             handle.aborted.store(true, Ordering::Relaxed);
             // Clone what we need before removing the entry.
             let state_tx = handle.state_tx.clone();
-            // Remove from run_map and broadcast terminal state while we
-            // still hold the lock — no race window for a duplicate finish.
             map.remove(id);
-            let is_empty = map.is_empty();
             drop(map);
             let _ = state_tx.send(RunState {
                 id: id.to_string(),
@@ -480,9 +474,20 @@ async fn handle_stop(request: &Value, shutdown_tx: &watch::Sender<bool>) -> Valu
                 stage: String::new(),
                 started_at: String::new(),
             });
-            if is_empty {
-                let _ = shutdown_tx.send(true);
-            }
+            // Write terminal state to disk so the aborted run isn't
+            // reported as orphan and has a recorded exit_code.
+            let state_file = config::state_root().join(id).join("state.json");
+            let _ = state::locked_update(&state_file, |data| {
+                data.insert("status".to_string(), Value::String("stopped".to_string()));
+                data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
+                data.insert("exit_code".to_string(), Value::from(1));
+            });
+            // Reap backend resources that the aborted task would have
+            // reaped in Gremlin::finish.
+            reap_client_for(id);
+            // Shutdown is signalled by handle_connection after dispatch_op
+            // writes the response — do not signal here to avoid the
+            // connection task being dropped before the response is sent.
             return ok_response(serde_json::json!({"id": id, "status": "stopping"}));
         }
     }
@@ -1487,6 +1492,35 @@ pub(crate) async fn stop_child(id: &str) {
             stage: String::new(),
             started_at: String::new(),
         });
+        // Write terminal state to disk so the aborted child isn't
+        // reported as orphan and has a recorded exit_code.
+        let state_file = config::state_root().join(id).join("state.json");
+        let _ = state::locked_update(&state_file, |data| {
+            data.insert("status".to_string(), Value::String("stopped".to_string()));
+            data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
+            data.insert("exit_code".to_string(), Value::from(1));
+        });
+        // Reap backend resources that the aborted task would have
+        // reaped in Gremlin::finish.
+        reap_client_for(id);
+    }
+}
+
+/// Reap backend resources for an aborted gremlin by reading its client
+/// spec from state.json and calling [`Client::reap_all`].
+///
+/// If the client spec cannot be read or parsed this is a silent no-op —
+/// the gremlin may not have started running yet.
+fn reap_client_for(id: &str) {
+    let state_file = config::state_root().join(id).join("state.json");
+    let raw = state::read_state_json(Some(&state_file));
+    let spec = raw.get("client").and_then(|v| v.as_str()).unwrap_or("");
+    if spec.is_empty() {
+        return;
+    }
+    match Client::parse(spec) {
+        Ok(client) => client.reap_all(id),
+        Err(e) => log::warn!("reap_client_for {id}: failed to parse client spec {spec:?}: {e}"),
     }
 }
 
