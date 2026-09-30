@@ -498,8 +498,14 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     evt_tx: evt_tx.take().unwrap(),
                     pause: pause.clone().unwrap(),
                 };
-                match interactive_loop(model, &mut history, &mut next_prompt, &mut session, turn_num)
-                    .await
+                match interactive_loop(
+                    model,
+                    &mut history,
+                    &mut next_prompt,
+                    &mut session,
+                    turn_num,
+                )
+                .await
                 {
                     Ok(InteractiveLoopResult::Resumed) => {
                         interactive_active = false;
