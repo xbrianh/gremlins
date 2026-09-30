@@ -767,7 +767,11 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     let log_path = config::state_root().join(id).join("log");
     if let Ok(content) = std::fs::read_to_string(&log_path) {
         let lines: Vec<&str> = content.lines().collect();
-        let start = if lines.len() > 20 { lines.len() - 20 } else { 0 };
+        let start = if lines.len() > 20 {
+            lines.len() - 20
+        } else {
+            0
+        };
         for line in &lines[start..] {
             eprintln!("log: {line}");
         }
