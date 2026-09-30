@@ -389,6 +389,11 @@ async fn run_agent(
             // create a fresh cmd channel pair and swap the handle's cmd_tx.
             gremlin.interactive_session.take().or_else(|| {
                 let (tx, rx) = tokio::sync::mpsc::channel(8);
+                let pause = gremlin
+                    .runtime_config
+                    .interactive
+                    .as_ref()
+                    .map(|h| h.pause.clone());
                 if let Ok(mut map) = get_run_map().lock() {
                     if let Some(handle) = map.get_mut(gremlin.id.as_str()) {
                         handle.interactive.cmd_tx = tx;
@@ -402,6 +407,7 @@ async fn run_agent(
                 evt_tx.map(|evt_tx| crate::clients::interactive::InteractiveSession {
                     cmd_rx: rx,
                     evt_tx,
+                    pause: pause.expect("pause token must be present when evt_tx is"),
                 })
             })
         },

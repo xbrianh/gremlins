@@ -12,11 +12,10 @@ use rig_core::completion::{
 };
 use rig_core::streaming::StreamedAssistantContent;
 use rig_core::OneOrMany;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
-use super::interactive::{InteractiveCommand, InteractiveEvent, InteractiveSession};
+use super::interactive::{InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken};
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
@@ -68,7 +67,7 @@ impl CancelToken {
 
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::Relaxed);
-        self.notify.notify_waiters();
+        self.notify.notify_one();
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -290,10 +289,19 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     result
 }
 
+/// Future that resolves when a [`PauseToken`] fires, or never if there is no token.
+async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
+    if let Some(ref p) = pause {
+        p.paused().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 // ── interactive loop ─────────────────────────────────────────────────────
 
-/// Interactive state machine. Called when the operator sends `Pause`
-/// or when re-entering after a `RunTurn`/`Inject`.
+/// Interactive state machine. Called when the operator triggers pause
+/// (via [`PauseToken`]) or when re-entering after a `RunTurn`/`Inject`.
 ///
 /// On entry, broadcasts `Ready { turn }`. Then blocks reading
 /// `InteractiveCommand`s from the session's `cmd_rx`.
@@ -309,42 +317,37 @@ async fn interactive_loop<M: CompletionModel>(
 ) -> Result<InteractiveLoopResult, ClientError> {
     let _ = session.evt_tx.send(InteractiveEvent::Ready { turn });
 
-    loop {
-        let cmd = match session.cmd_rx.recv().await {
-            Some(cmd) => cmd,
-            None => {
-                let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                    reason: "disconnect".to_string(),
-                });
-                return Ok(InteractiveLoopResult::Resumed);
-            }
-        };
+    let cmd = match session.cmd_rx.recv().await {
+        Some(cmd) => cmd,
+        None => {
+            let _ = session.evt_tx.send(InteractiveEvent::Ended {
+                reason: "disconnect".to_string(),
+            });
+            return Ok(InteractiveLoopResult::Resumed);
+        }
+    };
 
-        match cmd {
-            InteractiveCommand::Inject(text) => {
-                let msg = format!("[operator]: {text}");
-                history.push(Message::user(msg));
-                *next_prompt = Message::user(text);
-                return Ok(InteractiveLoopResult::RunOneTurn);
-            }
-            InteractiveCommand::RunTurn => {
-                return Ok(InteractiveLoopResult::RunOneTurn);
-            }
-            InteractiveCommand::Bail(reason) => {
-                let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                    reason: "bailed".to_string(),
-                });
-                return Err(ClientError::Bail {
-                    reason: format!("operator bailed: {reason}"),
-                });
-            }
-            InteractiveCommand::Quit => {
-                let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                    reason: "resumed".to_string(),
-                });
-                return Ok(InteractiveLoopResult::Resumed);
-            }
-            InteractiveCommand::Pause => {} // no-op: already paused
+    match cmd {
+        InteractiveCommand::Inject(text) => {
+            let msg = format!("[operator]: {text}");
+            history.push(Message::user(msg));
+            *next_prompt = Message::user(text);
+            Ok(InteractiveLoopResult::RunOneTurn)
+        }
+        InteractiveCommand::RunTurn => Ok(InteractiveLoopResult::RunOneTurn),
+        InteractiveCommand::Bail(reason) => {
+            let _ = session.evt_tx.send(InteractiveEvent::Ended {
+                reason: "bailed".to_string(),
+            });
+            Err(ClientError::Bail {
+                reason: format!("operator bailed: {reason}"),
+            })
+        }
+        InteractiveCommand::Quit => {
+            let _ = session.evt_tx.send(InteractiveEvent::Ended {
+                reason: "resumed".to_string(),
+            });
+            Ok(InteractiveLoopResult::Resumed)
         }
     }
 }
@@ -431,8 +434,14 @@ async fn run_agent_loop_core<M: CompletionModel>(
     mut reminder_budget: usize,
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    mut interactive: Option<InteractiveSession>,
+    interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
+    // Destructure the interactive session into its components so we can
+    // thread them independently through the loop.
+    let (mut cmd_rx, mut evt_tx, pause) = interactive
+        .map(|s| (Some(s.cmd_rx), Some(s.evt_tx), Some(s.pause)))
+        .unwrap_or((None, None, None));
+
     let original_system_prompt = system_prompt.clone();
     let mut system_prompt = system_prompt;
     let mut history: Vec<Message> = Vec::new();
@@ -461,6 +470,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
     }
 
     let mut interactive_active: bool = false;
+    let mut pending_run_one_turn: bool = false;
 
     let mut remaining_turns = max_turns;
     while remaining_turns > 0 {
@@ -474,67 +484,87 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // ── interactive turn boundary ──────────────────────────────────
         //
         // Two modes:
-        // 1. No active interactive session — try_recv for Pause.
+        // 1. No active interactive session — check pause token.
         // 2. Active interactive session (re-entering after RunOneTurn) —
         //    enter interactive_loop immediately.
-        if let Some(ref mut session) = interactive {
-            if interactive_active {
+        if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
+            if pending_run_one_turn {
+                // Came back from a mid-stream or mid-tool pause with
+                // RunOneTurn. Execute one turn, then re-enter interactive.
+                pending_run_one_turn = false;
+                interactive_active = true;
+                // Fall through to execute one turn.
+            } else if interactive_active {
                 // Re-enter interactive_loop after a RunOneTurn/Inject.
-                match interactive_loop(model, &mut history, &mut next_prompt, session, turn_num)
-                    .await
+                let mut session = InteractiveSession {
+                    cmd_rx: cmd_rx.take().unwrap(),
+                    evt_tx: evt_tx.take().unwrap(),
+                    pause: pause.clone().unwrap(),
+                };
+                match interactive_loop(
+                    model,
+                    &mut history,
+                    &mut next_prompt,
+                    &mut session,
+                    turn_num,
+                )
+                .await
                 {
                     Ok(InteractiveLoopResult::Resumed) => {
                         interactive_active = false;
                         system_prompt = original_system_prompt.clone();
+                        cmd_rx = Some(session.cmd_rx);
+                        evt_tx = Some(session.evt_tx);
                         continue;
                     }
                     Ok(InteractiveLoopResult::RunOneTurn) => {
+                        cmd_rx = Some(session.cmd_rx);
+                        evt_tx = Some(session.evt_tx);
                         // Fall through to execute one turn.
                     }
                     Err(e) => return Err(e),
                 }
-            } else {
-                // Drain pending commands with try_recv. Only Pause matters.
-                match session.cmd_rx.try_recv() {
-                    Ok(InteractiveCommand::Pause) => {
-                        // Amend system prompt with operator note.
-                        let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                        let amended_system = match &system_prompt {
-                            Some(sp) => format!("{sp}{debug_note}"),
-                            None => debug_note.trim_start().to_string(),
-                        };
-                        system_prompt = Some(amended_system);
+            } else if pause.as_ref().is_some_and(|p| p.is_paused()) {
+                // Pause token was triggered — enter interactive mode.
+                if let Some(ref p) = pause {
+                    p.reset();
+                }
 
-                        match interactive_loop(
-                            model,
-                            &mut history,
-                            &mut next_prompt,
-                            session,
-                            turn_num,
-                        )
-                        .await
-                        {
-                            Ok(InteractiveLoopResult::Resumed) => {
-                                system_prompt = original_system_prompt.clone();
-                                continue;
-                            }
-                            Ok(InteractiveLoopResult::RunOneTurn) => {
-                                interactive_active = true;
-                                // Fall through to execute one turn.
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    // Ignore non-Pause commands while idle — only Pause
-                    // enters interactive mode.
-                    Ok(InteractiveCommand::Inject(_))
-                    | Ok(InteractiveCommand::Quit)
-                    | Ok(InteractiveCommand::Bail(_))
-                    | Ok(InteractiveCommand::RunTurn) => {}
-                    Err(mpsc::error::TryRecvError::Empty) => {}
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                // Amend system prompt with operator note.
+                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                let amended_system = match &system_prompt {
+                    Some(sp) => format!("{sp}{debug_note}"),
+                    None => debug_note.trim_start().to_string(),
+                };
+                system_prompt = Some(amended_system);
+
+                let mut session = InteractiveSession {
+                    cmd_rx: cmd_rx.take().unwrap(),
+                    evt_tx: evt_tx.take().unwrap(),
+                    pause: pause.clone().unwrap(),
+                };
+                match interactive_loop(
+                    model,
+                    &mut history,
+                    &mut next_prompt,
+                    &mut session,
+                    turn_num,
+                )
+                .await
+                {
+                    Ok(InteractiveLoopResult::Resumed) => {
                         system_prompt = original_system_prompt.clone();
+                        cmd_rx = Some(session.cmd_rx);
+                        evt_tx = Some(session.evt_tx);
+                        continue;
                     }
+                    Ok(InteractiveLoopResult::RunOneTurn) => {
+                        interactive_active = true;
+                        cmd_rx = Some(session.cmd_rx);
+                        evt_tx = Some(session.evt_tx);
+                        // Fall through to execute one turn.
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -571,6 +601,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut ended = false;
         let mut turn_usage: Option<Usage> = None;
+        let mut paused_mid_stream = false;
 
         loop {
             let item = tokio::select! {
@@ -580,6 +611,62 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     return Err(ClientError::Runtime {
                         message: "cancelled".into(),
                     });
+                }
+                _ = maybe_pause(&pause) => {
+                    // Operator triggered debug — cancel the stream and enter
+                    // interactive mode. The turn will be re-executed after
+                    // the debug session ends.
+                    log::debug!("agent_loop: paused mid-stream (label={})", prefix);
+                    response.cancel();
+                    paused_mid_stream = true;
+                    if let Some(ref p) = pause {
+                        p.reset();
+                    }
+
+                    // Amend system prompt with operator note (same as turn-boundary path).
+                    let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                    let amended_system = match &system_prompt {
+                        Some(sp) => format!("{sp}{debug_note}"),
+                        None => debug_note.trim_start().to_string(),
+                    };
+                    system_prompt = Some(amended_system);
+
+                    // Enter interactive mode inline.
+                    if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
+                        let mut session = InteractiveSession {
+                            cmd_rx: cmd_rx.take().unwrap(),
+                            evt_tx: evt_tx.take().unwrap(),
+                            pause: pause.clone().unwrap(),
+                        };
+                        match interactive_loop(
+                            model,
+                            &mut history,
+                            &mut next_prompt,
+                            &mut session,
+                            turn_num,
+                        )
+                        .await
+                        {
+                            Ok(InteractiveLoopResult::Resumed) => {
+                                system_prompt = original_system_prompt.clone();
+                                cmd_rx = Some(session.cmd_rx);
+                                evt_tx = Some(session.evt_tx);
+                                interactive_active = false;
+                                // Re-build the request from the original next_prompt
+                                // (still available — the builder clones it).
+                                break; // exit the stream loop, re-enter the turn loop
+                            }
+                            Ok(InteractiveLoopResult::RunOneTurn) => {
+                                cmd_rx = Some(session.cmd_rx);
+                                evt_tx = Some(session.evt_tx);
+                                pending_run_one_turn = true;
+                                break; // exit the stream loop, execute one turn
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    // No interactive session — shouldn't happen, but continue.
+                    break;
                 }
                 timed = tokio::time::timeout(
                     Duration::from_secs_f64(idle_timeout),
@@ -617,6 +704,13 @@ async fn run_agent_loop_core<M: CompletionModel>(
             }
         }
 
+        if paused_mid_stream {
+            // Stream was interrupted by pause — skip post-stream processing.
+            // The turn loop will re-enter at the top and either continue
+            // (if Resumed) or execute one turn (if RunOneTurn).
+            continue;
+        }
+
         if timed_out || stream_error.is_some() {
             log::debug!(
                 "stream ended: timed_out={timed_out} stream_error={stream_error:?} turn={turn_num}",
@@ -638,8 +732,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // Emit TurnComplete if interactive mode is active, before text/tool_calls
         // are consumed by the rest of the turn processing.
         if interactive_active {
-            if let Some(ref session) = interactive {
-                let _ = session.evt_tx.send(InteractiveEvent::TurnComplete {
+            if let Some(ref evt_tx) = evt_tx {
+                let _ = evt_tx.send(InteractiveEvent::TurnComplete {
                     turn: turn_num,
                     text: text.clone(),
                     tool_calls: tool_calls
@@ -809,8 +903,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     ));
                 }
                 // Emit Done if interactive mode is active.
-                if let Some(ref session) = interactive {
-                    let _ = session.evt_tx.send(InteractiveEvent::Done {
+                if let Some(ref evt_tx) = evt_tx {
+                    let _ = evt_tx.send(InteractiveEvent::Done {
                         text: result_text.clone(),
                         usage: Some(usage.clone()),
                     });
@@ -925,7 +1019,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             return Ok(completed_run(Some(final_text), captured, usage));
         }
 
-        history.push(next_prompt);
+        history.push(next_prompt.clone());
         history.push(assistant_tool_message(&text, &tool_calls));
 
         // Phase 1: emit tool-start events, collect owned data for concurrent execution
@@ -963,8 +1057,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         // Phase 2: concurrent execution. Over-cap Task calls short-circuit so a
         // single response cannot spawn an unbounded number of child loops.
+        // Wrapped in a tokio::select! with maybe_pause so the operator can
+        // interrupt a long-running tool batch.
         let ctx = tool_ctx.clone();
-        let results = join_all(jobs.iter().map(|j| {
+        let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             async move {
                 if j.over_cap {
@@ -976,8 +1072,68 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     tools::invoke(&j.name, ctx, &j.args).await
                 }
             }
-        }))
-        .await;
+        }));
+
+        let results = tokio::select! {
+            results = exec_fut => results,
+            _ = maybe_pause(&pause) => {
+                // Operator triggered debug mid-tool — drop the join_all future
+                // (cancels pending tool futures). Completed tool side effects
+                // (files written, bash commands run) are not unwound.
+                log::debug!("agent_loop: paused mid-tool (label={})", prefix);
+                if let Some(ref p) = pause {
+                    p.reset();
+                }
+
+                // Pop the two messages pushed at lines 1005-1006
+                // (next_prompt + assistant_tool_message) so the turn can be
+                // re-executed cleanly without duplicate history entries.
+                history.pop(); // assistant_tool_message
+                history.pop(); // next_prompt
+
+                // Amend system prompt with operator note.
+                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                let amended_system = match &system_prompt {
+                    Some(sp) => format!("{sp}{debug_note}"),
+                    None => debug_note.trim_start().to_string(),
+                };
+                system_prompt = Some(amended_system);
+
+                // Enter interactive mode.
+                if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
+                    let mut session = InteractiveSession {
+                        cmd_rx: cmd_rx.take().unwrap(),
+                        evt_tx: evt_tx.take().unwrap(),
+                        pause: pause.clone().unwrap(),
+                    };
+                    match interactive_loop(
+                        model,
+                        &mut history,
+                        &mut next_prompt,
+                        &mut session,
+                        turn_num,
+                    )
+                    .await
+                    {
+                        Ok(InteractiveLoopResult::Resumed) => {
+                            system_prompt = original_system_prompt.clone();
+                            cmd_rx = Some(session.cmd_rx);
+                            evt_tx = Some(session.evt_tx);
+                            interactive_active = false;
+                            continue; // re-execute the turn from scratch
+                        }
+                        Ok(InteractiveLoopResult::RunOneTurn) => {
+                            cmd_rx = Some(session.cmd_rx);
+                            evt_tx = Some(session.evt_tx);
+                            pending_run_one_turn = true;
+                            continue; // re-execute the turn from scratch
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                continue;
+            }
+        };
 
         // Phase 3: emit results in order
         let mut result_msgs = Vec::new();
@@ -1342,9 +1498,11 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::interactive::InteractiveChannels;
     use http::StatusCode;
     use rig_core::message::UserContent;
     use std::collections::HashMap;
+    use tokio::sync::broadcast::error::RecvError;
 
     #[test]
     fn default_classifier() {
@@ -2665,5 +2823,436 @@ mod tests {
             task_result.contains("# Scout"),
             "task result should carry its description header, got: {task_result}"
         );
+    }
+
+    // ── PauseToken tests ───────────────────────────────────────────────
+
+    /// Regression: `pause()` between flag load and `notified().await` must
+    /// not be lost. With `notify_one` the permit is stored, so the next
+    /// `notified().await` completes immediately.
+    #[tokio::test]
+    async fn pause_token_race_regression() {
+        let token = PauseToken::new();
+
+        // Simulate the race: call paused() (which creates a Notified future
+        // but does not poll it), then pause(), then poll.
+        let paused_fut = token.paused();
+        token.pause();
+        // The flag is now true AND a permit is stored. The future must
+        // resolve immediately when polled.
+        tokio::pin!(paused_fut);
+        let result = tokio::time::timeout(Duration::from_millis(100), &mut paused_fut).await;
+        assert!(
+            result.is_ok(),
+            "paused() should resolve immediately after pause()"
+        );
+        assert!(token.is_paused());
+    }
+
+    /// `paused()` must resolve immediately when the flag is already set,
+    /// even without a stored permit.
+    #[tokio::test]
+    async fn pause_token_paused_resolves_immediately_when_flag_set() {
+        let token = PauseToken::new();
+        token.pause();
+        let result = tokio::time::timeout(Duration::from_millis(100), token.paused()).await;
+        assert!(
+            result.is_ok(),
+            "paused() should resolve immediately when flag is set"
+        );
+    }
+
+    /// After `reset()`, `is_paused()` returns false and `paused()` does not
+    /// resolve (it stays pending).
+    #[tokio::test]
+    async fn pause_token_reset_clears_flag() {
+        let token = PauseToken::new();
+        token.pause();
+        assert!(token.is_paused());
+        token.reset();
+        assert!(!token.is_paused());
+        // paused() should not resolve — it stays pending.
+        let result = tokio::time::timeout(Duration::from_millis(50), token.paused()).await;
+        assert!(result.is_err(), "paused() should stay pending after reset");
+    }
+
+    /// Multiple pause/reset cycles work correctly.
+    #[tokio::test]
+    async fn pause_token_multiple_cycles() {
+        let token = PauseToken::new();
+        for _ in 0..3 {
+            token.pause();
+            assert!(token.is_paused());
+            let result = tokio::time::timeout(Duration::from_millis(100), token.paused()).await;
+            assert!(result.is_ok());
+            token.reset();
+            assert!(!token.is_paused());
+        }
+    }
+
+    // ── Interactive session tests ───────────────────────────────────────
+
+    /// Helper: build a minimal ToolContext for interactive tests.
+    fn test_tool_ctx() -> ToolContext {
+        ToolContext {
+            cwd: None,
+            extra_env: None,
+            base_env: None,
+            allowed_roots: vec![],
+            audit_log: None,
+            allowed_tools: None,
+            task_fn: None,
+            audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
+        }
+    }
+
+    /// Pause at turn boundary: the agent loop checks `pause.is_paused()`
+    /// before making the API call, enters interactive mode, broadcasts
+    /// Ready, and waits for a command.
+    #[tokio::test]
+    async fn interactive_pause_at_turn_boundary_broadcasts_ready() {
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        // Pre-set the pause token so the agent enters interactive mode
+        // at the turn boundary before the first API call.
+        handle.pause.pause();
+
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let tool_ctx = test_tool_ctx();
+        let tool_defs = vec![];
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+
+        // Spawn the agent loop — it will enter interactive mode and block.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let agent = tokio::spawn(async move {
+            run_agent_loop_core(
+                &model,
+                "hi",
+                None,
+                &tool_ctx,
+                &tool_defs,
+                &cancel,
+                &opts,
+                "[t] ",
+                10,
+                5.0,
+                &mut None,
+                &mut None,
+                true,
+                &[],
+                0,
+                0,
+                &None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    Ok(InteractiveEvent::Ended { .. }) => return false,
+                    Err(RecvError::Closed) => return false,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ready, "agent should broadcast Ready when paused");
+
+        // Send Quit to resume.
+        let _ = handle.cmd_tx.send(InteractiveCommand::Quit).await;
+
+        // Agent should complete normally.
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("ok"));
+    }
+
+    /// Inject a message during interactive mode, verify the agent processes
+    /// it, emits TurnComplete, then Quit resumes normal operation.
+    #[tokio::test]
+    async fn interactive_inject_then_run_turn_then_quit() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-int-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        handle.pause.pause();
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let mut tool_ctx = test_tool_ctx();
+        tool_ctx.allowed_roots = vec![dir.clone()];
+        let tool_defs = tools::tool_definitions(None);
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+
+        // Turn 1 (Inject): Write tool call so agent continues.
+        // Turn 2 (Quit): Done call to finish.
+        let target = dir.join("out.txt");
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("got it"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Write",
+                    serde_json::json!({
+                        "file_path": target.to_str().unwrap(),
+                        "content": "hello"
+                    }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("all done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let agent = tokio::spawn(async move {
+            run_agent_loop_core(
+                &model,
+                "hi",
+                None,
+                &tool_ctx,
+                &tool_defs,
+                &cancel,
+                &opts,
+                "[t] ",
+                10,
+                5.0,
+                &mut None,
+                &mut None,
+                true,
+                &[],
+                0,
+                0,
+                &None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ready);
+
+        // Inject a message.
+        let _ = handle
+            .cmd_tx
+            .send(InteractiveCommand::Inject("look at this".into()))
+            .await;
+
+        // Wait for TurnComplete.
+        let tc = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::TurnComplete { .. }) => return true,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(tc, "should get TurnComplete after Inject");
+
+        // Quit — agent resumes normal operation and completes.
+        let _ = handle.cmd_tx.send(InteractiveCommand::Quit).await;
+
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("all done"));
+    }
+
+    /// Bail during interactive mode terminates the agent loop.
+    #[tokio::test]
+    async fn interactive_bail_terminates_agent() {
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        handle.pause.pause();
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let tool_ctx = test_tool_ctx();
+        let tool_defs = vec![];
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let agent = tokio::spawn(async move {
+            run_agent_loop_core(
+                &model,
+                "hi",
+                None,
+                &tool_ctx,
+                &tool_defs,
+                &cancel,
+                &opts,
+                "[t] ",
+                10,
+                5.0,
+                &mut None,
+                &mut None,
+                true,
+                &[],
+                0,
+                0,
+                &None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ready);
+
+        // Bail.
+        let _ = handle
+            .cmd_tx
+            .send(InteractiveCommand::Bail("test bail".into()))
+            .await;
+
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap();
+        match result {
+            Err(ClientError::Bail { reason }) => {
+                assert!(reason.contains("test bail"));
+            }
+            other => panic!("expected Bail, got {other:?}"),
+        }
+    }
+
+    /// When the cmd_tx sender is dropped (simulating supervisor disconnect),
+    /// the interactive loop returns Resumed gracefully.
+    #[tokio::test]
+    async fn interactive_cmd_tx_drop_resumes_gracefully() {
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        handle.pause.pause();
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let tool_ctx = test_tool_ctx();
+        let tool_defs = vec![];
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let agent = tokio::spawn(async move {
+            run_agent_loop_core(
+                &model,
+                "hi",
+                None,
+                &tool_ctx,
+                &tool_defs,
+                &cancel,
+                &opts,
+                "[t] ",
+                10,
+                5.0,
+                &mut None,
+                &mut None,
+                true,
+                &[],
+                0,
+                0,
+                &None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ready);
+
+        // Drop the handle's cmd_tx to simulate disconnect.
+        drop(handle);
+
+        // Agent should resume and complete normally.
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("ok"));
     }
 }
