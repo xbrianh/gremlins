@@ -378,6 +378,25 @@ pub(crate) fn copilot_github_token() -> Option<String> {
         })
 }
 
+/// Copilot OAuth token auto-discovered from the Copilot extension's
+/// `apps.json` (e.g. `~/.config/github-copilot/apps.json`).
+pub(crate) fn copilot_oauth_token() -> Option<String> {
+    // Copilot uses XDG config convention on all platforms.
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(home_dir().join(".config")))?;
+    let apps_path = config_dir.join("github-copilot").join("apps.json");
+    let content = std::fs::read_to_string(&apps_path).ok()?;
+    let apps: serde_json::Value = serde_json::from_str(&content).ok()?;
+    // Return the oauth_token from the first entry.
+    apps.as_object()?
+        .values()
+        .find_map(|v| v.get("oauth_token")?.as_str().map(String::from))
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// GREMLINS_TELEMETRY — "1" or "true" enables per-turn telemetry logging.
 pub(crate) fn telemetry_enabled() -> bool {
     std::env::var("GREMLINS_TELEMETRY")
@@ -621,7 +640,8 @@ pub fn scratch_root(gremlin_id: Option<&str>) -> PathBuf {
 /// Parsed content of providers.json.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ApiKeys {
-    keys: HashMap<String, String>,
+    api_keys: HashMap<String, String>,
+    pats: HashMap<String, String>,
 }
 
 impl ApiKeys {
@@ -629,7 +649,7 @@ impl ApiKeys {
     pub(crate) fn load() -> Self {
         let path = user_config_root().join("providers.json");
         match parse_api_keys(&path) {
-            Ok(keys) => ApiKeys { keys },
+            Ok((api_keys, pats)) => ApiKeys { api_keys, pats },
             Err(e) => {
                 if !matches!(&e, ApiKeysError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound)
                 {
@@ -642,37 +662,54 @@ impl ApiKeys {
 
     /// Get the API key for a provider name (e.g. "openai", "xai").
     pub(crate) fn get(&self, provider: &str) -> Option<&str> {
-        self.keys
+        self.api_keys
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Get the PAT (personal access token) for a provider name.
+    pub(crate) fn pat(&self, provider: &str) -> Option<&str> {
+        self.pats
             .get(provider)
             .map(|s| s.as_str())
             .filter(|s| !s.trim().is_empty())
     }
 }
 
-fn parse_api_keys(path: &Path) -> Result<HashMap<String, String>, ApiKeysError> {
+type ParsedApiKeys = (HashMap<String, String>, HashMap<String, String>);
+
+fn parse_api_keys(path: &Path) -> Result<ParsedApiKeys, ApiKeysError> {
     let content = std::fs::read_to_string(path)?;
     let value: serde_json::Value = serde_json::from_str(&content)?;
     let obj = value.as_object().ok_or(ApiKeysError::NotAnObject)?;
-    let mut keys = HashMap::new();
+    let mut api_keys = HashMap::new();
+    let mut pats = HashMap::new();
     for (k, v) in obj {
         match v.as_object() {
             Some(obj) => {
                 if let Some(api_key) = obj.get("api-key").and_then(|v| v.as_str()) {
                     if !api_key.trim().is_empty() {
-                        keys.insert(k.clone(), api_key.to_string());
+                        api_keys.insert(k.clone(), api_key.to_string());
                     }
-                } else {
-                    warn!("providers.json entry {k:?} missing string \"api-key\" field — skipping");
+                }
+                if let Some(pat) = obj.get("pat").and_then(|v| v.as_str()) {
+                    if !pat.trim().is_empty() {
+                        pats.insert(k.clone(), pat.to_string());
+                    }
+                }
+                if !api_keys.contains_key(k) && !pats.contains_key(k) {
+                    warn!("providers.json entry {k:?} has no non-empty \"api-key\" or \"pat\" field — skipping");
                 }
             }
             None => {
                 warn!(
-                    "providers.json entry {k:?} value must be an object with \"api-key\" — skipping"
+                    "providers.json entry {k:?} value must be an object with \"api-key\" or \"pat\" — skipping"
                 );
             }
         }
     }
-    Ok(keys)
+    Ok((api_keys, pats))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -694,6 +731,12 @@ pub fn api_key(env_var_name: &str, provider_name: &str) -> Option<String> {
         }
     }
     ApiKeys::load().get(provider_name).map(|s| s.to_string())
+}
+
+/// Resolve a PAT (personal access token) for `provider` from
+/// `providers.json`. Returns None if not set.
+pub(crate) fn pat(provider_name: &str) -> Option<String> {
+    ApiKeys::load().pat(provider_name).map(|s| s.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1142,6 +1185,37 @@ mod tests {
         let _sandbox = Sandbox::with_providers(r#"{"foo": "bar"}"#);
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
+    }
+
+    #[test]
+    fn test_api_keys_pat_field() {
+        let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": "ghp_test_token"}}"#);
+        let keys = ApiKeys::load();
+        assert!(keys.get("copilot").is_none());
+        assert_eq!(keys.pat("copilot"), Some("ghp_test_token"));
+    }
+
+    #[test]
+    fn test_api_keys_pat_empty_ignored() {
+        let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": ""}}"#);
+        let keys = ApiKeys::load();
+        assert!(keys.pat("copilot").is_none());
+    }
+
+    #[test]
+    fn test_api_keys_pat_whitespace_ignored() {
+        let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": "   "}}"#);
+        let keys = ApiKeys::load();
+        assert!(keys.pat("copilot").is_none());
+    }
+
+    #[test]
+    fn test_api_keys_both_api_key_and_pat() {
+        let _sandbox =
+            Sandbox::with_providers(r#"{"copilot": {"api-key": "sk-fake", "pat": "ghp_fake"}}"#);
+        let keys = ApiKeys::load();
+        assert_eq!(keys.get("copilot"), Some("sk-fake"));
+        assert_eq!(keys.pat("copilot"), Some("ghp_fake"));
     }
 
     // -----------------------------------------------------------------------
