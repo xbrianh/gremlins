@@ -358,7 +358,7 @@ pub(super) fn task_model_selector(
 /// `("openai", "gpt-4o")`.  OpenRouter model IDs that carry colon suffixes
 /// like `:free` or `:online` are preserved — `openrouter:some/model:free`
 /// yields `("openrouter", "some/model:free")`.
-fn provider_and_model(spec: &str) -> Option<(&str, &str)> {
+pub(crate) fn provider_and_model(spec: &str) -> Option<(&str, &str)> {
     let (provider, rest) = spec.split_once(':')?;
     if provider.is_empty() || rest.is_empty() {
         return None;

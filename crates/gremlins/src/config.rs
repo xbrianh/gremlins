@@ -354,6 +354,30 @@ pub(crate) fn reasoning_effort() -> Option<String> {
     std::env::var("GREMLINS_REASONING_EFFORT").ok()
 }
 
+/// Copilot API key: `GITHUB_COPILOT_API_KEY` then `COPILOT_API_KEY`.
+pub(crate) fn copilot_api_key() -> Option<String> {
+    std::env::var("GITHUB_COPILOT_API_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("COPILOT_API_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+}
+
+/// Copilot GitHub token: `COPILOT_GITHUB_ACCESS_TOKEN` then `GITHUB_TOKEN`.
+pub(crate) fn copilot_github_token() -> Option<String> {
+    std::env::var("COPILOT_GITHUB_ACCESS_TOKEN")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("GITHUB_TOKEN")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+}
+
 /// GREMLINS_TELEMETRY — "1" or "true" enables per-turn telemetry logging.
 pub(crate) fn telemetry_enabled() -> bool {
     std::env::var("GREMLINS_TELEMETRY")

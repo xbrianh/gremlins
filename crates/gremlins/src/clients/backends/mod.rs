@@ -40,6 +40,7 @@ macro_rules! backends {
 
 backends! {
     cmd: "cmd" => cmd::CmdBackend::build,
+    copilot: "copilot" => copilot::CopilotBackend::build,
     openai: "openai" => openai::OpenAiBackend::build,
     xai: "xai" => xai::XaiBackend::build,
     openrouter: "openrouter" => openrouter::OpenRouterBackend::build,
