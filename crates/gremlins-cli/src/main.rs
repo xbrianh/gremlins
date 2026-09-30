@@ -688,12 +688,86 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     let request = serde_json::json!({"op": "debug", "id": id});
     socket::write_json_line(&mut stream, &request).await?;
 
+    eprintln!("debug: waiting for agent to pause…");
+
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(read_half);
 
-    // Wait for debug_ready.
+    // Spawn a blocking stdin reader thread so we can watch for /quit
+    // during the ready-wait phase without blocking the async runtime.
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut line_buf = String::new();
+        loop {
+            line_buf.clear();
+            match std::io::BufRead::read_line(&mut stdin.lock(), &mut line_buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line_buf.trim().to_string();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if stdin_tx.send(trimmed).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Wait for debug_ready, but also watch for /quit from stdin.
+    // Use a channel-based socket reader so the read future is never
+    // dropped when stdin input wins the select — no buffered data is lost.
+    let (sock_tx, mut sock_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<Option<Value>, String>>();
+    tokio::spawn(async move {
+        loop {
+            let result = socket::read_json_line(&mut reader).await;
+            let done = result.as_ref().ok().is_none_or(|o| o.is_none());
+            let _ = sock_tx.send(result);
+            if done {
+                break;
+            }
+        }
+    });
+
+    let mut stdin_closed = false;
     loop {
-        let line = socket::read_json_line(&mut reader).await?;
+        let line = if stdin_closed {
+            match sock_rx.recv().await {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return Err(e),
+                None => return Err("connection closed before debug_ready".to_string()),
+            }
+        } else {
+            tokio::select! {
+                sock_result = sock_rx.recv() => {
+                    match sock_result {
+                        Some(Ok(v)) => v,
+                        Some(Err(e)) => return Err(e),
+                        None => return Err("connection closed before debug_ready".to_string()),
+                    }
+                }
+                stdin_line = stdin_rx.recv() => {
+                    match stdin_line {
+                        Some(l) if l == "/quit" => {
+                            let cmd = serde_json::json!({"op": "quit"});
+                            let _ = socket::write_json_line(&mut write_half, &cmd).await;
+                            eprintln!("debug: cancelled");
+                            return Ok(());
+                        }
+                        Some(_) => continue, // discard other input during wait
+                        None => {
+                            stdin_closed = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+        };
+
         match line {
             Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("error") => {
                 let msg = l
@@ -711,54 +785,56 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
         }
     }
 
-    // Spawn a reader task to print agent events.
+    // Tail the last ~20 lines of the gremlin log for immediate context.
+    // Read only the tail of the file (append-only log, no rotation) so
+    // startup time and memory stay bounded regardless of log length.
+    let log_path = config::state_root().join(id).join("log");
+    if let Ok(lines) = tail_log_lines(&log_path, 20).await {
+        for line in &lines {
+            eprintln!("log: {line}");
+        }
+    }
+
+    // Drain any stdin lines queued during the ready-wait phase so they
+    // don't leak into the active-session loop as spurious commands.
+    while stdin_rx.try_recv().is_ok() {}
+
+    // Spawn a reader task to print agent events from the socket channel.
     let read_handle = tokio::spawn(async move {
-        loop {
-            match socket::read_json_line(&mut reader).await {
-                Ok(Some(line)) => {
-                    let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    match typ {
-                        "debug_turn_complete" => {
-                            eprintln!("debug: turn complete — agent paused");
-                        }
-                        "debug_done" => {
-                            eprintln!("debug: agent called Done");
-                        }
-                        "debug_ended" => {
-                            let reason = line.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                            eprintln!("debug: session ended ({reason})");
-                            break;
-                        }
-                        "error" => {
-                            let msg = line.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                            eprintln!("debug: error: {msg}");
-                            break;
-                        }
-                        _ => {}
-                    }
+        while let Some(Ok(Some(line))) = sock_rx.recv().await {
+            let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match typ {
+                "debug_turn_complete" => {
+                    eprintln!("debug: turn complete — agent paused");
                 }
-                Ok(None) => break,
-                Err(_) => break,
+                "debug_done" => {
+                    eprintln!("debug: agent called Done");
+                }
+                "debug_ended" => {
+                    let reason = line.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                    eprintln!("debug: session ended ({reason})");
+                    break;
+                }
+                "error" => {
+                    let msg = line.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    eprintln!("debug: error: {msg}");
+                    break;
+                }
+                _ => {}
             }
         }
     });
 
-    // Read stdin lines and forward to the socket.
-    let stdin = std::io::stdin();
-    let mut line_buf = String::new();
+    // Read stdin lines from the channel and forward to the socket.
     loop {
-        line_buf.clear();
-        let n = std::io::BufRead::read_line(&mut stdin.lock(), &mut line_buf)
-            .map_err(|e| format!("stdin: {e}"))?;
-        if n == 0 {
-            let cmd = serde_json::json!({"op": "quit"});
-            socket::write_json_line(&mut write_half, &cmd).await?;
-            break;
-        }
-        let trimmed = line_buf.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+        let trimmed = match stdin_rx.recv().await {
+            Some(line) => line,
+            None => {
+                let cmd = serde_json::json!({"op": "quit"});
+                socket::write_json_line(&mut write_half, &cmd).await?;
+                break;
+            }
+        };
 
         let cmd = if trimmed == "/continue" {
             serde_json::json!({"op": "continue"})
@@ -1251,4 +1327,56 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
         map.insert(key.to_string(), value);
     }
     Ok(map)
+}
+
+/// Read the last `n` lines from a file without loading the entire file.
+/// Reads backwards in chunks, so cost is O(n) not O(file_size).
+async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut f = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("open log: {e}"))?;
+
+    let file_len = f
+        .metadata()
+        .await
+        .map_err(|e| format!("stat log: {e}"))?
+        .len();
+
+    if file_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Read the last chunk (up to 8 KiB) from the end of the file.
+    let chunk_size = 8192usize.min(file_len as usize);
+    let mut buf = vec![0u8; chunk_size];
+    f.seek(std::io::SeekFrom::End(-(chunk_size as i64)))
+        .await
+        .map_err(|e| format!("seek log: {e}"))?;
+    f.read_exact(&mut buf)
+        .await
+        .map_err(|e| format!("read log tail: {e}"))?;
+
+    // If the chunk doesn't start at a line boundary, skip the partial first line.
+    let start = if file_len > chunk_size as u64 {
+        // We didn't read from the beginning, so the first byte may be mid-line.
+        // Skip to the first newline.
+        buf.iter()
+            .position(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let text = std::str::from_utf8(&buf[start..]).map_err(|e| format!("utf-8: {e}"))?;
+    let all_lines: Vec<&str> = text.lines().collect();
+    let keep = if all_lines.len() > n {
+        &all_lines[all_lines.len() - n..]
+    } else {
+        &all_lines
+    };
+
+    Ok(keep.iter().map(|s| s.to_string()).collect())
 }
