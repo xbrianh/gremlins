@@ -169,7 +169,11 @@ impl GremlinsDaemonLock {
     /// The daemon is started in a separate process group so that
     /// terminal signals (Ctrl‑C) sent to the CLI do not kill the
     /// executor and all hosted gremlins.
-    pub fn spawn_daemon(&self) -> Result<(), String> {
+    ///
+    /// Returns the child handle with piped stdout and stderr. The
+    /// daemon prints `ready` to stdout after binding the socket; the
+    /// caller reads this line as a deterministic readiness signal.
+    pub fn spawn_daemon(&self) -> Result<std::process::Child, String> {
         let safe_fd = self.handoff_fd()?;
 
         let current_exe =
@@ -178,8 +182,8 @@ impl GremlinsDaemonLock {
         let mut cmd = std::process::Command::new(current_exe);
         cmd.arg("serve").arg(safe_fd.to_string());
         cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
         #[cfg(unix)]
         {
@@ -187,7 +191,8 @@ impl GremlinsDaemonLock {
             cmd.process_group(0);
         }
 
-        cmd.spawn()
+        let child = cmd
+            .spawn()
             .map_err(|e| format!("failed to spawn executor daemon: {e}"))?;
 
         // The daemon now holds the lock via the dup'd fd referring to
@@ -198,7 +203,7 @@ impl GremlinsDaemonLock {
         // is never released.
         drop(unsafe { std::fs::File::from_raw_fd(safe_fd) });
 
-        Ok(())
+        Ok(child)
     }
 }
 
