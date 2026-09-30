@@ -63,6 +63,11 @@ enum Cmds {
         /// Gremlin id whose log to follow.
         id: String,
     },
+    /// Interactively debug a running gremlin in an agent stage.
+    Debug {
+        /// Gremlin id to debug.
+        id: String,
+    },
     /// Remove a gremlin's filesystem assets.
     Clean {
         /// Gremlin id to clean.
@@ -107,6 +112,7 @@ async fn main() {
         Some(Cmds::Stop { id }) => stop(&id).await,
         Some(Cmds::Resume { id }) => resume(&id).await,
         Some(Cmds::Log { id }) => log_gremlin(&id).await,
+        Some(Cmds::Debug { id }) => debug_gremlin(&id).await,
         Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
         Some(Cmds::Rm { id }) => rm(&id).await,
         Some(Cmds::Land { id }) => land(&id).await,
@@ -654,6 +660,123 @@ async fn log_gremlin(id: &str) -> Result<(), String> {
             println!("{text}");
         }
     }
+
+    Ok(())
+}
+
+/// Interactive debug session for a running gremlin.
+///
+/// Connects to the executor socket, sends `{"op": "debug", "id": "..."}`,
+/// and enters an interactive line-based loop. Plain text becomes `{"op": "talk", "text": "..."}`.
+/// Slash commands: `/continue`, `/bail <reason>`, `/quit`.
+async fn debug_gremlin(id: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    let mut stream = match spawn::connect().await {
+        Ok(s) => s,
+        Err(_) => {
+            return Err("no executor running — start one with `gremlins launch ...`".to_string())
+        }
+    };
+
+    let request = serde_json::json!({"op": "debug", "id": id});
+    socket::write_json_line(&mut stream, &request).await?;
+
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(read_half);
+
+    // Wait for debug_ready.
+    loop {
+        let line = socket::read_json_line(&mut reader).await?;
+        match line {
+            Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("error") => {
+                let msg = l
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                return Err(msg.to_string());
+            }
+            Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("debug_ready") => {
+                eprintln!("debug: connected to gremlin {id}");
+                break;
+            }
+            Some(_) => continue,
+            None => return Err("connection closed before debug_ready".to_string()),
+        }
+    }
+
+    // Spawn a reader task to print agent events.
+    let read_handle = tokio::spawn(async move {
+        loop {
+            match socket::read_json_line(&mut reader).await {
+                Ok(Some(line)) => {
+                    let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match typ {
+                        "debug_turn_complete" => {
+                            eprintln!("debug: turn complete — agent paused");
+                        }
+                        "debug_paused" => {
+                            eprintln!("debug: agent paused");
+                        }
+                        "debug_ended" => {
+                            let reason = line.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                            eprintln!("debug: session ended ({reason})");
+                            break;
+                        }
+                        "error" => {
+                            let msg = line.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                            eprintln!("debug: error: {msg}");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Read stdin lines and forward to the socket.
+    let stdin = std::io::stdin();
+    let mut line_buf = String::new();
+    loop {
+        line_buf.clear();
+        let n = std::io::BufRead::read_line(&mut stdin.lock(), &mut line_buf)
+            .map_err(|e| format!("stdin: {e}"))?;
+        if n == 0 {
+            let cmd = serde_json::json!({"op": "quit"});
+            socket::write_json_line(&mut write_half, &cmd).await?;
+            break;
+        }
+        let trimmed = line_buf.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let cmd = if let Some(_rest) = trimmed.strip_prefix("/continue") {
+            serde_json::json!({"op": "continue"})
+        } else if let Some(rest) = trimmed.strip_prefix("/bail") {
+            let reason = rest.trim();
+            serde_json::json!({"op": "bail", "reason": if reason.is_empty() { "operator bailed" } else { reason }})
+        } else if trimmed == "/quit" {
+            serde_json::json!({"op": "quit"})
+        } else {
+            serde_json::json!({"op": "talk", "text": trimmed})
+        };
+
+        let is_quit = trimmed == "/quit";
+        socket::write_json_line(&mut write_half, &cmd).await?;
+        if is_quit {
+            break;
+        }
+    }
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), read_handle).await;
 
     Ok(())
 }

@@ -18,6 +18,7 @@ use super::backend::{ClientError, RunParams};
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
+use crate::executor::debug::{DebugCommand, DebugEvent, DebugResult};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
@@ -225,6 +226,8 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
         &ctx.params.log_tx,
+        None,
+        None,
     )
     .await
 }
@@ -277,6 +280,8 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         0,
         completion_nudge_budget,
         &log_tx,
+        None,
+        None,
     )
     .await;
     log::info!("{prefix}task: end");
@@ -284,6 +289,129 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         let _ = tx.send(format!("{prefix}task: end"));
     }
     result
+}
+
+// ── debug loop ────────────────────────────────────────────────────────────
+
+/// Interactive debug state machine. Called when the operator sends `Pause`.
+#[allow(clippy::too_many_arguments)]
+async fn debug_loop<M: CompletionModel>(
+    model: &M,
+    history: &mut Vec<Message>,
+    next_prompt: &mut Message,
+    system_prompt: &str,
+    tool_ctx: &ToolContext,
+    tool_defs: &[ToolDefinition],
+    cancel: &CancelToken,
+    opts: &LoopOpts<'_>,
+    prefix: &str,
+    max_turns: usize,
+    idle_timeout: f64,
+    raw: &mut Option<std::fs::File>,
+    captured: &mut Option<Vec<serde_json::Value>>,
+    nested: bool,
+    expected_artifact_paths: &[PathBuf],
+    reminder_budget: &mut usize,
+    completion_nudge_budget: &mut usize,
+    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<DebugCommand>,
+    evt_tx: &Option<tokio::sync::broadcast::Sender<DebugEvent>>,
+) -> DebugResult {
+    if let Some(tx) = evt_tx {
+        let _ = tx.send(DebugEvent::Ready);
+    }
+
+    loop {
+        let cmd = match cmd_rx.recv().await {
+            Some(cmd) => cmd,
+            None => {
+                if let Some(tx) = evt_tx {
+                    let _ = tx.send(DebugEvent::Ended {
+                        reason: "resumed".to_string(),
+                    });
+                }
+                return DebugResult::Resumed;
+            }
+        };
+
+        match cmd {
+            DebugCommand::Talk(text) => {
+                let msg = format!("[operator]: {text}");
+                history.push(Message::user(msg));
+                *next_prompt = Message::user(text);
+
+                let result = Box::pin(run_agent_loop_core(
+                    model,
+                    &next_prompt_text(next_prompt),
+                    Some(system_prompt.to_string()),
+                    tool_ctx,
+                    tool_defs,
+                    cancel,
+                    opts,
+                    prefix,
+                    max_turns,
+                    idle_timeout,
+                    raw,
+                    captured,
+                    nested,
+                    expected_artifact_paths,
+                    *reminder_budget,
+                    *completion_nudge_budget,
+                    log_tx,
+                    None,
+                    None,
+                ))
+                .await;
+
+                if let Ok(completed) = result {
+                    if let Some(ref text) = completed.text_result {
+                        history.push(Message::assistant(text.clone()));
+                    }
+                }
+
+                if let Some(tx) = evt_tx {
+                    let _ = tx.send(DebugEvent::TurnComplete);
+                }
+            }
+            DebugCommand::Continue => {
+                if let Some(tx) = evt_tx {
+                    let _ = tx.send(DebugEvent::Paused);
+                }
+                return DebugResult::RunOneTurn;
+            }
+            DebugCommand::Bail(reason) => {
+                if let Some(tx) = evt_tx {
+                    let _ = tx.send(DebugEvent::Ended {
+                        reason: "bailed".to_string(),
+                    });
+                }
+                return DebugResult::Bailed(reason);
+            }
+            DebugCommand::Quit => {
+                if let Some(tx) = evt_tx {
+                    let _ = tx.send(DebugEvent::Ended {
+                        reason: "resumed".to_string(),
+                    });
+                }
+                return DebugResult::Resumed;
+            }
+            DebugCommand::Pause => {}
+        }
+    }
+}
+
+fn next_prompt_text(msg: &Message) -> String {
+    match msg {
+        Message::User { content } => content
+            .iter()
+            .filter_map(|c| match c {
+                rig_core::completion::message::UserContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    }
 }
 
 // ── helpers for completion-decision bookkeeping ───────────────────────────
@@ -361,6 +489,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
     mut reminder_budget: usize,
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    mut debug_cmd_rx: Option<tokio::sync::mpsc::Receiver<DebugCommand>>,
+    debug_evt_tx: Option<tokio::sync::broadcast::Sender<DebugEvent>>,
 ) -> Result<CompletedRun, ClientError> {
     let mut history: Vec<Message> = Vec::new();
     let mut next_prompt = Message::user(prompt.to_string());
@@ -393,6 +523,69 @@ async fn run_agent_loop_core<M: CompletionModel>(
             return Err(ClientError::Runtime {
                 message: "cancelled".into(),
             });
+        }
+
+        // ── debug turn boundary ──────────────────────────────────────────
+        if let Some(mut rx) = debug_cmd_rx.take() {
+            match rx.try_recv() {
+                Ok(DebugCommand::Pause) => {
+                    // Amend system prompt with operator note.
+                    let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                    let amended_system = match &system_prompt {
+                        Some(sp) => format!("{sp}{debug_note}"),
+                        None => debug_note.trim_start().to_string(),
+                    };
+
+                    match debug_loop(
+                        model,
+                        &mut history,
+                        &mut next_prompt,
+                        &amended_system,
+                        tool_ctx,
+                        tool_defs,
+                        cancel,
+                        opts,
+                        prefix,
+                        max_turns,
+                        idle_timeout,
+                        raw,
+                        captured,
+                        nested,
+                        expected_artifact_paths,
+                        &mut reminder_budget,
+                        &mut completion_nudge_budget,
+                        log_tx,
+                        &mut rx,
+                        &debug_evt_tx,
+                    )
+                    .await
+                    {
+                        DebugResult::Resumed => {
+                            continue;
+                        }
+                        DebugResult::RunOneTurn => {
+                            debug_cmd_rx = Some(rx);
+                        }
+                        DebugResult::Bailed(reason) => {
+                            return Err(ClientError::Runtime {
+                                message: format!("operator bailed: {reason}"),
+                            });
+                        }
+                    }
+                }
+                Ok(DebugCommand::Talk(text)) => {
+                    let msg = format!("[operator]: {text}");
+                    history.push(Message::user(msg));
+                    debug_cmd_rx = Some(rx);
+                }
+                Ok(DebugCommand::Quit) | Ok(DebugCommand::Bail(_)) | Ok(DebugCommand::Continue) => {
+                    debug_cmd_rx = Some(rx);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    debug_cmd_rx = Some(rx);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {}
+            }
         }
 
         // Snapshot before request construction so TTFT includes connection /
@@ -1330,6 +1523,8 @@ mod tests {
                 task_clients_exact: HashMap::new(),
                 task_clients_prefix: HashMap::new(),
                 cancel_token: None,
+                debug_cmd_rx: None,
+                debug_evt_tx: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,

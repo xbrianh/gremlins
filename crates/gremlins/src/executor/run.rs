@@ -380,6 +380,8 @@ async fn run_agent(
         task_clients_exact: gremlin.runtime_config.task_clients_exact.clone(),
         task_clients_prefix: gremlin.runtime_config.task_clients_prefix.clone(),
         cancel_token: gremlin.cancel_token.clone(),
+        debug_cmd_rx: gremlin.runtime_config.debug_cmd_rx.take(),
+        debug_evt_tx: gremlin.runtime_config.debug_evt_tx.clone(),
     };
 
     log::debug!(
