@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Map, Value};
@@ -29,12 +30,43 @@ use crate::executor::state;
 
 pub(crate) struct RunHandle {
     pub cancel: Arc<CancelToken>,
+    pub task: Option<tokio::task::JoinHandle<()>>,
+    pub aborted: Arc<AtomicBool>,
     #[allow(dead_code)]
     pub state_tx: watch::Sender<RunState>,
     /// Broadcast sender for live log subscribers (Op::Log with follow:true).
     pub log_broadcast: broadcast::Sender<String>,
     /// Interactive handle (supervisor → agent loop).
     pub interactive: InteractiveHandle,
+}
+
+impl RunHandle {
+    /// Post-run cleanup: remove from run_map, broadcast terminal state,
+    /// optionally signal shutdown when the run map empties.
+    fn finish(
+        id: &str,
+        result: i32,
+        state_tx: &watch::Sender<RunState>,
+        shutdown_tx: Option<&watch::Sender<bool>>,
+    ) {
+        let run_map = get_run_map();
+        let is_empty = {
+            let mut map = run_map.lock().unwrap();
+            map.remove(id);
+            map.is_empty()
+        };
+        let _ = state_tx.send(RunState {
+            id: id.to_string(),
+            status: if result == 0 { "done" } else { "stopped" }.to_string(),
+            stage: String::new(),
+            started_at: String::new(),
+        });
+        if is_empty {
+            if let Some(tx) = shutdown_tx {
+                let _ = tx.send(true);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -167,7 +199,7 @@ async fn dispatch_op(
             DispatchOutcome::Continue
         }
         "stop" => {
-            let resp = handle_stop(request).await;
+            let resp = handle_stop(request, shutdown_tx).await;
             let _ = socket::write_json_line(write_half, &resp).await;
             DispatchOutcome::Continue
         }
@@ -361,13 +393,16 @@ async fn handle_launch(
         started_at: state::now_stamp(),
     });
 
-    let run_map = get_run_map().clone();
     let id_clone = id.clone();
     let state_tx_clone = state_tx.clone();
     let shutdown_tx_clone = shutdown_tx.clone();
 
+    let aborted = Arc::new(AtomicBool::new(false));
+
     let handle = RunHandle {
         cancel: cancel_token.clone(),
+        task: None,
+        aborted: aborted.clone(),
         state_tx,
         log_broadcast,
         interactive: interactive_handle,
@@ -378,19 +413,15 @@ async fn handle_launch(
     // to the backend.
     gremlin.cancel_token = Some(cancel_token);
 
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         let (result, _registry) = run_gremlin_task(gremlin, None).await;
-        run_map.lock().unwrap().remove(&id_clone);
-        let _ = state_tx_clone.send(RunState {
-            id: id_clone.clone(),
-            status: if result == 0 { "done" } else { "stopped" }.to_string(),
-            stage: String::new(),
-            started_at: String::new(),
-        });
-        if run_map.lock().unwrap().is_empty() {
-            let _ = shutdown_tx_clone.send(true);
+        if !aborted.load(Ordering::Relaxed) {
+            RunHandle::finish(&id_clone, result, &state_tx_clone, Some(&shutdown_tx_clone));
         }
     });
+
+    // Store the JoinHandle so handle_stop can abort the task.
+    get_run_map().lock().unwrap().get_mut(&id[..]).unwrap().task = Some(join_handle);
 
     ok_response(serde_json::json!({"id": id}))
 }
@@ -399,7 +430,7 @@ async fn handle_launch(
 // stop
 // ---------------------------------------------------------------------------
 
-async fn handle_stop(request: &Value) -> Value {
+async fn handle_stop(request: &Value, shutdown_tx: &watch::Sender<bool>) -> Value {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
         return error_response("missing 'id' field");
@@ -410,45 +441,53 @@ async fn handle_stop(request: &Value) -> Value {
     }
 
     let run_map = get_run_map();
-    let map = run_map.lock().unwrap();
-    match map.get(id) {
-        Some(handle) => {
+
+    // Check the run_map for a live handle.
+    {
+        let map = run_map.lock().unwrap();
+        if let Some(handle) = map.get(id) {
             handle.cancel.cancel();
-            ok_response(serde_json::json!({"id": id, "status": "stopping"}))
-        }
-        None => {
-            drop(map);
-            let state_dir = config::state_root().join(id);
-            let state_file = state_dir.join("state.json");
-            if state_file.is_file() {
-                let raw = state::read_state_json(Some(&state_file));
-                let status = raw.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                if status == "done" || status == "stopped" {
-                    return ok_response(serde_json::json!({
-                        "id": id,
-                        "status": status,
-                        "message": "already terminal"
-                    }));
-                }
-                // Orphaned: state says running but no executor entry.
-                // Clean up by marking it stopped so the user can rm it.
-                if let Err(e) = state::locked_update(&state_file, |data| {
-                    data.insert("status".to_string(), Value::String("stopped".to_string()));
-                    data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
-                }) {
-                    return error_response(&format!(
-                        "failed to update state for orphaned gremlin {id}: {e}"
-                    ));
-                }
-                return ok_response(serde_json::json!({
-                    "id": id,
-                    "status": "stopped",
-                    "message": "orphaned gremlin marked stopped"
-                }));
+            if let Some(ref task) = handle.task {
+                task.abort();
             }
-            error_response(&format!("unknown gremlin {id:?}"))
+            handle.aborted.store(true, Ordering::Relaxed);
+            let state_tx = handle.state_tx.clone();
+            drop(map);
+            RunHandle::finish(id, 1, &state_tx, Some(shutdown_tx));
+            return ok_response(serde_json::json!({"id": id, "status": "stopping"}));
         }
     }
+
+    // Not in run_map — check for orphaned or already-terminal gremlin.
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if state_file.is_file() {
+        let raw = state::read_state_json(Some(&state_file));
+        let status = raw.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status == "done" || status == "stopped" {
+            return ok_response(serde_json::json!({
+                "id": id,
+                "status": status,
+                "message": "already terminal"
+            }));
+        }
+        // Orphaned: state says running but no executor entry.
+        // Clean up by marking it stopped so the user can rm it.
+        if let Err(e) = state::locked_update(&state_file, |data| {
+            data.insert("status".to_string(), Value::String("stopped".to_string()));
+            data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
+        }) {
+            return error_response(&format!(
+                "failed to update state for orphaned gremlin {id}: {e}"
+            ));
+        }
+        return ok_response(serde_json::json!({
+            "id": id,
+            "status": "stopped",
+            "message": "orphaned gremlin marked stopped"
+        }));
+    }
+    error_response(&format!("unknown gremlin {id:?}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -547,13 +586,16 @@ async fn handle_resume(
         started_at: state::now_stamp(),
     });
 
-    let run_map = get_run_map().clone();
     let id_clone = id.to_string();
     let state_tx_clone = state_tx.clone();
     let shutdown_tx_clone = shutdown_tx.clone();
 
+    let aborted = Arc::new(AtomicBool::new(false));
+
     let handle = RunHandle {
         cancel: cancel_token.clone(),
+        task: None,
+        aborted: aborted.clone(),
         state_tx,
         log_broadcast,
         interactive: interactive_handle,
@@ -562,19 +604,15 @@ async fn handle_resume(
 
     gremlin.cancel_token = Some(cancel_token);
 
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         let (result, _registry) = run_gremlin_task(gremlin, Some(&resume_stage)).await;
-        run_map.lock().unwrap().remove(&id_clone);
-        let _ = state_tx_clone.send(RunState {
-            id: id_clone.clone(),
-            status: if result == 0 { "done" } else { "stopped" }.to_string(),
-            stage: String::new(),
-            started_at: String::new(),
-        });
-        if run_map.lock().unwrap().is_empty() {
-            let _ = shutdown_tx_clone.send(true);
+        if !aborted.load(Ordering::Relaxed) {
+            RunHandle::finish(&id_clone, result, &state_tx_clone, Some(&shutdown_tx_clone));
         }
     });
+
+    // Store the JoinHandle so handle_stop can abort the task.
+    get_run_map().lock().unwrap().get_mut(id).unwrap().task = Some(join_handle);
 
     ok_response(serde_json::json!({"id": id, "resume_from": resume_stage_for_response}))
 }
@@ -1332,8 +1370,12 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
 
     let state_tx_clone = state_tx.clone();
 
+    let aborted = Arc::new(AtomicBool::new(false));
+
     let handle = RunHandle {
         cancel: cancel_token.clone(),
+        task: None,
+        aborted: aborted.clone(),
         state_tx,
         log_broadcast,
         interactive: interactive_handle,
@@ -1345,22 +1387,25 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     // cancel_token is already set on the gremlin (inherited via fork or
     // just created above).  No need to overwrite.
 
-    let run_map = get_run_map().clone();
     let id_clone = id.clone();
 
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         let (result, registry) = run_gremlin_task(gremlin, None).await;
         // Send the registry before updating state so the parent can read it.
         let _ = registry_tx.send(Some(registry));
-        run_map.lock().unwrap().remove(&id_clone);
-        let _ = state_tx_clone.send(RunState {
-            id: id_clone.clone(),
-            status: if result == 0 { "done" } else { "stopped" }.to_string(),
-            stage: String::new(),
-            started_at: String::new(),
-        });
-        // Don't signal shutdown — the parent gremlin is still running.
+        if !aborted.load(Ordering::Relaxed) {
+            // Don't signal shutdown — the parent gremlin is still running.
+            RunHandle::finish(
+                &id_clone,
+                result,
+                &state_tx_clone,
+                None::<&watch::Sender<bool>>,
+            );
+        }
     });
+
+    // Store the JoinHandle so stop_child can abort the task.
+    get_run_map().lock().unwrap().get_mut(&id[..]).unwrap().task = Some(join_handle);
 
     LaunchResult {
         state_rx,
@@ -1368,18 +1413,30 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     }
 }
 
-/// Stop a child gremlin by sending on its cancel channel.
+/// Stop a child gremlin by aborting its task and cleaning up.
 ///
 /// A no-op when the child is not in the run map (already finished or never
 /// launched).
 pub(crate) async fn stop_child(id: &str) {
     let run_map = get_run_map();
-    let handle = {
+    let (should_finish, state_tx) = {
         let map = run_map.lock().unwrap();
-        map.get(id).map(|h| h.cancel.clone())
+        match map.get(id) {
+            Some(handle) => {
+                handle.cancel.cancel();
+                if let Some(ref task) = handle.task {
+                    task.abort();
+                }
+                handle.aborted.store(true, Ordering::Relaxed);
+                let state_tx = handle.state_tx.clone();
+                (true, Some(state_tx))
+            }
+            None => (false, None),
+        }
     };
-    if let Some(cancel) = handle {
-        cancel.cancel();
+    if should_finish {
+        // Don't signal shutdown — the parent gremlin is still running.
+        RunHandle::finish(id, 1, &state_tx.unwrap(), None::<&watch::Sender<bool>>);
     }
 }
 
