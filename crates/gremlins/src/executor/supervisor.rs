@@ -1080,21 +1080,12 @@ async fn handle_debug(
         }
     };
 
-    // Subscribe to interactive events *before* sending Pause so we don't miss
+    // Subscribe to interactive events *before* triggering pause so we don't miss
     // the Ready broadcast.
     let mut evt_rx = interactive_handle.evt_tx.subscribe();
 
-    // Send Pause command to the agent loop.
-    if interactive_handle
-        .cmd_tx
-        .send(InteractiveCommand::Pause)
-        .await
-        .is_err()
-    {
-        let resp = error_response("failed to send pause command — agent loop may have exited");
-        let _ = socket::write_json_line(write_half, &resp).await;
-        return;
-    }
+    // Signal the agent loop to pause at its next yield point.
+    interactive_handle.pause.pause();
 
     // Wait for Ready from the agent loop.
     let ready = loop {
@@ -1125,6 +1116,7 @@ async fn handle_debug(
     };
 
     if !ready {
+        interactive_handle.pause.reset();
         return;
     }
 
@@ -1141,6 +1133,7 @@ async fn handle_debug(
             .cmd_tx
             .send(InteractiveCommand::Quit)
             .await;
+        interactive_handle.pause.reset();
         return;
     }
 
@@ -1220,6 +1213,9 @@ async fn handle_debug(
             }
         }
     }
+
+    // Clear the pause signal so the agent loop resumes normal operation.
+    interactive_handle.pause.reset();
 }
 
 // ---------------------------------------------------------------------------

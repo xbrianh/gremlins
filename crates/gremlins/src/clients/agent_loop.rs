@@ -12,11 +12,10 @@ use rig_core::completion::{
 };
 use rig_core::streaming::StreamedAssistantContent;
 use rig_core::OneOrMany;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
-use super::interactive::{InteractiveCommand, InteractiveEvent, InteractiveSession};
+use super::interactive::{InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken};
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
@@ -290,10 +289,19 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     result
 }
 
+/// Future that resolves when a [`PauseToken`] fires, or never if there is no token.
+async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
+    if let Some(ref p) = pause {
+        p.paused().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 // ── interactive loop ─────────────────────────────────────────────────────
 
-/// Interactive state machine. Called when the operator sends `Pause`
-/// or when re-entering after a `RunTurn`/`Inject`.
+/// Interactive state machine. Called when the operator triggers pause
+/// (via [`PauseToken`]) or when re-entering after a `RunTurn`/`Inject`.
 ///
 /// On entry, broadcasts `Ready { turn }`. Then blocks reading
 /// `InteractiveCommand`s from the session's `cmd_rx`.
@@ -344,7 +352,6 @@ async fn interactive_loop<M: CompletionModel>(
                 });
                 return Ok(InteractiveLoopResult::Resumed);
             }
-            InteractiveCommand::Pause => {} // no-op: already paused
         }
     }
 }
@@ -431,8 +438,14 @@ async fn run_agent_loop_core<M: CompletionModel>(
     mut reminder_budget: usize,
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    mut interactive: Option<InteractiveSession>,
+    interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
+    // Destructure the interactive session into its components so we can
+    // thread them independently through the loop.
+    let (mut cmd_rx, mut evt_tx, pause) = interactive
+        .map(|s| (Some(s.cmd_rx), Some(s.evt_tx), Some(s.pause)))
+        .unwrap_or((None, None, None));
+
     let original_system_prompt = system_prompt.clone();
     let mut system_prompt = system_prompt;
     let mut history: Vec<Message> = Vec::new();
@@ -474,67 +487,75 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // ── interactive turn boundary ──────────────────────────────────
         //
         // Two modes:
-        // 1. No active interactive session — try_recv for Pause.
+        // 1. No active interactive session — check pause token.
         // 2. Active interactive session (re-entering after RunOneTurn) —
         //    enter interactive_loop immediately.
-        if let Some(ref mut session) = interactive {
+        if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
             if interactive_active {
                 // Re-enter interactive_loop after a RunOneTurn/Inject.
-                match interactive_loop(model, &mut history, &mut next_prompt, session, turn_num)
+                let mut session = InteractiveSession {
+                    cmd_rx: cmd_rx.take().unwrap(),
+                    evt_tx: evt_tx.take().unwrap(),
+                    pause: pause.clone().unwrap(),
+                };
+                match interactive_loop(model, &mut history, &mut next_prompt, &mut session, turn_num)
                     .await
                 {
                     Ok(InteractiveLoopResult::Resumed) => {
                         interactive_active = false;
                         system_prompt = original_system_prompt.clone();
+                        cmd_rx = Some(session.cmd_rx);
+                        evt_tx = Some(session.evt_tx);
                         continue;
                     }
                     Ok(InteractiveLoopResult::RunOneTurn) => {
+                        cmd_rx = Some(session.cmd_rx);
+                        evt_tx = Some(session.evt_tx);
                         // Fall through to execute one turn.
                     }
                     Err(e) => return Err(e),
                 }
-            } else {
-                // Drain pending commands with try_recv. Only Pause matters.
-                match session.cmd_rx.try_recv() {
-                    Ok(InteractiveCommand::Pause) => {
-                        // Amend system prompt with operator note.
-                        let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                        let amended_system = match &system_prompt {
-                            Some(sp) => format!("{sp}{debug_note}"),
-                            None => debug_note.trim_start().to_string(),
-                        };
-                        system_prompt = Some(amended_system);
+            } else if pause.as_ref().is_some_and(|p| p.is_paused()) {
+                // Pause token was triggered — enter interactive mode.
+                if let Some(ref p) = pause {
+                    p.reset();
+                }
 
-                        match interactive_loop(
-                            model,
-                            &mut history,
-                            &mut next_prompt,
-                            session,
-                            turn_num,
-                        )
-                        .await
-                        {
-                            Ok(InteractiveLoopResult::Resumed) => {
-                                system_prompt = original_system_prompt.clone();
-                                continue;
-                            }
-                            Ok(InteractiveLoopResult::RunOneTurn) => {
-                                interactive_active = true;
-                                // Fall through to execute one turn.
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    // Ignore non-Pause commands while idle — only Pause
-                    // enters interactive mode.
-                    Ok(InteractiveCommand::Inject(_))
-                    | Ok(InteractiveCommand::Quit)
-                    | Ok(InteractiveCommand::Bail(_))
-                    | Ok(InteractiveCommand::RunTurn) => {}
-                    Err(mpsc::error::TryRecvError::Empty) => {}
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                // Amend system prompt with operator note.
+                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                let amended_system = match &system_prompt {
+                    Some(sp) => format!("{sp}{debug_note}"),
+                    None => debug_note.trim_start().to_string(),
+                };
+                system_prompt = Some(amended_system);
+
+                let mut session = InteractiveSession {
+                    cmd_rx: cmd_rx.take().unwrap(),
+                    evt_tx: evt_tx.take().unwrap(),
+                    pause: pause.clone().unwrap(),
+                };
+                match interactive_loop(
+                    model,
+                    &mut history,
+                    &mut next_prompt,
+                    &mut session,
+                    turn_num,
+                )
+                .await
+                {
+                    Ok(InteractiveLoopResult::Resumed) => {
                         system_prompt = original_system_prompt.clone();
+                        cmd_rx = Some(session.cmd_rx);
+                        evt_tx = Some(session.evt_tx);
+                        continue;
                     }
+                    Ok(InteractiveLoopResult::RunOneTurn) => {
+                        interactive_active = true;
+                        cmd_rx = Some(session.cmd_rx);
+                        evt_tx = Some(session.evt_tx);
+                        // Fall through to execute one turn.
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -571,6 +592,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut ended = false;
         let mut turn_usage: Option<Usage> = None;
+        let mut paused_mid_stream = false;
 
         loop {
             let item = tokio::select! {
@@ -580,6 +602,52 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     return Err(ClientError::Runtime {
                         message: "cancelled".into(),
                     });
+                }
+                _ = maybe_pause(&pause) => {
+                    // Operator triggered debug — cancel the stream and enter
+                    // interactive mode. The turn will be re-executed after
+                    // the debug session ends.
+                    log::debug!("agent_loop: paused mid-stream (label={})", prefix);
+                    response.cancel();
+                    paused_mid_stream = true;
+                    if let Some(ref p) = pause {
+                        p.reset();
+                    }
+                    // Enter interactive mode inline.
+                    if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
+                        let mut session = InteractiveSession {
+                            cmd_rx: cmd_rx.take().unwrap(),
+                            evt_tx: evt_tx.take().unwrap(),
+                            pause: pause.clone().unwrap(),
+                        };
+                        match interactive_loop(
+                            model,
+                            &mut history,
+                            &mut next_prompt,
+                            &mut session,
+                            turn_num,
+                        )
+                        .await
+                        {
+                            Ok(InteractiveLoopResult::Resumed) => {
+                                cmd_rx = Some(session.cmd_rx);
+                                evt_tx = Some(session.evt_tx);
+                                interactive_active = false;
+                                // Re-build the request from the original next_prompt
+                                // (still available — the builder clones it).
+                                break; // exit the stream loop, re-enter the turn loop
+                            }
+                            Ok(InteractiveLoopResult::RunOneTurn) => {
+                                cmd_rx = Some(session.cmd_rx);
+                                evt_tx = Some(session.evt_tx);
+                                interactive_active = true;
+                                break; // exit the stream loop, execute one turn
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    // No interactive session — shouldn't happen, but continue.
+                    break;
                 }
                 timed = tokio::time::timeout(
                     Duration::from_secs_f64(idle_timeout),
@@ -617,6 +685,13 @@ async fn run_agent_loop_core<M: CompletionModel>(
             }
         }
 
+        if paused_mid_stream {
+            // Stream was interrupted by pause — skip post-stream processing.
+            // The turn loop will re-enter at the top and either continue
+            // (if Resumed) or execute one turn (if RunOneTurn).
+            continue;
+        }
+
         if timed_out || stream_error.is_some() {
             log::debug!(
                 "stream ended: timed_out={timed_out} stream_error={stream_error:?} turn={turn_num}",
@@ -638,8 +713,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // Emit TurnComplete if interactive mode is active, before text/tool_calls
         // are consumed by the rest of the turn processing.
         if interactive_active {
-            if let Some(ref session) = interactive {
-                let _ = session.evt_tx.send(InteractiveEvent::TurnComplete {
+            if let Some(ref evt_tx) = evt_tx {
+                let _ = evt_tx.send(InteractiveEvent::TurnComplete {
                     turn: turn_num,
                     text: text.clone(),
                     tool_calls: tool_calls
@@ -809,8 +884,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     ));
                 }
                 // Emit Done if interactive mode is active.
-                if let Some(ref session) = interactive {
-                    let _ = session.evt_tx.send(InteractiveEvent::Done {
+                if let Some(ref evt_tx) = evt_tx {
+                    let _ = evt_tx.send(InteractiveEvent::Done {
                         text: result_text.clone(),
                         usage: Some(usage.clone()),
                     });
@@ -925,7 +1000,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             return Ok(completed_run(Some(final_text), captured, usage));
         }
 
-        history.push(next_prompt);
+        history.push(next_prompt.clone());
         history.push(assistant_tool_message(&text, &tool_calls));
 
         // Phase 1: emit tool-start events, collect owned data for concurrent execution
@@ -963,8 +1038,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         // Phase 2: concurrent execution. Over-cap Task calls short-circuit so a
         // single response cannot spawn an unbounded number of child loops.
+        // Wrapped in a tokio::select! with maybe_pause so the operator can
+        // interrupt a long-running tool batch.
         let ctx = tool_ctx.clone();
-        let results = join_all(jobs.iter().map(|j| {
+        let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             async move {
                 if j.over_cap {
@@ -976,8 +1053,52 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     tools::invoke(&j.name, ctx, &j.args).await
                 }
             }
-        }))
-        .await;
+        }));
+
+        let results = tokio::select! {
+            results = exec_fut => results,
+            _ = maybe_pause(&pause) => {
+                // Operator triggered debug mid-tool — drop the join_all future
+                // (cancels pending tool futures). Completed tool side effects
+                // (files written, bash commands run) are not unwound.
+                log::debug!("agent_loop: paused mid-tool (label={})", prefix);
+                if let Some(ref p) = pause {
+                    p.reset();
+                }
+                // Enter interactive mode.
+                if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
+                    let mut session = InteractiveSession {
+                        cmd_rx: cmd_rx.take().unwrap(),
+                        evt_tx: evt_tx.take().unwrap(),
+                        pause: pause.clone().unwrap(),
+                    };
+                    match interactive_loop(
+                        model,
+                        &mut history,
+                        &mut next_prompt,
+                        &mut session,
+                        turn_num,
+                    )
+                    .await
+                    {
+                        Ok(InteractiveLoopResult::Resumed) => {
+                            cmd_rx = Some(session.cmd_rx);
+                            evt_tx = Some(session.evt_tx);
+                            interactive_active = false;
+                            continue; // re-execute the turn from scratch
+                        }
+                        Ok(InteractiveLoopResult::RunOneTurn) => {
+                            cmd_rx = Some(session.cmd_rx);
+                            evt_tx = Some(session.evt_tx);
+                            interactive_active = true;
+                            continue; // re-execute the turn from scratch
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                continue;
+            }
+        };
 
         // Phase 3: emit results in order
         let mut result_msgs = Vec::new();
