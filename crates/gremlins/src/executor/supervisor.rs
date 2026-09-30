@@ -1102,8 +1102,17 @@ async fn handle_debug(
                     _ => continue,
                 }
             }
-            _ = socket::read_json_line(&mut reader) => {
-                // Client disconnected before Ready.
+            result = socket::read_json_line(&mut reader) => {
+                // Client sent a message before Ready — decode it.
+                // If it's a quit, propagate to the agent so it doesn't stay paused.
+                if let Ok(Some(cmd)) = result {
+                    if cmd.get("op").and_then(|v| v.as_str()) == Some("quit") {
+                        let _ = interactive_handle
+                            .cmd_tx
+                            .send(InteractiveCommand::Quit)
+                            .await;
+                    }
+                }
                 break false;
             }
         }

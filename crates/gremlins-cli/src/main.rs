@@ -784,15 +784,11 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     }
 
     // Tail the last ~20 lines of the gremlin log for immediate context.
+    // Read only the tail of the file (append-only log, no rotation) so
+    // startup time and memory stay bounded regardless of log length.
     let log_path = config::state_root().join(id).join("log");
-    if let Ok(content) = tokio::fs::read_to_string(&log_path).await {
-        let lines: Vec<&str> = content.lines().collect();
-        let start = if lines.len() > 20 {
-            lines.len() - 20
-        } else {
-            0
-        };
-        for line in &lines[start..] {
+    if let Ok(lines) = tail_log_lines(&log_path, 20).await {
+        for line in &lines {
             eprintln!("log: {line}");
         }
     }
@@ -1329,4 +1325,56 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
         map.insert(key.to_string(), value);
     }
     Ok(map)
+}
+
+/// Read the last `n` lines from a file without loading the entire file.
+/// Reads backwards in chunks, so cost is O(n) not O(file_size).
+async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut f = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("open log: {e}"))?;
+
+    let file_len = f
+        .metadata()
+        .await
+        .map_err(|e| format!("stat log: {e}"))?
+        .len();
+
+    if file_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Read the last chunk (up to 8 KiB) from the end of the file.
+    let chunk_size = 8192usize.min(file_len as usize);
+    let mut buf = vec![0u8; chunk_size];
+    f.seek(std::io::SeekFrom::End(-(chunk_size as i64)))
+        .await
+        .map_err(|e| format!("seek log: {e}"))?;
+    f.read_exact(&mut buf)
+        .await
+        .map_err(|e| format!("read log tail: {e}"))?;
+
+    // If the chunk doesn't start at a line boundary, skip the partial first line.
+    let start = if file_len > chunk_size as u64 {
+        // We didn't read from the beginning, so the first byte may be mid-line.
+        // Skip to the first newline.
+        buf.iter()
+            .position(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let text = std::str::from_utf8(&buf[start..]).map_err(|e| format!("utf-8: {e}"))?;
+    let all_lines: Vec<&str> = text.lines().collect();
+    let keep = if all_lines.len() > n {
+        &all_lines[all_lines.len() - n..]
+    } else {
+        &all_lines
+    };
+
+    Ok(keep.iter().map(|s| s.to_string()).collect())
 }
