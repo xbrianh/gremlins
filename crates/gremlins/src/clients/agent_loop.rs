@@ -67,7 +67,7 @@ impl CancelToken {
 
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::Relaxed);
-        self.notify.notify_waiters();
+        self.notify.notify_one();
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -1498,9 +1498,11 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::interactive::InteractiveChannels;
     use http::StatusCode;
     use rig_core::message::UserContent;
     use std::collections::HashMap;
+    use tokio::sync::broadcast::error::RecvError;
 
     #[test]
     fn default_classifier() {
@@ -2821,5 +2823,436 @@ mod tests {
             task_result.contains("# Scout"),
             "task result should carry its description header, got: {task_result}"
         );
+    }
+
+    // ── PauseToken tests ───────────────────────────────────────────────
+
+    /// Regression: `pause()` between flag load and `notified().await` must
+    /// not be lost. With `notify_one` the permit is stored, so the next
+    /// `notified().await` completes immediately.
+    #[tokio::test]
+    async fn pause_token_race_regression() {
+        let token = PauseToken::new();
+
+        // Simulate the race: call paused() (which creates a Notified future
+        // but does not poll it), then pause(), then poll.
+        let paused_fut = token.paused();
+        token.pause();
+        // The flag is now true AND a permit is stored. The future must
+        // resolve immediately when polled.
+        tokio::pin!(paused_fut);
+        let result = tokio::time::timeout(Duration::from_millis(100), &mut paused_fut).await;
+        assert!(
+            result.is_ok(),
+            "paused() should resolve immediately after pause()"
+        );
+        assert!(token.is_paused());
+    }
+
+    /// `paused()` must resolve immediately when the flag is already set,
+    /// even without a stored permit.
+    #[tokio::test]
+    async fn pause_token_paused_resolves_immediately_when_flag_set() {
+        let token = PauseToken::new();
+        token.pause();
+        let result = tokio::time::timeout(Duration::from_millis(100), token.paused()).await;
+        assert!(
+            result.is_ok(),
+            "paused() should resolve immediately when flag is set"
+        );
+    }
+
+    /// After `reset()`, `is_paused()` returns false and `paused()` does not
+    /// resolve (it stays pending).
+    #[tokio::test]
+    async fn pause_token_reset_clears_flag() {
+        let token = PauseToken::new();
+        token.pause();
+        assert!(token.is_paused());
+        token.reset();
+        assert!(!token.is_paused());
+        // paused() should not resolve — it stays pending.
+        let result = tokio::time::timeout(Duration::from_millis(50), token.paused()).await;
+        assert!(result.is_err(), "paused() should stay pending after reset");
+    }
+
+    /// Multiple pause/reset cycles work correctly.
+    #[tokio::test]
+    async fn pause_token_multiple_cycles() {
+        let token = PauseToken::new();
+        for _ in 0..3 {
+            token.pause();
+            assert!(token.is_paused());
+            let result = tokio::time::timeout(Duration::from_millis(100), token.paused()).await;
+            assert!(result.is_ok());
+            token.reset();
+            assert!(!token.is_paused());
+        }
+    }
+
+    // ── Interactive session tests ───────────────────────────────────────
+
+    /// Helper: build a minimal ToolContext for interactive tests.
+    fn test_tool_ctx() -> ToolContext {
+        ToolContext {
+            cwd: None,
+            extra_env: None,
+            base_env: None,
+            allowed_roots: vec![],
+            audit_log: None,
+            allowed_tools: None,
+            task_fn: None,
+            audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
+        }
+    }
+
+    /// Pause at turn boundary: the agent loop checks `pause.is_paused()`
+    /// before making the API call, enters interactive mode, broadcasts
+    /// Ready, and waits for a command.
+    #[tokio::test]
+    async fn interactive_pause_at_turn_boundary_broadcasts_ready() {
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        // Pre-set the pause token so the agent enters interactive mode
+        // at the turn boundary before the first API call.
+        handle.pause.pause();
+
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let tool_ctx = test_tool_ctx();
+        let tool_defs = vec![];
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+
+        // Spawn the agent loop — it will enter interactive mode and block.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let agent = tokio::spawn(async move {
+            run_agent_loop_core(
+                &model,
+                "hi",
+                None,
+                &tool_ctx,
+                &tool_defs,
+                &cancel,
+                &opts,
+                "[t] ",
+                10,
+                5.0,
+                &mut None,
+                &mut None,
+                true,
+                &[],
+                0,
+                0,
+                &None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    Ok(InteractiveEvent::Ended { .. }) => return false,
+                    Err(RecvError::Closed) => return false,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ready, "agent should broadcast Ready when paused");
+
+        // Send Quit to resume.
+        let _ = handle.cmd_tx.send(InteractiveCommand::Quit).await;
+
+        // Agent should complete normally.
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("ok"));
+    }
+
+    /// Inject a message during interactive mode, verify the agent processes
+    /// it, emits TurnComplete, then Quit resumes normal operation.
+    #[tokio::test]
+    async fn interactive_inject_then_run_turn_then_quit() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-int-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        handle.pause.pause();
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let mut tool_ctx = test_tool_ctx();
+        tool_ctx.allowed_roots = vec![dir.clone()];
+        let tool_defs = tools::tool_definitions(None);
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+
+        // Turn 1 (Inject): Write tool call so agent continues.
+        // Turn 2 (Quit): Done call to finish.
+        let target = dir.join("out.txt");
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("got it"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Write",
+                    serde_json::json!({
+                        "file_path": target.to_str().unwrap(),
+                        "content": "hello"
+                    }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("all done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let agent = tokio::spawn(async move {
+            run_agent_loop_core(
+                &model,
+                "hi",
+                None,
+                &tool_ctx,
+                &tool_defs,
+                &cancel,
+                &opts,
+                "[t] ",
+                10,
+                5.0,
+                &mut None,
+                &mut None,
+                true,
+                &[],
+                0,
+                0,
+                &None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ready);
+
+        // Inject a message.
+        let _ = handle
+            .cmd_tx
+            .send(InteractiveCommand::Inject("look at this".into()))
+            .await;
+
+        // Wait for TurnComplete.
+        let tc = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::TurnComplete { .. }) => return true,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(tc, "should get TurnComplete after Inject");
+
+        // Quit — agent resumes normal operation and completes.
+        let _ = handle.cmd_tx.send(InteractiveCommand::Quit).await;
+
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("all done"));
+    }
+
+    /// Bail during interactive mode terminates the agent loop.
+    #[tokio::test]
+    async fn interactive_bail_terminates_agent() {
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        handle.pause.pause();
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let tool_ctx = test_tool_ctx();
+        let tool_defs = vec![];
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let agent = tokio::spawn(async move {
+            run_agent_loop_core(
+                &model,
+                "hi",
+                None,
+                &tool_ctx,
+                &tool_defs,
+                &cancel,
+                &opts,
+                "[t] ",
+                10,
+                5.0,
+                &mut None,
+                &mut None,
+                true,
+                &[],
+                0,
+                0,
+                &None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ready);
+
+        // Bail.
+        let _ = handle
+            .cmd_tx
+            .send(InteractiveCommand::Bail("test bail".into()))
+            .await;
+
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap();
+        match result {
+            Err(ClientError::Bail { reason }) => {
+                assert!(reason.contains("test bail"));
+            }
+            other => panic!("expected Bail, got {other:?}"),
+        }
+    }
+
+    /// When the cmd_tx sender is dropped (simulating supervisor disconnect),
+    /// the interactive loop returns Resumed gracefully.
+    #[tokio::test]
+    async fn interactive_cmd_tx_drop_resumes_gracefully() {
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        handle.pause.pause();
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let tool_ctx = test_tool_ctx();
+        let tool_defs = vec![];
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let agent = tokio::spawn(async move {
+            run_agent_loop_core(
+                &model,
+                "hi",
+                None,
+                &tool_ctx,
+                &tool_defs,
+                &cancel,
+                &opts,
+                "[t] ",
+                10,
+                5.0,
+                &mut None,
+                &mut None,
+                true,
+                &[],
+                0,
+                0,
+                &None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ready);
+
+        // Drop the handle's cmd_tx to simulate disconnect.
+        drop(handle);
+
+        // Agent should resume and complete normally.
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("ok"));
     }
 }

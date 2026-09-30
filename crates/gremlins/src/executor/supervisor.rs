@@ -1088,6 +1088,13 @@ async fn handle_debug(
     interactive_handle.pause.pause();
 
     // Wait for Ready from the agent loop.
+    //
+    // Race against cmd_tx.closed(): if the agent session has already exited
+    // (cmd_rx dropped), the cmd_tx sender will close. Without this branch
+    // the select! would hang forever because evt_rx cannot close while this
+    // handle_debug owns an evt_tx clone.
+    let cmd_tx_closed = interactive_handle.cmd_tx.closed();
+    tokio::pin!(cmd_tx_closed);
     let ready = loop {
         tokio::select! {
             result = evt_rx.recv() => {
@@ -1098,6 +1105,10 @@ async fn handle_debug(
                     Err(broadcast::error::RecvError::Closed) => break false,
                     _ => continue,
                 }
+            }
+            _ = &mut cmd_tx_closed => {
+                // Agent session exited — cmd_rx was dropped.
+                break false;
             }
             result = socket::read_json_line(&mut reader) => {
                 // Client sent a message before Ready — decode it.

@@ -28,9 +28,13 @@ impl PauseToken {
     }
 
     /// Signal the agent loop to pause at the next yield point.
+    ///
+    /// Uses [`Notify::notify_one`] rather than `notify_waiters` so the
+    /// permit is stored when no waiter is registered yet — eliminating the
+    /// race between flag check and `notified().await` in [`paused`](Self::paused).
     pub fn pause(&self) {
         self.flag.store(true, Ordering::Release);
-        self.notify.notify_waiters();
+        self.notify.notify_one();
     }
 
     /// Clear the pause signal so the agent can resume normal operation.
@@ -43,12 +47,24 @@ impl PauseToken {
     }
 
     /// Future that resolves when `pause()` is called.
+    ///
+    /// Safe against the race where `pause()` fires between the flag check
+    /// and `notified().await`: `pause()` uses `notify_one`, which stores a
+    /// permit when no waiter is registered, so the next `notified().await`
+    /// completes immediately.
+    ///
+    /// After waking, re-checks the flag so that a `reset()` between
+    /// `pause()` and `paused()` does not cause a spurious resolution.
     pub async fn paused(&self) {
-        let notified = self.notify.notified();
-        if self.flag.load(Ordering::Acquire) {
-            return;
+        loop {
+            let notified = self.notify.notified();
+            if self.flag.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+            // Woke up — re-check the flag before returning.
+            // If reset() was called, the flag is false and we loop.
         }
-        notified.await;
     }
 }
 
