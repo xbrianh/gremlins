@@ -337,7 +337,6 @@ async fn handle_launch(
     let log_path = gremlin.state_dir.join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
-    let (_cancel_tx, cancel_rx) = watch::channel(false);
     let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
         id: id.clone(),
@@ -363,7 +362,7 @@ async fn handle_launch(
     gremlin.cancel_token = Some(cancel_token);
 
     tokio::spawn(async move {
-        let (result, _registry) = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
+        let (result, _registry) = run_gremlin_task(gremlin, None).await;
         run_map.lock().unwrap().remove(&id_clone);
         let _ = state_tx_clone.send(RunState {
             id: id_clone.clone(),
@@ -505,7 +504,6 @@ async fn handle_resume(
     let log_path = gremlin.state_dir.join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
-    let (_cancel_tx, cancel_rx) = watch::channel(false);
     let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
         id: id.to_string(),
@@ -529,8 +527,7 @@ async fn handle_resume(
     gremlin.cancel_token = Some(cancel_token);
 
     tokio::spawn(async move {
-        let (result, _registry) =
-            run_gremlin_task(gremlin, Some(cancel_rx), Some(&resume_stage)).await;
+        let (result, _registry) = run_gremlin_task(gremlin, Some(&resume_stage)).await;
         run_map.lock().unwrap().remove(&id_clone);
         let _ = state_tx_clone.send(RunState {
             id: id_clone.clone(),
@@ -884,7 +881,6 @@ async fn handle_log(
 
 async fn run_gremlin_task(
     mut gremlin: Gremlin,
-    _cancel: Option<watch::Receiver<bool>>,
     resume_from: Option<&str>,
 ) -> (i32, Box<dyn crate::artifacts::registry::ArtifactRegistry>) {
     let exit_code = match gremlin.run(resume_from).await {
@@ -1045,8 +1041,12 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     let log_path = gremlin.state_dir.join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
-    let (_cancel_tx, cancel_rx) = watch::channel(false);
-    let cancel_token = CancelToken::new();
+    // Reuse the cancel token inherited from the parent via Gremlin::fork;
+    // create a fresh one only when there is no parent token.
+    let cancel_token = gremlin
+        .cancel_token
+        .clone()
+        .unwrap_or_else(CancelToken::new);
     let (state_tx, state_rx) = watch::channel(RunState {
         id: id.clone(),
         status: "running".to_string(),
@@ -1067,14 +1067,14 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     // and call remove before the insert.
     get_run_map().lock().unwrap().insert(id.clone(), handle);
 
-    // Thread the cancel token into the child gremlin.
-    gremlin.cancel_token = Some(cancel_token);
+    // cancel_token is already set on the gremlin (inherited via fork or
+    // just created above).  No need to overwrite.
 
     let run_map = get_run_map().clone();
     let id_clone = id.clone();
 
     tokio::spawn(async move {
-        let (result, registry) = run_gremlin_task(gremlin, Some(cancel_rx), None).await;
+        let (result, registry) = run_gremlin_task(gremlin, None).await;
         // Send the registry before updating state so the parent can read it.
         let _ = registry_tx.send(Some(registry));
         run_map.lock().unwrap().remove(&id_clone);
