@@ -21,6 +21,8 @@ pub struct RunParams {
     pub expected_artifact_paths: Vec<PathBuf>,
     pub system_prompt: Option<String>,
     pub gremlin_id: Option<String>,
+    /// Per-gremlin log channel for streaming log output.
+    pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Base process environment for tool sandboxing.
     /// When set, replaces `std::env::vars()` as the base for bash tool env.
     pub base_env: Option<HashMap<String, String>>,
