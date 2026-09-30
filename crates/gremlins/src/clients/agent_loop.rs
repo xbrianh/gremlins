@@ -317,41 +317,37 @@ async fn interactive_loop<M: CompletionModel>(
 ) -> Result<InteractiveLoopResult, ClientError> {
     let _ = session.evt_tx.send(InteractiveEvent::Ready { turn });
 
-    loop {
-        let cmd = match session.cmd_rx.recv().await {
-            Some(cmd) => cmd,
-            None => {
-                let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                    reason: "disconnect".to_string(),
-                });
-                return Ok(InteractiveLoopResult::Resumed);
-            }
-        };
+    let cmd = match session.cmd_rx.recv().await {
+        Some(cmd) => cmd,
+        None => {
+            let _ = session.evt_tx.send(InteractiveEvent::Ended {
+                reason: "disconnect".to_string(),
+            });
+            return Ok(InteractiveLoopResult::Resumed);
+        }
+    };
 
-        match cmd {
-            InteractiveCommand::Inject(text) => {
-                let msg = format!("[operator]: {text}");
-                history.push(Message::user(msg));
-                *next_prompt = Message::user(text);
-                return Ok(InteractiveLoopResult::RunOneTurn);
-            }
-            InteractiveCommand::RunTurn => {
-                return Ok(InteractiveLoopResult::RunOneTurn);
-            }
-            InteractiveCommand::Bail(reason) => {
-                let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                    reason: "bailed".to_string(),
-                });
-                return Err(ClientError::Bail {
-                    reason: format!("operator bailed: {reason}"),
-                });
-            }
-            InteractiveCommand::Quit => {
-                let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                    reason: "resumed".to_string(),
-                });
-                return Ok(InteractiveLoopResult::Resumed);
-            }
+    match cmd {
+        InteractiveCommand::Inject(text) => {
+            let msg = format!("[operator]: {text}");
+            history.push(Message::user(msg));
+            *next_prompt = Message::user(text);
+            Ok(InteractiveLoopResult::RunOneTurn)
+        }
+        InteractiveCommand::RunTurn => Ok(InteractiveLoopResult::RunOneTurn),
+        InteractiveCommand::Bail(reason) => {
+            let _ = session.evt_tx.send(InteractiveEvent::Ended {
+                reason: "bailed".to_string(),
+            });
+            Err(ClientError::Bail {
+                reason: format!("operator bailed: {reason}"),
+            })
+        }
+        InteractiveCommand::Quit => {
+            let _ = session.evt_tx.send(InteractiveEvent::Ended {
+                reason: "resumed".to_string(),
+            });
+            Ok(InteractiveLoopResult::Resumed)
         }
     }
 }
