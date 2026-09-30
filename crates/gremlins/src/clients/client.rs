@@ -43,7 +43,9 @@ pub fn default_native_block() -> HashMap<String, Vec<String>> {
 ///
 /// Callers use this to reject a bad spec early, before any work is queued.
 pub fn is_known_provider(provider: &str) -> bool {
-    backends::registry().iter().any(|(name, _)| *name == provider)
+    backends::registry()
+        .iter()
+        .any(|(name, _)| *name == provider)
 }
 
 /// The regex matching a trailing `:k=v,k=v` parameter list.
