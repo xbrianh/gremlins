@@ -1045,6 +1045,7 @@ async fn handle_debug(
         .await
         .is_err()
     {
+        let _ = debug_cmd_tx.send(DebugCommand::Quit).await;
         return;
     }
 
@@ -1098,12 +1099,14 @@ async fn handle_debug(
                     Ok(DebugEvent::TurnComplete) => {
                         let payload = serde_json::json!({"type": "debug_turn_complete"});
                         if socket::write_json_line(write_half, &payload).await.is_err() {
+                            let _ = debug_cmd_tx.send(DebugCommand::Quit).await;
                             break;
                         }
                     }
                     Ok(DebugEvent::Paused) => {
                         let payload = serde_json::json!({"type": "debug_paused"});
                         if socket::write_json_line(write_half, &payload).await.is_err() {
+                            let _ = debug_cmd_tx.send(DebugCommand::Quit).await;
                             break;
                         }
                     }

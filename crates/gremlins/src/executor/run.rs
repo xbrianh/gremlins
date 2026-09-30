@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 
 use crate::artifacts::registry::{ArtifactRegistry, Collision};
 use crate::artifacts::resolve::ResolveError;
-use crate::clients::backend::RunParams;
+use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::Client;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -403,13 +403,13 @@ async fn run_agent(
         params.model.as_deref().unwrap_or("default")
     );
 
-    let completed = client
-        .run(params)
-        .await
-        .map_err(|error| RunError::StageFailed {
+    let completed = client.run(params).await.map_err(|error| match error {
+        ClientError::Bail { reason } => RunError::Bail { reason },
+        other => RunError::StageFailed {
             stage: prepared.name.clone(),
-            message: error.to_string(),
-        })?;
+            message: other.to_string(),
+        },
+    })?;
 
     log::debug!(
         "agent stage '{}' (gremlin={}): client.run completed (turns={})",

@@ -758,20 +758,21 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
             continue;
         }
 
-        let cmd = if let Some(_rest) = trimmed.strip_prefix("/continue") {
+        let cmd = if trimmed == "/continue" {
             serde_json::json!({"op": "continue"})
-        } else if let Some(rest) = trimmed.strip_prefix("/bail") {
-            let reason = rest.trim();
-            serde_json::json!({"op": "bail", "reason": if reason.is_empty() { "operator bailed" } else { reason }})
+        } else if let Some(rest) = trimmed.strip_prefix("/bail ") {
+            serde_json::json!({"op": "bail", "reason": rest.trim()})
+        } else if trimmed == "/bail" {
+            serde_json::json!({"op": "bail", "reason": "operator bailed"})
         } else if trimmed == "/quit" {
             serde_json::json!({"op": "quit"})
         } else {
             serde_json::json!({"op": "talk", "text": trimmed})
         };
 
-        let is_quit = trimmed == "/quit";
+        let is_terminal = trimmed == "/quit" || trimmed == "/bail" || trimmed.starts_with("/bail ");
         socket::write_json_line(&mut write_half, &cmd).await?;
-        if is_quit {
+        if is_terminal {
             break;
         }
     }

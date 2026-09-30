@@ -434,6 +434,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
     mut debug_cmd_rx: Option<tokio::sync::mpsc::Receiver<DebugCommand>>,
     debug_evt_tx: Option<tokio::sync::broadcast::Sender<DebugEvent>>,
 ) -> Result<CompletedRun, ClientError> {
+    let original_system_prompt = system_prompt.clone();
     let mut system_prompt = system_prompt;
     let mut history: Vec<Message> = Vec::new();
     let mut next_prompt = Message::user(prompt.to_string());
@@ -462,7 +463,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
     let mut debug_active: Option<DebugEvent> = None;
 
-    for _ in 0..max_turns {
+    let mut remaining_turns = max_turns;
+    while remaining_turns > 0 {
         if cancel.is_cancelled() {
             log::debug!("agent_loop: cancelled before turn (label={})", prefix);
             return Err(ClientError::Runtime {
@@ -499,6 +501,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     {
                         DebugResult::Resumed => {
                             debug_cmd_rx = Some(rx);
+                            system_prompt = original_system_prompt.clone();
                             continue;
                         }
                         DebugResult::RunOneTurn(evt) => {
@@ -506,8 +509,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
                             debug_cmd_rx = Some(rx);
                         }
                         DebugResult::Bailed(reason) => {
-                            return Err(ClientError::Runtime {
-                                message: format!("operator bailed: {reason}"),
+                            return Err(ClientError::Bail {
+                                reason: format!("operator bailed: {reason}"),
                             });
                         }
                     }
@@ -524,7 +527,9 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     debug_cmd_rx = Some(rx);
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    system_prompt = original_system_prompt.clone();
+                }
             }
         }
 
@@ -543,6 +548,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 {
                     DebugResult::Resumed => {
                         debug_cmd_rx = Some(rx);
+                        system_prompt = original_system_prompt.clone();
                         continue;
                     }
                     DebugResult::RunOneTurn(next_evt) => {
@@ -550,8 +556,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
                         debug_cmd_rx = Some(rx);
                     }
                     DebugResult::Bailed(reason) => {
-                        return Err(ClientError::Runtime {
-                            message: format!("operator bailed: {reason}"),
+                        return Err(ClientError::Bail {
+                            reason: format!("operator bailed: {reason}"),
                         });
                     }
                 }
@@ -1003,6 +1009,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // trailing the complete result block instead of splitting it.
         history.extend(result_msgs);
         next_prompt = Message::user(ledger_message(&ledger));
+        remaining_turns -= 1;
     }
 
     if !nested {
