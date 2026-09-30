@@ -686,12 +686,66 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     let request = serde_json::json!({"op": "debug", "id": id});
     socket::write_json_line(&mut stream, &request).await?;
 
+    eprintln!("debug: waiting for agent to pause…");
+
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(read_half);
 
-    // Wait for debug_ready.
+    // Spawn a blocking stdin reader thread so we can watch for /quit
+    // during the ready-wait phase without blocking the async runtime.
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut line_buf = String::new();
+        loop {
+            line_buf.clear();
+            match std::io::BufRead::read_line(&mut stdin.lock(), &mut line_buf) {
+                Ok(0) => {
+                    let _ = stdin_tx.send("/quit".to_string());
+                    break;
+                }
+                Ok(_) => {
+                    let trimmed = line_buf.trim().to_string();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if stdin_tx.send(trimmed).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Wait for debug_ready, but also watch for /quit from stdin.
+    let mut stdin_closed = false;
     loop {
-        let line = socket::read_json_line(&mut reader).await?;
+        let line = if stdin_closed {
+            socket::read_json_line(&mut reader).await?
+        } else {
+            tokio::select! {
+                result = socket::read_json_line(&mut reader) => {
+                    result?
+                }
+                stdin_line = stdin_rx.recv() => {
+                    match stdin_line {
+                        Some(l) if l == "/quit" => {
+                            let cmd = serde_json::json!({"op": "quit"});
+                            let _ = socket::write_json_line(&mut write_half, &cmd).await;
+                            eprintln!("debug: cancelled");
+                            return Ok(());
+                        }
+                        Some(_) => continue, // discard other input during wait
+                        None => {
+                            stdin_closed = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+        };
+
         match line {
             Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("error") => {
                 let msg = l
@@ -706,6 +760,16 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
             }
             Some(_) => continue,
             None => return Err("connection closed before debug_ready".to_string()),
+        }
+    }
+
+    // Tail the last ~20 lines of the gremlin log for immediate context.
+    let log_path = config::state_root().join(id).join("log");
+    if let Ok(content) = std::fs::read_to_string(&log_path) {
+        let lines: Vec<&str> = content.lines().collect();
+        let start = if lines.len() > 20 { lines.len() - 20 } else { 0 };
+        for line in &lines[start..] {
+            eprintln!("log: {line}");
         }
     }
 
@@ -741,22 +805,16 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
         }
     });
 
-    // Read stdin lines and forward to the socket.
-    let stdin = std::io::stdin();
-    let mut line_buf = String::new();
+    // Read stdin lines from the channel and forward to the socket.
     loop {
-        line_buf.clear();
-        let n = std::io::BufRead::read_line(&mut stdin.lock(), &mut line_buf)
-            .map_err(|e| format!("stdin: {e}"))?;
-        if n == 0 {
-            let cmd = serde_json::json!({"op": "quit"});
-            socket::write_json_line(&mut write_half, &cmd).await?;
-            break;
-        }
-        let trimmed = line_buf.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+        let trimmed = match stdin_rx.recv().await {
+            Some(line) => line,
+            None => {
+                let cmd = serde_json::json!({"op": "quit"});
+                socket::write_json_line(&mut write_half, &cmd).await?;
+                break;
+            }
+        };
 
         let cmd = if trimmed == "/continue" {
             serde_json::json!({"op": "continue"})
