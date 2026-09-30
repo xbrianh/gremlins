@@ -413,9 +413,17 @@ async fn handle_stop(request: &Value) -> Value {
                         "message": "already terminal"
                     }));
                 }
-                return error_response(&format!(
-                    "gremlin {id} is orphaned (state says running but no executor entry)"
-                ));
+                // Orphaned: state says running but no executor entry.
+                // Clean up by marking it stopped so the user can rm it.
+                let _ = state::locked_update(&state_file, |data| {
+                    data.insert("status".to_string(), Value::String("stopped".to_string()));
+                    data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
+                });
+                return ok_response(serde_json::json!({
+                    "id": id,
+                    "status": "stopped",
+                    "message": "orphaned gremlin marked stopped"
+                }));
             }
             error_response(&format!("unknown gremlin {id:?}"))
         }
@@ -682,11 +690,7 @@ async fn handle_status(request: &Value, state_root: &Path) -> Value {
 
     let is_live = get_run_map().lock().unwrap().contains_key(id);
 
-    let status = if is_live {
-        "running".to_string()
-    } else {
-        gremlin.state.read_str("status")
-    };
+    let status = status_or_orphan(is_live, &gremlin);
 
     ok_response(serde_json::json!({
         "id": gremlin.id.as_str(),
@@ -734,11 +738,7 @@ async fn handle_info(request: &Value, state_root: &Path) -> Value {
 
     let is_live = get_run_map().lock().unwrap().contains_key(id);
 
-    let status = if is_live {
-        "running".to_string()
-    } else {
-        gremlin.state.read_str("status")
-    };
+    let status = status_or_orphan(is_live, &gremlin);
 
     ok_response(serde_json::json!({
         "id": gremlin.id.as_str(),
@@ -930,6 +930,20 @@ fn spawn_log_writer(
             let _ = broadcast_tx.send(line);
         }
     });
+}
+
+/// When the run_map says the gremlin is live, always report "running".
+/// When it's not live and state.json says "running", it's orphaned.
+/// Otherwise return the status from state.json as-is.
+fn status_or_orphan(is_live: bool, gremlin: &Gremlin) -> String {
+    if is_live {
+        return "running".to_string();
+    }
+    let status = gremlin.state.read_str("status");
+    if status == "running" {
+        return "orphan".to_string();
+    }
+    status
 }
 
 fn definition_display_name(gremlin: &Gremlin) -> String {
