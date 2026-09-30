@@ -38,6 +38,7 @@ stage-definitions:
   github-request-copilot-review: github-request-copilot-review
   github-wait-copilot: github-wait-copilot
   github-wait-ci: github-wait-ci
+  github-push-to-pr-branch: github-push-to-pr-branch
   check-and-fix:
     type: sequence
     body:
@@ -131,4 +132,5 @@ stages:
     bind:
       review_summary: "artifact://review-summary.md"
   - { name: verify-github-review-fixes, type: check-and-fix }
+  - { name: push-review-fixes, type: github-push-to-pr-branch }
   - { name: wait-for-ci, type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, ci_fix.md] }
