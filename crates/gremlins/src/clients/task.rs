@@ -588,109 +588,9 @@ mod tests {
     mod capture {
         use super::*;
 
-        use std::io::{Read, Write};
-        use std::os::fd::AsRawFd;
-        use std::sync::atomic::AtomicUsize;
-        use std::sync::Mutex;
-
         /// Base prefix of the format tests, so their lines can be told apart
         /// from any other line that reaches the shared stderr capture.
         const TEST_BASE: &str = "[task-test] ";
-
-        static CAPTURE_SEQ: AtomicUsize = AtomicUsize::new(0);
-
-        /// Panic captured off the raw-`pthread` job, re-raised on the test thread.
-        type Panic = Box<dyn std::any::Any + Send>;
-
-        static PANIC: Mutex<Option<Panic>> = Mutex::new(None);
-
-        static JOB: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
-
-        extern "C" fn run_job(_: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
-            let job = JOB.lock().unwrap().take().expect("job queued before spawn");
-            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
-                *PANIC.lock().unwrap() = Some(panic);
-            }
-            std::ptr::null_mut()
-        }
-
-        /// fd 2 is process-wide, so capturing tests take turns.
-        static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
-
-        /// Minimal logger that writes to stderr via eprintln! so the fd-2
-        /// redirect in [`capture_stderr`] captures log output.
-        struct TestLogger;
-
-        impl log::Log for TestLogger {
-            fn enabled(&self, _metadata: &log::Metadata) -> bool {
-                true
-            }
-            fn log(&self, record: &log::Record) {
-                if self.enabled(record.metadata()) {
-                    eprintln!("{} {} {}", record.level(), record.target(), record.args());
-                }
-            }
-            fn flush(&self) {
-                let _ = std::io::stderr().flush();
-            }
-        }
-
-        fn capture_stderr(job: impl FnOnce() + Send + 'static) -> Vec<String> {
-            let _serialized = CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            // Install a minimal logger that writes to stderr via eprintln! so
-            // the fd-2 redirect in this function captures log output.
-            let _ = log::set_logger(&TestLogger);
-            log::set_max_level(log::LevelFilter::Info);
-            let path = std::env::temp_dir().join(format!(
-                "gremlins-sub-log-{}-{}",
-                std::process::id(),
-                CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed)
-            ));
-            let file = std::fs::File::create(&path).unwrap();
-            std::io::stderr().flush().unwrap();
-            let saved = unsafe { libc::dup(2) };
-            assert!(saved >= 0, "dup(stderr) failed");
-            assert!(
-                unsafe { libc::dup2(file.as_raw_fd(), 2) } >= 0,
-                "dup2(stderr) failed"
-            );
-
-            *JOB.lock().unwrap() = Some(Box::new(job));
-            let mut thread: libc::pthread_t = unsafe { std::mem::zeroed() };
-            assert_eq!(
-                unsafe {
-                    libc::pthread_create(
-                        &mut thread,
-                        std::ptr::null(),
-                        run_job,
-                        std::ptr::null_mut(),
-                    )
-                },
-                0,
-                "pthread_create failed"
-            );
-            assert_eq!(
-                unsafe { libc::pthread_join(thread, std::ptr::null_mut()) },
-                0,
-                "pthread_join failed"
-            );
-
-            std::io::stderr().flush().unwrap();
-            unsafe { libc::dup2(saved, 2) };
-            unsafe { libc::close(saved) };
-
-            let mut buf = String::new();
-            std::fs::File::open(&path)
-                .unwrap()
-                .read_to_string(&mut buf)
-                .unwrap();
-            let _ = std::fs::remove_file(&path);
-
-            if let Some(panic) = PANIC.lock().unwrap().take() {
-                std::panic::resume_unwind(panic);
-            }
-            buf.lines().map(str::to_string).collect()
-        }
 
         /// `[task.<chain>]` of every begin line this test's runner logged.
         fn task_prefixes(lines: &[String]) -> Vec<String> {
@@ -743,8 +643,9 @@ mod tests {
 
         fn runner_with_turns(
             turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>,
-        ) -> tools::TaskFn {
-            make_task_runner(
+        ) -> (tools::TaskFn, tokio::sync::mpsc::UnboundedReceiver<String>) {
+            let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+            let runner = make_task_runner(
                 rig_core::test_utils::MockCompletionModel::from_stream_turns(turns),
                 None,
                 None,
@@ -754,16 +655,25 @@ mod tests {
                 5.0,
                 10,
                 0,
-                None,
-            )
+                Some(log_tx),
+            );
+            (runner, log_rx)
+        }
+
+        /// Drain the log channel into a Vec of lines.
+        fn drain_log(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> Vec<String> {
+            let mut lines = Vec::new();
+            while let Ok(line) = rx.try_recv() {
+                lines.push(line);
+            }
+            lines
         }
 
         #[test]
         fn task_prefix_wraps_a_single_segment_at_depth_one() {
-            let lines = capture_stderr(|| {
-                let runner = runner_with_turns(vec![turn_text("only")]);
-                block_on(runner("label".into(), "task".into()));
-            });
+            let (runner, mut log_rx) = runner_with_turns(vec![turn_text("only")]);
+            block_on(runner("label".into(), "task".into()));
+            let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
             assert_eq!(
@@ -781,11 +691,10 @@ mod tests {
         /// its prefix must carry the parent's segment as lineage.
         #[test]
         fn nested_task_prefix_appends_to_the_parent_chain() {
-            let lines = capture_stderr(|| {
-                let runner =
-                    runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
-                block_on(runner("label".into(), "task".into()));
-            });
+            let (runner, mut log_rx) =
+                runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
+            block_on(runner("label".into(), "task".into()));
+            let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
             let (parent, child) = (&segments[0], &segments[1]);
@@ -804,13 +713,12 @@ mod tests {
         /// shared parent segment.
         #[test]
         fn sibling_invocations_get_distinct_segments() {
-            let lines = capture_stderr(|| {
-                let runner = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
-                block_on(async {
-                    runner("one".into(), "one".into()).await;
-                    runner("two".into(), "two".into()).await;
-                });
+            let (runner, mut log_rx) = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
+            block_on(async {
+                runner("one".into(), "one".into()).await;
+                runner("two".into(), "two".into()).await;
             });
+            let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
             assert_ne!(segments[0], segments[1], "siblings must not share an id");

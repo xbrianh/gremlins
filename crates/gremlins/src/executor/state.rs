@@ -70,6 +70,26 @@ pub fn now_stamp() -> String {
     )
 }
 
+/// `[YYYY-MM-DDTHH:MM:SS.sssZ]` — millisecond precision, UTC.
+/// Matches `env_logger`'s `format_timestamp_millis()` format.
+pub fn now_stamp_millis() -> String {
+    let tm = now_utc();
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_millis())
+        .unwrap_or(0);
+    format!(
+        "[{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z]",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        millis,
+    )
+}
+
 /// ISO-8601 with microseconds and `+00:00`, matching Python `datetime.isoformat()`.
 pub fn now_iso() -> String {
     let tm = now_utc();

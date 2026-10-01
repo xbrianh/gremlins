@@ -77,12 +77,6 @@ async fn run_stage_scoped(
     enclosing_client: Option<&str>,
 ) -> Result<(), RunError> {
     let _attempt = gremlin.state.read_str("attempt");
-    log::debug!(
-        "stage '{}' (gremlin={}): entering (type={}, scope={scope:?})",
-        stage.name(),
-        gremlin.id.as_str(),
-        stage.stage_type(),
-    );
     send_log(
         &gremlin.runtime_config.log_tx,
         format!(
@@ -205,12 +199,6 @@ async fn run_agent(
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
 
-    log::debug!(
-        "agent stage '{}' (gremlin={}): preparing (client={})",
-        agent.name,
-        gremlin.id.as_str(),
-        client.model()
-    );
     send_log(
         &gremlin.runtime_config.log_tx,
         format!(
@@ -431,12 +419,6 @@ async fn run_agent(
             },
         })?;
 
-    log::debug!(
-        "agent stage '{}' (gremlin={}): client.run completed (turns={})",
-        prepared.name,
-        gremlin.id.as_str(),
-        completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
-    );
     send_log(
         &gremlin.runtime_config.log_tx,
         format!(
@@ -517,11 +499,6 @@ async fn run_exec(
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
 
-    log::debug!(
-        "exec stage '{}' (gremlin={}): preparing",
-        exec.name,
-        gremlin.id.as_str()
-    );
     send_log(
         &gremlin.runtime_config.log_tx,
         format!("[{}] exec: preparing", exec.name),
@@ -619,6 +596,7 @@ async fn run_exec(
     prepared.state_dir = gremlin.state_dir.clone();
     prepared.env = gremlin.env.clone();
     prepared.base_env = gremlin.runtime_config.base_process_env.clone();
+    prepared.log_tx = gremlin.runtime_config.log_tx.clone();
 
     if gremlin.dry_run {
         log::debug!(
@@ -649,13 +627,6 @@ async fn run_exec(
     }
 
     if !prepared.cmds.is_empty() {
-        log::debug!(
-            "exec stage '{}' (gremlin={}): running {} command(s): {:?}",
-            prepared.name,
-            gremlin.id.as_str(),
-            prepared.cmds.len(),
-            prepared.cmds
-        );
         send_log(
             &gremlin.runtime_config.log_tx,
             format!(
@@ -742,7 +713,6 @@ async fn run_sequence(
         if !skip_guard.is_empty() {
             let resolved = skip_guard.replace("{loop_iter}", &gremlin.loop_iter);
             if is_registered_uri(gremlin.registry.as_ref(), &resolved).await {
-                log::info!("sequence '{}': skipped (artifact exists)", seq.name);
                 send_log(
                     &gremlin.runtime_config.log_tx,
                     format!("sequence '{}': skipped (artifact exists)", seq.name),
@@ -778,7 +748,6 @@ async fn run_sequence(
             let resolved = skip_guard.replace("{loop_iter}", &loop_iter);
             if is_registered_uri(gremlin.registry.as_ref(), &resolved).await {
                 if iteration == 1 {
-                    log::info!("sequence '{}': skipped (artifact exists)", seq.name);
                     send_log(
                         &gremlin.runtime_config.log_tx,
                         format!("sequence '{}': skipped (artifact exists)", seq.name),
@@ -786,7 +755,6 @@ async fn run_sequence(
                     gremlin.loop_iter = saved_loop_iter;
                     return Ok(());
                 }
-                log::info!("sequence '{}': stopped (artifact exists)", seq.name);
                 send_log(
                     &gremlin.runtime_config.log_tx,
                     format!("sequence '{}': stopped (artifact exists)", seq.name),
@@ -796,10 +764,6 @@ async fn run_sequence(
             }
         }
 
-        log::info!(
-            "sequence '{}': iteration {iteration}/{max_iterations} starting",
-            seq.name
-        );
         send_log(
             &gremlin.runtime_config.log_tx,
             format!(
@@ -828,7 +792,6 @@ async fn run_sequence(
         if !skip_guard.is_empty() {
             let resolved = skip_guard.replace("{loop_iter}", &loop_iter);
             if is_registered_uri(gremlin.registry.as_ref(), &resolved).await {
-                log::info!("sequence '{}': stopped (artifact produced)", seq.name);
                 send_log(
                     &gremlin.runtime_config.log_tx,
                     format!("sequence '{}': stopped (artifact produced)", seq.name),
@@ -890,7 +853,6 @@ impl Gremlin {
         let first_start = self.worktree.is_some() && resume_from.is_none();
         if first_start && has_bootstrap {
             if let Err(error) = run_definition_bootstrap(self, is_fork).await {
-                log::error!("bootstrap failed");
                 send_log(&self.runtime_config.log_tx, "bootstrap failed".to_string());
                 self.state.write_bail_file(
                     "other",
@@ -924,7 +886,6 @@ impl Gremlin {
             // Check for cancellation before each stage.
             if let Some(ref cancel_token) = self.cancel_token {
                 if cancel_token.is_cancelled() {
-                    log::info!("gremlin {}: cancelled", self.id.as_str());
                     send_log(&self.runtime_config.log_tx, "cancelled".to_string());
                     self.finish(-1);
                     return Ok(-1);
@@ -963,12 +924,6 @@ impl Gremlin {
             let saved_loop_iter = self.loop_iter.clone();
             self.loop_iter = format!("{}~{}", saved_loop_iter, attempt);
 
-            log::debug!(
-                "gremlin {}: running top-level stage '{}' (type={})",
-                self.id.as_str(),
-                stage.name(),
-                stage.stage_type()
-            );
             send_log(
                 &self.runtime_config.log_tx,
                 format!(
@@ -1014,12 +969,6 @@ impl Gremlin {
     /// write the terminal state — the bookkeeping every exit path owes the
     /// operator, whether the run succeeded, bailed, or blew up.
     fn finish(&mut self, exit_code: i32) {
-        log::debug!(
-            "gremlin {}: finish() calling client.reap_all() (exit_code={exit_code}, provider={}, model={})",
-            self.id.as_str(),
-            self.client.provider(),
-            self.client.model(),
-        );
         send_log(
             &self.runtime_config.log_tx,
             format!("finished (exit_code={})", exit_code),
