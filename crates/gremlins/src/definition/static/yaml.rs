@@ -224,18 +224,39 @@ fn yaml_str(mapping: &Mapping, key: &str) -> Option<String> {
 }
 
 /// Read the nested `interpolation:` structure: `{inputs: {…}, outputs: {…}}`.
-/// Returns (inputs_map, outputs_map). If the nested form is absent, returns
+/// Returns (inputs_map, outputs_map). If `interpolation` is absent, returns
 /// empty maps.
+///
+/// Rejects legacy flat `interpolation:` (keys other than `inputs`/`outputs`),
+/// non-mapping values, and the deprecated top-level `bind:` key.
 #[allow(clippy::type_complexity)]
 fn yaml_interpolation_nested(
     mapping: &Mapping,
 ) -> Result<(HashMap<String, String>, HashMap<String, String>), SchemaError> {
+    // Reject legacy top-level `bind:` key
+    if mapping.contains_key("bind") {
+        return Err(SchemaError::Generic(
+            "top-level 'bind:' is no longer supported; use 'interpolation: {outputs: {\u{2026}}}' instead"
+                .to_string(),
+        ));
+    }
     if let Some(interp_val) = mapping.get("interpolation").filter(|v| !v.is_null()) {
-        if let Some(interp_map) = interp_val.as_mapping() {
-            let inputs = yaml_string_map(interp_map, "inputs")?;
-            let outputs = yaml_string_map(interp_map, "outputs")?;
-            return Ok((inputs, outputs));
+        let interp_map = interp_val
+            .as_mapping()
+            .ok_or_else(|| SchemaError::Generic("'interpolation' must be a mapping".to_string()))?;
+        // Reject unknown sub-keys — only "inputs" and "outputs" are valid
+        for key in interp_map.keys() {
+            if let Some(k) = key.as_str() {
+                if k != "inputs" && k != "outputs" {
+                    return Err(SchemaError::Generic(format!(
+                        "unknown key {k:?} in 'interpolation'; expected 'inputs' or 'outputs'"
+                    )));
+                }
+            }
         }
+        let inputs = yaml_string_map(interp_map, "inputs")?;
+        let outputs = yaml_string_map(interp_map, "outputs")?;
+        return Ok((inputs, outputs));
     }
     Ok((HashMap::new(), HashMap::new()))
 }

@@ -840,6 +840,11 @@ fn _expand_stage_def(
                     if let Some(m) = interp_val.as_mapping() {
                         if let Some(outputs_val) = m.get("outputs") {
                             // New nested form: merge into interpolation.outputs
+                            let cs_out = outputs_val.as_mapping().ok_or_else(|| {
+                                SchemaError::Generic(
+                                    "'interpolation.outputs' must be a mapping".to_string(),
+                                )
+                            })?;
                             let existing_outputs = inner_map
                                 .get("interpolation")
                                 .and_then(|v| v.as_mapping())
@@ -853,10 +858,8 @@ fn _expand_stage_def(
                                 .unwrap_or_default();
 
                             let mut merged_outputs = existing_outputs;
-                            if let Some(cs_out) = outputs_val.as_mapping() {
-                                for (k, v) in cs_out {
-                                    merged_outputs.insert(k.clone(), v.clone());
-                                }
+                            for (k, v) in cs_out {
+                                merged_outputs.insert(k.clone(), v.clone());
                             }
 
                             // Build nested interpolation mapping
@@ -963,6 +966,12 @@ fn _expand_stage_def(
                     merged_map.insert(
                         serde_yaml::Value::String("interpolation".to_string()),
                         serde_yaml::Value::Mapping(existing),
+                    );
+                } else {
+                    // Non-mapping value — insert as-is so schema validation can reject it
+                    merged_map.insert(
+                        serde_yaml::Value::String("interpolation".to_string()),
+                        v.clone(),
                     );
                 }
             } else {
