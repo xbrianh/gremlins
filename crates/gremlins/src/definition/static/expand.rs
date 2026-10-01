@@ -612,6 +612,53 @@ fn _expand_entry(
     Ok(vec![entry])
 }
 
+/// Validate call-site interpolation shape before distributing to stages.
+/// Rejects scalars, non-mapping values, misspelled/legacy sub-keys, and
+/// non-mapping `inputs`/`outputs` values — the same validation that
+/// `yaml_interpolation_nested` applies to primitive stages.
+fn validate_call_site_interpolation(
+    call_site_map: &serde_yaml::Mapping,
+) -> Result<(), SchemaError> {
+    let Some(interp_val) = call_site_map.get("interpolation").filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let interp_map = interp_val
+        .as_mapping()
+        .ok_or_else(|| SchemaError::Generic("'interpolation' must be a mapping".to_string()))?;
+    for key in interp_map.keys() {
+        match key.as_str() {
+            Some("inputs") | Some("outputs") => {}
+            Some(other) => {
+                return Err(SchemaError::Generic(format!(
+                    "unknown key {other:?} in 'interpolation'; expected 'inputs' or 'outputs'"
+                )));
+            }
+            None => {
+                return Err(SchemaError::Generic(
+                    "'interpolation' keys must be strings".to_string(),
+                ));
+            }
+        }
+    }
+    // Validate inputs values are mappings (not scalars)
+    if let Some(inputs_val) = interp_map.get("inputs").filter(|v| !v.is_null()) {
+        if !inputs_val.is_mapping() {
+            return Err(SchemaError::Generic(
+                "'interpolation.inputs' must be a mapping".to_string(),
+            ));
+        }
+    }
+    // Validate outputs values are mappings (not scalars)
+    if let Some(outputs_val) = interp_map.get("outputs").filter(|v| !v.is_null()) {
+        if !outputs_val.is_mapping() {
+            return Err(SchemaError::Generic(
+                "'interpolation.outputs' must be a mapping".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn _expand_stage_def(
     call_site: &serde_yaml::Value,
@@ -763,6 +810,9 @@ fn _expand_stage_def(
         );
 
         let ctx_value = serde_yaml::Value::Mapping(ctx);
+
+        // Validate call-site interpolation shape before distributing to stages
+        validate_call_site_interpolation(call_site_map)?;
 
         let mut result: Vec<serde_yaml::Value> = Vec::new();
         for (i, raw_inner) in inner_list.iter().enumerate() {

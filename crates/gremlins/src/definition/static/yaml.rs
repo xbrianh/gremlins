@@ -244,13 +244,19 @@ fn yaml_interpolation_nested(
         let interp_map = interp_val
             .as_mapping()
             .ok_or_else(|| SchemaError::Generic("'interpolation' must be a mapping".to_string()))?;
-        // Reject unknown sub-keys — only "inputs" and "outputs" are valid
+        // Reject unknown or non-string sub-keys — only "inputs" and "outputs" are valid
         for key in interp_map.keys() {
-            if let Some(k) = key.as_str() {
-                if k != "inputs" && k != "outputs" {
+            match key.as_str() {
+                Some("inputs") | Some("outputs") => {}
+                Some(other) => {
                     return Err(SchemaError::Generic(format!(
-                        "unknown key {k:?} in 'interpolation'; expected 'inputs' or 'outputs'"
+                        "unknown key {other:?} in 'interpolation'; expected 'inputs' or 'outputs'"
                     )));
+                }
+                None => {
+                    return Err(SchemaError::Generic(
+                        "'interpolation' keys must be strings".to_string(),
+                    ));
                 }
             }
         }
