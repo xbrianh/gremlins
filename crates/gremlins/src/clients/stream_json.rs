@@ -44,8 +44,13 @@ pub(crate) struct StreamState {
     pub(crate) api_error_status: Option<i32>,
 }
 
-/// Emit a stream-json event to stderr in the standard format.
-pub(crate) fn emit_event(prefix: &str, evt: &Value) {
+/// Emit a stream-json event to the per-gremlin log (via `log_tx`) and also
+/// to stderr (via `log`). When `log_tx` is `None` only the `log` path is used.
+pub(crate) fn emit_event(
+    prefix: &str,
+    evt: &Value,
+    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) {
     use crate::clients::log_util::trunc;
 
     let evt_type = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -55,13 +60,12 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
             if evt.get("subtype").and_then(|v| v.as_str()) == Some("init") {
                 let model = evt.get("model").and_then(|v| v.as_str()).unwrap_or("?");
                 let cwd = evt.get("cwd").and_then(|v| v.as_str()).unwrap_or("?");
-                log::info!(
+                let msg = format!(
                     "{}using client model={} cwd={} reasoning_effort={}",
-                    prefix,
-                    model,
-                    cwd,
-                    "default"
+                    prefix, model, cwd, "default"
                 );
+                send_log(log_tx, &msg);
+                log::info!("{msg}");
             }
         }
         "assistant" => {
@@ -74,16 +78,22 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                     match c.get("type").and_then(|v| v.as_str()) {
                         Some("text") => {
                             let text = c.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                            log::info!("{}text: {}", prefix, trunc(text, 200));
+                            let msg = format!("{}text: {}", prefix, trunc(text, 200));
+                            send_log(log_tx, &msg);
+                            log::info!("{msg}");
                         }
                         Some("thinking") => {
                             let thinking = c.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
-                            log::info!("{}think: {}", prefix, trunc(thinking, 200));
+                            let msg = format!("{}think: {}", prefix, trunc(thinking, 200));
+                            send_log(log_tx, &msg);
+                            log::info!("{msg}");
                         }
                         Some("tool_use") => {
                             let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                             let arg = tool_arg(c);
-                            log::info!("{}tool: {} {}", prefix, name, trunc(&arg, 200));
+                            let msg = format!("{}tool: {} {}", prefix, name, trunc(&arg, 200));
+                            send_log(log_tx, &msg);
+                            log::info!("{msg}");
                         }
                         _ => {}
                     }
@@ -101,9 +111,13 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                         let is_error = c.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
                         let body = tool_result_body(c.get("content").unwrap_or(&Value::Null));
                         if is_error {
-                            log::warn!("{}result ERROR: {}", prefix, trunc(&body, 200));
+                            let msg = format!("{}result ERROR: {}", prefix, trunc(&body, 200));
+                            send_log(log_tx, &msg);
+                            log::warn!("{msg}");
                         } else {
-                            log::info!("{}result: {}", prefix, trunc(&body, 200));
+                            let msg = format!("{}result: {}", prefix, trunc(&body, 200));
+                            send_log(log_tx, &msg);
+                            log::info!("{msg}");
                         }
                     }
                 }
@@ -120,9 +134,17 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                 .get("num_turns")
                 .and_then(|v| v.as_i64())
                 .map_or("?".to_string(), |t| t.to_string());
-            log::info!("{prefix}final: subtype={subtype} turns={turns} cost={cost_str}");
+            let msg = format!("{prefix}final: subtype={subtype} turns={turns} cost={cost_str}");
+            send_log(log_tx, &msg);
+            log::info!("{msg}");
         }
         _ => {}
+    }
+}
+
+fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
+    if let Some(tx) = tx {
+        let _ = tx.send(msg.to_string());
     }
 }
 

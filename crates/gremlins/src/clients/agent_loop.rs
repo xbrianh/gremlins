@@ -913,21 +913,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
                         total_reasoning_tokens,
                         log_tx,
                     );
-                    send_log(
-                        log_tx,
-                        prefix,
-                        &format!("final: turns={turns} cost=not-reported"),
-                    );
-                    send_log(log_tx, prefix, &format!(
-                        "summary: turns={turn_num} wall={:.1}s token_total={} prompt_avg={} completion_avg={} cached_avg={}% cache_creation={} reasoning_pct={}%",
-                        loop_start.elapsed().as_secs_f64(),
-                        total_prompt_tokens + total_completion_tokens,
-                        if turn_num > 0 { total_prompt_tokens / turn_num as u64 } else { 0 },
-                        if turn_num > 0 { total_completion_tokens / turn_num as u64 } else { 0 },
-                        if total_prompt_tokens > 0 { (total_cached_tokens as f64 / total_prompt_tokens as f64) * 100.0 } else { 0.0 },
-                        total_cache_creation_tokens,
-                        if total_completion_tokens > 0 { (total_reasoning_tokens as f64 / total_completion_tokens as f64) * 100.0 } else { 0.0 },
-                    ));
                 }
                 // Emit Done if interactive mode is active.
                 if let Some(ref evt_tx) = evt_tx {
@@ -1044,11 +1029,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     total_cache_creation_tokens,
                     total_reasoning_tokens,
                     log_tx,
-                );
-                send_log(
-                    log_tx,
-                    prefix,
-                    &format!("final: turns={turns} cost=not-reported (exhausted)"),
                 );
             }
             return Ok(completed_run(Some(final_text), captured, usage));
@@ -1218,11 +1198,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
             total_cache_creation_tokens,
             total_reasoning_tokens,
             log_tx,
-        );
-        send_log(
-            log_tx,
-            prefix,
-            &format!("final: turns={turns} cost=not-reported{suffix}"),
         );
     }
 

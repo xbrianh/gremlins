@@ -1326,14 +1326,19 @@ fn spawn_log_writer(
 
         while let Some(line) = log_rx.recv().await {
             let ts = crate::executor::state::now_stamp_millis();
-            let stamped = format!("{ts} {line}");
-            if let Some(ref mut f) = file {
-                let _ = f.write_all(stamped.as_bytes()).await;
-                let _ = f.write_all(b"\n").await;
-                let _ = f.flush().await;
+            // Stamp each newline-separated part so every physical log line
+            // carries a timestamp, even when a single message contains
+            // embedded newlines (e.g. stage names or error text).
+            for part in line.split('\n') {
+                let stamped = format!("{ts} {part}");
+                if let Some(ref mut f) = file {
+                    let _ = f.write_all(stamped.as_bytes()).await;
+                    let _ = f.write_all(b"\n").await;
+                    let _ = f.flush().await;
+                }
+                // Broadcast to live subscribers — ignore errors (no subscribers).
+                let _ = broadcast_tx.send(stamped);
             }
-            // Broadcast to live subscribers — ignore errors (no subscribers).
-            let _ = broadcast_tx.send(stamped);
         }
     });
 }
