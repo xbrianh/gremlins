@@ -292,7 +292,9 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
 /// Future that resolves when a [`PauseToken`] fires, or never if there is no token.
 async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
     if let Some(ref p) = pause {
+        log::debug!("maybe_pause: waiting on pause token");
         p.paused().await;
+        log::debug!("maybe_pause: pause token resolved");
     } else {
         std::future::pending::<()>().await;
     }
@@ -315,6 +317,7 @@ async fn interactive_loop<M: CompletionModel>(
     session: &mut InteractiveSession,
     turn: usize,
 ) -> Result<InteractiveLoopResult, ClientError> {
+    log::debug!("interactive_loop: broadcasting Ready (turn={turn})");
     let _ = session.evt_tx.send(InteractiveEvent::Ready { turn });
 
     let cmd = match session.cmd_rx.recv().await {
@@ -526,6 +529,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 }
             } else if pause.as_ref().is_some_and(|p| p.is_paused()) {
                 // Pause token was triggered — enter interactive mode.
+                log::debug!(
+                    "agent_loop: pause token detected at turn boundary (label={})",
+                    prefix
+                );
                 if let Some(ref p) = pause {
                     p.reset();
                 }
@@ -622,6 +629,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     if let Some(ref p) = pause {
                         p.reset();
                     }
+                    log::debug!("agent_loop: entering interactive mode mid-stream (label={})", prefix);
 
                     // Amend system prompt with operator note (same as turn-boundary path).
                     let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
@@ -1084,6 +1092,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 if let Some(ref p) = pause {
                     p.reset();
                 }
+                log::debug!("agent_loop: entering interactive mode mid-tool (label={})", prefix);
 
                 // Pop the two messages pushed at lines 1005-1006
                 // (next_prompt + assistant_tool_message) so the turn can be

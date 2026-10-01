@@ -998,13 +998,16 @@ async fn handle_debug(
     write_half: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    log::debug!("handle_debug: received debug request for {id:?}");
     if id.is_empty() {
+        log::debug!("handle_debug: missing 'id' field");
         let resp = error_response("missing 'id' field");
         let _ = socket::write_json_line(write_half, &resp).await;
         return;
     }
 
     if validate_gremlin_id(id).is_err() {
+        log::debug!("handle_debug: invalid gremlin id {id:?}");
         let resp = error_response(&format!("invalid gremlin id {id:?}"));
         let _ = socket::write_json_line(write_half, &resp).await;
         return;
@@ -1013,6 +1016,7 @@ async fn handle_debug(
     let state_dir = state_root.join(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
+        log::debug!("handle_debug: unknown gremlin {id:?}");
         let resp = error_response(&format!("unknown gremlin {id:?}"));
         let _ = socket::write_json_line(write_half, &resp).await;
         return;
@@ -1034,6 +1038,7 @@ async fn handle_debug(
         };
 
         if stage_name.is_empty() {
+            log::debug!("handle_debug: gremlin {id} has no recorded stage");
             let resp = error_response(&format!("gremlin {id} has no recorded stage"));
             let _ = socket::write_json_line(write_half, &resp).await;
             return;
@@ -1057,6 +1062,9 @@ async fn handle_debug(
                 .unwrap_or(false);
 
         if !is_agent {
+            log::debug!(
+                "handle_debug: gremlin {id} is not in an agent stage (current: {stage_name})"
+            );
             let resp = error_response(&format!(
                 "gremlin {id} is not in an agent stage (current: {stage_name})"
             ));
@@ -1074,18 +1082,23 @@ async fn handle_debug(
     let interactive_handle = match interactive_handle {
         Some(h) => h,
         None => {
+            log::debug!("handle_debug: gremlin {id} is not in the run map");
             let resp = error_response(&format!("gremlin {id} is not running"));
             let _ = socket::write_json_line(write_half, &resp).await;
             return;
         }
     };
 
+    log::debug!("handle_debug: got interactive handle for {id}");
+
     // Subscribe to interactive events *before* triggering pause so we don't miss
     // the Ready broadcast.
     let mut evt_rx = interactive_handle.evt_tx.subscribe();
 
     // Signal the agent loop to pause at its next yield point.
+    log::debug!("handle_debug: calling pause() for {id}");
     interactive_handle.pause.pause();
+    log::debug!("handle_debug: pause() called, waiting for Ready from agent…");
 
     // Wait for Ready from the agent loop.
     //
@@ -1099,22 +1112,40 @@ async fn handle_debug(
         tokio::select! {
             result = evt_rx.recv() => {
                 match result {
-                    Ok(InteractiveEvent::Ready { .. }) => break true,
-                    Ok(InteractiveEvent::Ended { .. }) => break false,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break false,
-                    _ => continue,
+                    Ok(InteractiveEvent::Ready { turn }) => {
+                        log::debug!("handle_debug: received Ready event (turn={turn}) for {id}");
+                        break true;
+                    }
+                    Ok(InteractiveEvent::Ended { reason }) => {
+                        log::debug!("handle_debug: received Ended event ({reason}) for {id}");
+                        break false;
+                    }
+                    Ok(other) => {
+                        log::debug!("handle_debug: ignoring event while waiting for Ready: {other:?}");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::debug!("handle_debug: broadcast lagged ({n}) for {id}, continuing");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        log::debug!("handle_debug: broadcast channel closed for {id}");
+                        break false;
+                    }
                 }
             }
             _ = &mut cmd_tx_closed => {
                 // Agent session exited — cmd_rx was dropped.
+                log::debug!("handle_debug: cmd_tx closed for {id} — agent session exited");
                 break false;
             }
             result = socket::read_json_line(&mut reader) => {
                 // Client sent a message before Ready — decode it.
                 // If it's a quit, propagate to the agent so it doesn't stay paused.
                 if let Ok(Some(cmd)) = result {
-                    if cmd.get("op").and_then(|v| v.as_str()) == Some("quit") {
+                    let op = cmd.get("op").and_then(|v| v.as_str());
+                    log::debug!("handle_debug: client message before Ready: op={op:?}");
+                    if op == Some("quit") {
                         let _ = interactive_handle
                             .cmd_tx
                             .send(InteractiveCommand::Quit)
@@ -1127,11 +1158,13 @@ async fn handle_debug(
     };
 
     if !ready {
+        log::debug!("handle_debug: agent did not become ready for {id}, resetting pause");
         interactive_handle.pause.reset();
         return;
     }
 
     // Send debug_ready to the client.
+    log::debug!("handle_debug: sending debug_ready for {id}");
     let ready_payload = serde_json::json!({
         "type": "debug_ready",
         "id": id,
@@ -1140,6 +1173,7 @@ async fn handle_debug(
         .await
         .is_err()
     {
+        log::debug!("handle_debug: failed to send debug_ready for {id}, client disconnected");
         let _ = interactive_handle
             .cmd_tx
             .send(InteractiveCommand::Quit)
@@ -1147,6 +1181,7 @@ async fn handle_debug(
         interactive_handle.pause.reset();
         return;
     }
+    log::debug!("handle_debug: debug_ready sent, entering command loop for {id}");
 
     // Bidirectional loop: read commands from client, forward to agent.
     loop {
