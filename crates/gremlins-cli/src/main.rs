@@ -768,9 +768,22 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                 stdin_line = stdin_rx.recv() => {
                     match stdin_line {
                         Some(l) if l == "/quit" => {
-                            let cmd = serde_json::json!({"op": "quit"});
+                            let cmd = serde_json::json!({"op": "bail", "reason": "operator stopped"});
                             let _ = socket::write_json_line(&mut write_half, &cmd).await;
                             eprintln!("debug: cancelled");
+                            return Ok(());
+                        }
+                        Some(l) if l.starts_with("/quit ") => {
+                            let reason = l.strip_prefix("/quit ").unwrap().trim();
+                            let cmd = serde_json::json!({"op": "bail", "reason": reason});
+                            let _ = socket::write_json_line(&mut write_half, &cmd).await;
+                            eprintln!("debug: cancelled");
+                            return Ok(());
+                        }
+                        Some(l) if l == "/continue" || l == "/exit" => {
+                            let cmd = serde_json::json!({"op": "quit"});
+                            let _ = socket::write_json_line(&mut write_half, &cmd).await;
+                            eprintln!("debug: resumed");
                             return Ok(());
                         }
                         Some(_) => continue, // discard other input during wait
@@ -835,6 +848,18 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
             let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match typ {
                 "debug_turn_complete" => {
+                    let text = line.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    let tool_calls = line.get("tool_calls").and_then(|v| v.as_array());
+                    if !text.is_empty() {
+                        eprintln!("{text}");
+                    }
+                    if let Some(tcs) = tool_calls {
+                        for tc in tcs {
+                            if let Some(name) = tc.as_str() {
+                                eprintln!("  [tool: {name}]");
+                            }
+                        }
+                    }
                     eprintln!("debug: turn complete — agent paused");
                 }
                 "debug_done" => {
@@ -866,19 +891,31 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
             }
         };
 
-        let cmd = if trimmed == "/continue" {
-            serde_json::json!({"op": "continue"})
-        } else if let Some(rest) = trimmed.strip_prefix("/bail ") {
-            serde_json::json!({"op": "bail", "reason": rest.trim()})
-        } else if trimmed == "/bail" {
-            serde_json::json!({"op": "bail", "reason": "operator bailed"})
-        } else if trimmed == "/quit" {
+        let cmd = if trimmed == "/continue" || trimmed == "/exit" {
             serde_json::json!({"op": "quit"})
+        } else if let Some(rest) = trimmed.strip_prefix("/quit ") {
+            serde_json::json!({"op": "bail", "reason": rest.trim()})
+        } else if trimmed == "/quit" {
+            serde_json::json!({"op": "bail", "reason": "operator stopped"})
+        } else if trimmed == "/step" {
+            serde_json::json!({"op": "continue"})
+        } else if trimmed == "/help" {
+            eprintln!("available commands:");
+            eprintln!("  /quit [reason]  — bail the stage (default: operator stopped)");
+            eprintln!("  /continue       — exit interactive mode, agent resumes");
+            eprintln!("  /exit           — alias for /continue");
+            eprintln!("  /step           — run one turn, then re-pause");
+            eprintln!("  /help           — show this help");
+            eprintln!("  <anything else> — send message to agent");
+            continue;
         } else {
             serde_json::json!({"op": "talk", "text": trimmed})
         };
 
-        let is_terminal = trimmed == "/quit" || trimmed == "/bail" || trimmed.starts_with("/bail ");
+        let is_terminal = trimmed == "/quit"
+            || trimmed.starts_with("/quit ")
+            || trimmed == "/continue"
+            || trimmed == "/exit";
         socket::write_json_line(&mut write_half, &cmd).await?;
         if is_terminal {
             break;
