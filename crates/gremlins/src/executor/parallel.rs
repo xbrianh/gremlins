@@ -598,7 +598,7 @@ fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builders::artifacts::artifact;
+    use crate::builders::artifacts::output;
     use crate::builders::composite::ParallelBuilder;
     use crate::builders::exec::ExecBuilder;
     use crate::definition::StageSpec;
@@ -975,7 +975,7 @@ mod tests {
         let stages = vec![ParallelBuilder::new("group")
             .stage(
                 ExecBuilder::new("writer")
-                    .bind("output", artifact("artifact://out.txt"))
+                    .output("output", output("artifact://out.txt"))
                     .cmds(vec!["echo hello > {output}".to_string()])
                     .build()
                     .unwrap(),

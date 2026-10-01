@@ -13,7 +13,7 @@ pub(crate) struct StageEntry {
 pub(crate) struct StageNode {
     pub name: String,
     pub stage_type: String,
-    pub bind_map: HashMap<String, String>,
+    pub outputs_map: HashMap<String, String>,
     pub interpolation_map: HashMap<String, String>,
     pub skip_if_exists: String,
     pub body: Vec<StageNode>,
@@ -115,7 +115,7 @@ pub(crate) fn check_duplicate_producers(
         let is_conditional = !stage.skip_if_exists.is_empty();
 
         if !is_conditional {
-            for (raw_key, uri_str) in &stage.bind_map {
+            for (raw_key, uri_str) in &stage.outputs_map {
                 if raw_key.ends_with('?') {
                     continue;
                 }
@@ -250,7 +250,7 @@ fn check_consumers_inner(
         }
 
         // Collect this stage's bind outputs.
-        // Both bind_map values and keys can serve as producer URIs:
+        // Both outputs_map values and keys can serve as producer URIs:
         // - Values like "artifact://plan.md" are direct artifact URIs.
         // - Keys like "review-chain" can be referenced as
         //   artifact://review-chain by downstream consumers (the executor
@@ -258,7 +258,7 @@ fn check_consumers_inner(
         // - Runtime templates ({name}, etc.) are resolved against the
         //   stage's own metadata so that recipes produce predictable URIs.
         let mut stage_outputs: Vec<String> = Vec::new();
-        for (key, val) in &stage.bind_map {
+        for (key, val) in &stage.outputs_map {
             // Resolve runtime templates in keys: {name} → stage name
             let resolved_key = key.replace("{name}", &stage.name);
             if val.starts_with("artifact://") {
@@ -355,7 +355,7 @@ mod tests {
         StageNode {
             name: name.to_string(),
             stage_type: stage_type.to_string(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
             interpolation_map: HashMap::new(),
             skip_if_exists: String::new(),
             body: vec![],
@@ -376,10 +376,10 @@ mod tests {
     fn stage_with_bind(
         name: &str,
         stage_type: &str,
-        bind_map: HashMap<String, String>,
+        outputs_map: HashMap<String, String>,
     ) -> StageNode {
         StageNode {
-            bind_map,
+            outputs_map,
             ..stage_node(name, stage_type)
         }
     }
@@ -458,7 +458,7 @@ mod tests {
             StageNode {
                 name: "s2".to_string(),
                 stage_type: "agent".to_string(),
-                bind_map: HashMap::from([("out".to_string(), "uri-b".to_string())]),
+                outputs_map: HashMap::from([("out".to_string(), "uri-b".to_string())]),
                 interpolation_map: HashMap::new(),
                 skip_if_exists: "true".to_string(),
                 body: vec![],
@@ -474,7 +474,7 @@ mod tests {
         let stages = vec![StageNode {
             name: "par".to_string(),
             stage_type: "parallel".to_string(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
             interpolation_map: HashMap::new(),
             skip_if_exists: String::new(),
             body: vec![
@@ -501,7 +501,7 @@ mod tests {
         let stages = vec![StageNode {
             name: "seq".to_string(),
             stage_type: "sequence".to_string(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
             interpolation_map: HashMap::new(),
             skip_if_exists: String::new(),
             body: vec![
@@ -747,7 +747,7 @@ mod tests {
             StageNode {
                 name: "par".to_string(),
                 stage_type: "parallel".to_string(),
-                bind_map: HashMap::new(),
+                outputs_map: HashMap::new(),
                 interpolation_map: HashMap::new(),
                 skip_if_exists: String::new(),
                 body: vec![
@@ -782,7 +782,7 @@ mod tests {
         let stages = vec![StageNode {
             name: "par".to_string(),
             stage_type: "parallel".to_string(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
             interpolation_map: HashMap::new(),
             skip_if_exists: String::new(),
             body: vec![
@@ -795,13 +795,13 @@ mod tests {
                 StageNode {
                     name: "c2".to_string(),
                     stage_type: "agent".to_string(),
-                    bind_map: HashMap::new(),
+                    outputs_map: HashMap::new(),
                     interpolation_map: HashMap::new(),
                     skip_if_exists: String::new(),
                     body: vec![StageNode {
                         name: "nested-par".to_string(),
                         stage_type: "parallel".to_string(),
-                        bind_map: HashMap::new(),
+                        outputs_map: HashMap::new(),
                         interpolation_map: HashMap::new(),
                         skip_if_exists: String::new(),
                         body: vec![stage_with_interp(
@@ -830,7 +830,7 @@ mod tests {
         let stages = vec![StageNode {
             name: "seq".to_string(),
             stage_type: "sequence".to_string(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
             interpolation_map: HashMap::new(),
             skip_if_exists: String::new(),
             body: vec![
@@ -892,7 +892,7 @@ mod tests {
             StageNode {
                 name: "par".to_string(),
                 stage_type: "parallel".to_string(),
-                bind_map: HashMap::new(),
+                outputs_map: HashMap::new(),
                 interpolation_map: HashMap::new(),
                 skip_if_exists: String::new(),
                 body: vec![stage_with_bind(
@@ -925,14 +925,14 @@ mod tests {
             StageNode {
                 name: "par".to_string(),
                 stage_type: "parallel".to_string(),
-                bind_map: HashMap::new(),
+                outputs_map: HashMap::new(),
                 interpolation_map: HashMap::new(),
                 skip_if_exists: String::new(),
                 body: vec![
                     StageNode {
                         name: "seq".to_string(),
                         stage_type: "sequence".to_string(),
-                        bind_map: HashMap::new(),
+                        outputs_map: HashMap::new(),
                         interpolation_map: HashMap::new(),
                         skip_if_exists: String::new(),
                         body: vec![stage_with_bind(

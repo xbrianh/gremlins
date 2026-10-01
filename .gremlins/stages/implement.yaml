@@ -4,7 +4,8 @@ stages:
   - name: implement
     type: agent
     interpolation:
-      plan: content("artifact://plan.md")
+      inputs:
+        plan: content("artifact://plan.md")
     prompt:
       - "{{prompt}}"
     options:
@@ -19,7 +20,8 @@ stages:
   - name: require-impl-progress
     type: exec
     interpolation:
-      base_sha: content("artifact://base_sha")
+      inputs:
+        base_sha: content("artifact://base_sha")
     options:
       cmds:
         - |

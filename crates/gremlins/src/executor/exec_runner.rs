@@ -55,9 +55,9 @@ pub struct ExecPrepared {
     pub name: String,
     pub interpolation_map: HashMap<String, String>,
     /// bind key (trimmed, no `?`) → registered filesystem path, for command substitution.
-    pub(crate) bind_paths: HashMap<String, String>,
+    pub(crate) output_paths: HashMap<String, String>,
     /// (bind key, substituted URI, optional) for post-run verification.
-    pub(crate) bind_uris: Vec<(String, String, bool)>,
+    pub(crate) output_uris: Vec<(String, String, bool)>,
     pub cmds: Vec<String>,
     pub cwd: PathBuf,
     pub artifact_dir: PathBuf,
@@ -116,9 +116,9 @@ pub async fn prepare_exec(
     let mut interpolation_map: HashMap<String, String> = content_interpolated;
     interpolation_map.extend(filepath_interpolated);
 
-    let mut bind_paths: HashMap<String, String> = HashMap::new();
-    let mut bind_uris: Vec<(String, String, bool)> = Vec::new();
-    for (raw_key, raw_uri_str) in &exec.bind_map {
+    let mut output_paths: HashMap<String, String> = HashMap::new();
+    let mut output_uris: Vec<(String, String, bool)> = Vec::new();
+    for (raw_key, raw_uri_str) in &exec.outputs_map {
         let k = vars::substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
         let optional = k.ends_with('?');
         let key = k.trim_end_matches('?').to_string();
@@ -146,14 +146,14 @@ pub async fn prepare_exec(
                 name: name.clone(),
                 detail: e.to_string(),
             })?;
-        bind_paths.insert(key.clone(), path);
-        bind_uris.push((key, uri_str, optional));
+        output_paths.insert(key.clone(), path);
+        output_uris.push((key, uri_str, optional));
     }
 
-    // Merge interpolation_map and bind_paths (bind shadows interpolation)
+    // Merge interpolation_map and output_paths (bind shadows interpolation)
     let subst_vars: HashMap<String, String> = interpolation_map
         .iter()
-        .chain(bind_paths.iter())
+        .chain(output_paths.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -195,8 +195,8 @@ pub async fn prepare_exec(
     Ok(ExecPrepared {
         name: name.clone(),
         interpolation_map,
-        bind_paths,
-        bind_uris,
+        output_paths,
+        output_uris,
         cmds,
         cwd: PathBuf::new(),
         artifact_dir: PathBuf::new(),
@@ -507,8 +507,8 @@ pub async fn commit_exec(
     prepared: &ExecPrepared,
     local_registry: &dyn LocalizedArtifactRegistry,
 ) -> Result<(), ExecError> {
-    for (key, uri_str, optional) in &prepared.bind_uris {
-        let path = &prepared.bind_paths[key];
+    for (key, uri_str, optional) in &prepared.output_uris {
+        let path = &prepared.output_paths[key];
         let produced = local_registry.has_file(path).await;
         if produced {
             local_registry
@@ -556,20 +556,20 @@ mod tests {
             name: "test".to_string(),
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
+            outputs_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
         let prepared = prepare_exec(&optional_exec, &registry, &registry, "", &fw)
             .await
             .unwrap();
-        assert_eq!(prepared.bind_uris[0].0, "out");
-        assert!(prepared.bind_uris[0].2);
+        assert_eq!(prepared.output_uris[0].0, "out");
+        assert!(prepared.output_uris[0].2);
 
         // Non-optional bind: still a duplicate-producer error.
         let non_optional_exec = Exec {
             name: "test".to_string(),
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+            outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let err = prepare_exec(&non_optional_exec, &registry, &registry, "", &fw)
             .await
@@ -589,7 +589,7 @@ mod tests {
             name: "test".to_string(),
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+            outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
         let prepared = prepare_exec(&exec, &registry, &registry, "", &fw)
@@ -611,7 +611,7 @@ mod tests {
             name: "test".to_string(),
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
+            outputs_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
         let prepared = prepare_exec(&exec, &registry, &registry, "", &fw)
@@ -632,13 +632,13 @@ mod tests {
             name: "test".to_string(),
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+            outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
         let prepared = prepare_exec(&exec, &registry, &registry, "", &fw)
             .await
             .unwrap();
-        fs::write(&prepared.bind_paths["out"], "data").unwrap();
+        fs::write(&prepared.output_paths["out"], "data").unwrap();
         commit_exec(&prepared, &registry).await.unwrap();
         assert!(registry.is_registered("artifact://out.txt").await);
     }
@@ -651,7 +651,7 @@ mod tests {
             name: "test".to_string(),
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
+            outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
         let prepared = prepare_exec(&exec, &reg, &reg, "", &fw).await.unwrap();
@@ -679,8 +679,8 @@ mod tests {
         let prepared = ExecPrepared {
             name: "injection-test".to_string(),
             interpolation_map: HashMap::new(),
-            bind_paths: HashMap::new(),
-            bind_uris: Vec::new(),
+            output_paths: HashMap::new(),
+            output_uris: Vec::new(),
             cmds: vec!["printf '%s' \"${GREMLINS_PR_TITLE}\"".to_string()],
             cwd: tmp.path().to_path_buf(),
             artifact_dir: artifact_dir.clone(),
@@ -706,8 +706,8 @@ mod tests {
         ExecPrepared {
             name: name.to_string(),
             interpolation_map: HashMap::new(),
-            bind_paths: HashMap::new(),
-            bind_uris: Vec::new(),
+            output_paths: HashMap::new(),
+            output_uris: Vec::new(),
             cmds: cmds.into_iter().map(|s| s.to_string()).collect(),
             cwd: std::env::current_dir().unwrap(),
             artifact_dir: state_dir.join("artifacts"),

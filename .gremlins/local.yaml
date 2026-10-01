@@ -25,7 +25,8 @@ bootstrap:
 
 land:
   interpolation:
-    message: artifact://commit_message.txt
+    inputs:
+      message: artifact://commit_message.txt
   options:
     cmds:
       - WORKTREE_HEAD=$(git -C "$GREMLINS_WORKTREE_PATH" rev-parse HEAD)
@@ -66,9 +67,10 @@ stages:
   - name: compute-diff
     type: exec
     interpolation:
-      base_sha: content("artifact://base_sha")
-    bind:
-      diff: "artifact://diff.txt"
+      inputs:
+        base_sha: content("artifact://base_sha")
+      outputs:
+        diff: "artifact://diff.txt"
     options:
       cmds:
         - "git diff {base_sha}...HEAD > {diff}"
@@ -77,36 +79,40 @@ stages:
       - name: review-one
         type: agent
         interpolation:
-          plan: content("artifact://plan.md")
-          diff: content("artifact://diff.txt")
+          inputs:
+            plan: content("artifact://plan.md")
+            diff: content("artifact://diff.txt")
+          outputs:
+            filepath: "artifact://review-one.md"
         prompt: [review.md]
-        bind:
-          filepath: "artifact://review-one.md"
       - name: review-two
         type: agent
         interpolation:
-          plan: content("artifact://plan.md")
-          diff: content("artifact://diff.txt")
+          inputs:
+            plan: content("artifact://plan.md")
+            diff: content("artifact://diff.txt")
+          outputs:
+            filepath: "artifact://review-two.md"
         prompt: [review.md]
-        bind:
-          filepath: "artifact://review-two.md"
   - name: address
     type: agent
     prompt: [style_guide.md, dev-env-howto.md, address.md]
     interpolation:
-      plan: content("artifact://plan.md")
-      diff: content("artifact://diff.txt")
-      review_one: content("artifact://review-one.md")
-      review_two: content("artifact://review-two.md")
-    bind:
-      address_summary: "artifact://address-summary.md"
+      inputs:
+        plan: content("artifact://plan.md")
+        diff: content("artifact://diff.txt")
+        review_one: content("artifact://review-one.md")
+        review_two: content("artifact://review-two.md")
+      outputs:
+        address_summary: "artifact://address-summary.md"
   - { name: verify-address-fixes, type: check-and-fix }
   - name: commit-message
     type: agent
     prompt: [commit_message.md]
     interpolation:
-      plan: content("artifact://plan.md")
-      diff: content("artifact://diff.txt")
-      address_summary: content("artifact://address-summary.md")
-    bind:
-      commit_message: "artifact://commit_message.txt"
+      inputs:
+        plan: content("artifact://plan.md")
+        diff: content("artifact://diff.txt")
+        address_summary: content("artifact://address-summary.md")
+      outputs:
+        commit_message: "artifact://commit_message.txt"

@@ -38,7 +38,7 @@ pub enum SchemaError {
         map: String,
     },
 
-    #[error("stage {stage}: key {key:?} declared in both bind: and interpolation: — a stage cannot both produce and consume the same key")]
+    #[error("stage {stage}: key {key:?} declared in both outputs: and inputs: — a stage cannot both produce and consume the same key")]
     DuplicateStageKey { stage: String, key: String },
 
     #[error("stage {stage}: artifact {uri:?} is consumed via interpolation but never produced by any prior stage's bind, bootstrap bind_artifact, cli_out, or implicit artifact (base_sha, base_ref)")]

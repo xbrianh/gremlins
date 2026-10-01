@@ -18,9 +18,9 @@ pub struct AgentPrepared {
     pub name: String,
     pub prompt: String,
     pub model: Option<String>,
-    pub(crate) bind_paths: HashMap<String, String>,
+    pub(crate) output_paths: HashMap<String, String>,
     /// (key, uri_str, optional)
-    pub(crate) bind_uris: Vec<(String, String, bool)>,
+    pub(crate) output_uris: Vec<(String, String, bool)>,
     pub expected_artifact_paths: Vec<String>,
     pub cwd: String,
     pub artifact_dir: String,
@@ -90,9 +90,9 @@ pub async fn prepare_agent(
     let mut interpolation_map: HashMap<String, String> = content_interpolated;
     interpolation_map.extend(filepath_interpolated);
 
-    let mut bind_paths: HashMap<String, String> = HashMap::new();
-    let mut bind_uris: Vec<(String, String, bool)> = Vec::new();
-    for (raw_key, raw_uri_str) in &agent.bind_map {
+    let mut output_paths: HashMap<String, String> = HashMap::new();
+    let mut output_uris: Vec<(String, String, bool)> = Vec::new();
+    for (raw_key, raw_uri_str) in &agent.outputs_map {
         let k = vars::substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
         let optional = k.ends_with('?');
         let key = k.trim_end_matches('?').to_string();
@@ -120,14 +120,14 @@ pub async fn prepare_agent(
                 name: name.clone(),
                 detail: e.to_string(),
             })?;
-        bind_paths.insert(key.clone(), path);
-        bind_uris.push((key, uri_str, optional));
+        output_paths.insert(key.clone(), path);
+        output_uris.push((key, uri_str, optional));
     }
 
     // Merge: bind output paths shadow interpolation keys on collision
     let subst_vars: HashMap<String, String> = interpolation_map
         .iter()
-        .chain(bind_paths.iter())
+        .chain(output_paths.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -141,14 +141,14 @@ pub async fn prepare_agent(
         .and_then(|v| v.as_str())
         .map(|raw| vars::substitute_vars(raw, &str_opts, &subst_vars, framework_subs));
 
-    let expected_artifact_paths: Vec<String> = bind_paths.values().cloned().collect();
+    let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
 
     Ok(AgentPrepared {
         name: name.clone(),
         prompt,
         model,
-        bind_paths,
-        bind_uris,
+        output_paths,
+        output_uris,
         expected_artifact_paths,
         cwd: String::new(),
         artifact_dir: String::new(),
@@ -166,8 +166,8 @@ pub async fn commit_agent(
     prepared: &AgentPrepared,
     local_registry: &dyn LocalizedArtifactRegistry,
 ) -> Result<(), AgentError> {
-    for (key, uri_str, optional) in &prepared.bind_uris {
-        let path = &prepared.bind_paths[key];
+    for (key, uri_str, optional) in &prepared.output_uris {
+        let path = &prepared.output_paths[key];
         let produced = local_registry.has_file(path).await;
         if produced {
             local_registry
@@ -260,7 +260,7 @@ mod tests {
                 "var".to_string(),
                 r#"content("artifact://world")"#.to_string(),
             )]),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -281,7 +281,7 @@ mod tests {
                 "name".to_string(),
                 r#"content("artifact://interp-src")"#.to_string(),
             )]),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -303,13 +303,13 @@ mod tests {
                 "key".to_string(),
                 r#"content("artifact://interp-val")"#.to_string(),
             )]),
-            bind_map: HashMap::from([("key".to_string(), "artifact://out.md".to_string())]),
+            outputs_map: HashMap::from([("key".to_string(), "artifact://out.md".to_string())]),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
-        // bind_paths should contain the registered path, not "interp-val"
-        assert!(prepared.bind_paths.contains_key("key"));
-        let path = &prepared.bind_paths["key"];
+        // output_paths should contain the registered path, not "interp-val"
+        assert!(prepared.output_paths.contains_key("key"));
+        let path = &prepared.output_paths["key"];
         assert!(path.contains("out.md"));
         // The prompt should use the bind path (shadow)
         assert!(prepared.prompt.contains("out.md"));
@@ -326,7 +326,7 @@ mod tests {
             prompts: vec!["{missing}".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::from([("missing".to_string(), "nonexistent".to_string())]),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let err = prepare_agent(&agent, &reg, &reg, "", &fw)
@@ -345,7 +345,7 @@ mod tests {
             prompts: vec!["{out}".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([(
+            outputs_map: HashMap::from([(
                 "out".to_string(),
                 "artifact://{loop_iter}/out.txt".to_string(),
             )]),
@@ -354,7 +354,7 @@ mod tests {
         let prepared = prepare_agent(&agent, &reg, &reg, "my-agent~3", &fw)
             .await
             .unwrap();
-        assert_eq!(prepared.bind_uris[0].1, "artifact://my-agent~3/out.txt");
+        assert_eq!(prepared.output_uris[0].1, "artifact://my-agent~3/out.txt");
     }
 
     #[tokio::test]
@@ -374,7 +374,7 @@ mod tests {
                 "plan".to_string(),
                 r#"content("artifact://{loop_iter}/plan.md")"#.to_string(),
             )]),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "my-agent~2", &fw)
@@ -393,12 +393,12 @@ mod tests {
             prompts: vec!["{result}".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("result?".to_string(), "artifact://out.md".to_string())]),
+            outputs_map: HashMap::from([("result?".to_string(), "artifact://out.md".to_string())]),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
-        assert_eq!(prepared.bind_uris[0].0, "result");
-        assert!(prepared.bind_uris[0].2); // optional
+        assert_eq!(prepared.output_uris[0].0, "result");
+        assert!(prepared.output_uris[0].2); // optional
     }
 
     #[tokio::test]
@@ -418,7 +418,7 @@ mod tests {
                 "provider".to_string(),
                 r#"content("artifact://openai")"#.to_string(),
             )]),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -435,7 +435,7 @@ mod tests {
             prompts: vec!["hi".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -452,7 +452,7 @@ mod tests {
             prompts: vec!["hi".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -476,7 +476,7 @@ mod tests {
             prompts: vec!["hi".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -497,12 +497,15 @@ mod tests {
             prompts: vec!["{my-agent}".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("{name}".to_string(), "artifact://{name}.md".to_string())]),
+            outputs_map: HashMap::from([(
+                "{name}".to_string(),
+                "artifact://{name}.md".to_string(),
+            )]),
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
-        assert_eq!(prepared.bind_uris[0].0, "my-agent");
-        assert!(prepared.bind_uris[0].1.contains("my-agent.md"));
+        assert_eq!(prepared.output_uris[0].0, "my-agent");
+        assert!(prepared.output_uris[0].1.contains("my-agent.md"));
     }
 
     #[tokio::test]
@@ -519,7 +522,7 @@ mod tests {
             ],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -540,7 +543,7 @@ mod tests {
                 "child_plan".to_string(),
                 "artifact://value".to_string(),
             )]),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -563,7 +566,7 @@ mod tests {
             prompts: vec!["{string_k} {num_k}".to_string()],
             options: opts,
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -581,7 +584,7 @@ mod tests {
             prompts: vec!["{a} {b} {c}".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([
+            outputs_map: HashMap::from([
                 ("a".to_string(), "artifact://a.md".to_string()),
                 ("b".to_string(), "artifact://b.md".to_string()),
                 ("c".to_string(), "artifact://c.md".to_string()),
@@ -589,7 +592,7 @@ mod tests {
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
-        assert_eq!(prepared.bind_uris.len(), 3);
+        assert_eq!(prepared.output_uris.len(), 3);
         assert_eq!(prepared.expected_artifact_paths.len(), 3);
     }
 
@@ -603,7 +606,7 @@ mod tests {
             prompts: vec!["Static prompt".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
@@ -627,7 +630,7 @@ mod tests {
             prompts: vec!["hi".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([(key.to_string(), uri.to_string())]),
+            outputs_map: HashMap::from([(key.to_string(), uri.to_string())]),
         }
     }
 
@@ -652,7 +655,7 @@ mod tests {
         let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
-        std::fs::write(&prepared.bind_paths["out"], "").unwrap();
+        std::fs::write(&prepared.output_paths["out"], "").unwrap();
         commit_agent(&prepared, &reg).await.unwrap();
         assert!(reg.is_registered("artifact://out.md").await);
     }
@@ -678,7 +681,7 @@ mod tests {
             prompts: vec!["hi".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([
+            outputs_map: HashMap::from([
                 ("a".to_string(), "artifact://a.md".to_string()),
                 ("b".to_string(), "artifact://b.md".to_string()),
             ]),
@@ -687,8 +690,8 @@ mod tests {
             .await
             .unwrap();
         // Pin iteration order so the missing bind is evaluated last.
-        prepared.bind_uris.sort_by(|x, y| x.0.cmp(&y.0));
-        std::fs::write(&prepared.bind_paths["a"], "content").unwrap();
+        prepared.output_uris.sort_by(|x, y| x.0.cmp(&y.0));
+        std::fs::write(&prepared.output_paths["a"], "content").unwrap();
         let err = commit_agent(&prepared, &reg).await.unwrap_err();
         assert!(matches!(err, AgentError::MissingArtifact { key, .. } if key == "b"));
         // The file that was written is still committed.
@@ -705,7 +708,7 @@ mod tests {
             prompts: vec!["hi".to_string()],
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([
+            outputs_map: HashMap::from([
                 ("a".to_string(), "artifact://a.md".to_string()),
                 ("b?".to_string(), "artifact://b.md".to_string()),
             ]),
@@ -713,7 +716,7 @@ mod tests {
         let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
-        std::fs::write(&prepared.bind_paths["a"], "content").unwrap();
+        std::fs::write(&prepared.output_paths["a"], "content").unwrap();
         commit_agent(&prepared, &reg).await.unwrap();
         assert!(reg.is_registered("artifact://a.md").await);
         assert!(!reg.is_registered("artifact://b.md").await);
@@ -727,7 +730,7 @@ mod tests {
         let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
             .await
             .unwrap();
-        std::fs::write(&prepared.bind_paths["out"], "content").unwrap();
+        std::fs::write(&prepared.output_paths["out"], "content").unwrap();
         commit_agent(&prepared, &reg).await.unwrap();
         assert!(reg.is_registered("artifact://out.md").await);
     }

@@ -13,10 +13,11 @@ stages:
       - name: poll
         type: exec
         interpolation:
-          pr_number: content("artifact://pr-number.txt")
-          repo: content("artifact://repo.txt")
-        bind:
-          status?: "artifact://{loop_iter}/status"
+          inputs:
+            pr_number: content("artifact://pr-number.txt")
+            repo: content("artifact://repo.txt")
+          outputs:
+            status?: "artifact://{loop_iter}/status"
         options:
           timeout: 30
           cmds:
