@@ -223,39 +223,21 @@ fn yaml_str(mapping: &Mapping, key: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// Read the new nested `interpolation:` structure: `{inputs: {…}, outputs: {…}}`.
-/// Returns (inputs_map, outputs_map). Backward-compatible: also reads the old
-/// flat `interpolation:` and `bind:` keys when the nested form is absent.
+/// Read the nested `interpolation:` structure: `{inputs: {…}, outputs: {…}}`.
+/// Returns (inputs_map, outputs_map). If the nested form is absent, returns
+/// empty maps.
 #[allow(clippy::type_complexity)]
 fn yaml_interpolation_nested(
     mapping: &Mapping,
 ) -> Result<(HashMap<String, String>, HashMap<String, String>), SchemaError> {
-    // Try the new nested form first.
     if let Some(interp_val) = mapping.get("interpolation").filter(|v| !v.is_null()) {
         if let Some(interp_map) = interp_val.as_mapping() {
-            // Check if this is the nested form (has "inputs" or "outputs" sub-keys)
-            let has_inputs = interp_map.contains_key("inputs");
-            let has_outputs = interp_map.contains_key("outputs");
-            if has_inputs || has_outputs {
-                let inputs = yaml_string_map(interp_map, "inputs")?;
-                let outputs = yaml_string_map(interp_map, "outputs")?;
-                // Also check for legacy flat `bind:` key
-                let legacy_bind = yaml_string_map(mapping, "bind")?;
-                if !legacy_bind.is_empty() {
-                    return Err(SchemaError::Generic(
-                        "cannot use nested interpolation (inputs:/outputs:) alongside a top-level bind: key"
-                            .to_string(),
-                    ));
-                }
-                return Ok((inputs, outputs));
-            }
+            let inputs = yaml_string_map(interp_map, "inputs")?;
+            let outputs = yaml_string_map(interp_map, "outputs")?;
+            return Ok((inputs, outputs));
         }
     }
-
-    // Fall back to legacy flat keys.
-    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
-    let bind_map = yaml_string_map(mapping, "bind")?;
-    Ok((interpolation_map, bind_map))
+    Ok((HashMap::new(), HashMap::new()))
 }
 
 /// Read a YAML string→string mapping, returning an empty map when absent.
