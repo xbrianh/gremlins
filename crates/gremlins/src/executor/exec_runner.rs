@@ -76,6 +76,8 @@ pub struct ExecPrepared {
     /// `prepare_exec` for the exec command templates. Merged into the
     /// child shell's environment in `run_shell`.
     pub substitution_env: HashMap<String, String>,
+    /// Per-gremlin log channel for exec stage lifecycle events.
+    pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
@@ -205,6 +207,7 @@ pub async fn prepare_exec(
         env: HashMap::new(),
         base_env: HashMap::new(),
         substitution_env,
+        log_tx: None,
     })
 }
 
@@ -340,25 +343,31 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
             });
 
             if !contained {
-                log::warn!(
-                    "exec {}: stream path escapes log dir, skipping stream",
-                    prepared.name
-                );
+                if let Some(ref tx) = prepared.log_tx {
+                    let _ = tx.send(format!(
+                        "exec {}: stream path escapes log dir, skipping stream",
+                        prepared.name
+                    ));
+                }
                 None
             } else {
-                log::info!(
-                    "exec {}: streaming output to {}",
-                    prepared.name,
-                    stream_path.display()
-                );
+                if let Some(ref tx) = prepared.log_tx {
+                    let _ = tx.send(format!(
+                        "exec {}: streaming output to {}",
+                        prepared.name,
+                        stream_path.display()
+                    ));
+                }
                 Some(&stream_path)
             }
         }
         Err(e) => {
-            log::warn!(
-                "exec {}: failed to create exec_stage_logs dir: {e}",
-                prepared.name
-            );
+            if let Some(ref tx) = prepared.log_tx {
+                let _ = tx.send(format!(
+                    "exec {}: failed to create exec_stage_logs dir: {e}",
+                    prepared.name
+                ));
+            }
             None
         }
     };
@@ -395,12 +404,14 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
 
     let script = build_instrumented_script(&prepared.cmds, &prepared.substitution_env);
 
-    log::info!(
-        "exec {}: running {} command(s) via instrumented script (timeout={:?})",
-        prepared.name,
-        prepared.cmds.len(),
-        prepared.timeout,
-    );
+    if let Some(ref tx) = prepared.log_tx {
+        let _ = tx.send(format!(
+            "exec {}: running {} command(s) via instrumented script (timeout={:?})",
+            prepared.name,
+            prepared.cmds.len(),
+            prepared.timeout,
+        ));
+    }
 
     let result = run_shell_async(
         &script,
@@ -481,10 +492,12 @@ pub fn process_shell_result(
     let shell_output = raw_output_str.trim().to_string();
     let shell_rc = result.returncode;
 
-    log::info!(
-        "exec {name}: done rc={shell_rc} output_len={}",
-        raw_output_str.len(),
-    );
+    if let Some(ref tx) = prepared.log_tx {
+        let _ = tx.send(format!(
+            "exec {name}: done rc={shell_rc} output_len={}",
+            raw_output_str.len(),
+        ));
+    }
 
     // A non-zero exit is always an error.
     if shell_rc != 0 {
@@ -689,6 +702,7 @@ mod tests {
             env: HashMap::new(),
             base_env: HashMap::new(),
             substitution_env,
+            log_tx: None,
         };
 
         let result = run_shell(&prepared).await.unwrap();
@@ -716,6 +730,7 @@ mod tests {
             env: HashMap::new(),
             base_env: HashMap::new(),
             substitution_env: HashMap::new(),
+            log_tx: None,
         }
     }
 
@@ -739,6 +754,7 @@ mod tests {
             name: "resolved".to_string(),
             cmds: vec!["echo \"${GREMLINS_INPUT}\"".to_string()],
             substitution_env,
+            log_tx: None,
             ..make_prepared("resolved", vec!["echo ok"], &state_dir)
         };
         let result = run_shell(&prepared).await.unwrap();

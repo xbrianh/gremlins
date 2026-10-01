@@ -29,6 +29,12 @@ use crate::core::proc::run_shell_async;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::truncate;
 use crate::executor::RunError;
+
+fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
+    if let Some(tx) = tx {
+        let _ = tx.send(msg.to_string());
+    }
+}
 use crate::schemas::bootstrap::substitute_bootstrap_vars;
 
 /// `gremlins:<name>(<args>)`, anchored at the start — the DSL marker is a
@@ -53,6 +59,7 @@ pub async fn run_bootstrap(
     cmds: &[String],
     cwd: &Path,
     env: &HashMap<String, String>,
+    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<(), RunError> {
     let cmds: Vec<&str> = cmds
         .iter()
@@ -86,17 +93,20 @@ pub async fn run_bootstrap(
 
     if result.returncode != 0 {
         let detail = failure_detail(&result.stdout, &result.stderr);
-        log::error!(
+        let msg = format!(
             "bootstrap failed (exit {}): {}",
             result.returncode,
             truncate(&detail, 2000)
         );
+        send_log(log_tx, &msg);
+        log::error!("{msg}");
         return Err(RunError::BootstrapFailed {
             exit_code: result.returncode,
             stderr: truncate(&detail, 500),
         });
     }
 
+    send_log(log_tx, "bootstrap ok");
     log::info!("bootstrap ok");
     Ok(())
 }
@@ -315,16 +325,19 @@ pub async fn run_definition_bootstrap(
     let bootstrap = gremlin.definition.bootstrap().clone();
     let cwd = gremlin.cwd();
     let env = gremlin.env.clone();
+    let log_tx = gremlin.runtime_config.log_tx.clone();
 
     if !bootstrap.cmds.is_empty() {
-        run_bootstrap(&bootstrap.cmds, &cwd, &env).await?;
+        run_bootstrap(&bootstrap.cmds, &cwd, &env, &log_tx).await?;
     }
 
     // A forked child inherits the parent's artifacts via copy_tree +
     // fork_registry — its launch_cmds (bind_artifact, shell guards) and
     // cli_out already ran in the parent and do not need to run again.
     if !skip_launch && !bootstrap.launch_cmds.is_empty() {
-        log::info!("running {} launch command(s)", bootstrap.launch_cmds.len());
+        let msg = format!("running {} launch command(s)", bootstrap.launch_cmds.len());
+        send_log(&log_tx, &msg);
+        log::info!("{msg}");
 
         // Every declared source key gets a value, even an absent one, so an
         // optional `{plan}` substitutes to an empty string instead of leaking
@@ -340,7 +353,9 @@ pub async fn run_definition_bootstrap(
         for command in &bootstrap.launch_cmds {
             match parse_gremlins_command(command) {
                 Some((cmd_name, args)) => {
-                    log::info!("launch DSL: {}({})", cmd_name, args.join(", "));
+                    let msg = format!("launch DSL: {}({})", cmd_name, args.join(", "));
+                    send_log(&log_tx, &msg);
+                    log::info!("{msg}");
                     run_dsl_command(&cmd_name, &args, gremlin).await?;
                 }
                 None => shell_cmds.push(substitute_bootstrap_vars(command, &cwd, &values)),
@@ -348,12 +363,14 @@ pub async fn run_definition_bootstrap(
         }
 
         if !shell_cmds.is_empty() {
-            run_bootstrap(&shell_cmds, &cwd, &env).await?;
+            run_bootstrap(&shell_cmds, &cwd, &env, &log_tx).await?;
         }
     }
 
     if !skip_launch && !bootstrap.cli_out.is_empty() {
-        log::info!("running {} cli_out binding(s)", bootstrap.cli_out.len());
+        let msg = format!("running {} cli_out binding(s)", bootstrap.cli_out.len());
+        send_log(&log_tx, &msg);
+        log::info!("{msg}");
         run_cli_out(gremlin, &bootstrap.cli_out).await?;
     }
 
@@ -534,17 +551,21 @@ mod tests {
     async fn run_bootstrap_is_a_noop_without_commands() {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
-        assert!(run_bootstrap(&[], dir.path(), &env).await.is_ok());
-        assert!(run_bootstrap(&["   ".to_string()], dir.path(), &env)
-            .await
-            .is_ok());
+        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+        assert!(run_bootstrap(&[], dir.path(), &env, &log_tx).await.is_ok());
+        assert!(
+            run_bootstrap(&["   ".to_string()], dir.path(), &env, &log_tx)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn run_bootstrap_reports_the_exit_code() {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
-        let error = run_bootstrap(&["exit 7".to_string()], dir.path(), &env)
+        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+        let error = run_bootstrap(&["exit 7".to_string()], dir.path(), &env, &log_tx)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -557,11 +578,13 @@ mod tests {
     async fn run_bootstrap_reports_stdout_when_stderr_is_blank() {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
+        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
         // stderr says nothing but a newline; the reason is on stdout.
         let error = run_bootstrap(
             &["printf 'the reason'; printf '\\n' >&2; exit 9".to_string()],
             dir.path(),
             &env,
+            &log_tx,
         )
         .await
         .unwrap_err();
@@ -572,10 +595,12 @@ mod tests {
     async fn run_bootstrap_injects_the_cwd_variable() {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
+        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
         run_bootstrap(
             &["test \"$GREMLINS_BOOTSTRAP_CWD\" = \"$(pwd)\"".to_string()],
             dir.path(),
             &env,
+            &log_tx,
         )
         .await
         .unwrap();

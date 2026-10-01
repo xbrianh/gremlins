@@ -146,11 +146,9 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
-    log::info!("{prefix}{log_line}");
     ctx.send_log(&log_line);
 
     if cwd.is_none() {
-        log::warn!("{prefix}warning: no cwd set for worktree enforcement");
         ctx.send_log("warning: no cwd set for worktree enforcement");
     }
 
@@ -250,7 +248,6 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<CompletedRun, ClientError> {
-    log::info!("{prefix}task: begin (max_turns={max_turns})");
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
     }
@@ -283,7 +280,6 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         None,
     )
     .await;
-    log::info!("{prefix}task: end");
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: end"));
     }
@@ -777,12 +773,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
 
         if !reasoning.is_empty() {
             let msg = format!("think: {}", trunc(&reasoning, 200));
-            log::info!("{prefix}{msg}");
             send_log(log_tx, prefix, &msg);
         }
         if !text.is_empty() {
             let msg = format!("text: {}", trunc(&text, 200));
-            log::info!("{prefix}{msg}");
             send_log(log_tx, prefix, &msg);
         }
         if !nested {
@@ -807,6 +801,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             &text,
             &tool_calls,
             turn_usage.as_ref(),
+            log_tx,
         );
 
         if let Some(ref u) = turn_usage {
@@ -906,7 +901,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     total_reasoning_tokens,
                 );
                 if !nested {
-                    emit_final(prefix, turns, "");
+                    emit_final(prefix, turns, "", log_tx);
                     emit_summary(
                         prefix,
                         turn_num,
@@ -916,22 +911,8 @@ async fn run_agent_loop_core<M: CompletionModel>(
                         total_cached_tokens,
                         total_cache_creation_tokens,
                         total_reasoning_tokens,
-                    );
-                    send_log(
                         log_tx,
-                        prefix,
-                        &format!("final: turns={turns} cost=not-reported"),
                     );
-                    send_log(log_tx, prefix, &format!(
-                        "summary: turns={turn_num} wall={:.1}s token_total={} prompt_avg={} completion_avg={} cached_avg={}% cache_creation={} reasoning_pct={}%",
-                        loop_start.elapsed().as_secs_f64(),
-                        total_prompt_tokens + total_completion_tokens,
-                        if turn_num > 0 { total_prompt_tokens / turn_num as u64 } else { 0 },
-                        if turn_num > 0 { total_completion_tokens / turn_num as u64 } else { 0 },
-                        if total_prompt_tokens > 0 { (total_cached_tokens as f64 / total_prompt_tokens as f64) * 100.0 } else { 0.0 },
-                        total_cache_creation_tokens,
-                        if total_completion_tokens > 0 { (total_reasoning_tokens as f64 / total_completion_tokens as f64) * 100.0 } else { 0.0 },
-                    ));
                 }
                 // Emit Done if interactive mode is active.
                 if let Some(ref evt_tx) = evt_tx {
@@ -1037,7 +1018,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 total_reasoning_tokens,
             );
             if !nested {
-                emit_final(prefix, turns, " (exhausted)");
+                emit_final(prefix, turns, " (exhausted)", log_tx);
                 emit_summary(
                     prefix,
                     turn_num,
@@ -1047,11 +1028,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     total_cached_tokens,
                     total_cache_creation_tokens,
                     total_reasoning_tokens,
-                );
-                send_log(
                     log_tx,
-                    prefix,
-                    &format!("final: turns={turns} cost=not-reported (exhausted)"),
                 );
             }
             return Ok(completed_run(Some(final_text), captured, usage));
@@ -1071,7 +1048,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 tc.function.name,
                 trunc(&key_arg(&tc.function.arguments), 200)
             );
-            log::info!("{prefix}{tool_msg}");
             send_log(log_tx, prefix, &tool_msg);
             if !nested {
                 let tool_evt = tool_use_event(&tc.id, &tc.function.name, &tc.function.arguments);
@@ -1179,7 +1155,6 @@ async fn run_agent_loop_core<M: CompletionModel>(
         let mut ledger = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
-            log::info!("{prefix}{result_msg}");
             send_log(log_tx, prefix, &result_msg);
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
@@ -1212,7 +1187,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         } else {
             ""
         };
-        emit_final(prefix, turns, suffix);
+        emit_final(prefix, turns, suffix, log_tx);
         emit_summary(
             prefix,
             turn_num,
@@ -1222,11 +1197,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             total_cached_tokens,
             total_cache_creation_tokens,
             total_reasoning_tokens,
-        );
-        send_log(
             log_tx,
-            prefix,
-            &format!("final: turns={turns} cost=not-reported{suffix}"),
         );
     }
 
@@ -1414,6 +1385,7 @@ fn emit_turn_metrics(
     text: &str,
     tool_calls: &[ToolCall],
     usage: Option<&Usage>,
+    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) {
     if !crate::config::telemetry_enabled() {
         return;
@@ -1456,9 +1428,8 @@ fn emit_turn_metrics(
         "-".into()
     };
 
-    log::debug!(
-        "{}metrics: turn={} ttft={} gen={} tools={} prompt={} completion={} cached={}({}) reasoning_tok={} reasoning_byte_ratio={}",
-        prefix,
+    let msg = format!(
+        "metrics: turn={} ttft={} gen={} tools={} prompt={} completion={} cached={}({}) reasoning_tok={} reasoning_byte_ratio={}",
         turn,
         ttft,
         gen_time,
@@ -1470,6 +1441,7 @@ fn emit_turn_metrics(
         reasoning_tok,
         reasoning_byte_ratio,
     );
+    send_log(log_tx, prefix, &msg);
 }
 
 /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
@@ -1483,6 +1455,7 @@ fn emit_summary(
     total_cached: u64,
     total_cache_creation: u64,
     total_reasoning: u64,
+    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) {
     let wall = loop_start.elapsed();
     let token_total = total_prompt + total_completion;
@@ -1516,9 +1489,8 @@ fn emit_summary(
         "-".into()
     };
 
-    log::info!(
-        "{}summary: turns={} wall={:.1}s token_total={} prompt_avg={} completion_avg={} cached_avg={} cache_creation={} reasoning_pct={}",
-        prefix,
+    let msg = format!(
+        "summary: turns={} wall={:.1}s token_total={} prompt_avg={} completion_avg={} cached_avg={} cache_creation={} reasoning_pct={}",
         turns,
         wall.as_secs_f64(),
         token_total,
@@ -1528,10 +1500,17 @@ fn emit_summary(
         total_cache_creation,
         reasoning_pct,
     );
+    send_log(log_tx, prefix, &msg);
 }
 
-pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
-    log::info!("{prefix}final: turns={turns} cost=not-reported{suffix}");
+pub(crate) fn emit_final(
+    prefix: &str,
+    turns: usize,
+    suffix: &str,
+    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) {
+    let msg = format!("final: turns={turns} cost=not-reported{suffix}");
+    send_log(log_tx, prefix, &msg);
 }
 
 #[cfg(test)]
