@@ -18,6 +18,7 @@ use regex::Regex;
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::backends;
+use crate::clients::interactive::InteractiveSession;
 use crate::clients::protocol::CompletedRun;
 
 /// The six tools every native agent may call.
@@ -164,11 +165,15 @@ impl Client {
     }
 
     /// Run one task through this client's backend, building it if needed.
-    pub async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError> {
+    pub async fn run(
+        &self,
+        params: RunParams,
+        interactive: Option<InteractiveSession>,
+    ) -> Result<CompletedRun, ClientError> {
         let backend = self
             .get_or_build_backend()
             .map_err(|message| ClientError::Runtime { message })?;
-        backend.run(params).await
+        backend.run(params, interactive).await
     }
 
     /// Return the backend for this spec, looking it up in the module-level

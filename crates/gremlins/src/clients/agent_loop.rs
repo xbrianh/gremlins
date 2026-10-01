@@ -115,6 +115,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
     task_model_selector: Option<super::task::TaskModelSelector<M>>,
+    interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
     let extra_env = ctx.params.extra_env.clone();
@@ -226,7 +227,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
         &ctx.params.log_tx,
-        ctx.params.interactive,
+        interactive,
     )
     .await
 }
@@ -1687,7 +1688,6 @@ mod tests {
                 task_clients_exact: HashMap::new(),
                 task_clients_prefix: HashMap::new(),
                 cancel_token: None,
-                interactive: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -1745,6 +1745,7 @@ mod tests {
             cancel,
             loop_opts(None),
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1789,7 +1790,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -1850,6 +1851,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
+            None,
             None,
         )
         .await
@@ -1919,6 +1921,7 @@ mod tests {
             cancel,
             loop_opts(Some(&filter)),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1979,7 +1982,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
+        run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         let audit = dir.join("run.audit.jsonl");
@@ -2040,6 +2043,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
+            None,
             None,
         )
         .await
@@ -2120,7 +2124,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "mix", ctx.clone(), cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "mix", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
@@ -2192,7 +2196,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.params.system_prompt = Some("you are a harness".into());
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
@@ -2233,7 +2237,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
@@ -2285,7 +2289,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "read", ctx.clone(), cancel, loop_opts(None), None)
+        run_agent_loop(&model, "read", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
 
@@ -2366,6 +2370,7 @@ mod tests {
             CancelToken::new(),
             loop_opts(None),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2437,7 +2442,7 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
@@ -2480,7 +2485,7 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         // Returns normally — file is still missing (Python verify_produced catches it).
@@ -2524,7 +2529,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.completion_nudge_budget = 1;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "do it", ctx.clone(), cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "do it", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         // Done succeeds; text is non-empty so it's the result.
@@ -2605,7 +2610,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         // File was written on the retry, not in the mixed turn.
@@ -2660,7 +2665,7 @@ mod tests {
         ctx.expected_artifact_paths = vec![];
         ctx.reminder_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None)
+        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None, None)
             .await
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("just text"));
@@ -2717,6 +2722,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
+            None,
             None,
         )
         .await
@@ -2816,6 +2822,7 @@ mod tests {
             CancelToken::new(),
             loop_opts(None),
             Some(selector),
+            None,
         )
         .await
         .unwrap();

@@ -9,6 +9,7 @@ use rig_core::providers::openai;
 
 use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
 use super::backend::{ClientError, RunParams};
+use super::interactive::InteractiveSession;
 use super::protocol::CompletedRun;
 use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use super::task::TaskModelSelector;
@@ -76,14 +77,12 @@ impl OpenAiRunState {
 /// `task-clients` specs).
 pub(crate) async fn run_openai_compat(
     state: &OpenAiRunState,
-    mut params: RunParams,
+    params: RunParams,
+    mut interactive: Option<InteractiveSession>,
     classify_error: Option<ErrorClassifier>,
     provider_name: &str,
 ) -> Result<CompletedRun, ClientError> {
     validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
-
-    // Snatch interactive session before params.clone() drops the receiver.
-    let interactive = params.interactive.take();
 
     let idle_timeout = params
         .idle_timeout
@@ -93,7 +92,7 @@ pub(crate) async fn run_openai_compat(
     } else {
         format!("[{}] ", params.label)
     };
-    let mut ctx = RunContext {
+    let ctx = RunContext {
         params: params.clone(),
         prefix: prefix.clone(),
         idle_timeout,
@@ -101,7 +100,6 @@ pub(crate) async fn run_openai_compat(
         reminder_budget: crate::config::artifact_reminder_budget(),
         completion_nudge_budget: crate::config::completion_nudge_budget(),
     };
-    ctx.params.interactive = interactive;
     *state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
     let prompt = Mutex::new(params.prompt.clone());
@@ -132,6 +130,8 @@ pub(crate) async fn run_openai_compat(
             let p = prompt.lock().unwrap().clone();
             let ctx = ctx.clone();
             let cancel = cancel.clone();
+            // Move interactive on first attempt; subsequent retries get None.
+            let interactive = interactive.take();
             async move {
                 // Before each retry attempt, check if we've been cancelled.
                 if cancel.is_cancelled() {
@@ -166,6 +166,7 @@ pub(crate) async fn run_openai_compat(
                         &ctx.params.task_clients_exact,
                         &ctx.params.task_clients_prefix,
                     ),
+                    interactive,
                 )
                 .await;
 
@@ -291,6 +292,7 @@ pub(crate) async fn run_with_agent_loop(
     tool_filter: Option<&[String]>,
     classify_error: Option<ErrorClassifier>,
     task_model_selector: Option<TaskModelSelector<OpenAiModel>>,
+    interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
     let model = client.completion_model(model_name);
     let mut ctx = ctx.clone();
@@ -307,6 +309,7 @@ pub(crate) async fn run_with_agent_loop(
             classify_error,
         },
         task_model_selector,
+        interactive,
     )
     .await
 }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
 use crate::clients::protocol::CompletedRun;
 
@@ -66,8 +67,12 @@ impl OpenAiBackend {
 
 #[async_trait]
 impl Backend for OpenAiBackend {
-    async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError> {
-        run_openai_compat(&self.state, params, None, PROVIDER_NAME).await
+    async fn run(
+        &self,
+        params: RunParams,
+        interactive: Option<InteractiveSession>,
+    ) -> Result<CompletedRun, ClientError> {
+        run_openai_compat(&self.state, params, interactive, None, PROVIDER_NAME).await
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
@@ -78,7 +83,7 @@ impl Backend for OpenAiBackend {
             })?;
             ctx.params.clone()
         };
-        self.run(params).await
+        self.run(params, None).await
     }
 
     fn reap_all(&self, gremlin_id: &str) {
