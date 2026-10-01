@@ -2,9 +2,10 @@ stages:
   - name: resolve-pr-base
     type: exec
     interpolation:
-      prev_branch_path: "artifact://pr-branch.txt?"
-    bind:
-      base_ref_to_open_pr: "artifact://pr-base-ref.txt"
+      inputs:
+        prev_branch_path: "artifact://pr-branch.txt?"
+      outputs:
+        base_ref_to_open_pr: "artifact://pr-base-ref.txt"
     options:
       cmds:
         - |
@@ -15,9 +16,10 @@ stages:
   - name: diff-summary
     type: exec
     interpolation:
-      base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
-    bind:
-      diff_summary: "artifact://diff-summary.txt"
+      inputs:
+        base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
+      outputs:
+        diff_summary: "artifact://diff-summary.txt"
     options:
       cmds:
         - 'git_diff_summary "{base_ref_to_open_pr}" > "{diff_summary}"'
@@ -28,26 +30,28 @@ stages:
     body:
       - type: agent
         interpolation:
-          base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
-          plan_issue_number: content("artifact://plan-issue-number.txt")
-          plan: content("artifact://plan.md")?
-          diff_summary: content("artifact://diff-summary.txt")
+          inputs:
+            base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
+            plan_issue_number: content("artifact://plan-issue-number.txt")
+            plan: content("artifact://plan.md")?
+            diff_summary: content("artifact://diff-summary.txt")
+          outputs:
+            pr_title:  "artifact://pr-title.txt"
+            pr_body:   "artifact://pr-body.md"
         prompt:
           - github_open_pull_request.md
-        bind:
-          pr_title:  "artifact://pr-title.txt"
-          pr_body:   "artifact://pr-body.md"
 
   - name: push-and-open
     type: exec
     interpolation:
-      base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
-      pr_title: content("artifact://pr-title.txt")
-      pr_body_file: "artifact://pr-body.md"
-    bind:
-      pr_number: "artifact://pr-number.txt"
-      pr_url:    "artifact://pr-url.txt"
-      pr_branch: "artifact://pr-branch.txt"
+      inputs:
+        base_ref_to_open_pr: content("artifact://pr-base-ref.txt")
+        pr_title: content("artifact://pr-title.txt")
+        pr_body_file: "artifact://pr-body.md"
+      outputs:
+        pr_number: "artifact://pr-number.txt"
+        pr_url:    "artifact://pr-url.txt"
+        pr_branch: "artifact://pr-branch.txt"
     options:
       cmds:
         - 'gh_create_pr "{base_ref_to_open_pr}" "{pr_title}" "{pr_body_file}" "{pr_number}" "{pr_url}" "{pr_branch}"'

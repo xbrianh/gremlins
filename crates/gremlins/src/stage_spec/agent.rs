@@ -10,7 +10,7 @@ pub struct Agent {
     pub prompts: Vec<String>,
     pub options: HashMap<String, serde_json::Value>,
     pub interpolation_map: HashMap<String, String>,
-    pub bind_map: HashMap<String, String>,
+    pub outputs_map: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -31,12 +31,12 @@ mod tests {
                 serde_json::Value::String("val".to_string()),
             )]),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::from([("bind-key".to_string(), "bind-val".to_string())]),
+            outputs_map: HashMap::from([("bind-key".to_string(), "bind-val".to_string())]),
         };
 
         assert_eq!(agent.name, "test-agent");
         assert_eq!(agent.prompts, vec!["hi".to_string()]);
-        assert_eq!(agent.bind_map.get("bind-key").unwrap(), "bind-val");
+        assert_eq!(agent.outputs_map.get("bind-key").unwrap(), "bind-val");
         assert_eq!(
             agent.options.get("key").unwrap(),
             &serde_json::Value::String("val".to_string())

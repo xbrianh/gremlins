@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::builders::artifacts::{BindTarget, InterpolationValue};
+use crate::builders::artifacts::{InterpolationValue, OutputTarget};
 use crate::definition::r#static::expand::key_referenced_in_text;
 use crate::definition::r#static::loader::{self, StageEntry, StageNode};
 use crate::definition::r#static::StaticDefinition;
@@ -152,7 +152,7 @@ impl From<BootstrapBuilder> for Bootstrap {
 pub struct LandBuilder {
     options: HashMap<String, serde_json::Value>,
     interpolation_map: HashMap<String, String>,
-    bind_map: HashMap<String, String>,
+    outputs_map: HashMap<String, String>,
     client: Option<crate::definition::ClientSpec>,
 }
 
@@ -162,7 +162,7 @@ impl LandBuilder {
         LandBuilder {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
             client: None,
         }
     }
@@ -217,15 +217,15 @@ impl LandBuilder {
         self
     }
 
-    /// Add a bind entry.
-    pub fn bind(mut self, key: impl Into<String>, target: impl Into<BindTarget>) -> Self {
-        self.bind_map.insert(key.into(), target.into().into());
+    /// Add an output entry.
+    pub fn output(mut self, key: impl Into<String>, target: impl Into<OutputTarget>) -> Self {
+        self.outputs_map.insert(key.into(), target.into().into());
         self
     }
 
-    /// Replace the entire bind map.
-    pub fn bind_map(mut self, map: HashMap<String, String>) -> Self {
-        self.bind_map = map;
+    /// Replace the entire outputs map.
+    pub fn outputs_map(mut self, map: HashMap<String, String>) -> Self {
+        self.outputs_map = map;
         self
     }
 
@@ -262,10 +262,10 @@ impl LandBuilder {
             }
         }
 
-        // --- Collision check: keys in both bind: and interpolation: ---
+        // --- Collision check: keys in both outputs: and interpolation: ---
         {
-            let bind_keys: HashSet<String> = self
-                .bind_map
+            let output_keys: HashSet<String> = self
+                .outputs_map
                 .keys()
                 .filter(|k| !k.contains('{'))
                 .map(|k| k.strip_suffix('?').unwrap_or(k).to_string())
@@ -274,11 +274,11 @@ impl LandBuilder {
                 if interp_key.contains('{') {
                     continue;
                 }
-                if bind_keys.contains(interp_key.as_str()) {
+                if output_keys.contains(interp_key.as_str()) {
                     return Err(SchemaError::Stage {
                         name: name.clone(),
                         msg: format!(
-                            "key {interp_key:?} declared in both bind: and interpolation: — a stage cannot both produce and consume the same key"
+                            "key {interp_key:?} declared in both outputs: and interpolation: — a stage cannot both produce and consume the same key"
                         ),
                     });
                 }
@@ -313,8 +313,8 @@ impl LandBuilder {
                 }
             }
 
-            // Check bind keys
-            for key in self.bind_map.keys() {
+            // Check output keys
+            for key in self.outputs_map.keys() {
                 if key.contains('{') {
                     continue;
                 }
@@ -325,7 +325,7 @@ impl LandBuilder {
                 return Err(SchemaError::Stage {
                     name: name.clone(),
                     msg: format!(
-                        "key {key:?} declared in bind: is not referenced in any prompt or command"
+                        "key {key:?} declared in outputs: is not referenced in any prompt or command"
                     ),
                 });
             }
@@ -335,7 +335,7 @@ impl LandBuilder {
             name,
             options: self.options,
             interpolation_map: self.interpolation_map,
-            bind_map: self.bind_map,
+            outputs_map: self.outputs_map,
         };
         Ok(StageSpec::Exec {
             stage,
@@ -369,7 +369,7 @@ impl Default for LandBuilder {
 ///     .stage(
 ///         AgentBuilder::new("plan")
 ///             .prompt("write the plan to {plan}")
-///             .bind("plan", artifact("artifact://plan.md"))
+///             .output("plan", output("artifact://plan.md"))
 ///             .build()
 ///             .unwrap(),
 ///     )
@@ -575,7 +575,7 @@ pub(crate) fn fill_builder_names(stages: &mut [StageSpec]) {
 mod tests {
     use super::*;
     use crate::builders::agent::AgentBuilder;
-    use crate::builders::artifacts::{artifact, content};
+    use crate::builders::artifacts::{content, output};
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
     use serde_yaml::Value;
@@ -587,7 +587,7 @@ mod tests {
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write the plan to {plan}")
-                    .bind("plan", artifact("artifact://plan.md"))
+                    .output("plan", output("artifact://plan.md"))
                     .build()
                     .unwrap(),
             )
@@ -618,14 +618,14 @@ mod tests {
             .stage(
                 AgentBuilder::new("first")
                     .prompt("one {out}")
-                    .bind("out", artifact("artifact://shared.md"))
+                    .output("out", output("artifact://shared.md"))
                     .build()
                     .unwrap(),
             )
             .stage(
                 AgentBuilder::new("second")
                     .prompt("two {out}")
-                    .bind("out", artifact("artifact://shared.md"))
+                    .output("out", output("artifact://shared.md"))
                     .build()
                     .unwrap(),
             )
@@ -663,8 +663,8 @@ mod tests {
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write {plan} and create {pr_url}")
-                    .bind("plan", artifact("artifact://plan.md"))
-                    .bind("pr_url", artifact("artifact://pr-url.txt"))
+                    .output("plan", output("artifact://plan.md"))
+                    .output("pr_url", output("artifact://pr-url.txt"))
                     .build()
                     .unwrap(),
             )
@@ -717,7 +717,7 @@ mod tests {
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write the plan to {plan}")
-                    .bind("plan", artifact("artifact://plan.md"))
+                    .output("plan", output("artifact://plan.md"))
                     .build()
                     .unwrap(),
             )
@@ -936,7 +936,7 @@ mod tests {
     fn land_builder_all_keys_referenced_ok() {
         LandBuilder::new()
             .cmd("cat {foo} {bar}")
-            .bind("foo", artifact("artifact://foo.txt"))
+            .output("foo", output("artifact://foo.txt"))
             .interpolate(
                 "bar",
                 crate::builders::artifacts::InterpolationValue::from(
@@ -948,15 +948,15 @@ mod tests {
     }
 
     #[test]
-    fn land_builder_unused_bind_key_error() {
+    fn land_builder_unused_output_key_error() {
         let err = LandBuilder::new()
             .cmd("cat {foo}")
-            .bind("foo", artifact("artifact://foo.txt"))
-            .bind("unused", artifact("artifact://unused.txt"))
+            .output("foo", output("artifact://foo.txt"))
+            .output("unused", output("artifact://unused.txt"))
             .build()
             .unwrap_err();
         assert!(err.to_string().contains("unused"), "{err}");
-        assert!(err.to_string().contains("bind:"), "{err}");
+        assert!(err.to_string().contains("outputs:"), "{err}");
     }
 
     #[test]
@@ -982,10 +982,10 @@ mod tests {
     }
 
     #[test]
-    fn land_builder_bind_interp_collision_error() {
+    fn land_builder_output_interp_collision_error() {
         let err = LandBuilder::new()
             .cmd("cat {shared}")
-            .bind("shared", artifact("artifact://shared.txt"))
+            .output("shared", output("artifact://shared.txt"))
             .interpolate(
                 "shared",
                 crate::builders::artifacts::InterpolationValue::from(
@@ -994,14 +994,14 @@ mod tests {
             )
             .build()
             .unwrap_err();
-        assert!(err.to_string().contains("both bind:"), "{err}");
+        assert!(err.to_string().contains("both outputs:"), "{err}");
     }
 
     #[test]
-    fn land_builder_optional_bind_collides_with_interp() {
+    fn land_builder_optional_output_collides_with_interp() {
         let err = LandBuilder::new()
             .cmd("cat {shared}")
-            .bind("shared?", artifact("artifact://shared.txt"))
+            .output("shared?", output("artifact://shared.txt"))
             .interpolate(
                 "shared",
                 crate::builders::artifacts::InterpolationValue::from(
@@ -1010,14 +1010,14 @@ mod tests {
             )
             .build()
             .unwrap_err();
-        assert!(err.to_string().contains("both bind:"), "{err}");
+        assert!(err.to_string().contains("both outputs:"), "{err}");
     }
 
     #[test]
-    fn land_builder_optional_bind_referenced_ok() {
+    fn land_builder_optional_output_referenced_ok() {
         LandBuilder::new()
             .cmd("cat {foo}")
-            .bind("foo?", artifact("artifact://foo.txt"))
+            .output("foo?", output("artifact://foo.txt"))
             .build()
             .unwrap();
     }
@@ -1026,7 +1026,7 @@ mod tests {
     fn land_builder_hyphen_underscore_normalization_ok() {
         LandBuilder::new()
             .cmd("cat {child-plan}")
-            .bind("child_plan", artifact("artifact://plan.txt"))
+            .output("child_plan", output("artifact://plan.txt"))
             .build()
             .unwrap();
     }

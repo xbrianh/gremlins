@@ -10,7 +10,7 @@
 //!     .stage(
 //!         AgentBuilder::new("plan")
 //!             .prompt("write the plan to {plan}")
-//!             .bind("plan", artifact("artifact://plan.md"))
+//!             .output("plan", output("artifact://plan.md"))
 //!             .build()
 //!             .unwrap(),
 //!     )
@@ -32,7 +32,7 @@ pub mod definition;
 pub mod exec;
 // Re-export everything at the module root
 pub use agent::AgentBuilder;
-pub use artifacts::{artifact, content, BindTarget, InterpolationValue};
+pub use artifacts::{content, output, InterpolationValue, OutputTarget};
 pub use composite::{ParallelBuilder, SequenceBuilder};
 pub use definition::{BootstrapBuilder, DefinitionBuilder, LandBuilder};
 pub use exec::ExecBuilder;

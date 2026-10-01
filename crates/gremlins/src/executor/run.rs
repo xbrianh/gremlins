@@ -220,7 +220,7 @@ async fn run_agent(
         ),
     );
 
-    // Compute checkout keys: bind_map keys + filepath-style interpolation keys.
+    // Compute checkout keys: outputs_map keys + filepath-style interpolation keys.
     // Content interpolation keys are NOT included — they're read once at prepare time.
     //
     // We need to resolve template variables in the URIs before looking them up.
@@ -251,7 +251,7 @@ async fn run_agent(
     uri_subs.extend(framework_subs.clone());
 
     let mut checkout_keys: Vec<String> = Vec::new();
-    for raw_uri_str in agent.bind_map.values() {
+    for raw_uri_str in agent.outputs_map.values() {
         let resolved = vars::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
         // Strip optional marker (? or ?fallback).
         let resolved = match resolved.find('?') {
@@ -524,7 +524,7 @@ async fn run_exec(
         format!("[{}] exec: preparing", exec.name),
     );
 
-    // Compute checkout keys: bind_map keys + filepath-style interpolation keys.
+    // Compute checkout keys: outputs_map keys + filepath-style interpolation keys.
     // Content interpolation keys are NOT included — they're read once at prepare time.
     let str_opts = vars::string_options(&exec.options);
     let (content_map, filepath_map) =
@@ -549,7 +549,7 @@ async fn run_exec(
     uri_subs.extend(framework_subs.clone());
 
     let mut checkout_keys: Vec<String> = Vec::new();
-    for raw_uri_str in exec.bind_map.values() {
+    for raw_uri_str in exec.outputs_map.values() {
         let resolved = vars::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
         // Strip optional marker (? or ?fallback).
         let resolved = match resolved.find('?') {
@@ -1069,7 +1069,7 @@ mod tests {
     use crate::artifacts::registry::{DryRunArtifactRegistry, FileSystemArtifactRegistry};
     use crate::artifacts::uri::Uri;
     use crate::builders::agent::AgentBuilder;
-    use crate::builders::artifacts::artifact;
+    use crate::builders::artifacts::output;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
     use crate::definition::StageSpec;
@@ -1240,7 +1240,7 @@ mod tests {
     async fn agent_commits_a_produced_bound_artifact() {
         let stages = vec![AgentBuilder::new("writer")
             .client("cmd:sh -c 'cat >/dev/null'")
-            .bind("out?", artifact("artifact://{name}.md"))
+            .output("out?", output("artifact://{name}.md"))
             .prompt("write {out}")
             .build()
             .unwrap()];
@@ -1265,7 +1265,7 @@ mod tests {
     async fn agent_missing_artifact_bails() {
         let stages = vec![AgentBuilder::new("writer")
             .client("cmd:sh -c 'cat >/dev/null'")
-            .bind("out", artifact("artifact://out.md"))
+            .output("out", output("artifact://out.md"))
             .prompt("write {out}")
             .build()
             .unwrap()];
@@ -1564,7 +1564,7 @@ mod tests {
         // A missing non-optional artifact causes a Bail.
         let stages = vec![AgentBuilder::new("writer")
             .client("cmd:sh -c 'cat >/dev/null'")
-            .bind("out", artifact("artifact://out.md"))
+            .output("out", output("artifact://out.md"))
             .prompt("hi {out}")
             .build()
             .unwrap()];

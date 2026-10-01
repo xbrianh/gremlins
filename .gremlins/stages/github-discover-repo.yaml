@@ -4,8 +4,9 @@ stages:
     skip_if_exists: "artifact://repo.txt"
     body:
       - type: exec
-        bind:
-          repo: "artifact://repo.txt"
+        interpolation:
+          outputs:
+            repo: "artifact://repo.txt"
         options:
           cmds:
             - 'gh_discover_repo > "{repo}"'

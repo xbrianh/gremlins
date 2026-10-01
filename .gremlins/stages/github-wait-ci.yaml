@@ -14,11 +14,12 @@ stages:
       - name: ci-wait
         type: exec
         interpolation:
-          pr_url: content("artifact://pr-url.txt")
-          fix_head: content("artifact://fix-head")?
-        bind:
-          status?: "artifact://{loop_iter}/status"
-          done?: "artifact://{loop_iter}/done"
+          inputs:
+            pr_url: content("artifact://pr-url.txt")
+            fix_head: content("artifact://fix-head")?
+          outputs:
+            status?: "artifact://{loop_iter}/status"
+            done?: "artifact://{loop_iter}/done"
         options:
           timeout: 1470
           startup_grace_secs: 60
@@ -34,9 +35,10 @@ stages:
         body:
           - type: exec
             interpolation:
-              pr_url: content("artifact://pr-url.txt")
-            bind:
-              ci_log?: "artifact://{loop_iter}/ci_failure.txt"
+              inputs:
+                pr_url: content("artifact://pr-url.txt")
+              outputs:
+                ci_log?: "artifact://{loop_iter}/ci_failure.txt"
             options:
               timeout: 120
               cmds:
@@ -50,7 +52,8 @@ stages:
             prompt:
               - "{{prompt}}"
             interpolation:
-              failure_output: content("artifact://{loop_iter}/ci_failure.txt")?
+              inputs:
+                failure_output: content("artifact://{loop_iter}/ci_failure.txt")?
 
       - name: push-fix
         type: sequence
@@ -58,7 +61,8 @@ stages:
         body:
           - type: exec
             interpolation:
-              pr_branch: content("artifact://pr-branch.txt")
+              inputs:
+                pr_branch: content("artifact://pr-branch.txt")
             options:
               cmds:
                 - ci_push_fix "{pr_branch}"
@@ -68,8 +72,9 @@ stages:
         skip_if_exists: "artifact://fix-head"
         body:
           - type: exec
-            bind:
-              fix_head: "artifact://fix-head"
+            interpolation:
+              outputs:
+                fix_head: "artifact://fix-head"
             options:
               cmds:
                 - |

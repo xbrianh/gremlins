@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::builders::artifacts::{BindTarget, InterpolationValue};
+use crate::builders::artifacts::{InterpolationValue, OutputTarget};
 use crate::definition::r#static::expand::key_referenced_in_text;
 use crate::definition::ClientSpec;
 use crate::schemas::error::SchemaError;
@@ -31,7 +31,7 @@ pub struct ExecBuilder {
     name: String,
     options: HashMap<String, serde_json::Value>,
     interpolation_map: HashMap<String, String>,
-    bind_map: HashMap<String, String>,
+    outputs_map: HashMap<String, String>,
     client: Option<ClientSpec>,
 }
 
@@ -42,7 +42,7 @@ impl ExecBuilder {
             name: name.into(),
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
-            bind_map: HashMap::new(),
+            outputs_map: HashMap::new(),
             client: None,
         }
     }
@@ -103,15 +103,15 @@ impl ExecBuilder {
         self
     }
 
-    /// Add a bind entry.
-    pub fn bind(mut self, key: impl Into<String>, target: impl Into<BindTarget>) -> Self {
-        self.bind_map.insert(key.into(), target.into().into());
+    /// Add an output entry.
+    pub fn output(mut self, key: impl Into<String>, target: impl Into<OutputTarget>) -> Self {
+        self.outputs_map.insert(key.into(), target.into().into());
         self
     }
 
-    /// Replace the entire bind map.
-    pub fn bind_map(mut self, map: HashMap<String, String>) -> Self {
-        self.bind_map = map;
+    /// Replace the entire outputs map.
+    pub fn outputs_map(mut self, map: HashMap<String, String>) -> Self {
+        self.outputs_map = map;
         self
     }
 
@@ -154,10 +154,10 @@ impl ExecBuilder {
             }
         }
 
-        // --- Collision check: keys in both bind: and interpolation: ---
+        // --- Collision check: keys in both outputs: and interpolation: ---
         {
-            let bind_keys: HashSet<String> = self
-                .bind_map
+            let output_keys: HashSet<String> = self
+                .outputs_map
                 .keys()
                 .filter(|k| !k.contains('{'))
                 .map(|k| k.strip_suffix('?').unwrap_or(k).to_string())
@@ -166,11 +166,11 @@ impl ExecBuilder {
                 if interp_key.contains('{') {
                     continue;
                 }
-                if bind_keys.contains(interp_key.as_str()) {
+                if output_keys.contains(interp_key.as_str()) {
                     return Err(SchemaError::Stage {
                         name: name.clone(),
                         msg: format!(
-                            "key {interp_key:?} declared in both bind: and interpolation: — a stage cannot both produce and consume the same key"
+                            "key {interp_key:?} declared in both outputs: and interpolation: — a stage cannot both produce and consume the same key"
                         ),
                     });
                 }
@@ -205,8 +205,8 @@ impl ExecBuilder {
                 }
             }
 
-            // Check bind keys
-            for key in self.bind_map.keys() {
+            // Check output keys
+            for key in self.outputs_map.keys() {
                 if key.contains('{') {
                     continue;
                 }
@@ -217,7 +217,7 @@ impl ExecBuilder {
                 return Err(SchemaError::Stage {
                     name: name.clone(),
                     msg: format!(
-                        "key {key:?} declared in bind: is not referenced in any prompt or command"
+                        "key {key:?} declared in outputs: is not referenced in any prompt or command"
                     ),
                 });
             }
@@ -227,7 +227,7 @@ impl ExecBuilder {
             name,
             options: self.options,
             interpolation_map: self.interpolation_map,
-            bind_map: self.bind_map,
+            outputs_map: self.outputs_map,
         };
         Ok(StageSpec::Exec {
             stage,
@@ -239,13 +239,13 @@ impl ExecBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builders::artifacts::artifact;
+    use crate::builders::artifacts::output;
 
     #[test]
     fn all_keys_referenced_ok() {
         ExecBuilder::new("test")
             .cmd("cat {foo} {bar}")
-            .bind("foo", artifact("artifact://foo.txt"))
+            .output("foo", output("artifact://foo.txt"))
             .interpolate(
                 "bar",
                 crate::builders::artifacts::InterpolationValue::from(
@@ -257,15 +257,15 @@ mod tests {
     }
 
     #[test]
-    fn unused_bind_key_error() {
+    fn unused_output_key_error() {
         let err = ExecBuilder::new("test")
             .cmd("cat {foo}")
-            .bind("foo", artifact("artifact://foo.txt"))
-            .bind("unused", artifact("artifact://unused.txt"))
+            .output("foo", output("artifact://foo.txt"))
+            .output("unused", output("artifact://unused.txt"))
             .build()
             .unwrap_err();
         assert!(err.to_string().contains("unused"), "{err}");
-        assert!(err.to_string().contains("bind:"), "{err}");
+        assert!(err.to_string().contains("outputs:"), "{err}");
     }
 
     #[test]
@@ -291,10 +291,10 @@ mod tests {
     }
 
     #[test]
-    fn bind_interp_collision_error() {
+    fn output_interp_collision_error() {
         let err = ExecBuilder::new("test")
             .cmd("cat {shared}")
-            .bind("shared", artifact("artifact://shared.txt"))
+            .output("shared", output("artifact://shared.txt"))
             .interpolate(
                 "shared",
                 crate::builders::artifacts::InterpolationValue::from(
@@ -303,14 +303,14 @@ mod tests {
             )
             .build()
             .unwrap_err();
-        assert!(err.to_string().contains("both bind:"), "{err}");
+        assert!(err.to_string().contains("both outputs:"), "{err}");
     }
 
     #[test]
-    fn optional_bind_collides_with_interp() {
+    fn optional_output_collides_with_interp() {
         let err = ExecBuilder::new("test")
             .cmd("cat {shared}")
-            .bind("shared?", artifact("artifact://shared.txt"))
+            .output("shared?", output("artifact://shared.txt"))
             .interpolate(
                 "shared",
                 crate::builders::artifacts::InterpolationValue::from(
@@ -319,14 +319,14 @@ mod tests {
             )
             .build()
             .unwrap_err();
-        assert!(err.to_string().contains("both bind:"), "{err}");
+        assert!(err.to_string().contains("both outputs:"), "{err}");
     }
 
     #[test]
-    fn optional_bind_referenced_via_stripped_form_ok() {
+    fn optional_output_referenced_via_stripped_form_ok() {
         ExecBuilder::new("test")
             .cmd("cat {foo}")
-            .bind("foo?", artifact("artifact://foo.txt"))
+            .output("foo?", output("artifact://foo.txt"))
             .build()
             .unwrap();
     }
@@ -335,7 +335,7 @@ mod tests {
     fn hyphen_underscore_normalization_ok() {
         ExecBuilder::new("test")
             .cmd("cat {child-plan}")
-            .bind("child_plan", artifact("artifact://plan.txt"))
+            .output("child_plan", output("artifact://plan.txt"))
             .build()
             .unwrap();
     }

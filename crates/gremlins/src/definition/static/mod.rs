@@ -530,7 +530,7 @@ mod tests {
                 prompts: vec![],
                 options: std::collections::HashMap::new(),
                 interpolation_map: std::collections::HashMap::new(),
-                bind_map: std::collections::HashMap::new(),
+                outputs_map: std::collections::HashMap::new(),
             },
             client: None,
         }
@@ -542,7 +542,7 @@ mod tests {
                 name: name.to_string(),
                 options: std::collections::HashMap::new(),
                 interpolation_map: std::collections::HashMap::new(),
-                bind_map: std::collections::HashMap::new(),
+                outputs_map: std::collections::HashMap::new(),
             },
             client: None,
         }
@@ -629,7 +629,7 @@ mod tests {
                 prompts: vec![],
                 options: std::collections::HashMap::new(),
                 interpolation_map: std::collections::HashMap::new(),
-                bind_map: std::collections::HashMap::new(),
+                outputs_map: std::collections::HashMap::new(),
             },
             client: Some(ClientSpec("xai:grok-5".into())),
         };
@@ -672,7 +672,7 @@ mod tests {
                 prompts: vec![],
                 options: std::collections::HashMap::new(),
                 interpolation_map: std::collections::HashMap::new(),
-                bind_map: std::collections::HashMap::new(),
+                outputs_map: std::collections::HashMap::new(),
             },
             client: None,
         }
@@ -685,7 +685,7 @@ mod tests {
                 name: name.to_string(),
                 options: std::collections::HashMap::new(),
                 interpolation_map: std::collections::HashMap::new(),
-                bind_map: std::collections::HashMap::new(),
+                outputs_map: std::collections::HashMap::new(),
             },
             client: None,
         }

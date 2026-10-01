@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde_yaml::{Mapping, Value};
 
 use crate::builders::agent::AgentBuilder;
-use crate::builders::artifacts::{BindTarget, InterpolationValue};
+use crate::builders::artifacts::{InterpolationValue, OutputTarget};
 use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
 use crate::builders::definition::{fill_builder_names, DefinitionBuilder, LandBuilder};
 use crate::builders::exec::ExecBuilder;
@@ -223,6 +223,41 @@ fn yaml_str(mapping: &Mapping, key: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Read the new nested `interpolation:` structure: `{inputs: {…}, outputs: {…}}`.
+/// Returns (inputs_map, outputs_map). Backward-compatible: also reads the old
+/// flat `interpolation:` and `bind:` keys when the nested form is absent.
+#[allow(clippy::type_complexity)]
+fn yaml_interpolation_nested(
+    mapping: &Mapping,
+) -> Result<(HashMap<String, String>, HashMap<String, String>), SchemaError> {
+    // Try the new nested form first.
+    if let Some(interp_val) = mapping.get("interpolation").filter(|v| !v.is_null()) {
+        if let Some(interp_map) = interp_val.as_mapping() {
+            // Check if this is the nested form (has "inputs" or "outputs" sub-keys)
+            let has_inputs = interp_map.contains_key("inputs");
+            let has_outputs = interp_map.contains_key("outputs");
+            if has_inputs || has_outputs {
+                let inputs = yaml_string_map(interp_map, "inputs")?;
+                let outputs = yaml_string_map(interp_map, "outputs")?;
+                // Also check for legacy flat `bind:` key
+                let legacy_bind = yaml_string_map(mapping, "bind")?;
+                if !legacy_bind.is_empty() {
+                    return Err(SchemaError::Generic(
+                        "cannot use nested interpolation (inputs:/outputs:) alongside a top-level bind: key"
+                            .to_string(),
+                    ));
+                }
+                return Ok((inputs, outputs));
+            }
+        }
+    }
+
+    // Fall back to legacy flat keys.
+    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
+    let bind_map = yaml_string_map(mapping, "bind")?;
+    Ok((interpolation_map, bind_map))
+}
+
 /// Read a YAML string→string mapping, returning an empty map when absent.
 fn yaml_string_map(mapping: &Mapping, key: &str) -> Result<HashMap<String, String>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
@@ -296,8 +331,7 @@ fn yaml_client(mapping: &Mapping) -> Option<ClientSpec> {
 /// Build an [`AgentBuilder`] from a YAML stage mapping.
 fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
     let prompts = yaml_string_list(mapping, "prompt")?;
-    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
-    let bind_map = yaml_string_map(mapping, "bind")?;
+    let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
     let client = yaml_client(mapping);
 
@@ -309,7 +343,7 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaErr
         builder = builder.interpolate(k, InterpolationValue(v));
     }
     for (k, v) in bind_map {
-        builder = builder.bind(k, BindTarget(v));
+        builder = builder.output(k, OutputTarget(v));
     }
     for (k, v) in options {
         builder = builder.option(k, v);
@@ -323,8 +357,7 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaErr
 
 /// Build an [`ExecBuilder`] from a YAML stage mapping.
 fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
-    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
-    let bind_map = yaml_string_map(mapping, "bind")?;
+    let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
     let client = yaml_client(mapping);
 
@@ -333,7 +366,7 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaErro
         builder = builder.interpolate(k, InterpolationValue(v));
     }
     for (k, v) in bind_map {
-        builder = builder.bind(k, BindTarget(v));
+        builder = builder.output(k, OutputTarget(v));
     }
     for (k, v) in options {
         builder = builder.option(k, v);
@@ -477,8 +510,7 @@ fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<StageSpec>, SchemaE
 /// Build the land stage from its YAML mapping, forcing name=land and
 /// type=exec through [`LandBuilder`].
 fn land_from_yaml_builder(mapping: &Mapping) -> Result<StageSpec, SchemaError> {
-    let interpolation_map = yaml_string_map(mapping, "interpolation")?;
-    let bind_map = yaml_string_map(mapping, "bind")?;
+    let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
     let client = yaml_client(mapping);
 
@@ -487,7 +519,7 @@ fn land_from_yaml_builder(mapping: &Mapping) -> Result<StageSpec, SchemaError> {
         builder = builder.interpolate(k, InterpolationValue(v));
     }
     for (k, v) in bind_map {
-        builder = builder.bind(k, BindTarget(v));
+        builder = builder.output(k, OutputTarget(v));
     }
     for (k, v) in options {
         builder = builder.option(k, v);
@@ -593,7 +625,7 @@ fn resolve_default_client(
 mod tests {
     use super::*;
     use crate::builders::agent::AgentBuilder;
-    use crate::builders::artifacts::artifact;
+    use crate::builders::artifacts::output;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
     use crate::stage_spec::parallel::ErrorPolicy;
@@ -630,7 +662,7 @@ mod tests {
                     "content(\"artifact://input.md\")",
                 ),
             )
-            .bind("plan", artifact("artifact://plan.md"))
+            .output("plan", output("artifact://plan.md"))
             .option("model", "xai:grok-4")
             .client("xai:grok-4")
             .build()
@@ -654,7 +686,7 @@ mod tests {
                     "content(\"artifact://in.txt\")",
                 ),
             )
-            .bind("out", artifact("artifact://out.txt"))
+            .output("out", output("artifact://out.txt"))
             .option("timeout", "30")
             .client("local")
             .build()

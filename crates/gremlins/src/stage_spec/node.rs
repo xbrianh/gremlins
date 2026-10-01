@@ -184,12 +184,12 @@ impl StageSpec {
     /// validators — unlike a snapshot taken from the raw YAML, whose nested
     /// mappings never receive their filled names.
     pub(crate) fn to_stage_node(&self) -> StageNode {
-        let (bind_map, interpolation_map) = match self {
+        let (outputs_map, interpolation_map) = match self {
             StageSpec::Agent { stage, .. } => {
-                (stage.bind_map.clone(), stage.interpolation_map.clone())
+                (stage.outputs_map.clone(), stage.interpolation_map.clone())
             }
             StageSpec::Exec { stage, .. } => {
-                (stage.bind_map.clone(), stage.interpolation_map.clone())
+                (stage.outputs_map.clone(), stage.interpolation_map.clone())
             }
             StageSpec::Sequence { .. } | StageSpec::Parallel { .. } => {
                 (HashMap::new(), HashMap::new())
@@ -199,7 +199,7 @@ impl StageSpec {
         StageNode {
             name: self.name().to_string(),
             stage_type: self.stage_type().to_string(),
-            bind_map,
+            outputs_map,
             interpolation_map,
             skip_if_exists: self.skip_if_exists().to_string(),
             body: self.body().iter().map(StageSpec::to_stage_node).collect(),
@@ -299,12 +299,22 @@ fn agent_to_yaml(stage: &Agent, client: &Option<ClientSpec>) -> Value {
         );
     }
     insert_if_nonempty(&mut m, "options", options_to_yaml(&stage.options));
-    insert_if_nonempty(
-        &mut m,
-        "interpolation",
-        string_map_to_yaml(&stage.interpolation_map),
-    );
-    insert_if_nonempty(&mut m, "bind", string_map_to_yaml(&stage.bind_map));
+    // Serialize interpolation as {inputs:, outputs:} nested mapping
+    let interp_inputs = string_map_to_yaml(&stage.interpolation_map);
+    let interp_outputs = string_map_to_yaml(&stage.outputs_map);
+    if !is_empty_value(&interp_inputs) || !is_empty_value(&interp_outputs) {
+        let mut interp_map = Mapping::new();
+        if !is_empty_value(&interp_inputs) {
+            interp_map.insert(Value::String("inputs".to_string()), interp_inputs);
+        }
+        if !is_empty_value(&interp_outputs) {
+            interp_map.insert(Value::String("outputs".to_string()), interp_outputs);
+        }
+        m.insert(
+            Value::String("interpolation".to_string()),
+            Value::Mapping(interp_map),
+        );
+    }
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
@@ -322,12 +332,22 @@ fn exec_to_yaml(stage: &Exec, client: &Option<ClientSpec>) -> Value {
         Value::String("exec".to_string()),
     );
     insert_if_nonempty(&mut m, "options", options_to_yaml(&stage.options));
-    insert_if_nonempty(
-        &mut m,
-        "interpolation",
-        string_map_to_yaml(&stage.interpolation_map),
-    );
-    insert_if_nonempty(&mut m, "bind", string_map_to_yaml(&stage.bind_map));
+    // Serialize interpolation as {inputs:, outputs:} nested mapping
+    let interp_inputs = string_map_to_yaml(&stage.interpolation_map);
+    let interp_outputs = string_map_to_yaml(&stage.outputs_map);
+    if !is_empty_value(&interp_inputs) || !is_empty_value(&interp_outputs) {
+        let mut interp_map = Mapping::new();
+        if !is_empty_value(&interp_inputs) {
+            interp_map.insert(Value::String("inputs".to_string()), interp_inputs);
+        }
+        if !is_empty_value(&interp_outputs) {
+            interp_map.insert(Value::String("outputs".to_string()), interp_outputs);
+        }
+        m.insert(
+            Value::String("interpolation".to_string()),
+            Value::Mapping(interp_map),
+        );
+    }
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }

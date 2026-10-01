@@ -283,9 +283,10 @@ pub(crate) fn parse_default(raw: &str) -> serde_yaml::Value {
     serde_yaml::Value::String(s.to_string())
 }
 
-/// Validate that every key declared in each stage's `bind:` or `interpolation:`
-/// map is actually referenced as `{KEY}` somewhere in the stage's prompts or
-/// commands. Also catches keys declared in both maps.
+/// Validate that every key declared in each stage's `interpolation:` map
+/// (both `inputs:` and `outputs:` sub-keys) is actually referenced as
+/// `{KEY}` somewhere in the stage's prompts or commands. Also catches keys
+/// declared in both sub-maps.
 ///
 /// By the time this runs, all bundled recipe call-sites have already been
 /// inlined by `_expand_stage_def`, so the validator only ever sees fully
@@ -324,17 +325,44 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
 
     let stage_name = mapping.get("name").and_then(|v| v.as_str()).unwrap_or("?");
 
-    let bind_map = mapping.get("bind").and_then(|v| v.as_mapping());
-    let interp_map = mapping.get("interpolation").and_then(|v| v.as_mapping());
+    let bind_map = mapping
+        .get("interpolation")
+        .and_then(|v| v.as_mapping())
+        .and_then(|m| m.get("outputs"))
+        .and_then(|v| v.as_mapping());
+    let interp_map = mapping
+        .get("interpolation")
+        .and_then(|v| v.as_mapping())
+        .and_then(|m| m.get("inputs"))
+        .and_then(|v| v.as_mapping());
+
+    // Also check legacy flat keys for backward compatibility
+    let legacy_bind = mapping.get("bind").and_then(|v| v.as_mapping());
+    let legacy_interp = mapping.get("interpolation").and_then(|v| v.as_mapping());
+    // If the interpolation key is a mapping with inputs/outputs, don't treat it as legacy
+    let legacy_interp =
+        legacy_interp.filter(|m| !m.contains_key("inputs") && !m.contains_key("outputs"));
+
+    // Merge legacy into the new-style maps
+    let bind_map = if bind_map.is_some() {
+        bind_map
+    } else {
+        legacy_bind
+    };
+    let interp_map = if interp_map.is_some() {
+        interp_map
+    } else {
+        legacy_interp
+    };
 
     // Nothing to check if neither map exists
     if bind_map.is_none() && interp_map.is_none() {
         return;
     }
 
-    // Check for collisions: keys appearing in both bind: and interpolation:.
-    // The trailing `?` on optional bind keys is stripped by the runtime, so
-    // `foo?` in bind collides with `foo` in interpolation.
+    // Check for collisions: keys appearing in both outputs: and inputs:.
+    // The trailing `?` on optional output keys is stripped by the runtime, so
+    // `foo?` in outputs collides with `foo` in inputs.
     let mut colliding_keys: HashSet<String> = HashSet::new();
     if let (Some(bind), Some(interp)) = (&bind_map, &interp_map) {
         let bind_keys: HashSet<String> = bind
@@ -354,7 +382,7 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
         }
     }
 
-    // Collect keys from both bind: and interpolation: — all must be referenced.
+    // Collect keys from both inputs: and outputs: — all must be referenced.
     // Skip keys that contain `{...}` templates (these are framework substitution
     // variables resolved at runtime, e.g. `{name}`, `{model}`).
     let mut keys: Vec<(String, String)> = Vec::new(); // (key, map_name)
@@ -362,7 +390,7 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
         for key in interp.keys() {
             if let Some(k) = key.as_str() {
                 if !colliding_keys.contains(k) && !k.contains('{') {
-                    keys.push((k.to_string(), "interpolation".to_string()));
+                    keys.push((k.to_string(), "interpolation.inputs".to_string()));
                 }
             }
         }
@@ -371,7 +399,7 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
         for key in bind.keys() {
             if let Some(k) = key.as_str() {
                 if !colliding_keys.contains(k) && !k.contains('{') {
-                    keys.push((k.to_string(), "bind".to_string()));
+                    keys.push((k.to_string(), "interpolation.outputs".to_string()));
                 }
             }
         }
@@ -413,9 +441,9 @@ fn validate_stage_keys_for_stage(stage: &serde_yaml::Value, errors: &mut Vec<Sch
         if key_referenced_in_text(key_str, &text) {
             continue;
         }
-        // For bind keys with trailing `?`, the exec stage runtime strips the
+        // For output keys with trailing `?`, the exec stage runtime strips the
         // `?` before substitution, so also check the un-suffixed form.
-        if map_name == "bind" && key_str.ends_with('?') {
+        if map_name == "interpolation.outputs" && key_str.ends_with('?') {
             let stripped = &key_str[..key_str.len() - 1];
             if key_referenced_in_text(stripped, &text) {
                 continue;
@@ -840,6 +868,16 @@ fn _expand_stage_def(
                     .to_string(),
             });
         }
+        // Also reject interpolation.outputs in recipe definitions
+        if let Some(interp) = def_map.get("interpolation").and_then(|v| v.as_mapping()) {
+            if interp.contains_key("outputs") {
+                return Err(SchemaError::StageDef {
+                    name: def_name.to_string(),
+                    msg: "must not declare 'interpolation.outputs:' keys; declare them at each call site instead"
+                        .to_string(),
+                });
+            }
+        }
 
         let last_idx = inner_list.len() - 1;
         let required_opts: Vec<String> = def_map
@@ -964,41 +1002,163 @@ fn _expand_stage_def(
                         client.clone(),
                     );
                 }
+                // Merge call-site interpolation.inputs into inner stage's interpolation.inputs
                 if let Some(interpolation_val) = call_site_map.get("interpolation") {
-                    let mut merged_interpolation = inner_map
-                        .get("interpolation")
-                        .and_then(|v| v.as_mapping())
-                        .map(|m| {
-                            m.iter()
-                                .map(|(k, v)| (k.clone(), v.clone()))
-                                .collect::<serde_yaml::Mapping>()
-                        })
-                        .unwrap_or_default();
-                    if let Some(cs_interpolation) = interpolation_val.as_mapping() {
-                        for (k, v) in cs_interpolation {
+                    let cs_inputs = if let Some(m) = interpolation_val.as_mapping() {
+                        // New nested form: {inputs: {…}, outputs: {…}}
+                        if m.contains_key("inputs") || m.contains_key("outputs") {
+                            m.get("inputs").and_then(|v| v.as_mapping())
+                        } else {
+                            // Legacy flat form: treat as inputs
+                            Some(m)
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(cs_inputs) = cs_inputs {
+                        let mut merged_interpolation = inner_map
+                            .get("interpolation")
+                            .and_then(|v| v.as_mapping())
+                            .map(|m| {
+                                // Check if inner already uses nested form
+                                if m.contains_key("inputs") || m.contains_key("outputs") {
+                                    // Nested form: merge into inputs
+                                    m.get("inputs")
+                                        .and_then(|v| v.as_mapping())
+                                        .map(|im| {
+                                            im.iter()
+                                                .map(|(k, v)| (k.clone(), v.clone()))
+                                                .collect::<serde_yaml::Mapping>()
+                                        })
+                                        .unwrap_or_default()
+                                } else {
+                                    // Legacy flat form
+                                    m.iter()
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect::<serde_yaml::Mapping>()
+                                }
+                            })
+                            .unwrap_or_default();
+                        for (k, v) in cs_inputs {
                             merged_interpolation.insert(k.clone(), v.clone());
                         }
+                        // Always emit nested form
+                        let mut nested = serde_yaml::Mapping::new();
+                        nested.insert(
+                            serde_yaml::Value::String("inputs".to_string()),
+                            serde_yaml::Value::Mapping(merged_interpolation),
+                        );
+                        // Preserve existing outputs if any
+                        if let Some(existing_outputs) = inner_map
+                            .get("interpolation")
+                            .and_then(|v| v.as_mapping())
+                            .and_then(|m| m.get("outputs").cloned())
+                        {
+                            nested.insert(
+                                serde_yaml::Value::String("outputs".to_string()),
+                                existing_outputs,
+                            );
+                        }
+                        inner_map.insert(
+                            serde_yaml::Value::String("interpolation".to_string()),
+                            serde_yaml::Value::Mapping(nested),
+                        );
                     }
-                    inner_map.insert(
-                        serde_yaml::Value::String("interpolation".to_string()),
-                        serde_yaml::Value::Mapping(merged_interpolation),
-                    );
                 }
             }
             if i == last_idx {
-                if let Some(bind_val) = call_site_map.get("bind") {
-                    if inner_map.contains_key("bind") {
+                // Merge call-site interpolation.outputs into inner stage's interpolation.outputs
+                // Also support legacy call-site `bind:` key
+                let cs_outputs = if let Some(bind_val) = call_site_map.get("bind") {
+                    // Legacy bind: key — check for existing outputs in both forms
+                    let has_existing = inner_map.contains_key("bind")
+                        || inner_map
+                            .get("interpolation")
+                            .and_then(|v| v.as_mapping())
+                            .map(|m| m.contains_key("outputs"))
+                            .unwrap_or(false);
+                    if has_existing {
                         return Err(SchemaError::StageDef {
                             name: def_name.to_string(),
                             msg: format!(
-                                "inner stage {i} declares 'bind:'; call-site must not also declare 'bind:'"
+                                "inner stage {i} already declares outputs; call-site must not also declare 'bind:'"
                             ),
                         });
                     }
-                    inner_map.insert(
-                        serde_yaml::Value::String("bind".to_string()),
-                        bind_val.clone(),
-                    );
+                    Some((bind_val.clone(), true)) // (value, is_legacy)
+                } else if let Some(interp_val) = call_site_map.get("interpolation") {
+                    if let Some(m) = interp_val.as_mapping() {
+                        if m.contains_key("outputs") {
+                            m.get("outputs").cloned().map(|v| (v, false))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some((outputs_val, is_legacy)) = cs_outputs {
+                    if is_legacy {
+                        // Legacy: place as top-level `bind:` key
+                        inner_map
+                            .insert(serde_yaml::Value::String("bind".to_string()), outputs_val);
+                    } else {
+                        // New nested form: merge into interpolation.outputs
+                        let existing_outputs = inner_map
+                            .get("interpolation")
+                            .and_then(|v| v.as_mapping())
+                            .and_then(|m| m.get("outputs"))
+                            .and_then(|v| v.as_mapping())
+                            .map(|m| {
+                                m.iter()
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect::<serde_yaml::Mapping>()
+                            })
+                            .unwrap_or_default();
+
+                        let mut merged_outputs = existing_outputs;
+                        if let Some(cs_out) = outputs_val.as_mapping() {
+                            for (k, v) in cs_out {
+                                merged_outputs.insert(k.clone(), v.clone());
+                            }
+                        }
+
+                        // Build nested interpolation mapping
+                        let mut nested = serde_yaml::Mapping::new();
+                        // Preserve existing inputs (handle both nested and legacy flat forms)
+                        if let Some(interp_mapping) =
+                            inner_map.get("interpolation").and_then(|v| v.as_mapping())
+                        {
+                            if let Some(existing_inputs) = interp_mapping.get("inputs").cloned() {
+                                nested.insert(
+                                    serde_yaml::Value::String("inputs".to_string()),
+                                    existing_inputs,
+                                );
+                            } else if !interp_mapping.contains_key("outputs") {
+                                // Legacy flat form: treat entire mapping as inputs
+                                nested.insert(
+                                    serde_yaml::Value::String("inputs".to_string()),
+                                    serde_yaml::Value::Mapping(
+                                        interp_mapping
+                                            .iter()
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect::<serde_yaml::Mapping>(),
+                                    ),
+                                );
+                            }
+                        }
+                        nested.insert(
+                            serde_yaml::Value::String("outputs".to_string()),
+                            serde_yaml::Value::Mapping(merged_outputs),
+                        );
+                        inner_map.insert(
+                            serde_yaml::Value::String("interpolation".to_string()),
+                            serde_yaml::Value::Mapping(nested),
+                        );
+                    }
                 }
             }
 
@@ -1026,13 +1186,127 @@ fn _expand_stage_def(
                 .to_string(),
         });
     }
+    // Also reject interpolation.outputs in recipe definitions
+    if let Some(interp) = def_map.get("interpolation").and_then(|v| v.as_mapping()) {
+        if interp.contains_key("outputs") {
+            return Err(SchemaError::StageDef {
+                name: def_name.to_string(),
+                msg: "must not declare 'interpolation.outputs:' keys; declare them at each call site instead"
+                    .to_string(),
+            });
+        }
+    }
 
     let mut merged = definition.clone();
     let merged_map = merged.as_mapping_mut().unwrap();
 
+    // Merge call-site keys: name, and interpolation (inputs/outputs)
     for key in &["name", "interpolation", "bind"] {
         if let Some(v) = call_site_map.get(*key) {
-            merged_map.insert(serde_yaml::Value::String(key.to_string()), v.clone());
+            if *key == "interpolation" {
+                // Handle nested interpolation merge
+                if let Some(cs_map) = v.as_mapping() {
+                    let is_nested = cs_map.contains_key("inputs") || cs_map.contains_key("outputs");
+                    if is_nested {
+                        // Merge into existing interpolation entry-by-entry.
+                        // First, normalize the definition's existing interpolation
+                        // map: if it's legacy flat (no inputs:/outputs: keys), wrap
+                        // it as `inputs:` so we don't produce a hybrid that
+                        // yaml_interpolation_nested would misinterpret.
+                        let mut existing = merged_map
+                            .get("interpolation")
+                            .and_then(|ev| ev.as_mapping())
+                            .map(|m| {
+                                let has_nested =
+                                    m.contains_key("inputs") || m.contains_key("outputs");
+                                if has_nested {
+                                    m.iter()
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect::<serde_yaml::Mapping>()
+                                } else {
+                                    // Legacy flat — wrap as inputs
+                                    let mut nested = serde_yaml::Mapping::new();
+                                    nested.insert(
+                                        serde_yaml::Value::String("inputs".to_string()),
+                                        serde_yaml::Value::Mapping(
+                                            m.iter()
+                                                .map(|(k, v)| (k.clone(), v.clone()))
+                                                .collect::<serde_yaml::Mapping>(),
+                                        ),
+                                    );
+                                    nested
+                                }
+                            })
+                            .unwrap_or_default();
+                        for (sub_k, sub_v) in cs_map {
+                            if let Some(cs_sub_map) = sub_v.as_mapping() {
+                                // Merge call-site entries into existing sub-map
+                                let mut merged_sub = existing
+                                    .get(sub_k)
+                                    .and_then(|v| v.as_mapping())
+                                    .map(|m| {
+                                        m.iter()
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect::<serde_yaml::Mapping>()
+                                    })
+                                    .unwrap_or_default();
+                                for (entry_k, entry_v) in cs_sub_map {
+                                    merged_sub.insert(entry_k.clone(), entry_v.clone());
+                                }
+                                existing
+                                    .insert(sub_k.clone(), serde_yaml::Value::Mapping(merged_sub));
+                            } else {
+                                existing.insert(sub_k.clone(), sub_v.clone());
+                            }
+                        }
+                        merged_map.insert(
+                            serde_yaml::Value::String("interpolation".to_string()),
+                            serde_yaml::Value::Mapping(existing),
+                        );
+                    } else {
+                        // Legacy flat interpolation — treat as inputs
+                        let mut nested = serde_yaml::Mapping::new();
+                        nested.insert(serde_yaml::Value::String("inputs".to_string()), v.clone());
+                        merged_map.insert(
+                            serde_yaml::Value::String("interpolation".to_string()),
+                            serde_yaml::Value::Mapping(nested),
+                        );
+                    }
+                }
+            } else if *key == "bind" {
+                // Legacy bind: convert to interpolation.outputs
+                let mut nested = serde_yaml::Mapping::new();
+                nested.insert(serde_yaml::Value::String("outputs".to_string()), v.clone());
+                // Preserve existing inputs if any (handle both nested and legacy flat forms)
+                if let Some(interp_mapping) = merged_map
+                    .get("interpolation")
+                    .and_then(|ev| ev.as_mapping())
+                {
+                    if let Some(existing_inputs) = interp_mapping.get("inputs").cloned() {
+                        nested.insert(
+                            serde_yaml::Value::String("inputs".to_string()),
+                            existing_inputs,
+                        );
+                    } else if !interp_mapping.contains_key("outputs") {
+                        // Legacy flat form: treat entire mapping as inputs
+                        nested.insert(
+                            serde_yaml::Value::String("inputs".to_string()),
+                            serde_yaml::Value::Mapping(
+                                interp_mapping
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect::<serde_yaml::Mapping>(),
+                            ),
+                        );
+                    }
+                }
+                merged_map.insert(
+                    serde_yaml::Value::String("interpolation".to_string()),
+                    serde_yaml::Value::Mapping(nested),
+                );
+            } else {
+                merged_map.insert(serde_yaml::Value::String(key.to_string()), v.clone());
+            }
         }
     }
     if !call_site_map.contains_key("name") && merged_map.contains_key("name") {
@@ -1268,7 +1542,7 @@ stages:
         match &errs[0] {
             SchemaError::UnusedStageKey { key, map, .. } => {
                 assert_eq!(key, "orphan");
-                assert_eq!(map, "bind");
+                assert_eq!(map, "interpolation.outputs");
             }
             _ => panic!("expected UnusedStageKey"),
         }
@@ -1292,7 +1566,7 @@ stages:
         match &errs[0] {
             SchemaError::UnusedStageKey { key, map, .. } => {
                 assert_eq!(key, "orphan");
-                assert_eq!(map, "interpolation");
+                assert_eq!(map, "interpolation.inputs");
             }
             _ => panic!("expected UnusedStageKey"),
         }
@@ -1361,7 +1635,7 @@ stages:
         match &errs[0] {
             SchemaError::UnusedStageKey { key, map, .. } => {
                 assert_eq!(key, "foo");
-                assert_eq!(map, "bind");
+                assert_eq!(map, "interpolation.outputs");
             }
             _ => panic!("expected UnusedStageKey"),
         }
@@ -1441,5 +1715,115 @@ stages:
             }
             _ => panic!("expected DuplicateStageKey"),
         }
+    }
+
+    /// When a single-primitive stage definition uses legacy flat
+    /// `interpolation: {foo: bar}` and the call site uses the new nested
+    /// `interpolation: {inputs: {baz: qux}}`, the merge must normalize the
+    /// legacy flat entries into `inputs:` so they aren't silently dropped.
+    #[test]
+    fn test_merge_legacy_definition_flat_with_call_site_nested() {
+        // A mock resolver that always returns "not found" — we test with
+        // in-memory stage_defs.
+        struct NotFoundResolver;
+        impl DefinitionResolver for NotFoundResolver {
+            fn resolve(
+                &self,
+                name: &str,
+                _project_root: &std::path::Path,
+            ) -> Result<PathBuf, SchemaError> {
+                Err(SchemaError::DefinitionNotFound {
+                    name: name.to_string(),
+                    available: String::new(),
+                })
+            }
+        }
+
+        // Definition: legacy flat interpolation
+        let definition = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+type: agent
+prompt:
+  - |
+    use {foo} and {baz}
+interpolation:
+  foo: content("artifact://foo.md")
+"#,
+        )
+        .unwrap();
+
+        // Call site: new nested form
+        let call_site = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+name: test
+interpolation:
+  inputs:
+    baz: content("artifact://baz.md")
+"#,
+        )
+        .unwrap();
+
+        let mut stage_defs = HashMap::new();
+        stage_defs.insert("mydef".to_string(), definition);
+
+        let prompt_dir = PathBuf::from(".");
+        let project_root = PathBuf::from(".");
+        let overlay_dir = Path::new(".");
+        let chain: Vec<PathBuf> = vec![];
+        let named_prompts = HashMap::new();
+        let seen_defs = HashSet::new();
+        let resolver = NotFoundResolver;
+
+        let result = _expand_stage_def(
+            &call_site,
+            "mydef",
+            &stage_defs,
+            &prompt_dir,
+            &project_root,
+            overlay_dir,
+            &chain,
+            &named_prompts,
+            &seen_defs,
+            &resolver,
+        );
+
+        // Should succeed — no error about missing keys
+        let expanded = result.unwrap();
+        assert_eq!(expanded.len(), 1, "single-primitive def produces one stage");
+
+        let stage = &expanded[0];
+        let interp = stage
+            .get("interpolation")
+            .and_then(|v| v.as_mapping())
+            .expect("interpolation must be a mapping");
+
+        // Must be the nested form
+        assert!(
+            interp.contains_key("inputs"),
+            "merged interpolation must have 'inputs' key"
+        );
+
+        let inputs = interp
+            .get("inputs")
+            .and_then(|v| v.as_mapping())
+            .expect("inputs must be a mapping");
+
+        // Both the definition's foo and the call-site's baz must be present
+        assert!(
+            inputs.contains_key("foo"),
+            "definition's 'foo' key must be preserved under inputs"
+        );
+        assert!(
+            inputs.contains_key("baz"),
+            "call-site's 'baz' key must be present under inputs"
+        );
+        assert_eq!(
+            inputs.get("foo").and_then(|v| v.as_str()).unwrap(),
+            "content(\"artifact://foo.md\")"
+        );
+        assert_eq!(
+            inputs.get("baz").and_then(|v| v.as_str()).unwrap(),
+            "content(\"artifact://baz.md\")"
+        );
     }
 }

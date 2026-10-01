@@ -9,21 +9,23 @@ stages:
         prompt:
           - "{{prompt}}"
         interpolation:
-          instructions: "artifact://instructions.txt?"
-        bind:
-          plan: "artifact://plan.md"
+          inputs:
+            instructions: "artifact://instructions.txt?"
+          outputs:
+            plan: "artifact://plan.md"
         options:
           idle_timeout: 600
 
   - name: resolve-plan-source
     type: exec
     interpolation:
-      plan: artifact://plan.md
+      inputs:
+        plan: artifact://plan.md
+      outputs:
+        plan_issue_number?: "artifact://plan-issue-number.txt"
     options:
       cmds:
         - 'gh_resolve_plan_source "{plan}" "{plan_issue_number}"'
-    bind:
-      plan_issue_number?: "artifact://plan-issue-number.txt"
 
   - name: publish-as-issue
     type: sequence
@@ -31,19 +33,21 @@ stages:
     body:
       - type: exec
         interpolation:
-          plan: artifact://plan.md
+          inputs:
+            plan: artifact://plan.md
+          outputs:
+            plan_issue_number: "artifact://plan-issue-number.txt"
         options:
           cmds:
             - 'gh_publish_issue "{plan}" > "{plan_issue_number}"'
-        bind:
-          plan_issue_number: "artifact://plan-issue-number.txt"
 
   - name: set-description
     type: exec
     interpolation:
-      plan: artifact://plan.md
-    bind:
-      description?: "artifact://description.txt"
+      inputs:
+        plan: artifact://plan.md
+      outputs:
+        description?: "artifact://description.txt"
     options:
       cmds:
         - "head -1 \"{plan}\" | sed 's/^#\\+ *//' > \"{description}\""

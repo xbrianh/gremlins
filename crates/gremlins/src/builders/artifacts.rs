@@ -1,8 +1,8 @@
-//! Thin newtypes for interpolation values and bind targets.
+//! Thin newtypes for interpolation values and output targets.
 //!
 //! These carry the string representation the stage types already store, so
 //! callers can write `content("artifact://plan.md")` and
-//! `artifact("artifact://plan.md")` without worrying about the internal
+//! `output("artifact://plan.md")` without worrying about the internal
 //! `content(...)` wrapper syntax.
 
 /// An interpolation value — the right-hand side of an interpolation map entry.
@@ -14,14 +14,14 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterpolationValue(pub String);
 
-/// A bind target — the right-hand side of a bind map entry.
+/// An output target — the right-hand side of an outputs map entry.
 ///
 /// ```ignore
-/// artifact("artifact://plan.md")
+/// output("artifact://plan.md")
 /// // stores: artifact://plan.md
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BindTarget(pub String);
+pub struct OutputTarget(pub String);
 
 /// Build an interpolation value with `content()` wrapping.
 ///
@@ -33,13 +33,13 @@ pub fn content(uri: impl Into<String>) -> InterpolationValue {
     InterpolationValue(format!("content(\"{uri}\")"))
 }
 
-/// Build a bind target (bare artifact URI).
+/// Build an output target (bare artifact URI).
 ///
 /// ```ignore
-/// artifact("artifact://plan.md")  // → artifact://plan.md
+/// output("artifact://plan.md")  // → artifact://plan.md
 /// ```
-pub fn artifact(uri: impl Into<String>) -> BindTarget {
-    BindTarget(uri.into())
+pub fn output(uri: impl Into<String>) -> OutputTarget {
+    OutputTarget(uri.into())
 }
 
 impl From<InterpolationValue> for String {
@@ -48,8 +48,8 @@ impl From<InterpolationValue> for String {
     }
 }
 
-impl From<BindTarget> for String {
-    fn from(v: BindTarget) -> Self {
+impl From<OutputTarget> for String {
+    fn from(v: OutputTarget) -> Self {
         v.0
     }
 }
@@ -66,14 +66,14 @@ impl From<String> for InterpolationValue {
     }
 }
 
-impl From<&str> for BindTarget {
+impl From<&str> for OutputTarget {
     fn from(s: &str) -> Self {
-        BindTarget(s.to_string())
+        OutputTarget(s.to_string())
     }
 }
 
-impl From<String> for BindTarget {
+impl From<String> for OutputTarget {
     fn from(s: String) -> Self {
-        BindTarget(s)
+        OutputTarget(s)
     }
 }

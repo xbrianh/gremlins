@@ -25,7 +25,8 @@ bootstrap:
 
 land:
   interpolation:
-    pr_url: content("artifact://pr-url.txt")
+    inputs:
+      pr_url: content("artifact://pr-url.txt")
   options:
     cmds:
       - gh pr merge --squash --delete-branch "{pr_url}"
@@ -73,9 +74,10 @@ stages:
   - name: compute-diff
     type: exec
     interpolation:
-      base_sha: content("artifact://base_sha")
-    bind:
-      diff: "artifact://diff.txt"
+      inputs:
+        base_sha: content("artifact://base_sha")
+      outputs:
+        diff: "artifact://diff.txt"
     options:
       cmds:
         - "git diff {base_sha}...HEAD > {diff}"
@@ -85,30 +87,33 @@ stages:
       - name: review-one
         type: agent
         interpolation:
-          plan: content("artifact://plan.md")
-          diff: content("artifact://diff.txt")
+          inputs:
+            plan: content("artifact://plan.md")
+            diff: content("artifact://diff.txt")
+          outputs:
+            filepath: "artifact://review-one.md"
         prompt: [review.md]
-        bind:
-          filepath: "artifact://review-one.md"
       - name: review-two
         type: agent
         interpolation:
-          plan: content("artifact://plan.md")
-          diff: content("artifact://diff.txt")
+          inputs:
+            plan: content("artifact://plan.md")
+            diff: content("artifact://diff.txt")
+          outputs:
+            filepath: "artifact://review-two.md"
         prompt: [review.md]
-        bind:
-          filepath: "artifact://review-two.md"
 
   - name: address
     type: agent
     prompt: [style_guide.md, dev-env-howto.md, address.md]
     interpolation:
-      plan: content("artifact://plan.md")
-      diff: content("artifact://diff.txt")
-      review_one: content("artifact://review-one.md")
-      review_two: content("artifact://review-two.md")
-    bind:
-      address_summary: "artifact://address-summary.md"
+      inputs:
+        plan: content("artifact://plan.md")
+        diff: content("artifact://diff.txt")
+        review_one: content("artifact://review-one.md")
+        review_two: content("artifact://review-two.md")
+      outputs:
+        address_summary: "artifact://address-summary.md"
 
   - { name: verify-address-fixes, type: check-and-fix }
   - { name: open-pr, type: github-open-pr }
@@ -117,20 +122,22 @@ stages:
   - name: gather-github-review-content
     type: exec
     interpolation:
-      pr: content("artifact://pr-url.txt")
-    bind:
-      github_review_content: "artifact://github-review-content.md"
+      inputs:
+        pr: content("artifact://pr-url.txt")
+      outputs:
+        github_review_content: "artifact://github-review-content.md"
     options:
       cmds:
         - 'gh_gather_review_content "{pr}" > "{github_review_content}"'
   - name: github-address-pull-request-reviews
     type: agent
     interpolation:
-      pr: content("artifact://pr-url.txt")
-      content: content("artifact://github-review-content.md")
+      inputs:
+        pr: content("artifact://pr-url.txt")
+        content: content("artifact://github-review-content.md")
+      outputs:
+        review_summary: "artifact://review-summary.md"
     prompt: [style_guide.md, dev-env-howto.md, github_address_pull_request_reviews.md]
-    bind:
-      review_summary: "artifact://review-summary.md"
   - { name: verify-github-review-fixes, type: check-and-fix }
   - { name: push-review-fixes, type: github-push-to-pr-branch }
   - { name: wait-for-ci, type: github-wait-ci, prompt: [style_guide.md, dev-env-howto.md, ci_fix.md] }
