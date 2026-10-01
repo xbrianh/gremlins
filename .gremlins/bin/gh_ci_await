@@ -91,14 +91,14 @@ if [ -z "$fix_head" ]; then
         fi
         sleep "$poll_interval"
     done
+    if ! sha_matches "$head_oid" "$fix_head"; then
+        printf 'ci-gate: timed out waiting for GitHub to reflect current commit (expected %s, got %s)\n' "$fix_head" "$head_oid" >&2
+        exit 2
+    fi
     if [ "$rollup_len" -eq 0 ]; then
         info "ci-gate: no check-runs after ${startup_grace_secs}s grace; skipping"
         printf 'skipped\n'
         exit 0
-    fi
-    if ! sha_matches "$head_oid" "$fix_head"; then
-        printf 'ci-gate: timed out waiting for GitHub to reflect current commit (expected %s, got %s)\n' "$fix_head" "$head_oid" >&2
-        exit 2
     fi
     info "ci-gate: ${rollup_len} check-run(s) found, SHA synced"
 else

@@ -104,10 +104,13 @@ enum Cmds {
 
 #[tokio::main]
 async fn main() {
-    let level = std::env::var("GREMLINS_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&level))
-        .format_timestamp_millis()
-        .init();
+    env_logger::Builder::from_env(
+        env_logger::Env::new()
+            .filter("GREMLINS_LOG_LEVEL")
+            .default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .init();
 
     let cli = Cli::parse();
     let result = match cli.command {
@@ -160,11 +163,6 @@ async fn executor_request(request: serde_json::Value) -> Result<serde_json::Valu
 /// Reconstructs the lock file from the inherited fd, binds the socket, and
 /// runs the supervisor accept loop until the last gremlin drains.
 async fn serve_daemon(lock_fd: i32) -> Result<(), String> {
-    let level = std::env::var("GREMLINS_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&level))
-        .format_timestamp_millis()
-        .init();
-
     config::init_global().map_err(|e| e.to_string())?;
 
     let state_root = config::state_root();
