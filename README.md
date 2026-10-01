@@ -51,7 +51,14 @@ can have running gremlins simultaneously without interference.
 - `git` — [Git](https://git-scm.com/downloads) (pre-installed on most systems)
 
 A provider also requires either its API key (`OPENAI_API_KEY`, `XAI_API_KEY`,
-`OPENROUTER_API_KEY`) or a `cmd:` command on `PATH`.
+`OPENROUTER_API_KEY`, `AZURE_OPENAI_API_KEY` or `AZURE_OPENAI_TOKEN`) or a `cmd:`
+command on `PATH`.
+
+**Azure OpenAI / Azure AI Foundry** uses `azure:<deployment>` as the client
+specifier. Set `AZURE_OPENAI_ENDPOINT` (required) and one of
+`AZURE_OPENAI_TOKEN` (Entra ID bearer token) or `AZURE_OPENAI_API_KEY`
+(API key). Optionally set `AZURE_OPENAI_API_VERSION` (defaults to
+`2024-10-21`).
 
 ## Dev install
 

@@ -44,4 +44,5 @@ backends! {
     openai: "openai" => openai::OpenAiBackend::build,
     xai: "xai" => xai::XaiBackend::build,
     openrouter: "openrouter" => openrouter::OpenRouterBackend::build,
+    azure: "azure" => azure::AzureBackend::build,
 }

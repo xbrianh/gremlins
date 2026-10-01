@@ -1,4 +1,5 @@
 #![deny(unreachable_pub)]
+#![allow(clippy::double_must_use)]
 pub mod artifacts;
 pub mod builders;
 pub mod clients;
