@@ -118,6 +118,7 @@ pub async fn run_supervisor(
             result = listener.accept() => {
                 match result {
                     Ok((stream, _addr)) => {
+                        log::info!("supervisor: accepted connection");
                         let state_root = state_root.clone();
                         let shutdown_tx = shutdown_tx.clone();
                         tokio::spawn(async move {
@@ -144,6 +145,7 @@ async fn handle_connection(
 ) {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
+    log::debug!("supervisor: handle_connection started, entering read loop");
 
     loop {
         let request = match socket::read_json_line(&mut reader).await {
@@ -160,6 +162,7 @@ async fn handle_connection(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        log::debug!("supervisor: received op={op:?}");
 
         // Streaming ops take ownership of the connection; handle them
         // directly so they can monitor the read half for disconnect.
@@ -252,6 +255,11 @@ fn error_response(message: &str) -> Value {
     map.insert("type".to_string(), Value::String("error".to_string()));
     map.insert("message".to_string(), Value::String(message.to_string()));
     Value::Object(map)
+}
+
+async fn send_debug_status(write_half: &mut (impl tokio::io::AsyncWrite + Unpin), stage: &str) {
+    let payload = serde_json::json!({"type": "debug_status", "stage": stage});
+    let _ = socket::write_json_line(write_half, &payload).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -999,6 +1007,8 @@ async fn handle_debug(
 ) {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     log::debug!("handle_debug: received debug request for {id:?}");
+    send_debug_status(write_half, "validating_id").await;
+
     if id.is_empty() {
         log::debug!("handle_debug: missing 'id' field");
         let resp = error_response("missing 'id' field");
@@ -1025,6 +1035,7 @@ async fn handle_debug(
     // Validate that the gremlin is currently in an agent stage.
     // Read the current stage name from state.json and cross-reference
     // with the definition YAML to check its type.
+    send_debug_status(write_half, "checking_stage_type").await;
     {
         let sf = state_dir.join("state.json");
         let stage_name = if sf.is_file() {
@@ -1083,6 +1094,7 @@ async fn handle_debug(
         Some(h) => h,
         None => {
             log::debug!("handle_debug: gremlin {id} is not in the run map");
+            send_debug_status(write_half, "not_running").await;
             let resp = error_response(&format!("gremlin {id} is not running"));
             let _ = socket::write_json_line(write_half, &resp).await;
             return;
@@ -1090,6 +1102,7 @@ async fn handle_debug(
     };
 
     log::debug!("handle_debug: got interactive handle for {id}");
+    send_debug_status(write_half, "got_handle").await;
 
     // Subscribe to interactive events *before* triggering pause so we don't miss
     // the Ready broadcast.
@@ -1099,6 +1112,8 @@ async fn handle_debug(
     log::debug!("handle_debug: calling pause() for {id}");
     interactive_handle.pause.pause();
     log::debug!("handle_debug: pause() called, waiting for Ready from agent…");
+    send_debug_status(write_half, "sent_pause_signal").await;
+    send_debug_status(write_half, "waiting_for_ready").await;
 
     // Wait for Ready from the agent loop.
     //
