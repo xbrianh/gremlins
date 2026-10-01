@@ -354,6 +354,28 @@ pub(crate) fn reasoning_effort() -> Option<String> {
     std::env::var("GREMLINS_REASONING_EFFORT").ok()
 }
 
+/// AZURE_OPENAI_ENDPOINT — required for the Azure backend.
+pub(crate) fn azure_endpoint() -> Option<String> {
+    std::env::var("AZURE_OPENAI_ENDPOINT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// AZURE_OPENAI_API_VERSION — defaults to "2024-10-21".
+pub(crate) fn azure_api_version() -> String {
+    std::env::var("AZURE_OPENAI_API_VERSION")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "2024-10-21".into())
+}
+
+/// AZURE_OPENAI_TOKEN — Entra ID bearer token for Azure auth.
+pub(crate) fn azure_auth_token() -> Option<String> {
+    std::env::var("AZURE_OPENAI_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
 /// Copilot API key: `GITHUB_COPILOT_API_KEY` then `COPILOT_API_KEY`.
 pub(crate) fn copilot_api_key() -> Option<String> {
     std::env::var("GITHUB_COPILOT_API_KEY")
