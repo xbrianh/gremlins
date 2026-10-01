@@ -195,21 +195,23 @@ impl Backend for AzureBackend {
                 let ctx = ctx.clone();
                 let cancel = cancel.clone();
                 async move {
-                    if cancel.is_cancelled() {
-                        return Err(ClientError::Runtime {
-                            message: "cancelled".into(),
-                        });
-                    }
-
                     let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
                     let id = self.state.next_id.fetch_add(1, Ordering::Relaxed);
-                    self.state
-                        .cancels
-                        .lock()
-                        .unwrap()
-                        .entry(gremlin_id.clone())
-                        .or_default()
-                        .insert(id, cancel.clone());
+
+                    // Check+insert under the cancels lock so reap_all cannot
+                    // remove the gremlin entry between the check and insert.
+                    {
+                        let mut guard = self.state.cancels.lock().unwrap();
+                        if cancel.is_cancelled() {
+                            return Err(ClientError::Runtime {
+                                message: "cancelled".into(),
+                            });
+                        }
+                        guard
+                            .entry(gremlin_id.clone())
+                            .or_default()
+                            .insert(id, cancel.clone());
+                    }
 
                     let model_name = self.state.effective_model(ctx.params.model.as_deref());
                     let model = self.state.client.completion_model(&model_name);
@@ -295,9 +297,9 @@ mod tests {
     fn isolated_env() -> EnvGuard {
         let mut guard = EnvGuard::lock();
         scrub_azure_env(&mut guard);
-        let tmp = tempfile::tempdir().unwrap();
-        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        guard.set("HOME", tmp.path());
+        let tmp = tempfile::tempdir().unwrap().keep();
+        guard.set("GREMLINS_SANDBOX_ROOT", &tmp);
+        guard.set("HOME", &tmp);
         guard
     }
 
@@ -377,6 +379,16 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("AZURE_OPENAI_API_KEY", "env-api-key");
 
+        // Write a providers.json so we can prove the env var wins.
+        let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
+        let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("providers.json"),
+            r#"{"azure": {"api-key": "providers-json-key"}}"#,
+        )
+        .unwrap();
+
         let auth = resolve_auth().unwrap();
         assert!(
             matches!(auth, AzureOpenAIAuth::ApiKey(k) if k == "env-api-key"),
@@ -417,6 +429,34 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("AZURE_OPENAI_API_VERSION", "2025-01-01");
         assert_eq!(crate::config::azure_api_version(), "2025-01-01");
+    }
+
+    #[test]
+    fn extra_params_passthrough() {
+        let mut extra = indexmap::IndexMap::new();
+        extra.insert("max_tokens".into(), "1024".into());
+        extra.insert("temperature".into(), "0.7".into());
+
+        let client_params = openai_protocol::string_map(&extra);
+        let state = AzureRunState {
+            client: azure::Client::builder()
+                .api_key(AzureOpenAIAuth::ApiKey("fake-key".into()))
+                .api_version("2024-10-21")
+                .azure_endpoint("https://example.openai.azure.com".to_string())
+                .build()
+                .unwrap(),
+            model: "gpt-4o".into(),
+            tool_filter: None,
+            client_params,
+            last_ctx: Mutex::new(None),
+            cancels: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            log_label: "test".into(),
+        };
+
+        let obj = state.extra_params().expect("extra_params should be Some");
+        assert_eq!(obj["max_tokens"], 1024);
+        assert_eq!(obj["temperature"], 0.7);
     }
 
     #[test]
