@@ -953,6 +953,12 @@ async fn run_agent_loop_core<M: CompletionModel>(
             .collect();
 
         if tool_calls.is_empty() {
+            // In interactive mode, empty turns are expected — the operator is
+            // driving the conversation. Don't nudge or remind.
+            if interactive_active {
+                continue;
+            }
+
             // Reasoning-only turn — the model is thinking. Just loop.
             if text.is_empty() && !reasoning.is_empty() {
                 log::debug!("reasoning-only turn: turn={turn_num} — continuing",);

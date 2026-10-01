@@ -1249,8 +1249,8 @@ async fn handle_debug(
                         // Agent re-entered interactive mode (after RunOneTurn).
                         // No action needed — we're already in the interactive loop.
                     }
-                    Ok(InteractiveEvent::TurnComplete { .. }) => {
-                        let payload = serde_json::json!({"type": "debug_turn_complete"});
+                    Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls }) => {
+                        let payload = serde_json::json!({"type": "debug_turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
                         if socket::write_json_line(write_half, &payload).await.is_err() {
                             let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
