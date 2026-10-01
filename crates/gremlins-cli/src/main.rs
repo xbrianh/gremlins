@@ -798,6 +798,11 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                 break;
             }
             Some(ref other) => {
+                if other.get("type").and_then(|v| v.as_str()) == Some("debug_status") {
+                    let stage = other.get("stage").and_then(|v| v.as_str()).unwrap_or("?");
+                    eprintln!("debug: daemon status: {stage}");
+                    continue;
+                }
                 log::debug!("debug: ignoring message during ready-wait: {other}");
                 continue;
             }
