@@ -40,6 +40,85 @@ impl AzureRunState {
             _ => self.model.clone(),
         }
     }
+
+    /// Build a [`RunContext`] from [`RunParams`], snatching the interactive
+    /// session and stashing the result in `last_ctx` for resume.
+    fn prepare_context(&self, mut params: RunParams) -> RunContext {
+        let interactive = params.interactive.take();
+
+        let idle_timeout = params
+            .idle_timeout
+            .unwrap_or_else(crate::config::stream_idle_timeout);
+        let prefix = if params.label.is_empty() {
+            String::new()
+        } else {
+            format!("[{}] ", params.label)
+        };
+        let mut ctx = RunContext {
+            params: params.clone(),
+            prefix: prefix.clone(),
+            idle_timeout,
+            expected_artifact_paths: params.expected_artifact_paths.clone(),
+            reminder_budget: crate::config::artifact_reminder_budget(),
+            completion_nudge_budget: crate::config::completion_nudge_budget(),
+        };
+        ctx.params.interactive = interactive;
+        *self.last_ctx.lock().unwrap() = Some(ctx.clone());
+        ctx
+    }
+
+    /// Execute a single agent-loop attempt, registering and cleaning up a
+    /// cancel token for the given `gremlin_id`.
+    async fn single_attempt(
+        &self,
+        prompt: &str,
+        ctx: RunContext,
+        cancel: Arc<CancelToken>,
+    ) -> Result<CompletedRun, ClientError> {
+        let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+
+        // Check+insert under the cancels lock so reap_all cannot
+        // remove the gremlin entry between the check and insert.
+        {
+            let mut guard = self.cancels.lock().unwrap();
+            if cancel.is_cancelled() {
+                return Err(ClientError::Runtime {
+                    message: "cancelled".into(),
+                });
+            }
+            guard
+                .entry(gremlin_id.clone())
+                .or_default()
+                .insert(id, cancel.clone());
+        }
+
+        let model_name = self.effective_model(ctx.params.model.as_deref());
+        let model = self.client.completion_model(&model_name);
+        let result = run_agent_loop(
+            &model,
+            prompt,
+            ctx,
+            cancel,
+            LoopOpts {
+                extra: self.extra_params(),
+                tool_filter: self.tool_filter.as_deref(),
+                classify_error: Some(default_classify as ErrorClassifier),
+            },
+            None, // task_model_selector deferred
+        )
+        .await;
+
+        if let Ok(mut guard) = self.cancels.lock() {
+            if let Some(inner) = guard.get_mut(&gremlin_id) {
+                inner.remove(&id);
+                if inner.is_empty() {
+                    guard.remove(&gremlin_id);
+                }
+            }
+        }
+        result
+    }
 }
 
 // ── AzureBackend ─────────────────────────────────────────────────────────
@@ -132,35 +211,13 @@ fn resolve_auth() -> Result<AzureOpenAIAuth, String> {
 
 #[async_trait]
 impl Backend for AzureBackend {
-    async fn run(&self, mut params: RunParams) -> Result<CompletedRun, ClientError> {
+    async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError> {
         validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
 
-        // Snatch interactive session before params.clone() drops the receiver.
-        let interactive = params.interactive.take();
-
-        let idle_timeout = params
-            .idle_timeout
-            .unwrap_or_else(crate::config::stream_idle_timeout);
-        let prefix = if params.label.is_empty() {
-            String::new()
-        } else {
-            format!("[{}] ", params.label)
-        };
-        let mut ctx = RunContext {
-            params: params.clone(),
-            prefix: prefix.clone(),
-            idle_timeout,
-            expected_artifact_paths: params.expected_artifact_paths.clone(),
-            reminder_budget: crate::config::artifact_reminder_budget(),
-            completion_nudge_budget: crate::config::completion_nudge_budget(),
-        };
-        ctx.params.interactive = interactive;
-        *self.state.last_ctx.lock().unwrap() = Some(ctx.clone());
-
+        let ctx = self.state.prepare_context(params.clone());
         let prompt = Mutex::new(params.prompt.clone());
         let timeout_prompt = params.on_timeout_prompt.clone();
         let backoff = &STREAM_IDLE_BACKOFF[..params.max_retries];
-
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
 
         retry::with_retry(
@@ -185,7 +242,8 @@ impl Backend for AzureBackend {
                     _ => "error",
                 };
                 log::warn!(
-                    "{prefix}stream {cause}, retrying in {wait}s ({}/{})...",
+                    "{}stream {cause}, retrying in {wait}s ({}/{})...",
+                    ctx.prefix,
                     attempt + 1,
                     params.max_retries
                 );
@@ -194,51 +252,7 @@ impl Backend for AzureBackend {
                 let p = prompt.lock().unwrap().clone();
                 let ctx = ctx.clone();
                 let cancel = cancel.clone();
-                async move {
-                    let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
-                    let id = self.state.next_id.fetch_add(1, Ordering::Relaxed);
-
-                    // Check+insert under the cancels lock so reap_all cannot
-                    // remove the gremlin entry between the check and insert.
-                    {
-                        let mut guard = self.state.cancels.lock().unwrap();
-                        if cancel.is_cancelled() {
-                            return Err(ClientError::Runtime {
-                                message: "cancelled".into(),
-                            });
-                        }
-                        guard
-                            .entry(gremlin_id.clone())
-                            .or_default()
-                            .insert(id, cancel.clone());
-                    }
-
-                    let model_name = self.state.effective_model(ctx.params.model.as_deref());
-                    let model = self.state.client.completion_model(&model_name);
-                    let result = run_agent_loop(
-                        &model,
-                        &p,
-                        ctx,
-                        cancel,
-                        LoopOpts {
-                            extra: self.state.extra_params(),
-                            tool_filter: self.state.tool_filter.as_deref(),
-                            classify_error: Some(default_classify as ErrorClassifier),
-                        },
-                        None, // task_model_selector deferred
-                    )
-                    .await;
-
-                    if let Ok(mut guard) = self.state.cancels.lock() {
-                        if let Some(inner) = guard.get_mut(&gremlin_id) {
-                            inner.remove(&id);
-                            if inner.is_empty() {
-                                guard.remove(&gremlin_id);
-                            }
-                        }
-                    }
-                    result
-                }
+                async move { self.state.single_attempt(&p, ctx, cancel).await }
             },
         )
         .await

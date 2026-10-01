@@ -450,8 +450,8 @@ mod tests {
     }
 
     #[test]
-    fn known_providers_are_the_five_backends() {
-        for p in ["copilot", "openai", "xai", "openrouter", "cmd"] {
+    fn known_providers_are_the_six_backends() {
+        for p in ["copilot", "openai", "xai", "openrouter", "cmd", "azure"] {
             assert!(is_known_provider(p), "{p}");
             assert!(Client::parse(&format!("{p}:model")).is_ok(), "{p}");
         }
