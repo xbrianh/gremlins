@@ -104,13 +104,9 @@ enum Cmds {
 
 #[tokio::main]
 async fn main() {
-    env_logger::Builder::from_env(
-        env_logger::Env::new()
-            .filter("GREMLINS_LOG_LEVEL")
-            .default_filter_or("info"),
-    )
-    .format_timestamp_millis()
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::new().filter_or("GREMLINS_LOG_LEVEL", "info"))
+        .format_timestamp_millis()
+        .init();
 
     let cli = Cli::parse();
     let result = match cli.command {
