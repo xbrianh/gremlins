@@ -243,7 +243,7 @@ fn yaml_interpolation_nested(
                 let legacy_bind = yaml_string_map(mapping, "bind")?;
                 if !legacy_bind.is_empty() {
                     return Err(SchemaError::Generic(
-                        "cannot use both nested interpolation.outputs and top-level bind: key"
+                        "cannot use nested interpolation (inputs:/outputs:) alongside a top-level bind: key"
                             .to_string(),
                     ));
                 }

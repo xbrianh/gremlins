@@ -176,7 +176,7 @@ fn extract_artifact_uris(raw: &str) -> Vec<(String, bool)> {
 }
 
 /// Validate that every artifact:// URI consumed via interpolation has been
-/// produced by a prior stage's bind or by bootstrap.
+/// produced by a prior stage's outputs or by bootstrap.
 ///
 /// Bootstrap-produced URIs come from `launch_cmds` (parsed gremlins:bind_artifact
 /// calls) and `cli_out` values.  `artifact://base_sha` and `artifact://base_ref`
