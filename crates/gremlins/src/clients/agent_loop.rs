@@ -296,6 +296,10 @@ async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
         p.paused().await;
         log::debug!("maybe_pause: pause token resolved");
     } else {
+        // No interactive session — pause is impossible. This future never
+        // resolves, which is intentional: without a session there is no
+        // channel for the agent to receive a pause signal.
+        log::trace!("maybe_pause: no interactive session, pending forever");
         std::future::pending::<()>().await;
     }
 }
@@ -320,9 +324,14 @@ async fn interactive_loop<M: CompletionModel>(
     log::debug!("interactive_loop: broadcasting Ready (turn={turn})");
     let _ = session.evt_tx.send(InteractiveEvent::Ready { turn });
 
+    log::debug!("interactive_loop: waiting for command (turn={turn})");
     let cmd = match session.cmd_rx.recv().await {
-        Some(cmd) => cmd,
+        Some(cmd) => {
+            log::debug!("interactive_loop: received command {cmd:?} (turn={turn})");
+            cmd
+        }
         None => {
+            log::debug!("interactive_loop: cmd_rx closed, ending session (turn={turn})");
             let _ = session.evt_tx.send(InteractiveEvent::Ended {
                 reason: "disconnect".to_string(),
             });
@@ -332,13 +341,21 @@ async fn interactive_loop<M: CompletionModel>(
 
     match cmd {
         InteractiveCommand::Inject(text) => {
+            log::debug!(
+                "interactive_loop: Inject command (len={}, turn={turn})",
+                text.len()
+            );
             let msg = format!("[operator]: {text}");
             history.push(Message::user(msg));
             *next_prompt = Message::user(text);
             Ok(InteractiveLoopResult::RunOneTurn)
         }
-        InteractiveCommand::RunTurn => Ok(InteractiveLoopResult::RunOneTurn),
+        InteractiveCommand::RunTurn => {
+            log::debug!("interactive_loop: RunTurn command (turn={turn})");
+            Ok(InteractiveLoopResult::RunOneTurn)
+        }
         InteractiveCommand::Bail(reason) => {
+            log::debug!("interactive_loop: Bail command (reason={reason:?}, turn={turn})");
             let _ = session.evt_tx.send(InteractiveEvent::Ended {
                 reason: "bailed".to_string(),
             });
@@ -347,6 +364,7 @@ async fn interactive_loop<M: CompletionModel>(
             })
         }
         InteractiveCommand::Quit => {
+            log::debug!("interactive_loop: Quit command (turn={turn})");
             let _ = session.evt_tx.send(InteractiveEvent::Ended {
                 reason: "resumed".to_string(),
             });
@@ -442,7 +460,10 @@ async fn run_agent_loop_core<M: CompletionModel>(
     // Destructure the interactive session into its components so we can
     // thread them independently through the loop.
     let (mut cmd_rx, mut evt_tx, pause) = interactive
-        .map(|s| (Some(s.cmd_rx), Some(s.evt_tx), Some(s.pause)))
+        .map(|s| {
+            log::debug!("agent_loop: interactive session set up (label={prefix})");
+            (Some(s.cmd_rx), Some(s.evt_tx), Some(s.pause))
+        })
         .unwrap_or((None, None, None));
 
     let original_system_prompt = system_prompt.clone();
@@ -741,6 +762,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // are consumed by the rest of the turn processing.
         if interactive_active {
             if let Some(ref evt_tx) = evt_tx {
+                log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
                 let _ = evt_tx.send(InteractiveEvent::TurnComplete {
                     turn: turn_num,
                     text: text.clone(),
@@ -912,6 +934,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 }
                 // Emit Done if interactive mode is active.
                 if let Some(ref evt_tx) = evt_tx {
+                    log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
                     let _ = evt_tx.send(InteractiveEvent::Done {
                         text: result_text.clone(),
                         usage: Some(usage.clone()),
