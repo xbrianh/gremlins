@@ -3382,4 +3382,87 @@ mod tests {
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
     }
+
+    /// Covers the `run_agent_loop` wrapper path (not just `run_agent_loop_core`).
+    /// Regression: the original class of bug — dropping the session while
+    /// forwarding/cloning context — would pass the suite because every
+    /// `run_agent_loop` test passed `None` and interactive tests called
+    /// `run_agent_loop_core` directly.
+    #[tokio::test]
+    async fn run_agent_loop_with_interactive_session_broadcasts_ready() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-ral-int-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        // Pre-set the pause token so the agent enters interactive mode
+        // at the turn boundary before the first API call.
+        handle.pause.pause();
+
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let agent = tokio::spawn(async move {
+            run_agent_loop(
+                &model,
+                "hi",
+                ctx,
+                cancel,
+                loop_opts(None),
+                None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    Ok(InteractiveEvent::Ended { .. }) => return false,
+                    Err(RecvError::Closed) => return false,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            ready,
+            "agent should broadcast Ready when paused via run_agent_loop"
+        );
+
+        // Send Quit to resume.
+        let _ = handle.cmd_tx.send(InteractiveCommand::Quit).await;
+
+        // Agent should complete normally.
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("ok"));
+    }
 }
