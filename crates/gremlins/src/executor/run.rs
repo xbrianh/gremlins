@@ -420,13 +420,16 @@ async fn run_agent(
         params.model.as_deref().unwrap_or("default")
     );
 
-    let completed = client.run(params, interactive).await.map_err(|error| match error {
-        ClientError::Bail { reason } => RunError::Bail { reason },
-        other => RunError::StageFailed {
-            stage: prepared.name.clone(),
-            message: other.to_string(),
-        },
-    })?;
+    let completed = client
+        .run(params, interactive)
+        .await
+        .map_err(|error| match error {
+            ClientError::Bail { reason } => RunError::Bail { reason },
+            other => RunError::StageFailed {
+                stage: prepared.name.clone(),
+                message: other.to_string(),
+            },
+        })?;
 
     log::debug!(
         "agent stage '{}' (gremlin={}): client.run completed (turns={})",
