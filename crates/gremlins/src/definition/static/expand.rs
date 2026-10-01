@@ -1208,14 +1208,34 @@ fn _expand_stage_def(
                 if let Some(cs_map) = v.as_mapping() {
                     let is_nested = cs_map.contains_key("inputs") || cs_map.contains_key("outputs");
                     if is_nested {
-                        // Merge into existing interpolation entry-by-entry
+                        // Merge into existing interpolation entry-by-entry.
+                        // First, normalize the definition's existing interpolation
+                        // map: if it's legacy flat (no inputs:/outputs: keys), wrap
+                        // it as `inputs:` so we don't produce a hybrid that
+                        // yaml_interpolation_nested would misinterpret.
                         let mut existing = merged_map
                             .get("interpolation")
                             .and_then(|ev| ev.as_mapping())
                             .map(|m| {
-                                m.iter()
-                                    .map(|(k, v)| (k.clone(), v.clone()))
-                                    .collect::<serde_yaml::Mapping>()
+                                let has_nested =
+                                    m.contains_key("inputs") || m.contains_key("outputs");
+                                if has_nested {
+                                    m.iter()
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect::<serde_yaml::Mapping>()
+                                } else {
+                                    // Legacy flat — wrap as inputs
+                                    let mut nested = serde_yaml::Mapping::new();
+                                    nested.insert(
+                                        serde_yaml::Value::String("inputs".to_string()),
+                                        serde_yaml::Value::Mapping(
+                                            m.iter()
+                                                .map(|(k, v)| (k.clone(), v.clone()))
+                                                .collect::<serde_yaml::Mapping>(),
+                                        ),
+                                    );
+                                    nested
+                                }
                             })
                             .unwrap_or_default();
                         for (sub_k, sub_v) in cs_map {
@@ -1695,5 +1715,115 @@ stages:
             }
             _ => panic!("expected DuplicateStageKey"),
         }
+    }
+
+    /// When a single-primitive stage definition uses legacy flat
+    /// `interpolation: {foo: bar}` and the call site uses the new nested
+    /// `interpolation: {inputs: {baz: qux}}`, the merge must normalize the
+    /// legacy flat entries into `inputs:` so they aren't silently dropped.
+    #[test]
+    fn test_merge_legacy_definition_flat_with_call_site_nested() {
+        // A mock resolver that always returns "not found" — we test with
+        // in-memory stage_defs.
+        struct NotFoundResolver;
+        impl DefinitionResolver for NotFoundResolver {
+            fn resolve(
+                &self,
+                name: &str,
+                _project_root: &std::path::Path,
+            ) -> Result<PathBuf, SchemaError> {
+                Err(SchemaError::DefinitionNotFound {
+                    name: name.to_string(),
+                    available: String::new(),
+                })
+            }
+        }
+
+        // Definition: legacy flat interpolation
+        let definition = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+type: agent
+prompt:
+  - |
+    use {foo} and {baz}
+interpolation:
+  foo: content("artifact://foo.md")
+"#,
+        )
+        .unwrap();
+
+        // Call site: new nested form
+        let call_site = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+name: test
+interpolation:
+  inputs:
+    baz: content("artifact://baz.md")
+"#,
+        )
+        .unwrap();
+
+        let mut stage_defs = HashMap::new();
+        stage_defs.insert("mydef".to_string(), definition);
+
+        let prompt_dir = PathBuf::from(".");
+        let project_root = PathBuf::from(".");
+        let overlay_dir = Path::new(".");
+        let chain: Vec<PathBuf> = vec![];
+        let named_prompts = HashMap::new();
+        let seen_defs = HashSet::new();
+        let resolver = NotFoundResolver;
+
+        let result = _expand_stage_def(
+            &call_site,
+            "mydef",
+            &stage_defs,
+            &prompt_dir,
+            &project_root,
+            overlay_dir,
+            &chain,
+            &named_prompts,
+            &seen_defs,
+            &resolver,
+        );
+
+        // Should succeed — no error about missing keys
+        let expanded = result.unwrap();
+        assert_eq!(expanded.len(), 1, "single-primitive def produces one stage");
+
+        let stage = &expanded[0];
+        let interp = stage
+            .get("interpolation")
+            .and_then(|v| v.as_mapping())
+            .expect("interpolation must be a mapping");
+
+        // Must be the nested form
+        assert!(
+            interp.contains_key("inputs"),
+            "merged interpolation must have 'inputs' key"
+        );
+
+        let inputs = interp
+            .get("inputs")
+            .and_then(|v| v.as_mapping())
+            .expect("inputs must be a mapping");
+
+        // Both the definition's foo and the call-site's baz must be present
+        assert!(
+            inputs.contains_key("foo"),
+            "definition's 'foo' key must be preserved under inputs"
+        );
+        assert!(
+            inputs.contains_key("baz"),
+            "call-site's 'baz' key must be present under inputs"
+        );
+        assert_eq!(
+            inputs.get("foo").and_then(|v| v.as_str()).unwrap(),
+            "content(\"artifact://foo.md\")"
+        );
+        assert_eq!(
+            inputs.get("baz").and_then(|v| v.as_str()).unwrap(),
+            "content(\"artifact://baz.md\")"
+        );
     }
 }

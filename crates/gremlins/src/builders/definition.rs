@@ -369,7 +369,7 @@ impl Default for LandBuilder {
 ///     .stage(
 ///         AgentBuilder::new("plan")
 ///             .prompt("write the plan to {plan}")
-///             .bind("plan", artifact("artifact://plan.md"))
+///             .output("plan", output("artifact://plan.md"))
 ///             .build()
 ///             .unwrap(),
 ///     )

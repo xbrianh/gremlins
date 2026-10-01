@@ -1,8 +1,8 @@
-//! Thin newtypes for interpolation values and bind targets.
+//! Thin newtypes for interpolation values and output targets.
 //!
 //! These carry the string representation the stage types already store, so
 //! callers can write `content("artifact://plan.md")` and
-//! `artifact("artifact://plan.md")` without worrying about the internal
+//! `output("artifact://plan.md")` without worrying about the internal
 //! `content(...)` wrapper syntax.
 
 /// An interpolation value — the right-hand side of an interpolation map entry.
