@@ -602,6 +602,25 @@ pub async fn run_shell_async(
             Ok(result) => result.map_err(ProcError::Io),
             Err(_elapsed) => {
                 let elapsed = t0.elapsed().as_secs_f64();
+
+                // Capture process tree *before* killing so we can see what
+                // was running and whether it was consuming CPU or hung.
+                #[cfg(unix)]
+                let ps_snapshot = {
+                    let tree = capture_process_tree(pid);
+                    if let Some(sp) = stream_path {
+                        let footer =
+                            format!("\n--- process tree at timeout ({elapsed:.1}s) ---\n{tree}");
+                        let _ = std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(sp)
+                            .and_then(|mut f| f.write_all(footer.as_bytes()));
+                    }
+                    tree
+                };
+                #[cfg(not(unix))]
+                let ps_snapshot = String::new();
+
                 #[cfg(unix)]
                 unsafe {
                     libc::killpg(pid as i32, libc::SIGKILL);
@@ -625,9 +644,10 @@ pub async fn run_shell_async(
                         .unwrap_or_default();
 
                 log::warn!(
-                    "run_shell_async: pid={pid} timed out after {elapsed:.2}s (timeout={t}) stdout_so_far={} stderr_so_far={}",
+                    "run_shell_async: pid={pid} timed out after {elapsed:.2}s (timeout={t}) stdout_so_far={} stderr_so_far={} ps={:.200}",
                     stdout_buf.len(),
                     stderr_buf.len(),
+                    ps_snapshot.lines().collect::<Vec<_>>().join(" | "),
                 );
 
                 cancel.disarm();
@@ -668,6 +688,50 @@ pub async fn run_shell_async(
         stdout: stdout_buf,
         stderr: stderr_buf,
     })
+}
+
+/// Capture a human-readable snapshot of the process tree rooted at `pid`
+/// (process group leader). Runs `ps` to show pid, ppid, state, %cpu, rss,
+/// elapsed time, and command for every process in the group.
+///
+/// Uses `pgrep -g` to enumerate process-group members because `ps -g`
+/// selects by session on Linux/procps, not by process group (BSD `ps -g`
+/// semantics differ).
+#[cfg(unix)]
+fn capture_process_tree(pid: u32) -> String {
+    use std::process::Command;
+    let pgid = pid as i32;
+
+    // Enumerate PIDs in the process group.
+    let pids = match Command::new("pgrep")
+        .args(["-g", &pgid.to_string()])
+        .output()
+    {
+        Ok(out) if !out.stdout.is_empty() => {
+            String::from_utf8_lossy(&out.stdout).replace('\n', ",")
+        }
+        _ => return format!("(pgrep -g {pgid}: no processes or pgrep unavailable)"),
+    };
+    let pids = pids.trim_end_matches(',');
+
+    match Command::new("ps")
+        .args(["-o", "pid,ppid,state,pcpu,rss,etime,command", "-p", pids])
+        .output()
+    {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            if out.status.success() {
+                stdout
+            } else {
+                format!(
+                    "ps failed (exit {}): {}",
+                    out.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&out.stderr).trim(),
+                )
+            }
+        }
+        Err(e) => format!("ps failed: {e}"),
+    }
 }
 
 /// How often the teardown helpers poll a process for its exit.
