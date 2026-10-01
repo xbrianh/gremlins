@@ -258,6 +258,41 @@ fn resolve_cmd_for_log(s: &str, env: &HashMap<String, String>) -> String {
     result
 }
 
+/// Build a single bash script that executes every command in `cmds` within one
+/// shell session, preserving shell state (variables, `cd`, functions, `umask`,
+/// etc.) across command boundaries. Each command is wrapped with `printf`
+/// header/footer markers so the stream log shows which command produced which
+/// output and which command failed or timed out. The script stops on the first
+/// non-zero exit (mirroring `&&` semantics).
+fn build_instrumented_script(
+    cmds: &[String],
+    substitution_env: &HashMap<String, String>,
+) -> String {
+    let total = cmds.len();
+    let mut script = String::with_capacity(cmds.iter().map(|c| c.len() + 80).sum());
+    script.push_str("set +e\n");
+    for (i, cmd) in cmds.iter().enumerate() {
+        let resolved = resolve_cmd_for_log(cmd, substitution_env);
+        // Escape single quotes for embedding in a single-quoted shell string:
+        // ' → '\''.
+        let escaped = resolved.replace('\'', "'\\''");
+        // The raw command is embedded verbatim so bash resolves ${…}
+        // references and other shell syntax at runtime.
+        script.push_str(&format!(
+            "printf -- '\\n--- cmd {i1}/{total}: %s ---\\n' '{escaped}'\n",
+            i1 = i + 1,
+        ));
+        script.push_str(cmd);
+        script.push('\n');
+        script.push_str(&format!(
+            "_rc=$?\nprintf -- '--- cmd {i1}/{total} exit: %d ---\\n' \"$_rc\"\n",
+            i1 = i + 1,
+        ));
+        script.push_str("if [ \"$_rc\" -ne 0 ]; then exit \"$_rc\"; fi\n");
+    }
+    script
+}
+
 /// Phase 2: run the shell commands. Uses only the prepared data; no registry access.
 pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError> {
     if prepared.cmds.is_empty() {
@@ -343,151 +378,91 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
             .and_then(|mut f| f.write_all(header.as_bytes()));
     }
 
-    // Run commands individually with per-command timing so timeouts and
-    // failures are attributed to the exact command that caused them.
+    // Run commands as a single instrumented shell script so shell state
+    // (variables, cd, functions, umask, etc.) is preserved across command
+    // boundaries.  Per-command headers and footers are emitted by the
+    // script itself so they appear in the stream log interleaved with the
+    // output they frame.
     let stage_start = std::time::Instant::now();
-    let deadline = prepared
-        .timeout
-        .map(|t| stage_start + std::time::Duration::from_secs_f64(t));
-    let total = prepared.cmds.len();
-    let mut combined_output = String::new();
-    let mut last_rc: i32 = 0;
 
-    for (i, cmd) in prepared.cmds.iter().enumerate() {
-        let remaining = deadline.map(|d| {
-            let now = std::time::Instant::now();
-            if now >= d {
-                0.0
-            } else {
-                (d - now).as_secs_f64().max(0.0)
-            }
-        });
-
-        let resolved = resolve_cmd_for_log(cmd, &prepared.substitution_env);
-
-        // Per-command header.
-        if let Some(sp) = stream_path_arg {
-            let cmd_header = format!("\n--- cmd {}/{}: {} ---\n", i + 1, total, resolved);
-            let _ = std::fs::OpenOptions::new()
-                .append(true)
-                .open(sp)
-                .and_then(|mut f| f.write_all(cmd_header.as_bytes()));
-        }
-
-        log::info!(
-            "exec {}: cmd {}/{} starting (remaining={:.1}s)",
-            prepared.name,
-            i + 1,
-            total,
-            remaining.unwrap_or(f64::INFINITY),
-        );
-
-        let cmd_start = std::time::Instant::now();
-        let result = run_shell_async(
-            cmd,
-            Some(&prepared.cwd),
-            Some(&env),
-            remaining,
-            stream_path_arg,
-        )
-        .await;
-        let cmd_elapsed = cmd_start.elapsed();
-
-        match result {
-            Ok(r) => {
-                combined_output.push_str(&String::from_utf8_lossy(&r.stdout));
-                combined_output.push_str(&String::from_utf8_lossy(&r.stderr));
-                last_rc = r.returncode;
-
-                // Per-command footer.
-                if let Some(sp) = stream_path_arg {
-                    let cmd_footer = format!(
-                        "--- cmd {}/{} exit: {} (duration: {:.1}s) ---\n",
-                        i + 1,
-                        total,
-                        last_rc,
-                        cmd_elapsed.as_secs_f64(),
-                    );
-                    let _ = std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(sp)
-                        .and_then(|mut f| f.write_all(cmd_footer.as_bytes()));
-                }
-
-                log::info!(
-                    "exec {}: cmd {}/{} done rc={} elapsed={:.1}s",
-                    prepared.name,
-                    i + 1,
-                    total,
-                    last_rc,
-                    cmd_elapsed.as_secs_f64(),
-                );
-
-                // Stop on first failure (mimics && semantics).
-                if last_rc != 0 {
-                    break;
-                }
-            }
-            Err(e) => {
-                // Per-command error footer.
-                if let Some(sp) = stream_path_arg {
-                    let cmd_footer = format!(
-                        "--- cmd {}/{} error: {e} (duration: {:.1}s) ---\n",
-                        i + 1,
-                        total,
-                        cmd_elapsed.as_secs_f64(),
-                    );
-                    let _ = std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(sp)
-                        .and_then(|mut f| f.write_all(cmd_footer.as_bytes()));
-                }
-
-                // Stage footer.
-                let elapsed = stage_start.elapsed();
-                if let Some(sp) = stream_path_arg {
-                    let footer = format!(
-                        "--- exit: error (duration: {:.1}s) ---\n",
-                        elapsed.as_secs_f64()
-                    );
-                    let _ = std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(sp)
-                        .and_then(|mut f| f.write_all(footer.as_bytes()));
-                }
-
-                return Err(ExecError::Proc(e));
-            }
+    // Validate timeout before computing a deadline —
+    // Duration::from_secs_f64 panics on NaN, negative, or overflow values.
+    if let Some(t) = prepared.timeout {
+        if !t.is_finite() || t < 0.0 || t > std::time::Duration::MAX.as_secs_f64() {
+            return Err(ExecError::Proc(ProcError::InvalidTimeout(t)));
         }
     }
 
-    // Stage footer.
+    let script = build_instrumented_script(&prepared.cmds, &prepared.substitution_env);
+
+    log::info!(
+        "exec {}: running {} command(s) via instrumented script (timeout={:?})",
+        prepared.name,
+        prepared.cmds.len(),
+        prepared.timeout,
+    );
+
+    let result = run_shell_async(
+        &script,
+        Some(&prepared.cwd),
+        Some(&env),
+        prepared.timeout,
+        stream_path_arg,
+    )
+    .await;
+
     let elapsed = stage_start.elapsed();
-    if let Some(sp) = stream_path_arg {
-        let footer = format!(
-            "--- exit: {} (duration: {:.1}s) ---\n",
-            last_rc,
-            elapsed.as_secs_f64()
-        );
-        let _ = std::fs::OpenOptions::new()
-            .append(true)
-            .open(sp)
-            .and_then(|mut f| f.write_all(footer.as_bytes()));
-    }
 
-    // If the last command exited non-zero, report it.
-    if last_rc != 0 {
-        return Err(ExecError::NonZeroExit {
-            name: prepared.name.clone(),
-            rc: last_rc,
-            output: Some(combined_output.trim().to_string()),
-        });
-    }
+    match result {
+        Ok(r) => {
+            let combined_output = format!(
+                "{}{}",
+                String::from_utf8_lossy(&r.stdout),
+                String::from_utf8_lossy(&r.stderr),
+            );
 
-    Ok(ShellResult {
-        output: combined_output.trim().to_string(),
-        rc: last_rc,
-    })
+            // Stage footer.
+            if let Some(sp) = stream_path_arg {
+                let footer = format!(
+                    "--- exit: {} (duration: {:.1}s) ---\n",
+                    r.returncode,
+                    elapsed.as_secs_f64()
+                );
+                let _ = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(sp)
+                    .and_then(|mut f| f.write_all(footer.as_bytes()));
+            }
+
+            if r.returncode != 0 {
+                return Err(ExecError::NonZeroExit {
+                    name: prepared.name.clone(),
+                    rc: r.returncode,
+                    output: Some(combined_output.trim().to_string()),
+                });
+            }
+
+            Ok(ShellResult {
+                output: combined_output.trim().to_string(),
+                rc: r.returncode,
+            })
+        }
+        Err(e) => {
+            // Stage footer on error.
+            if let Some(sp) = stream_path_arg {
+                let footer = format!(
+                    "--- exit: error (duration: {:.1}s) ---\n",
+                    elapsed.as_secs_f64()
+                );
+                let _ = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(sp)
+                    .and_then(|mut f| f.write_all(footer.as_bytes()));
+            }
+
+            Err(ExecError::Proc(e))
+        }
+    }
 }
 
 /// Post-process a ProcResult into a ShellResult (log writing, bail detection).
@@ -718,7 +693,8 @@ mod tests {
 
         let result = run_shell(&prepared).await.unwrap();
         // The output must contain the literal payload — not execute it.
-        assert_eq!(result.output, injection);
+        // (Per-command markers are now part of the combined output.)
+        assert!(result.output.contains(injection));
         // Neither marker file must exist.
         assert!(!Path::new("/tmp/gremlins_injection_test_marker").exists());
         assert!(!Path::new("/tmp/gremlins_injection_test_marker2").exists());
@@ -766,7 +742,7 @@ mod tests {
             ..make_prepared("resolved", vec!["echo ok"], &state_dir)
         };
         let result = run_shell(&prepared).await.unwrap();
-        assert_eq!(result.output, "/tmp/input.md");
+        assert!(result.output.contains("/tmp/input.md"));
 
         let log = read_log(&state_dir, "resolved");
         assert!(
@@ -783,7 +759,7 @@ mod tests {
 
         let prepared = make_prepared("hello", vec!["echo UNIQUE_OUTPUT_MARKER"], &state_dir);
         let result = run_shell(&prepared).await.unwrap();
-        assert_eq!(result.output, "UNIQUE_OUTPUT_MARKER");
+        assert!(result.output.contains("UNIQUE_OUTPUT_MARKER"));
         assert_eq!(result.rc, 0);
 
         let log = read_log(&state_dir, "hello");
@@ -830,7 +806,9 @@ mod tests {
 
         let prepared = make_prepared("silent", vec!["true"], &state_dir);
         let result = run_shell(&prepared).await.unwrap();
-        assert_eq!(result.output, "");
+        // Output now includes per-command markers from the instrumented script.
+        assert!(result.output.contains("--- cmd 1/1: true ---"));
+        assert!(result.output.contains("--- cmd 1/1 exit: 0"));
         assert_eq!(result.rc, 0);
 
         let log = read_log(&state_dir, "silent");
@@ -907,7 +885,7 @@ mod tests {
 
         let prepared = make_prepared("resilient", vec!["echo still-works"], &state_dir);
         let result = run_shell(&prepared).await.unwrap();
-        assert_eq!(result.output, "still-works");
+        assert!(result.output.contains("still-works"));
         assert_eq!(result.rc, 0);
         // The log file was never created.
         let safe = sanitize_log_filename("resilient");
@@ -923,7 +901,7 @@ mod tests {
 
         let prepared = make_prepared("../../../etc/passwd", vec!["echo ok"], &state_dir);
         let result = run_shell(&prepared).await.unwrap();
-        assert_eq!(result.output, "ok");
+        assert!(result.output.contains("ok"));
 
         // The log file must be inside exec_stage_logs, not escaped.
         let log_dir = state_dir.join("exec_stage_logs");
