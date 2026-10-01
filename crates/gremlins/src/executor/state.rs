@@ -73,11 +73,18 @@ pub fn now_stamp() -> String {
 /// `[YYYY-MM-DDTHH:MM:SS.sssZ]` — millisecond precision, UTC.
 /// Matches `env_logger`'s `format_timestamp_millis()` format.
 pub fn now_stamp_millis() -> String {
-    let tm = now_utc();
-    let millis = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now();
+    let since_epoch = now
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_millis())
-        .unwrap_or(0);
+        .unwrap_or_default();
+    let secs = since_epoch.as_secs();
+    let millis = since_epoch.subsec_millis();
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let t = secs as libc::time_t;
+        libc::gmtime_r(std::ptr::addr_of!(t), std::ptr::addr_of_mut!(tm));
+        tm
+    };
     format!(
         "[{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z]",
         tm.tm_year + 1900,
@@ -92,11 +99,18 @@ pub fn now_stamp_millis() -> String {
 
 /// ISO-8601 with microseconds and `+00:00`, matching Python `datetime.isoformat()`.
 pub fn now_iso() -> String {
-    let tm = now_utc();
-    let micros = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now();
+    let since_epoch = now
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_micros())
-        .unwrap_or(0);
+        .unwrap_or_default();
+    let secs = since_epoch.as_secs();
+    let micros = since_epoch.subsec_micros();
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let t = secs as libc::time_t;
+        libc::gmtime_r(std::ptr::addr_of!(t), std::ptr::addr_of_mut!(tm));
+        tm
+    };
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}+00:00",
         tm.tm_year + 1900,
