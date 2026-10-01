@@ -9,6 +9,7 @@ the concrete backend implementations themselves (`backends/`).
 
 | File | Role |
 |---|---|
+| `mod.rs` | The module's authoritative export map — re-exports the public types (`Client`, `Backend`, `RunParams`, `ClientError`, `CompletedRun`, etc.) that the rest of the crate imports from `clients::`. |
 | `client.rs` | Owns the `provider:model[:key=value,...]` grammar (`parse_spec`), the provider allowlist (`is_known_provider`), and `Client` — the type that turns a spec into a live `Backend` lazily and memoises it (`get_or_build_backend`). |
 | `backend.rs` | The `Backend` trait every provider implements, plus `RunParams` (everything a run needs: prompt, cwd, timeouts, retries, cancellation, interactive session, task-client overrides, …) and `ClientError`. |
 | `protocol.rs` | `CompletedRun` (exit code, text result, events, cost, token usage) and `UsageStats` — the shared result shape every backend returns. |
@@ -52,10 +53,10 @@ everything duplicated between OpenAI-compatible backends: the
 in-flight cancel tokens, and the next request id. `backends/openai.rs` and
 `backends/openrouter.rs` (and `backends/xai.rs`) each just construct an
 `OpenAiRunState` and delegate `run`/`reap` to `run_openai_compat` /
-`reap_openai_compat`, passing their own `ErrorClassifier` and provider name —
-OpenRouter's classifier additionally retries on a list of transient-error
-substrings (capacity, rate limits, gateway errors, etc.) that OpenAI's
-default classifier doesn't need to special-case.
+`reap_openai_compat`. OpenAI and xAI call `run_openai_compat` with no custom
+classifier (`None`), relying on its default retry behavior; only OpenRouter
+passes its own `ErrorClassifier`, which additionally retries on a list of
+transient-error substrings (capacity, rate limits, gateway errors, etc.).
 
 **The agent loop.** `agent_loop.rs::run_agent_loop` is the single
 tool-calling loop shared by every native backend: it streams the model's
