@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::interactive::InteractiveSession;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{validate_max_retries, with_retry, STREAM_IDLE_BACKOFF};
 use crate::clients::stream_json::{self, StreamState};
@@ -472,7 +473,11 @@ impl CmdBackend {
 
 #[async_trait]
 impl Backend for CmdBackend {
-    async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError> {
+    async fn run(
+        &self,
+        params: RunParams,
+        _interactive: Option<InteractiveSession>,
+    ) -> Result<CompletedRun, ClientError> {
         validate_max_retries(params.max_retries)
             .map_err(|m| ClientError::Runtime { message: m })?;
 

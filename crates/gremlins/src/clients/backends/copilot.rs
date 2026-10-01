@@ -10,6 +10,7 @@ use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
 };
 use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
@@ -263,11 +264,12 @@ fn copilot_task_model_selector(
 
 #[async_trait]
 impl Backend for CopilotBackend {
-    async fn run(&self, mut params: RunParams) -> Result<CompletedRun, ClientError> {
+    async fn run(
+        &self,
+        params: RunParams,
+        mut interactive: Option<InteractiveSession>,
+    ) -> Result<CompletedRun, ClientError> {
         validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
-
-        // Snatch interactive session before params.clone() drops the receiver.
-        let interactive = params.interactive.take();
 
         let idle_timeout = params
             .idle_timeout
@@ -277,7 +279,7 @@ impl Backend for CopilotBackend {
         } else {
             format!("[{}] ", params.label)
         };
-        let mut ctx = RunContext {
+        let ctx = RunContext {
             params: params.clone(),
             prefix: prefix.clone(),
             idle_timeout,
@@ -285,7 +287,6 @@ impl Backend for CopilotBackend {
             reminder_budget: crate::config::artifact_reminder_budget(),
             completion_nudge_budget: crate::config::completion_nudge_budget(),
         };
-        ctx.params.interactive = interactive;
         *self.state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
         let prompt = Mutex::new(params.prompt.clone());
@@ -332,6 +333,8 @@ impl Backend for CopilotBackend {
                 let ctx = ctx.clone();
                 let cancel = cancel.clone();
                 let task_selector = task_selector.clone();
+                // Move interactive on first attempt; subsequent retries get None.
+                let interactive = interactive.take();
                 async move {
                     if cancel.is_cancelled() {
                         return Err(ClientError::Runtime {
@@ -361,6 +364,7 @@ impl Backend for CopilotBackend {
                             classify_error: Some(default_classify as ErrorClassifier),
                         },
                         task_selector,
+                        interactive,
                     )
                     .await;
 
@@ -387,7 +391,7 @@ impl Backend for CopilotBackend {
             })?;
             ctx.params.clone()
         };
-        self.run(params).await
+        self.run(params, None).await
     }
 
     fn reap_all(&self, gremlin_id: &str) {

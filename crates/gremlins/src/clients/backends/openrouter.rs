@@ -6,6 +6,7 @@ use rig_core::completion::CompletionError;
 
 use crate::clients::agent_loop::ErrorClassifier;
 use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
 use crate::clients::protocol::CompletedRun;
 
@@ -132,9 +133,13 @@ impl OpenRouterBackend {
 
 #[async_trait]
 impl Backend for OpenRouterBackend {
-    async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError> {
+    async fn run(
+        &self,
+        params: RunParams,
+        interactive: Option<InteractiveSession>,
+    ) -> Result<CompletedRun, ClientError> {
         let classify: ErrorClassifier = classify_openrouter_error;
-        run_openai_compat(&self.state, params, Some(classify), PROVIDER_NAME).await
+        run_openai_compat(&self.state, params, interactive, Some(classify), PROVIDER_NAME).await
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
@@ -145,7 +150,7 @@ impl Backend for OpenRouterBackend {
             })?;
             ctx.params.clone()
         };
-        self.run(params).await
+        self.run(params, None).await
     }
 
     fn reap_all(&self, gremlin_id: &str) {

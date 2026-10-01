@@ -10,6 +10,7 @@ use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
 };
 use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
@@ -41,11 +42,8 @@ impl AzureRunState {
         }
     }
 
-    /// Build a [`RunContext`] from [`RunParams`], snatching the interactive
-    /// session and stashing the result in `last_ctx` for resume.
-    fn prepare_context(&self, mut params: RunParams) -> RunContext {
-        let interactive = params.interactive.take();
-
+    /// Build a [`RunContext`] from [`RunParams`] and stash it in `last_ctx` for resume.
+    fn prepare_context(&self, params: RunParams) -> RunContext {
         let idle_timeout = params
             .idle_timeout
             .unwrap_or_else(crate::config::stream_idle_timeout);
@@ -54,7 +52,7 @@ impl AzureRunState {
         } else {
             format!("[{}] ", params.label)
         };
-        let mut ctx = RunContext {
+        let ctx = RunContext {
             params: params.clone(),
             prefix: prefix.clone(),
             idle_timeout,
@@ -62,7 +60,6 @@ impl AzureRunState {
             reminder_budget: crate::config::artifact_reminder_budget(),
             completion_nudge_budget: crate::config::completion_nudge_budget(),
         };
-        ctx.params.interactive = interactive;
         *self.last_ctx.lock().unwrap() = Some(ctx.clone());
         ctx
     }
@@ -74,6 +71,7 @@ impl AzureRunState {
         prompt: &str,
         ctx: RunContext,
         cancel: Arc<CancelToken>,
+        interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError> {
         let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -106,6 +104,7 @@ impl AzureRunState {
                 classify_error: Some(default_classify as ErrorClassifier),
             },
             None, // task_model_selector deferred
+            interactive,
         )
         .await;
 
@@ -211,7 +210,11 @@ fn resolve_auth() -> Result<AzureOpenAIAuth, String> {
 
 #[async_trait]
 impl Backend for AzureBackend {
-    async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError> {
+    async fn run(
+        &self,
+        params: RunParams,
+        mut interactive: Option<InteractiveSession>,
+    ) -> Result<CompletedRun, ClientError> {
         validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
 
         let ctx = self.state.prepare_context(params.clone());
@@ -252,7 +255,9 @@ impl Backend for AzureBackend {
                 let p = prompt.lock().unwrap().clone();
                 let ctx = ctx.clone();
                 let cancel = cancel.clone();
-                async move { self.state.single_attempt(&p, ctx, cancel).await }
+                // Move interactive on first attempt; subsequent retries get None.
+                let interactive = interactive.take();
+                async move { self.state.single_attempt(&p, ctx, cancel, interactive).await }
             },
         )
         .await
@@ -266,7 +271,7 @@ impl Backend for AzureBackend {
             })?;
             ctx.params.clone()
         };
-        self.run(params).await
+        self.run(params, None).await
     }
 
     fn reap_all(&self, gremlin_id: &str) {

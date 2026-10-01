@@ -115,6 +115,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
     task_model_selector: Option<super::task::TaskModelSelector<M>>,
+    interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
     let extra_env = ctx.params.extra_env.clone();
@@ -226,7 +227,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
         &ctx.params.log_tx,
-        ctx.params.interactive,
+        interactive,
     )
     .await
 }
@@ -1687,7 +1688,6 @@ mod tests {
                 task_clients_exact: HashMap::new(),
                 task_clients_prefix: HashMap::new(),
                 cancel_token: None,
-                interactive: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -1745,6 +1745,7 @@ mod tests {
             cancel,
             loop_opts(None),
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1789,9 +1790,17 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "write",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.text_result.as_deref(), Some("wrote it"));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
@@ -1850,6 +1859,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
+            None,
             None,
         )
         .await
@@ -1919,6 +1929,7 @@ mod tests {
             cancel,
             loop_opts(Some(&filter)),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1979,9 +1990,17 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        run_agent_loop(
+            &model,
+            "write",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let audit = dir.join("run.audit.jsonl");
         assert!(audit.exists());
         let entry: serde_json::Value =
@@ -2040,6 +2059,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
+            None,
             None,
         )
         .await
@@ -2120,9 +2140,17 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "mix", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "mix",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
         let events = result.events.unwrap();
         let tool_uses: Vec<_> = events
@@ -2192,9 +2220,17 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.params.system_prompt = Some("you are a harness".into());
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
 
         let requests = model.requests();
@@ -2233,9 +2269,17 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
 
         for req in model.requests() {
@@ -2285,9 +2329,17 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        run_agent_loop(&model, "read", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        run_agent_loop(
+            &model,
+            "read",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let reqs = model.requests();
         assert_eq!(reqs.len(), 2);
@@ -2366,6 +2418,7 @@ mod tests {
             CancelToken::new(),
             loop_opts(None),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2437,9 +2490,17 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "write",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("done"));
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
@@ -2480,9 +2541,17 @@ mod tests {
         ctx.reminder_budget = 1;
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "write",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         // Returns normally — file is still missing (Python verify_produced catches it).
         assert_eq!(result.text_result.as_deref(), Some("still no write"));
         assert!(!target.exists());
@@ -2524,9 +2593,17 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         ctx.completion_nudge_budget = 1;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "do it", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "do it",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         // Done succeeds; text is non-empty so it's the result.
         assert_eq!(result.text_result.as_deref(), Some("all done"));
         // Two requests: initial turn + post-nudge turn.
@@ -2605,9 +2682,17 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "write", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "write",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         // File was written on the retry, not in the mixed turn.
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
         assert_eq!(result.text_result.as_deref(), Some("done"));
@@ -2660,9 +2745,17 @@ mod tests {
         ctx.expected_artifact_paths = vec![];
         ctx.reminder_budget = 0;
         let cancel = CancelToken::new();
-        let result = run_agent_loop(&model, "hi", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap();
+        let result = run_agent_loop(
+            &model,
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("just text"));
         // Only one request — no reminder loop.
         assert_eq!(model.requests().len(), 1);
@@ -2717,6 +2810,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
+            None,
             None,
         )
         .await
@@ -2816,6 +2910,7 @@ mod tests {
             CancelToken::new(),
             loop_opts(None),
             Some(selector),
+            None,
         )
         .await
         .unwrap();
@@ -3280,6 +3375,89 @@ mod tests {
         drop(handle);
 
         // Agent should resume and complete normally.
+        let result = tokio::time::timeout(Duration::from_secs(2), agent)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("ok"));
+    }
+
+    /// Covers the `run_agent_loop` wrapper path (not just `run_agent_loop_core`).
+    /// Regression: the original class of bug — dropping the session while
+    /// forwarding/cloning context — would pass the suite because every
+    /// `run_agent_loop` test passed `None` and interactive tests called
+    /// `run_agent_loop_core` directly.
+    #[tokio::test]
+    async fn run_agent_loop_with_interactive_session_broadcasts_ready() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-ral-int-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let channels = InteractiveChannels::new();
+        let (handle, session) = channels.split();
+
+        // Pre-set the pause token so the agent enters interactive mode
+        // at the turn boundary before the first API call.
+        handle.pause.pause();
+
+        let mut evt_rx = handle.evt_tx.subscribe();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let agent = tokio::spawn(async move {
+            run_agent_loop(
+                &model,
+                "hi",
+                ctx,
+                cancel,
+                loop_opts(None),
+                None,
+                Some(session),
+            )
+            .await
+        });
+
+        // Wait for Ready.
+        let ready = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Ok(InteractiveEvent::Ready { .. }) => return true,
+                    Ok(InteractiveEvent::Ended { .. }) => return false,
+                    Err(RecvError::Closed) => return false,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            ready,
+            "agent should broadcast Ready when paused via run_agent_loop"
+        );
+
+        // Send Quit to resume.
+        let _ = handle.cmd_tx.send(InteractiveCommand::Quit).await;
+
+        // Agent should complete normally.
         let result = tokio::time::timeout(Duration::from_secs(2), agent)
             .await
             .unwrap()

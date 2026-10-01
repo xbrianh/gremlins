@@ -36,8 +36,6 @@ pub struct RunParams {
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
     pub cancel_token: Option<Arc<CancelToken>>,
-    /// Interactive session (supervisor → agent loop).
-    pub interactive: Option<InteractiveSession>,
 }
 
 impl Clone for RunParams {
@@ -62,7 +60,6 @@ impl Clone for RunParams {
             task_clients_exact: self.task_clients_exact.clone(),
             task_clients_prefix: self.task_clients_prefix.clone(),
             cancel_token: self.cancel_token.clone(),
-            interactive: None,
         }
     }
 }
@@ -90,7 +87,11 @@ impl std::error::Error for ClientError {}
 
 #[async_trait]
 pub trait Backend: Send + Sync {
-    async fn run(&self, params: RunParams) -> Result<CompletedRun, ClientError>;
+    async fn run(
+        &self,
+        params: RunParams,
+        interactive: Option<InteractiveSession>,
+    ) -> Result<CompletedRun, ClientError>;
 
     async fn resume(&self) -> Result<CompletedRun, ClientError>;
 
