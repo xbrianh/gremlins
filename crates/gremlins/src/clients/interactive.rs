@@ -33,6 +33,7 @@ impl PauseToken {
     /// permit is stored when no waiter is registered yet — eliminating the
     /// race between flag check and `notified().await` in [`paused`](Self::paused).
     pub fn pause(&self) {
+        log::debug!("PauseToken::pause() called");
         self.flag.store(true, Ordering::Release);
         self.notify.notify_one();
     }
@@ -56,14 +57,18 @@ impl PauseToken {
     /// After waking, re-checks the flag so that a `reset()` between
     /// `pause()` and `paused()` does not cause a spurious resolution.
     pub async fn paused(&self) {
+        log::debug!("PauseToken::paused() — entering wait loop");
         loop {
             let notified = self.notify.notified();
             if self.flag.load(Ordering::Acquire) {
+                log::debug!("PauseToken::paused() — flag already set, returning immediately");
                 return;
             }
+            log::debug!("PauseToken::paused() — waiting for notify");
             notified.await;
             // Woke up — re-check the flag before returning.
             // If reset() was called, the flag is false and we loop.
+            log::debug!("PauseToken::paused() — notified, re-checking flag");
         }
     }
 }

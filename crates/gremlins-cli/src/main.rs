@@ -104,6 +104,14 @@ enum Cmds {
 
 #[tokio::main]
 async fn main() {
+    env_logger::Builder::from_env(
+        env_logger::Env::new()
+            .filter("GREMLINS_LOG_LEVEL")
+            .default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .init();
+
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Cmds::Launch { definition, args }) => launch(&definition, &args).await,
@@ -155,11 +163,6 @@ async fn executor_request(request: serde_json::Value) -> Result<serde_json::Valu
 /// Reconstructs the lock file from the inherited fd, binds the socket, and
 /// runs the supervisor accept loop until the last gremlin drains.
 async fn serve_daemon(lock_fd: i32) -> Result<(), String> {
-    let level = std::env::var("GREMLINS_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&level))
-        .format_timestamp_millis()
-        .init();
-
     config::init_global().map_err(|e| e.to_string())?;
 
     let state_root = config::state_root();
@@ -175,6 +178,20 @@ async fn serve_daemon(lock_fd: i32) -> Result<(), String> {
     // and only output on stdout — the parent reads this line as a
     // deterministic readiness signal.
     println!("ready");
+
+    // Redirect stderr to the executor log file so debug logs persist.
+    // After this point all log output goes to the log file.
+    let log_path = state_root.join("executor.log");
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use std::os::fd::IntoRawFd;
+        let fd = file.into_raw_fd();
+        unsafe { libc::dup2(fd, 2) };
+        unsafe { libc::close(fd) };
+    }
 
     log::info!(
         "executor: listening on {}",
@@ -686,7 +703,9 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     };
 
     let request = serde_json::json!({"op": "debug", "id": id});
+    log::debug!("debug: sending request: {request}");
     socket::write_json_line(&mut stream, &request).await?;
+    log::debug!("debug: request sent, waiting for agent to pause…");
 
     eprintln!("debug: waiting for agent to pause…");
 
@@ -774,16 +793,26 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                     .get("message")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown error");
+                log::debug!("debug: received error: {msg}");
                 return Err(msg.to_string());
             }
             Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("debug_ready") => {
+                log::debug!("debug: received debug_ready for {id}");
                 eprintln!("debug: connected to gremlin {id}");
                 break;
             }
-            Some(_) => continue,
-            None => return Err("connection closed before debug_ready".to_string()),
+            Some(ref other) => {
+                log::debug!("debug: ignoring message during ready-wait: {other}");
+                continue;
+            }
+            None => {
+                log::debug!("debug: connection closed before debug_ready");
+                return Err("connection closed before debug_ready".to_string());
+            }
         }
     }
+
+    log::debug!("debug: connected to {id}, entering interactive loop");
 
     // Tail the last ~20 lines of the gremlin log for immediate context.
     // Read only the tail of the file (append-only log, no rotation) so

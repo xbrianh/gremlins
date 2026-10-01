@@ -3,7 +3,7 @@
 # Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval] [sync_timeout]
 #
 # Phases:
-#   - No fix_head: startup grace — wait for check-runs to appear
+#   - No fix_head: startup grace — wait for check-runs to appear AND SHA to sync
 #   - fix_head:    SHA sync — wait for headRefOid to reflect the pushed commit
 #   - sync_timeout: max seconds to wait for SHA sync (default 180)
 #
@@ -54,31 +54,53 @@ bail_review_required() {
     fi
 }
 
+sha_matches() {
+    local head_oid="$1"
+    local expected="$2"
+    [ "$head_oid" = "$expected" ] || git merge-base --is-ancestor "$expected" "$head_oid" 2>/dev/null
+}
+
 # --- main ---
 
 info "ci-gate: awaiting CI availability for ${pr_url}"
 if [ -z "$fix_head" ]; then
-    # Iteration 1: startup grace — wait for any check-runs to appear
+    # First iteration: resolve local HEAD so we can verify check-runs
+    # belong to the current commit, not a stale previous push.
+    fix_head="$(git rev-parse HEAD)"
+    info "ci-gate: no fix_head provided, using local HEAD (${fix_head})"
+
+    # Startup grace: wait for check-runs to appear AND SHA to sync.
+    # Both must be satisfied — stale check-runs from a previous commit
+    # must not be mistaken for current CI.
     grace_deadline=$(( $(date +%s) + startup_grace_secs ))
     rollup_len=0
+    head_oid=""
     while true; do
         remaining=$(( grace_deadline - $(date +%s) ))
         info "ci-gate: waiting for check-runs to appear... ${remaining}s grace remaining"
         meta=$(fetch_meta)
         decision=$(printf '%s' "$meta" | sed -n '1p')
         rollup_len=$(printf '%s' "$meta" | sed -n '2p')
+        head_oid=$(printf '%s' "$meta" | sed -n '3p')
         bail_review_required "$decision"
-        if [ "$rollup_len" -gt 0 ] || [ "$(date +%s)" -ge "$grace_deadline" ]; then
+        if [ "$rollup_len" -gt 0 ] && sha_matches "$head_oid" "$fix_head"; then
+            break
+        fi
+        if [ "$(date +%s)" -ge "$grace_deadline" ]; then
             break
         fi
         sleep "$poll_interval"
     done
+    if ! sha_matches "$head_oid" "$fix_head"; then
+        printf 'ci-gate: timed out waiting for GitHub to reflect current commit (expected %s, got %s)\n' "$fix_head" "$head_oid" >&2
+        exit 2
+    fi
     if [ "$rollup_len" -eq 0 ]; then
         info "ci-gate: no check-runs after ${startup_grace_secs}s grace; skipping"
         printf 'skipped\n'
         exit 0
     fi
-    info "ci-gate: ${rollup_len} check-run(s) found"
+    info "ci-gate: ${rollup_len} check-run(s) found, SHA synced"
 else
     # Post-fix: wait for GitHub to reflect the pushed commit SHA
     info "ci-gate: waiting for SHA sync (expecting ${fix_head})"
@@ -90,7 +112,7 @@ else
         head_oid=$(printf '%s' "$meta" | sed -n '3p')
         info "ci-gate: SHA sync poll... current=${head_oid} expected=${fix_head} ${remaining}s remaining"
         bail_review_required "$decision"
-        if [ "$head_oid" = "$fix_head" ] || git merge-base --is-ancestor "$fix_head" "$head_oid" 2>/dev/null; then
+        if sha_matches "$head_oid" "$fix_head"; then
             break
         fi
         if [ "$(date +%s)" -ge "$sync_deadline" ]; then
