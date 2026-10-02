@@ -132,7 +132,7 @@ impl AzureBackend {
     /// Auth precedence:
     /// 1. `AZURE_OPENAI_TOKEN` env var → `AzureOpenAIAuth::Token`
     /// 2. `AZURE_OPENAI_API_KEY` env var → `AzureOpenAIAuth::ApiKey`
-    /// 3. `providers.json` `"azure"` entry → `AzureOpenAIAuth::ApiKey`
+    /// 3. `providers.yaml` `"azure"` entry → `AzureOpenAIAuth::ApiKey`
     ///
     /// `AZURE_OPENAI_ENDPOINT` is required.
     /// `AZURE_OPENAI_API_VERSION` defaults to `"2024-10-21"`.
@@ -194,7 +194,7 @@ fn resolve_auth() -> Result<AzureOpenAIAuth, String> {
         }
     }
 
-    // 3. providers.json "azure" entry
+    // 3. providers.yaml "azure" entry
     if let Some(key) = crate::config::api_key("", PROVIDER_NAME) {
         return Ok(AzureOpenAIAuth::ApiKey(key));
     }
@@ -203,7 +203,7 @@ fn resolve_auth() -> Result<AzureOpenAIAuth, String> {
         "no credentials for provider '{PROVIDER_NAME}': set AZURE_OPENAI_TOKEN, \
          AZURE_OPENAI_API_KEY, or add an entry in {}",
         crate::config::user_config_root()
-            .join("providers.json")
+            .join("providers.yaml")
             .display(),
     ))
 }
@@ -398,12 +398,12 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("AZURE_OPENAI_API_KEY", "env-api-key");
 
-        // Write a providers.json so we can prove the env var wins.
+        // Write a providers.yaml so we can prove the env var wins.
         let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
         let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
-            config_dir.join("providers.json"),
+            config_dir.join("providers.yaml"),
             r#"{"azure": {"api-key": "providers-json-key"}}"#,
         )
         .unwrap();
@@ -411,7 +411,7 @@ mod tests {
         let auth = resolve_auth().unwrap();
         assert!(
             matches!(auth, AzureOpenAIAuth::ApiKey(k) if k == "env-api-key"),
-            "AZURE_OPENAI_API_KEY should win over providers.json"
+            "AZURE_OPENAI_API_KEY should win over providers.yaml"
         );
     }
 
@@ -421,7 +421,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.json");
+        let providers_path = config_dir.join("providers.yaml");
         std::fs::write(
             &providers_path,
             r#"{"azure": {"api-key": "providers-json-key"}}"#,
@@ -432,7 +432,7 @@ mod tests {
         let auth = resolve_auth().unwrap();
         assert!(
             matches!(auth, AzureOpenAIAuth::ApiKey(k) if k == "providers-json-key"),
-            "providers.json should be the fallback when no env vars are set"
+            "providers.yaml should be the fallback when no env vars are set"
         );
     }
 

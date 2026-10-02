@@ -136,7 +136,7 @@ pub(crate) struct RuntimeConfig {
     pub task_clients_exact: HashMap<String, String>,
     /// Prefix-match task→client mappings from config.
     pub task_clients_prefix: HashMap<String, String>,
-    /// The default client from config.json, if any.
+    /// The default client from config.yaml, if any.
     pub default_client: Option<String>,
     /// The base process environment captured at startup, before any
     /// bootstrap or system vars are layered on.

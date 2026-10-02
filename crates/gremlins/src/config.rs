@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use indexmap::IndexMap;
 use log::warn;
-use serde_json::Value;
+use serde::Deserialize;
 
 /// Default name of the project-local overlay directory.
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
 // ---------------------------------------------------------------------------
-// Path overrides from config.json "paths" section
+// Path overrides from config.yaml "paths" section
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
@@ -22,17 +23,14 @@ pub struct PathOverrides {
     pub scratch_root: Option<PathBuf>,
 }
 
-fn parse_path_overrides(paths: &HashMap<String, Value>) -> PathOverrides {
-    fn str_to_path(v: &Value) -> Option<PathBuf> {
-        v.as_str().map(PathBuf::from)
-    }
+fn parse_path_overrides(paths: &HashMap<String, String>) -> PathOverrides {
     PathOverrides {
-        state_root: paths.get("state-root").and_then(str_to_path),
-        work_root: paths.get("work-root").and_then(str_to_path),
-        config_root: paths.get("config-root").and_then(str_to_path),
-        project_root: paths.get("project-root").and_then(str_to_path),
-        overlay_dir: paths.get("overlay-dir").and_then(str_to_path),
-        scratch_root: paths.get("scratch-root").and_then(str_to_path),
+        state_root: paths.get("state-root").map(PathBuf::from),
+        work_root: paths.get("work-root").map(PathBuf::from),
+        config_root: paths.get("config-root").map(PathBuf::from),
+        project_root: paths.get("project-root").map(PathBuf::from),
+        overlay_dir: paths.get("overlay-dir").map(PathBuf::from),
+        scratch_root: paths.get("scratch-root").map(PathBuf::from),
     }
 }
 
@@ -40,10 +38,9 @@ fn parse_path_overrides(paths: &HashMap<String, Value>) -> PathOverrides {
 // Config
 // ---------------------------------------------------------------------------
 
-/// Parsed content of config.json.
+/// Parsed content of config.yaml.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
-    raw: HashMap<String, Value>,
     default_client: Option<String>,
     exact_stage_clients: HashMap<String, String>,
     prefix_stage_clients: HashMap<String, String>,
@@ -52,13 +49,83 @@ pub struct Config {
     path_overrides: PathOverrides,
 }
 
+/// A string newtype that rejects non-string YAML scalars (numbers,
+/// booleans, etc.) instead of silently coercing them via `serde_yaml`.
+#[derive(Debug, Clone)]
+struct StrictString(String);
+
+impl<'de> Deserialize<'de> for StrictString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = StrictString;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<StrictString, E> {
+                Ok(StrictString(v.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<StrictString, E> {
+                Ok(StrictString(v))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<StrictString, E> {
+                Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Bool(v),
+                    &self,
+                ))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<StrictString, E> {
+                Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Signed(v),
+                    &self,
+                ))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<StrictString, E> {
+                Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Unsigned(v),
+                    &self,
+                ))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<StrictString, E> {
+                Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Float(v),
+                    &self,
+                ))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Typed structure for config.yaml deserialization.
+#[derive(Debug, Deserialize)]
+struct ConfigFile {
+    #[serde(rename = "default-client")]
+    default_client: Option<StrictString>,
+    #[serde(rename = "default-client-by-stage")]
+    default_client_by_stage: Option<IndexMap<String, StrictString>>,
+    #[serde(rename = "task-clients")]
+    task_clients: Option<IndexMap<String, StrictString>>,
+    paths: Option<HashMap<String, StrictString>>,
+}
+
 impl Config {
-    /// Load from `user_config_root(None) / "config.json"`.
+    /// Load from `user_config_root(None) / "config.yaml"`.
     /// Returns `Config::default()` if the file doesn't exist.
     pub fn load() -> Result<Self, ConfigError> {
-        let path = resolve_user_config_root(None).join("config.json");
-        let raw = match parse_json_config(&path) {
-            Ok(raw) => raw,
+        let path = resolve_user_config_root(None).join("config.yaml");
+        let cfg_file = match parse_yaml_config(&path) {
+            Ok(v) => v,
             Err(ConfigError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Config {
                     default_client: env_default_client(),
@@ -68,29 +135,34 @@ impl Config {
             Err(e) => return Err(e),
         };
 
-        let default_client = raw
-            .get("default-client")
-            .and_then(|v| v.as_str())
+        let default_client = cfg_file
+            .default_client
+            .map(|s| s.0)
             .filter(|s| !s.is_empty())
-            .map(String::from)
             .or_else(env_default_client);
 
-        let (exact_stage_clients, prefix_stage_clients) = parse_stage_clients(&raw);
+        let stage_clients: Option<IndexMap<String, String>> = cfg_file
+            .default_client_by_stage
+            .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
+        let (exact_stage_clients, prefix_stage_clients) =
+            parse_stage_clients(stage_clients.as_ref());
 
-        let (exact_task_clients, prefix_task_clients) = parse_task_clients(&raw);
+        let task_clients: Option<IndexMap<String, String>> = cfg_file
+            .task_clients
+            .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
+        let (exact_task_clients, prefix_task_clients) = parse_task_clients(task_clients.as_ref());
 
-        let path_overrides = raw
-            .get("paths")
-            .and_then(|v| v.as_object())
-            .map(|obj| {
-                let m: HashMap<String, Value> =
-                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                parse_path_overrides(&m)
+        let path_overrides = cfg_file
+            .paths
+            .as_ref()
+            .map(|m| {
+                let string_map: HashMap<String, String> =
+                    m.iter().map(|(k, v)| (k.clone(), v.0.clone())).collect();
+                parse_path_overrides(&string_map)
             })
             .unwrap_or_default();
 
         Ok(Config {
-            raw,
             default_client,
             exact_stage_clients,
             prefix_stage_clients,
@@ -119,10 +191,6 @@ impl Config {
         (&self.exact_task_clients, &self.prefix_task_clients)
     }
 
-    pub fn raw(&self) -> &HashMap<String, Value> {
-        &self.raw
-    }
-
     pub fn path_overrides(&self) -> &PathOverrides {
         &self.path_overrides
     }
@@ -137,31 +205,16 @@ impl Config {
 // ---------------------------------------------------------------------------
 
 fn parse_stage_clients(
-    raw: &HashMap<String, Value>,
+    map: Option<&IndexMap<String, String>>,
 ) -> (HashMap<String, String>, HashMap<String, String>) {
-    let obj = match raw
-        .get("default-client-by-stage")
-        .and_then(|v| v.as_object())
-    {
-        Some(o) => o,
-        None => return (HashMap::new(), HashMap::new()),
+    let Some(obj) = map else {
+        return (HashMap::new(), HashMap::new());
     };
 
     let mut exact = HashMap::new();
     let mut prefix = HashMap::new();
 
-    for (key, value) in obj {
-        let val_str = match value.as_str() {
-            Some(s) => s,
-            None => {
-                warn!(
-                    "config key {:?} in default-client-by-stage has non-string value {:?} — skipping",
-                    key, value
-                );
-                continue;
-            }
-        };
-
+    for (key, val_str) in obj {
         if let Some(p) = key.strip_suffix('*') {
             if p.is_empty() {
                 warn!(
@@ -171,9 +224,9 @@ fn parse_stage_clients(
                 );
                 continue;
             }
-            prefix.insert(p.to_string(), val_str.to_string());
+            prefix.insert(p.to_string(), val_str.clone());
         } else {
-            exact.insert(key.clone(), val_str.to_string());
+            exact.insert(key.clone(), val_str.clone());
         }
     }
 
@@ -186,29 +239,17 @@ fn parse_stage_clients(
 /// Keys are lowercased here so lookup is case-insensitive; a key ending in `*`
 /// denotes a prefix match, anything else an exact match.
 fn parse_task_clients(
-    raw: &HashMap<String, Value>,
+    map: Option<&IndexMap<String, String>>,
 ) -> (HashMap<String, String>, HashMap<String, String>) {
-    let obj = match raw.get("task-clients").and_then(|v| v.as_object()) {
-        Some(o) => o,
-        None => return (HashMap::new(), HashMap::new()),
+    let Some(obj) = map else {
+        return (HashMap::new(), HashMap::new());
     };
 
     let mut exact = HashMap::new();
     let mut prefix = HashMap::new();
     let mut seen = std::collections::HashSet::new();
 
-    for (key, value) in obj {
-        let val_str = match value.as_str() {
-            Some(s) => s,
-            None => {
-                warn!(
-                    "config key {:?} in task-clients has non-string value {:?} — skipping",
-                    key, value
-                );
-                continue;
-            }
-        };
-
+    for (key, val_str) in obj {
         let normalized = if let Some(p) = key.strip_suffix('*') {
             if p.is_empty() {
                 warn!(
@@ -233,9 +274,9 @@ fn parse_task_clients(
         }
 
         if key.ends_with('*') {
-            prefix.insert(normalized, val_str.to_string());
+            prefix.insert(normalized, val_str.clone());
         } else {
-            exact.insert(normalized, val_str.to_string());
+            exact.insert(normalized, val_str.clone());
         }
     }
 
@@ -243,26 +284,21 @@ fn parse_task_clients(
 }
 
 // ---------------------------------------------------------------------------
-// JSON parsing
+// YAML parsing
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("JSON parse error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("config file must contain a JSON object")]
-    NotAnObject,
+    #[error(transparent)]
+    Yaml(#[from] serde_yaml::Error),
 }
 
-fn parse_json_config(path: &Path) -> Result<HashMap<String, Value>, ConfigError> {
+fn parse_yaml_config(path: &Path) -> Result<ConfigFile, ConfigError> {
     let content = std::fs::read_to_string(path)?;
-    let value: Value = serde_json::from_str(&content)?;
-    match value {
-        Value::Object(map) => Ok(map.into_iter().collect()),
-        _ => Err(ConfigError::NotAnObject),
-    }
+    let cfg: ConfigFile = serde_yaml::from_str(&content)?;
+    Ok(cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -539,7 +575,7 @@ pub fn resolve_project_root(overrides: Option<&PathOverrides>) -> PathBuf {
 }
 
 /// The overlay of `project_root`, with the `paths.overlay-dir` override from
-/// config.json (`overrides`) still winning: it is part of the resolved
+/// config.yaml (`overrides`) still winning: it is part of the resolved
 /// configuration, not a per-process accident.
 fn overlay_dir_for(overrides: Option<&PathOverrides>, project_root: &Path) -> PathBuf {
     if let Some(o) = overrides {
@@ -579,7 +615,7 @@ pub(crate) fn overlay_dir_preferring(explicit: Option<&Path>, project_root: &Pat
 /// The configured overlay of `project_root`, ignoring `GREMLINS_OVERLAY_DIR`.
 ///
 /// The process-wide export a running gremlin carries must not redirect a
-/// resolution meant for the project a state file names; the config.json
+/// resolution meant for the project a state file names; the config.yaml
 /// override, by contrast, is part of the resolved layout and is honoured.
 pub(crate) fn overlay_dir_without_env(project_root: &Path) -> PathBuf {
     let overrides = get_global().map(|c| c.path_overrides().clone());
@@ -623,7 +659,7 @@ pub fn work_root() -> PathBuf {
 }
 
 pub fn user_config_root() -> PathBuf {
-    // Bootstrap: never consult config.json for config-root during load.
+    // Bootstrap: never consult config.yaml for config-root during load.
     // Post-bootstrap, honour the override.
     let overrides = get_global().map(|c| c.path_overrides().clone());
     resolve_user_config_root(overrides.as_ref())
@@ -656,20 +692,37 @@ pub fn scratch_root(gremlin_id: Option<&str>) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// ApiKeys — loaded from providers.json, not part of Config
+// ApiKeys — loaded from providers.yaml, not part of Config
 // ---------------------------------------------------------------------------
 
-/// Parsed content of providers.json.
+/// Parsed content of providers.yaml.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ApiKeys {
     api_keys: HashMap<String, String>,
     pats: HashMap<String, String>,
 }
 
+/// Typed structure for providers.yaml — a newtype over the provider map.
+///
+/// Uses `StrictString` for credential fields so non-string values (e.g.
+/// integers) are rejected at the deserialization layer rather than silently
+/// coerced by serde_yaml.
+#[derive(Debug, Deserialize)]
+struct ProvidersFile(HashMap<String, ProviderEntry>);
+
+/// Typed structure for a single provider entry in providers.yaml.
+#[derive(Debug, Deserialize)]
+struct ProviderEntry {
+    #[serde(rename = "api-key", default)]
+    api_key: Option<StrictString>,
+    #[serde(default)]
+    pat: Option<StrictString>,
+}
+
 impl ApiKeys {
-    /// Load from `user_config_root() / "providers.json"`.
+    /// Load from `user_config_root() / "providers.yaml"`.
     pub(crate) fn load() -> Self {
-        let path = user_config_root().join("providers.json");
+        let path = user_config_root().join("providers.yaml");
         match parse_api_keys(&path) {
             Ok((api_keys, pats)) => ApiKeys { api_keys, pats },
             Err(e) => {
@@ -703,32 +756,18 @@ type ParsedApiKeys = (HashMap<String, String>, HashMap<String, String>);
 
 fn parse_api_keys(path: &Path) -> Result<ParsedApiKeys, ApiKeysError> {
     let content = std::fs::read_to_string(path)?;
-    let value: serde_json::Value = serde_json::from_str(&content)?;
-    let obj = value.as_object().ok_or(ApiKeysError::NotAnObject)?;
+    let providers_file: ProvidersFile = serde_yaml::from_str(&content)?;
     let mut api_keys = HashMap::new();
     let mut pats = HashMap::new();
-    for (k, v) in obj {
-        match v.as_object() {
-            Some(obj) => {
-                if let Some(api_key) = obj.get("api-key").and_then(|v| v.as_str()) {
-                    if !api_key.trim().is_empty() {
-                        api_keys.insert(k.clone(), api_key.to_string());
-                    }
-                }
-                if let Some(pat) = obj.get("pat").and_then(|v| v.as_str()) {
-                    if !pat.trim().is_empty() {
-                        pats.insert(k.clone(), pat.to_string());
-                    }
-                }
-                if !api_keys.contains_key(k) && !pats.contains_key(k) {
-                    warn!("providers.json entry {k:?} has no non-empty \"api-key\" or \"pat\" field — skipping");
-                }
-            }
-            None => {
-                warn!(
-                    "providers.json entry {k:?} value must be an object with \"api-key\" or \"pat\" — skipping"
-                );
-            }
+    for (k, v) in providers_file.0 {
+        if let Some(api_key) = v.api_key.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            api_keys.insert(k.clone(), api_key);
+        }
+        if let Some(pat) = v.pat.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            pats.insert(k.clone(), pat);
+        }
+        if !api_keys.contains_key(&k) && !pats.contains_key(&k) {
+            warn!("providers.yaml entry {k:?} has no non-empty \"api-key\" or \"pat\" field — skipping");
         }
     }
     Ok((api_keys, pats))
@@ -738,14 +777,12 @@ fn parse_api_keys(path: &Path) -> Result<ParsedApiKeys, ApiKeysError> {
 pub(crate) enum ApiKeysError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("JSON parse error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("providers.json must contain a JSON object")]
-    NotAnObject,
+    #[error(transparent)]
+    Yaml(#[from] serde_yaml::Error),
 }
 
 /// Resolve an API key for `provider`. Checks the named env var first,
-/// then falls back to `providers.json`. Returns None if neither is set.
+/// then falls back to `providers.yaml`. Returns None if neither is set.
 pub fn api_key(env_var_name: &str, provider_name: &str) -> Option<String> {
     if let Ok(key) = std::env::var(env_var_name) {
         if !key.trim().is_empty() {
@@ -756,7 +793,7 @@ pub fn api_key(env_var_name: &str, provider_name: &str) -> Option<String> {
 }
 
 /// Resolve a PAT (personal access token) for `provider` from
-/// `providers.json`. Returns None if not set.
+/// `providers.yaml`. Returns None if not set.
 pub(crate) fn pat(provider_name: &str) -> Option<String> {
     ApiKeys::load().pat(provider_name).map(|s| s.to_string())
 }
@@ -778,51 +815,36 @@ mod tests {
 
     #[test]
     fn test_config_default_client() {
-        let raw: HashMap<String, Value> =
-            serde_json::from_str(r#"{"default-client": "openai:gpt-4o"}"#).unwrap();
-        let cfg = Config {
-            raw: raw.clone(),
-            default_client: raw
-                .get("default-client")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from),
-            exact_stage_clients: HashMap::new(),
-            prefix_stage_clients: HashMap::new(),
-            exact_task_clients: HashMap::new(),
-            prefix_task_clients: HashMap::new(),
-            path_overrides: PathOverrides::default(),
-        };
-        assert_eq!(cfg.default_client(), Some("openai:gpt-4o"));
+        let cfg_file: ConfigFile =
+            serde_yaml::from_str(r#"default-client: "openai:gpt-4o""#).unwrap();
+        assert_eq!(
+            cfg_file.default_client.as_ref().map(|s| s.0.as_str()),
+            Some("openai:gpt-4o")
+        );
     }
 
     #[test]
     fn test_config_default_client_empty_string() {
-        let raw: HashMap<String, Value> =
-            serde_json::from_str(r#"{"default-client": ""}"#).unwrap();
-        let cfg = Config {
-            raw: raw.clone(),
-            default_client: raw
-                .get("default-client")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from),
-            exact_stage_clients: HashMap::new(),
-            prefix_stage_clients: HashMap::new(),
-            exact_task_clients: HashMap::new(),
-            prefix_task_clients: HashMap::new(),
-            path_overrides: PathOverrides::default(),
-        };
-        assert_eq!(cfg.default_client(), None);
+        // Config::load filters empty default-client strings.
+        let _sandbox = Sandbox::with_config(Some(r#"default-client: """#));
+        let cfg = Config::load().unwrap();
+        assert!(
+            cfg.default_client().is_none(),
+            "empty default-client must be filtered out"
+        );
     }
 
     #[test]
     fn test_config_default_client_by_stage() {
-        let raw: HashMap<String, Value> = serde_json::from_str(
-            r#"{"default-client-by-stage": {"local-review-*": "openrouter:doomclientv5", "plan-*": "openai:gpt-5"}}"#,
-        )
-        .unwrap();
-        let (exact, prefix) = parse_stage_clients(&raw);
+        let map: IndexMap<String, String> = [
+            (
+                "local-review-*".to_string(),
+                "openrouter:doomclientv5".to_string(),
+            ),
+            ("plan-*".to_string(), "openai:gpt-5".to_string()),
+        ]
+        .into();
+        let (exact, prefix) = parse_stage_clients(Some(&map));
         assert!(exact.is_empty());
         assert_eq!(prefix.len(), 2);
         assert_eq!(
@@ -834,34 +856,45 @@ mod tests {
 
     #[test]
     fn test_config_exact_and_prefix() {
-        let raw: HashMap<String, Value> = serde_json::from_str(
-            r#"{"default-client-by-stage": {"review": "openai:gpt-5", "plan-*": "openai:gpt-4o"}}"#,
-        )
-        .unwrap();
-        let (exact, prefix) = parse_stage_clients(&raw);
+        let map: IndexMap<String, String> = [
+            ("review".to_string(), "openai:gpt-5".to_string()),
+            ("plan-*".to_string(), "openai:gpt-4o".to_string()),
+        ]
+        .into();
+        let (exact, prefix) = parse_stage_clients(Some(&map));
         assert_eq!(exact.get("review").unwrap(), "openai:gpt-5");
         assert_eq!(prefix.get("plan-").unwrap(), "openai:gpt-4o");
     }
 
     #[test]
-    fn test_config_non_string_value_skipped() {
-        let raw: HashMap<String, Value> = serde_json::from_str(
-            r#"{"default-client-by-stage": {"prefix-*": 42, "valid-*": "openrouter:model"}}"#,
+    fn test_config_non_string_value_coerced() {
+        // StrictString rejects non-string scalars — 42 must not be coerced
+        // into "42".
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"default-client-by-stage:
+  prefix-*: 42
+  valid-*: openrouter:model
+"#,
         )
         .unwrap();
-        let (exact, prefix) = parse_stage_clients(&raw);
-        assert!(exact.is_empty());
-        assert_eq!(prefix.len(), 1);
-        assert_eq!(prefix.get("valid-").unwrap(), "openrouter:model");
+        let result = parse_yaml_config(&path);
+        assert!(
+            result.is_err(),
+            "numeric value must be rejected, not coerced to string"
+        );
     }
 
     #[test]
     fn test_config_empty_prefix_star_skipped() {
-        let raw: HashMap<String, Value> = serde_json::from_str(
-            r#"{"default-client-by-stage": {"*": "openrouter:model", "plan-*": "openai:gpt-5"}}"#,
-        )
-        .unwrap();
-        let (exact, prefix) = parse_stage_clients(&raw);
+        let map: IndexMap<String, String> = [
+            ("*".to_string(), "openrouter:model".to_string()),
+            ("plan-*".to_string(), "openai:gpt-5".to_string()),
+        ]
+        .into();
+        let (exact, prefix) = parse_stage_clients(Some(&map));
         assert!(exact.is_empty());
         assert_eq!(prefix.len(), 1);
         assert_eq!(prefix.get("plan-").unwrap(), "openai:gpt-5");
@@ -870,69 +903,72 @@ mod tests {
     #[test]
     fn test_parse_task_clients() {
         // Exact and prefix keys, both normalized to lowercase.
-        let raw: HashMap<String, Value> = serde_json::from_str(
-            r#"{"task-clients": {"Scout": "openai:gpt-4o-mini", "Implement*": "openai:gpt-4o"}}"#,
-        )
-        .unwrap();
-        let (exact, prefix) = parse_task_clients(&raw);
+        let map: IndexMap<String, String> = [
+            ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
+            ("Implement*".to_string(), "openai:gpt-4o".to_string()),
+        ]
+        .into();
+        let (exact, prefix) = parse_task_clients(Some(&map));
         assert_eq!(exact.len(), 1);
         assert_eq!(exact.get("scout").unwrap(), "openai:gpt-4o-mini");
         assert_eq!(prefix.len(), 1);
         assert_eq!(prefix.get("implement").unwrap(), "openai:gpt-4o");
 
-        // Non-string values and an empty prefix are dropped.
-        let raw: HashMap<String, Value> = serde_json::from_str(
-            r#"{"task-clients": {"bad": 42, "*": "openai:gpt-4o", "ok-*": "openai:gpt-5"}}"#,
-        )
-        .unwrap();
-        let (exact, prefix) = parse_task_clients(&raw);
+        // An empty prefix is dropped.
+        let map: IndexMap<String, String> = [
+            ("*".to_string(), "openai:gpt-4o".to_string()),
+            ("ok-*".to_string(), "openai:gpt-5".to_string()),
+        ]
+        .into();
+        let (exact, prefix) = parse_task_clients(Some(&map));
         assert!(exact.is_empty());
         assert_eq!(prefix.len(), 1);
         assert_eq!(prefix.get("ok-").unwrap(), "openai:gpt-5");
 
         // Case-only duplicates are detected and the later one is skipped.
-        let raw: HashMap<String, Value> = serde_json::from_str(
-            r#"{"task-clients": {"Scout": "openai:gpt-4o-mini", "scout": "openai:gpt-5"}}"#,
-        )
-        .unwrap();
-        let (exact, _) = parse_task_clients(&raw);
+        let map: IndexMap<String, String> = [
+            ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
+            ("scout".to_string(), "openai:gpt-5".to_string()),
+        ]
+        .into();
+        let (exact, _) = parse_task_clients(Some(&map));
         assert_eq!(exact.len(), 1);
         assert_eq!(exact.get("scout").unwrap(), "openai:gpt-4o-mini");
 
         // Absent key yields empty maps.
-        let raw: HashMap<String, Value> =
-            serde_json::from_str(r#"{"default-client": "a:b"}"#).unwrap();
-        let (exact, prefix) = parse_task_clients(&raw);
+        let (exact, prefix) = parse_task_clients(None);
         assert!(exact.is_empty() && prefix.is_empty());
     }
 
     #[test]
-    fn test_config_json_decode_error() {
+    fn test_config_yaml_decode_error() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.json");
+        let path = dir.path().join("bad.yaml");
         fs::write(&path, "{bad").unwrap();
-        let result = parse_json_config(&path);
+        let result = parse_yaml_config(&path);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_config_not_an_object() {
+        // A YAML array cannot be deserialized as ConfigFile — serde_yaml
+        // will produce an error.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("array.json");
+        let path = dir.path().join("array.yaml");
         fs::write(&path, "[1, 2, 3]").unwrap();
-        let result = parse_json_config(&path);
-        assert!(matches!(result, Err(ConfigError::NotAnObject)));
+        let result = parse_yaml_config(&path);
+        assert!(result.is_err(), "YAML array rejected as config");
     }
 
     #[test]
     fn test_config_file_not_found() {
-        let result = parse_json_config(Path::new("/nonexistent/config.json"));
+        let result = parse_yaml_config(Path::new("/nonexistent/config.yaml"));
         assert!(matches!(result, Err(ConfigError::Io(_))));
     }
 
     #[test]
     fn test_paths_section_absent() {
-        // A real config.json, with no `paths` key: the loader must not invent
+        // A real config.yaml, with no `paths` key: the loader must not invent
         // overrides for a section that is simply absent.
         let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "a:b"}"#));
         let cfg = Config::load().unwrap();
@@ -1119,7 +1155,7 @@ mod tests {
         // Lazy load only happens once — values are identical
         let cfg1 = global_config().unwrap();
         let cfg2 = global_config().unwrap();
-        assert_eq!(cfg1.raw(), cfg2.raw());
+        assert_eq!(cfg1.default_client(), cfg2.default_client());
 
         // After clear, a new Arc is created
         clear_global();
@@ -1144,7 +1180,7 @@ mod tests {
         let config_dir = sandbox.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
-            config_dir.join("providers.json"),
+            config_dir.join("providers.yaml"),
             r#"{"openai": {"api-key": "sk-test"}, "xai": {"api-key": "xai-test"}}"#,
         )
         .unwrap();
@@ -1168,14 +1204,19 @@ mod tests {
     }
 
     #[test]
-    fn test_api_keys_object_non_string_api_key_ignored() {
+    fn test_api_keys_object_integer_api_key_rejected() {
+        // Non-string api-key values (e.g. integers) must be rejected —
+        // YAML type coercion would otherwise turn 42 into "42".
         let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": 42}}"#);
         let keys = ApiKeys::load();
-        assert!(keys.get("openai").is_none());
+        assert!(
+            keys.get("openai").is_none(),
+            "integer api-key must be rejected"
+        );
     }
 
     #[test]
-    fn test_api_keys_malformed_json() {
+    fn test_api_keys_malformed_yaml() {
         let _sandbox = Sandbox::with_providers("{bad");
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());
@@ -1190,6 +1231,7 @@ mod tests {
 
     #[test]
     fn test_api_keys_string_value_ignored() {
+        // YAML will reject a string value where a mapping is expected.
         let _sandbox = Sandbox::with_providers(r#"{"openai": "sk-test"}"#);
         let keys = ApiKeys::load();
         assert!(keys.get("openai").is_none());

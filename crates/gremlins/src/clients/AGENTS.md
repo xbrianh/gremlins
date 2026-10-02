@@ -25,7 +25,7 @@ the concrete backend implementations themselves (`backends/`).
 | `backends/mod.rs` | The `backends!` macro: declares each backend's module and generates `registry()`, mapping provider name → `BuildFn`. Adding a provider is one line here. |
 | `backends/openai.rs` | `OpenAiBackend` — wraps `OpenAiRunState` for `api.openai.com`, default model `gpt-4o`. |
 | `backends/openrouter.rs` | `OpenRouterBackend` — wraps `OpenAiRunState` for `openrouter.ai`, with its own transient-error classifier for retry. |
-| `backends/copilot.rs` | `CopilotBackend` — GitHub Copilot, with several credential sources (env vars, `providers.json`, auto-discovered `apps.json`). |
+| `backends/copilot.rs` | `CopilotBackend` — GitHub Copilot, with several credential sources (env vars, `providers.yaml`, auto-discovered `apps.json`). |
 | `backends/xai.rs` | `XaiBackend` — wraps `OpenAiRunState` for `api.x.ai`, default model `grok-4`. |
 | `backends/cmd.rs` | `CmdBackend` — drives an arbitrary external CLI (e.g. Claude Code) as a subprocess, parsing its `stream-json` output and tracking per-gremlin retry context. |
 

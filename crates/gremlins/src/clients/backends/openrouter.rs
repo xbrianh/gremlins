@@ -101,7 +101,7 @@ impl OpenRouterBackend {
         }
     }
 
-    /// Build an OpenRouter backend. Resolves `OPENROUTER_API_KEY` → `providers.json`.
+    /// Build an OpenRouter backend. Resolves `OPENROUTER_API_KEY` → `providers.yaml`.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
@@ -112,7 +112,7 @@ impl OpenRouterBackend {
                 format!(
                     "no API key for provider '{PROVIDER_NAME}': set {API_KEY_ENV} or add an entry in {}",
                     crate::config::user_config_root()
-                        .join("providers.json")
+                        .join("providers.yaml")
                         .display(),
                 )
             })?;
