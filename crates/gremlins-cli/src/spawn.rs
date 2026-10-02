@@ -13,6 +13,13 @@ use std::path::Path;
 use gremlins::config;
 use gremlins::executor::socket::{self, GremlinsDaemonLock};
 
+/// Idempotent entry point: ensure the executor daemon is running
+/// (becoming one if needed) and return a connected stream.
+pub(crate) async fn ensure_executor() -> Result<tokio::net::UnixStream, String> {
+    config::init_global().map_err(|e| e.to_string())?;
+    bind_or_connect().await
+}
+
 /// Try to connect to an existing executor. Returns `Ok(stream)` on success,
 /// or an error if no executor is running.
 pub(crate) async fn connect() -> Result<tokio::net::UnixStream, String> {

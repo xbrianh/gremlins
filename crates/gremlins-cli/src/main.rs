@@ -19,6 +19,7 @@ use gremlins::schemas::bootstrap;
 use serde_json::Value;
 
 mod spawn;
+mod tui;
 
 #[derive(Parser)]
 #[command(name = "gremlins", about = "AI-backed gremlin definition runner")]
@@ -137,8 +138,7 @@ async fn main() {
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::External(args)) => status_external(&args).await,
         None => {
-            let mut cmd = <Cli as clap::CommandFactory>::command();
-            cmd.print_help().unwrap();
+            tui::run().await;
             return;
         }
     };
@@ -152,16 +152,9 @@ async fn main() {
 // Socket helpers
 // ---------------------------------------------------------------------------
 
-/// Ensure an executor is running, becoming one if needed.
-/// Returns a connected stream.
-async fn ensure_executor() -> Result<tokio::net::UnixStream, String> {
-    config::init_global().map_err(|e| e.to_string())?;
-    spawn::bind_or_connect().await
-}
-
 /// Send a request to the executor and return the response.
 async fn executor_request(request: serde_json::Value) -> Result<serde_json::Value, String> {
-    let mut stream = ensure_executor().await?;
+    let mut stream = spawn::ensure_executor().await?;
     spawn::send_request(&mut stream, request).await
 }
 
