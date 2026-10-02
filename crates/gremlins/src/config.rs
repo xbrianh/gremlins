@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use indexmap::IndexMap;
 use log::warn;
 use serde::Deserialize;
-use serde_yaml::Mapping;
 
 /// Default name of the project-local overlay directory.
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
@@ -50,16 +49,74 @@ pub struct Config {
     path_overrides: PathOverrides,
 }
 
+/// A string newtype that rejects non-string YAML scalars (numbers,
+/// booleans, etc.) instead of silently coercing them via `serde_yaml`.
+#[derive(Debug, Clone)]
+struct StrictString(String);
+
+impl<'de> Deserialize<'de> for StrictString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = StrictString;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<StrictString, E> {
+                Ok(StrictString(v.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<StrictString, E> {
+                Ok(StrictString(v))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<StrictString, E> {
+                Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Bool(v),
+                    &self,
+                ))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<StrictString, E> {
+                Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Signed(v),
+                    &self,
+                ))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<StrictString, E> {
+                Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Unsigned(v),
+                    &self,
+                ))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<StrictString, E> {
+                Err(serde::de::Error::invalid_type(
+                    serde::de::Unexpected::Float(v),
+                    &self,
+                ))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 /// Typed structure for config.yaml deserialization.
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     #[serde(rename = "default-client")]
-    default_client: Option<String>,
+    default_client: Option<StrictString>,
     #[serde(rename = "default-client-by-stage")]
-    default_client_by_stage: Option<IndexMap<String, String>>,
+    default_client_by_stage: Option<IndexMap<String, StrictString>>,
     #[serde(rename = "task-clients")]
-    task_clients: Option<IndexMap<String, String>>,
-    paths: Option<HashMap<String, String>>,
+    task_clients: Option<IndexMap<String, StrictString>>,
+    paths: Option<HashMap<String, StrictString>>,
 }
 
 impl Config {
@@ -80,19 +137,29 @@ impl Config {
 
         let default_client = cfg_file
             .default_client
+            .map(|s| s.0)
             .filter(|s| !s.is_empty())
             .or_else(env_default_client);
 
+        let stage_clients: Option<IndexMap<String, String>> = cfg_file
+            .default_client_by_stage
+            .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
         let (exact_stage_clients, prefix_stage_clients) =
-            parse_stage_clients(cfg_file.default_client_by_stage.as_ref());
+            parse_stage_clients(stage_clients.as_ref());
 
-        let (exact_task_clients, prefix_task_clients) =
-            parse_task_clients(cfg_file.task_clients.as_ref());
+        let task_clients: Option<IndexMap<String, String>> = cfg_file
+            .task_clients
+            .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
+        let (exact_task_clients, prefix_task_clients) = parse_task_clients(task_clients.as_ref());
 
         let path_overrides = cfg_file
             .paths
             .as_ref()
-            .map(parse_path_overrides)
+            .map(|m| {
+                let string_map: HashMap<String, String> =
+                    m.iter().map(|(k, v)| (k.clone(), v.0.clone())).collect();
+                parse_path_overrides(&string_map)
+            })
             .unwrap_or_default();
 
         Ok(Config {
@@ -224,7 +291,7 @@ fn parse_task_clients(
 pub enum ConfigError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("YAML parse error: {0}")]
+    #[error(transparent)]
     Yaml(#[from] serde_yaml::Error),
 }
 
@@ -637,75 +704,19 @@ pub(crate) struct ApiKeys {
 
 /// Typed structure for providers.yaml — a newtype over the provider map.
 ///
-/// Deserialized with a manual impl that rejects non-string credential values
-/// (e.g. integers) instead of letting serde_yaml silently coerce them.
-#[derive(Debug)]
+/// Uses `StrictString` for credential fields so non-string values (e.g.
+/// integers) are rejected at the deserialization layer rather than silently
+/// coerced by serde_yaml.
+#[derive(Debug, Deserialize)]
 struct ProvidersFile(HashMap<String, ProviderEntry>);
 
-impl<'de> serde::Deserialize<'de> for ProvidersFile {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error;
-        let value = serde_yaml::Value::deserialize(deserializer)?;
-        let mapping = match &value {
-            serde_yaml::Value::Mapping(m) => m,
-            _ => return Err(Error::custom("providers.yaml must be a mapping")),
-        };
-        let mut providers = HashMap::new();
-        for (k, v) in mapping {
-            let key = k
-                .as_str()
-                .ok_or_else(|| Error::custom("provider name must be a string"))?
-                .to_string();
-            let entry = match v {
-                serde_yaml::Value::Mapping(m) => {
-                    let api_key =
-                        extract_optional_string(m, "api-key").map_err(Error::custom)?;
-                    let pat = extract_optional_string(m, "pat").map_err(Error::custom)?;
-                    ProviderEntry { api_key, pat }
-                }
-                _ => return Err(Error::custom(format!(
-                    "provider entry for {key:?} must be a mapping with optional \"api-key\" or \"pat\" fields"
-                ))),
-            };
-            providers.insert(key, entry);
-        }
-        Ok(ProvidersFile(providers))
-    }
-}
-
-/// Extract an optional string field from a YAML mapping, rejecting non-string
-/// values (numbers, booleans, sequences, nested mappings).
-fn extract_optional_string(m: &Mapping, key: &str) -> Result<Option<String>, String> {
-    let k = serde_yaml::Value::String(key.to_string());
-    let Some(v) = m.get(&k) else {
-        return Ok(None);
-    };
-    if v.is_null() {
-        return Ok(None);
-    }
-    match v.as_str() {
-        Some(s) => Ok(Some(s.to_owned())),
-        None => Err(format!(
-            "field {key:?} must be a string, found {}",
-            match v {
-                serde_yaml::Value::Number(_) => "a number",
-                serde_yaml::Value::Bool(_) => "a boolean",
-                serde_yaml::Value::Sequence(_) => "a sequence",
-                serde_yaml::Value::Mapping(_) => "a mapping",
-                _ => "an unknown type",
-            }
-        )),
-    }
-}
-
 /// Typed structure for a single provider entry in providers.yaml.
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 struct ProviderEntry {
-    api_key: Option<String>,
-    pat: Option<String>,
+    #[serde(rename = "api-key", default)]
+    api_key: Option<StrictString>,
+    #[serde(default)]
+    pat: Option<StrictString>,
 }
 
 impl ApiKeys {
@@ -749,10 +760,10 @@ fn parse_api_keys(path: &Path) -> Result<ParsedApiKeys, ApiKeysError> {
     let mut api_keys = HashMap::new();
     let mut pats = HashMap::new();
     for (k, v) in providers_file.0 {
-        if let Some(api_key) = v.api_key.filter(|s| !s.trim().is_empty()) {
+        if let Some(api_key) = v.api_key.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
             api_keys.insert(k.clone(), api_key);
         }
-        if let Some(pat) = v.pat.filter(|s| !s.trim().is_empty()) {
+        if let Some(pat) = v.pat.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
             pats.insert(k.clone(), pat);
         }
         if !api_keys.contains_key(&k) && !pats.contains_key(&k) {
@@ -766,7 +777,7 @@ fn parse_api_keys(path: &Path) -> Result<ParsedApiKeys, ApiKeysError> {
 pub(crate) enum ApiKeysError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("YAML parse error: {0}")]
+    #[error(transparent)]
     Yaml(#[from] serde_yaml::Error),
 }
 
@@ -806,19 +817,21 @@ mod tests {
     fn test_config_default_client() {
         let cfg_file: ConfigFile =
             serde_yaml::from_str(r#"default-client: "openai:gpt-4o""#).unwrap();
-        assert_eq!(cfg_file.default_client.as_deref(), Some("openai:gpt-4o"));
+        assert_eq!(
+            cfg_file.default_client.as_ref().map(|s| s.0.as_str()),
+            Some("openai:gpt-4o")
+        );
     }
 
     #[test]
     fn test_config_default_client_empty_string() {
-        let cfg_file: ConfigFile = serde_yaml::from_str(r#"default-client: """#).unwrap();
-        assert_eq!(cfg_file.default_client.as_deref(), Some(""));
-        // Config::load filters empty strings — test that separately.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        fs::write(&path, r#"default-client: """#).unwrap();
-        // We can't easily test Config::load in isolation here, but the
-        // deserialization round-trip confirms ConfigFile parses correctly.
+        // Config::load filters empty default-client strings.
+        let _sandbox = Sandbox::with_config(Some(r#"default-client: """#));
+        let cfg = Config::load().unwrap();
+        assert!(
+            cfg.default_client().is_none(),
+            "empty default-client must be filtered out"
+        );
     }
 
     #[test]
@@ -855,8 +868,8 @@ mod tests {
 
     #[test]
     fn test_config_non_string_value_coerced() {
-        // serde_yaml 0.9 coerces integers to strings for String fields.
-        // The value 42 becomes "42" and is accepted.
+        // StrictString rejects non-string scalars — 42 must not be coerced
+        // into "42".
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         fs::write(
@@ -867,10 +880,11 @@ mod tests {
 "#,
         )
         .unwrap();
-        let cfg_file = parse_yaml_config(&path).unwrap();
-        let map = cfg_file.default_client_by_stage.unwrap();
-        assert_eq!(map.get("prefix-*").unwrap(), "42");
-        assert_eq!(map.get("valid-*").unwrap(), "openrouter:model");
+        let result = parse_yaml_config(&path);
+        assert!(
+            result.is_err(),
+            "numeric value must be rejected, not coerced to string"
+        );
     }
 
     #[test]
