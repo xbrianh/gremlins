@@ -2,7 +2,7 @@
 //!
 //! The path resolvers read `GREMLINS_SANDBOX_ROOT`, `GREMLINS_PROJECT_ROOT`
 //! and `GREMLINS_OVERLAY_DIR` straight from the environment, and cache the
-//! parsed `config.yaml` in a process-global, so a test that changes either one
+//! parsed `settings.yaml` in a process-global, so a test that changes either one
 //! is racing every other test that resolves a path. One lock, taken by every
 //! module that touches that state, turns the race into an ordering.
 //!
@@ -30,7 +30,7 @@ const OVERRIDES: [&str; 3] = [
 /// made, newest first, when it drops.
 ///
 /// The lock is the one thing every test that resolves a path or parses a
-/// config has to share: `config::GLOBAL_CONFIG` caches a `config.yaml` that was
+/// config has to share: `config::GLOBAL_CONFIG` caches a `settings.yaml` that was
 /// read against whatever `GREMLINS_SANDBOX_ROOT` said at the time, so two tests
 /// swapping that variable must not overlap — in any module, not just the same
 /// file.
@@ -98,15 +98,15 @@ pub(crate) struct Sandbox {
 }
 
 impl Sandbox {
-    /// A sandbox with no `config.yaml`, so client and stage lookups see the
+    /// A sandbox with no `settings.yaml`, so client and stage lookups see the
     /// empty config a fresh machine would.
     pub(crate) fn new() -> Self {
         Self::with_config(None)
     }
 
-    /// A sandbox whose `config/config.yaml` holds `config_json`.
+    /// A sandbox whose `config/settings.yaml` holds `config_json`.
     pub(crate) fn with_config(config_json: Option<&str>) -> Self {
-        Sandbox::with_config_file("config.yaml", config_json)
+        Sandbox::with_config_file("settings.yaml", config_json)
     }
 
     /// A sandbox whose `config/providers.yaml` holds `json` — the file
