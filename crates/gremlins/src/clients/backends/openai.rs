@@ -40,7 +40,7 @@ impl OpenAiBackend {
         }
     }
 
-    /// Build an OpenAI backend. Resolves `OPENAI_API_KEY` → `providers.json`.
+    /// Build an OpenAI backend. Resolves `OPENAI_API_KEY` → `providers.yaml`.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
@@ -51,7 +51,7 @@ impl OpenAiBackend {
                 format!(
                     "no API key for provider '{PROVIDER_NAME}': set {API_KEY_ENV} or add an entry in {}",
                     crate::config::user_config_root()
-                        .join("providers.json")
+                        .join("providers.yaml")
                         .display(),
                 )
             })?;

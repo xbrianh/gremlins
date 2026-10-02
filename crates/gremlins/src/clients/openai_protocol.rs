@@ -315,7 +315,7 @@ pub(crate) async fn run_with_agent_loop(
 }
 
 /// Build the `task-clients` selector for an OpenAI-compatible client, or `None`
-/// when `config.json` declares no entries this backend can serve.
+/// when `config.yaml` declares no entries this backend can serve.
 ///
 /// The config is read once per run; the returned selector is shared behind an
 /// `Arc`, so each Task clones a pointer rather than the maps themselves. When

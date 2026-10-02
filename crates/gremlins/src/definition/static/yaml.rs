@@ -32,7 +32,7 @@ use super::StaticDefinition;
 /// The message emitted when no layer supplied a default client.
 const MISSING_DEFAULT_CLIENT: &str = "gremlin definition is missing 'default_client' — set a \
      'default_client' in the definition YAML, pass --client on the command line, or set \
-     'default-client' in config.json";
+     'default-client' in config.yaml";
 
 // ---------------------------------------------------------------------------
 // Public constructors

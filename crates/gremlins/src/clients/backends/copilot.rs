@@ -32,9 +32,9 @@ pub(crate) enum CopilotAuthSource {
     CopilotGitHubAccessToken,
     /// `GITHUB_TOKEN` env var.
     GitHubToken,
-    /// `providers.json` `"copilot"` entry (`api-key` field).
+    /// `providers.yaml` `"copilot"` entry (`api-key` field).
     ProvidersJson,
-    /// `providers.json` `"copilot"` entry (`pat` field).
+    /// `providers.yaml` `"copilot"` entry (`pat` field).
     ProvidersJsonPat,
     /// Auto-discovered from `~/.config/github-copilot/apps.json`.
     AppsJson,
@@ -45,7 +45,7 @@ pub(crate) enum CopilotAuthSource {
 /// unattended.
 ///
 /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
-/// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.json`
+/// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.yaml`
 /// `"copilot"` entry (`api-key` then `pat`) →
 /// `~/.config/github-copilot/apps.json` → error.
 fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
@@ -89,7 +89,7 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
         return Ok((client, source));
     }
 
-    // providers.json: try api-key first, then pat.
+    // providers.yaml: try api-key first, then pat.
     if let Some(key) = crate::config::api_key("", PROVIDER_NAME) {
         let client = copilot::Client::builder()
             .api_key(key)
@@ -123,7 +123,7 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
          COPILOT_API_KEY, COPILOT_GITHUB_ACCESS_TOKEN, GITHUB_TOKEN, or add an \
          entry with \"api-key\" or \"pat\" in {}",
         crate::config::user_config_root()
-            .join("providers.json")
+            .join("providers.yaml")
             .display(),
     ))
 }
@@ -192,7 +192,7 @@ impl CopilotBackend {
     /// Build a Copilot backend.
     ///
     /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
-    /// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.json`
+    /// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.yaml`
     /// `"copilot"` entry → error. OAuth is disabled — gremlins run
     /// unattended.
     pub fn build(
@@ -231,7 +231,7 @@ impl CopilotBackend {
 }
 
 /// Build a `TaskModelSelector` for the Copilot backend, or `None` when
-/// `config.json` declares no `task-clients` entries this backend can serve.
+/// `config.yaml` declares no `task-clients` entries this backend can serve.
 fn copilot_task_model_selector(
     client: &copilot::Client,
     task_clients_exact: &HashMap<String, String>,
@@ -439,7 +439,7 @@ mod tests {
         guard.remove("XDG_CONFIG_HOME");
     }
 
-    /// Set up an isolated sandbox with no providers.json and return the guard.
+    /// Set up an isolated sandbox with no providers.yaml and return the guard.
     fn isolated_env() -> EnvGuard {
         let mut guard = EnvGuard::lock();
         scrub_copilot_env(&mut guard);
@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(
             source,
             CopilotAuthSource::GitHubToken,
-            "GITHUB_TOKEN should win over providers.json"
+            "GITHUB_TOKEN should win over providers.yaml"
         );
     }
 
@@ -598,11 +598,11 @@ mod tests {
     #[test]
     fn auth_precedence_providers_json_fallback() {
         let mut guard = isolated_env();
-        // No env vars set — only providers.json.
+        // No env vars set — only providers.yaml.
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.json");
+        let providers_path = config_dir.join("providers.yaml");
         std::fs::write(
             &providers_path,
             format!(
@@ -616,18 +616,18 @@ mod tests {
         assert_eq!(
             source,
             CopilotAuthSource::ProvidersJson,
-            "providers.json should be the fallback when no env vars are set"
+            "providers.yaml should be the fallback when no env vars are set"
         );
     }
 
     #[test]
     fn auth_precedence_providers_json_pat_fallback() {
         let mut guard = isolated_env();
-        // No env vars set — only providers.json with a pat field.
+        // No env vars set — only providers.yaml with a pat field.
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.json");
+        let providers_path = config_dir.join("providers.yaml");
         std::fs::write(
             &providers_path,
             r#"{"copilot": {"pat": "ghp_fake_pat_token"}}"#,
@@ -639,7 +639,7 @@ mod tests {
         assert_eq!(
             source,
             CopilotAuthSource::ProvidersJsonPat,
-            "providers.json pat field should be the fallback when no env vars are set"
+            "providers.yaml pat field should be the fallback when no env vars are set"
         );
     }
 
@@ -649,7 +649,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.json");
+        let providers_path = config_dir.join("providers.yaml");
         std::fs::write(
             &providers_path,
             format!(
@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(
             source,
             CopilotAuthSource::ProvidersJson,
-            "providers.json api-key should win over pat when both are present"
+            "providers.yaml api-key should win over pat when both are present"
         );
     }
 
