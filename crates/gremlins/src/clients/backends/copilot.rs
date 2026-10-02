@@ -33,9 +33,9 @@ pub(crate) enum CopilotAuthSource {
     /// `GITHUB_TOKEN` env var.
     GitHubToken,
     /// `providers.yaml` `"copilot"` entry (`api-key` field).
-    ProvidersJson,
+    ProvidersYaml,
     /// `providers.yaml` `"copilot"` entry (`pat` field).
-    ProvidersJsonPat,
+    ProvidersYamlPat,
     /// Auto-discovered from `~/.config/github-copilot/apps.json`.
     AppsJson,
 }
@@ -96,7 +96,7 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
             .allow_device_flow(false)
             .build()
             .map_err(|e| format!("{e}"))?;
-        return Ok((client, CopilotAuthSource::ProvidersJson));
+        return Ok((client, CopilotAuthSource::ProvidersYaml));
     }
 
     if let Some(token) = crate::config::pat(PROVIDER_NAME) {
@@ -105,7 +105,7 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
             .allow_device_flow(false)
             .build()
             .map_err(|e| format!("{e}"))?;
-        return Ok((client, CopilotAuthSource::ProvidersJsonPat));
+        return Ok((client, CopilotAuthSource::ProvidersYamlPat));
     }
 
     // Auto-discover OAuth token from the Copilot extension's apps.json.
@@ -615,7 +615,7 @@ mod tests {
         let (_, source) = resolve_auth().unwrap();
         assert_eq!(
             source,
-            CopilotAuthSource::ProvidersJson,
+            CopilotAuthSource::ProvidersYaml,
             "providers.yaml should be the fallback when no env vars are set"
         );
     }
@@ -638,7 +638,7 @@ mod tests {
         let (_, source) = resolve_auth().unwrap();
         assert_eq!(
             source,
-            CopilotAuthSource::ProvidersJsonPat,
+            CopilotAuthSource::ProvidersYamlPat,
             "providers.yaml pat field should be the fallback when no env vars are set"
         );
     }
@@ -662,7 +662,7 @@ mod tests {
         let (_, source) = resolve_auth().unwrap();
         assert_eq!(
             source,
-            CopilotAuthSource::ProvidersJson,
+            CopilotAuthSource::ProvidersYaml,
             "providers.yaml api-key should win over pat when both are present"
         );
     }
