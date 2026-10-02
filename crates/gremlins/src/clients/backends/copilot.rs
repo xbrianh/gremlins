@@ -231,7 +231,7 @@ impl CopilotBackend {
 }
 
 /// Build a `TaskModelSelector` for the Copilot backend, or `None` when
-/// `config.yaml` declares no `task-clients` entries this backend can serve.
+/// `settings.yaml` declares no `task-clients` entries this backend can serve.
 fn copilot_task_model_selector(
     client: &copilot::Client,
     task_clients_exact: &HashMap<String, String>,

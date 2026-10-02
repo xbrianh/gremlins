@@ -10,7 +10,7 @@ use serde::Deserialize;
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
 // ---------------------------------------------------------------------------
-// Path overrides from config.yaml "paths" section
+// Path overrides from settings.yaml "paths" section
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
@@ -38,7 +38,7 @@ fn parse_path_overrides(paths: &HashMap<String, String>) -> PathOverrides {
 // Config
 // ---------------------------------------------------------------------------
 
-/// Parsed content of config.yaml.
+/// Parsed content of settings.yaml.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     default_client: Option<String>,
@@ -107,7 +107,7 @@ impl<'de> Deserialize<'de> for StrictString {
     }
 }
 
-/// Typed structure for config.yaml deserialization.
+/// Typed structure for settings.yaml deserialization.
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     #[serde(rename = "default-client")]
@@ -120,10 +120,10 @@ struct ConfigFile {
 }
 
 impl Config {
-    /// Load from `user_config_root(None) / "config.yaml"`.
+    /// Load from `user_config_root(None) / "settings.yaml"`.
     /// Returns `Config::default()` if the file doesn't exist.
     pub fn load() -> Result<Self, ConfigError> {
-        let path = resolve_user_config_root(None).join("config.yaml");
+        let path = resolve_user_config_root(None).join("settings.yaml");
         let cfg_file = match parse_yaml_config(&path) {
             Ok(v) => v,
             Err(ConfigError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -575,7 +575,7 @@ pub fn resolve_project_root(overrides: Option<&PathOverrides>) -> PathBuf {
 }
 
 /// The overlay of `project_root`, with the `paths.overlay-dir` override from
-/// config.yaml (`overrides`) still winning: it is part of the resolved
+/// settings.yaml (`overrides`) still winning: it is part of the resolved
 /// configuration, not a per-process accident.
 fn overlay_dir_for(overrides: Option<&PathOverrides>, project_root: &Path) -> PathBuf {
     if let Some(o) = overrides {
@@ -615,7 +615,7 @@ pub(crate) fn overlay_dir_preferring(explicit: Option<&Path>, project_root: &Pat
 /// The configured overlay of `project_root`, ignoring `GREMLINS_OVERLAY_DIR`.
 ///
 /// The process-wide export a running gremlin carries must not redirect a
-/// resolution meant for the project a state file names; the config.yaml
+/// resolution meant for the project a state file names; the settings.yaml
 /// override, by contrast, is part of the resolved layout and is honoured.
 pub(crate) fn overlay_dir_without_env(project_root: &Path) -> PathBuf {
     let overrides = get_global().map(|c| c.path_overrides().clone());
@@ -659,7 +659,7 @@ pub fn work_root() -> PathBuf {
 }
 
 pub fn user_config_root() -> PathBuf {
-    // Bootstrap: never consult config.yaml for config-root during load.
+    // Bootstrap: never consult settings.yaml for config-root during load.
     // Post-bootstrap, honour the override.
     let overrides = get_global().map(|c| c.path_overrides().clone());
     resolve_user_config_root(overrides.as_ref())
@@ -871,7 +871,7 @@ mod tests {
         // StrictString rejects non-string scalars — 42 must not be coerced
         // into "42".
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
+        let path = dir.path().join("settings.yaml");
         fs::write(
             &path,
             r#"default-client-by-stage:
@@ -962,13 +962,13 @@ mod tests {
 
     #[test]
     fn test_config_file_not_found() {
-        let result = parse_yaml_config(Path::new("/nonexistent/config.yaml"));
+        let result = parse_yaml_config(Path::new("/nonexistent/settings.yaml"));
         assert!(matches!(result, Err(ConfigError::Io(_))));
     }
 
     #[test]
     fn test_paths_section_absent() {
-        // A real config.yaml, with no `paths` key: the loader must not invent
+        // A real settings.yaml, with no `paths` key: the loader must not invent
         // overrides for a section that is simply absent.
         let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "a:b"}"#));
         let cfg = Config::load().unwrap();
