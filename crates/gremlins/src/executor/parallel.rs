@@ -20,13 +20,11 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::watch;
 
 use crate::artifacts::uri::Uri;
-use crate::config;
 use crate::definition::ErrorPolicy;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::stage_key;
-use crate::executor::state;
-use crate::executor::state::StateStore;
+use crate::executor::state::{StateData, StateStore};
 use crate::executor::supervisor::{self, LaunchResult, RunState};
 use crate::executor::RunError;
 
@@ -212,31 +210,30 @@ pub(crate) async fn run_parallel(
                         let state = state_rx.borrow().clone();
                         if state.status == "done" || state.status == "stopped" {
                             // Read the child's state.json to get the real outcome.
-                            let child_state_dir = config::state_root().join(&child_id);
-                            let child_state_file = child_state_dir.join("state.json");
-                            let outcome = if child_state_file.is_file() {
-                                let raw = state::read_state_json(Some(&child_state_file));
-                                let exit_code =
-                                    raw.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1);
-                                if exit_code == 0 {
-                                    Ok(())
-                                } else {
-                                    // Try to get a meaningful error from the bail file or state.
-                                    let reason = raw
-                                        .get("stage")
-                                        .and_then(|v| v.as_str())
-                                        .filter(|s| !s.is_empty() && *s != "starting")
-                                        .map(|s| format!("stage {s}: exited {exit_code}"))
-                                        .unwrap_or_else(|| format!("exited {exit_code}"));
-                                    Err(RunError::StageFailed {
-                                        stage: child_name.clone(),
-                                        message: reason,
-                                    })
+                            let outcome = match StateData::open(&child_id) {
+                                Ok(child_state) => {
+                                    let raw = child_state.state_tree();
+                                    let exit_code =
+                                        raw.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1);
+                                    if exit_code == 0 {
+                                        Ok(())
+                                    } else {
+                                        // Try to get a meaningful error from the bail file or state.
+                                        let reason = raw
+                                            .get("stage")
+                                            .and_then(|v| v.as_str())
+                                            .filter(|s| !s.is_empty() && *s != "starting")
+                                            .map(|s| format!("stage {s}: exited {exit_code}"))
+                                            .unwrap_or_else(|| format!("exited {exit_code}"));
+                                        Err(RunError::StageFailed {
+                                            stage: child_name.clone(),
+                                            message: reason,
+                                        })
+                                    }
                                 }
-                            } else {
-                                Err(RunError::Message(format!(
+                                Err(_) => Err(RunError::Message(format!(
                                     "child {child_name} state file not found"
-                                )))
+                                ))),
                             };
                             return (idx, child_name, child_id, outcome);
                         }
@@ -441,7 +438,7 @@ async fn merge_child_artifacts(
     gremlin: &mut Gremlin,
     outcome: &ChildOutcome,
 ) -> Result<(), RunError> {
-    use crate::executor::state::{Collision, StateData};
+    use crate::executor::state::Collision;
 
     // Open the child's state.
     let child_state = StateData::open(&outcome.child_id)?;
@@ -460,19 +457,17 @@ async fn merge_child_artifacts(
 
 /// Aggregate token usage and subprocess cost from a child into the parent.
 fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
-    let child_state_dir = config::state_root().join(&outcome.child_id);
-    let child_state_file = child_state_dir.join("state.json");
-    if !child_state_file.is_file() {
-        return;
-    }
-
-    let child_state = state::read_state_json(Some(&child_state_file));
-    if child_state.is_empty() {
+    let child_state = match StateData::open(&outcome.child_id) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let tree = child_state.state_tree();
+    if tree.is_empty() {
         return;
     }
 
     // Token usage.
-    if let Some(usage) = child_state.get("token_usage").and_then(|v| v.as_object()) {
+    if let Some(usage) = tree.get("token_usage").and_then(|v| v.as_object()) {
         let mut delta = HashMap::new();
         for (key, value) in usage {
             if let Some(n) = value.as_i64() {
@@ -483,7 +478,7 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
     }
 
     // Subprocess cost.
-    if let Some(cost) = child_state.get("subprocess_cost_usd") {
+    if let Some(cost) = tree.get("subprocess_cost_usd") {
         if let Some(n) = cost.as_f64() {
             gremlin.state.add_subprocess_cost(n);
         }
@@ -504,17 +499,12 @@ fn cleanup_child_fully(child_name: &str, child_id: &str) {
 fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &str) {
     use crate::core::git;
 
-    let child_state_dir = config::state_root().join(child_id);
-    let child_state_file = child_state_dir.join("state.json");
-    if !child_state_file.is_file() {
-        return;
-    }
-
-    let child_state = state::read_state_json(Some(&child_state_file));
-    let workdir = child_state
-        .get("workdir")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let child_state = match StateData::open(child_id) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let tree = child_state.state_tree();
+    let workdir = tree.get("workdir").and_then(|v| v.as_str()).unwrap_or("");
 
     if workdir.is_empty() {
         return;
@@ -562,6 +552,7 @@ mod tests {
         );
         def.convert_stage(stages[0].clone())
     }
+    use crate::config;
     use std::collections::HashMap;
     use std::path::PathBuf;
 

@@ -351,6 +351,22 @@ fn is_file_artifact(data_uri: &str) -> bool {
     data_uri.starts_with('/')
 }
 
+/// Validate that a gremlin id component is safe to use as a path segment.
+///
+/// Rejects empty strings, strings containing `..`, and strings with
+/// characters outside `[A-Za-z0-9_-]`.
+fn validate_gremlin_id_component(id: &str) -> Result<(), StateError> {
+    if id.is_empty()
+        || id.contains("..")
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(StateError::Other(format!("invalid gremlin id {id:?}")));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // FileSystemStateStore — filesystem-backed implementation
 // ---------------------------------------------------------------------------
@@ -371,6 +387,7 @@ impl FileSystemStateStore {
 
     /// Create a new state directory, write initial state.json, return a live store.
     pub fn create(gremlin_id: &str, initial: &Map<String, Value>) -> Result<Self, StateError> {
+        validate_gremlin_id_component(gremlin_id)?;
         let state_dir = config::state_root().join(gremlin_id);
         std::fs::create_dir_all(&state_dir)?;
         std::fs::create_dir_all(state_dir.join("artifacts"))?;
@@ -380,6 +397,7 @@ impl FileSystemStateStore {
 
     /// Open an existing state directory. Does NOT write anything.
     pub fn open(gremlin_id: &str) -> Result<Self, StateError> {
+        validate_gremlin_id_component(gremlin_id)?;
         let state_dir = config::state_root().join(gremlin_id);
         if !state_dir.is_dir() {
             return Err(StateError::Other(format!(
@@ -1104,6 +1122,7 @@ impl StateStore for FileSystemStateStore {
         &self,
         child_gremlin_id: &str,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        validate_gremlin_id_component(child_gremlin_id)?;
         let child_dir = config::state_root().join(child_gremlin_id);
         tokio::fs::create_dir_all(&child_dir).await?;
         let child_artifact_dir = child_dir.join("artifacts");

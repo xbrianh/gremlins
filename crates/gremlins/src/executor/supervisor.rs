@@ -484,13 +484,9 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
             });
             // Write terminal state to disk so the aborted run isn't
             // reported as orphan and has a recorded exit_code.
-            let state_dir = config::state_root().join(id);
-            let state_file = state_dir.join("state.json");
-            let _ = state::locked_update(&state_file, |data| {
-                data.insert("status".to_string(), Value::String("stopped".to_string()));
-                data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
-                data.insert("exit_code".to_string(), Value::from(1));
-            });
+            if let Ok(sd) = state::StateData::open(id) {
+                sd.write_terminal_state(1);
+            }
             // Reap backend resources that the aborted task would have
             // reaped in Gremlin::finish.
             reap_client_for(id);
@@ -1558,13 +1554,9 @@ pub(crate) async fn stop_child(id: &str) {
         });
         // Write terminal state to disk so the aborted child isn't
         // reported as orphan and has a recorded exit_code.
-        let state_dir = config::state_root().join(id);
-        let state_file = state_dir.join("state.json");
-        let _ = state::locked_update(&state_file, |data| {
-            data.insert("status".to_string(), Value::String("stopped".to_string()));
-            data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
-            data.insert("exit_code".to_string(), Value::from(1));
-        });
+        if let Ok(sd) = state::StateData::open(id) {
+            sd.write_terminal_state(1);
+        }
         // Reap backend resources that the aborted task would have
         // reaped in Gremlin::finish.
         reap_client_for(id);
@@ -1577,13 +1569,13 @@ pub(crate) async fn stop_child(id: &str) {
 /// If the client spec cannot be read or parsed this is a silent no-op —
 /// the gremlin may not have started running yet.
 fn reap_client_for(id: &str) {
-    let state_file = config::state_root().join(id).join("state.json");
-    let raw = state::read_state_json(Some(&state_file));
-    let spec = raw.get("client").and_then(|v| v.as_str()).unwrap_or("");
+    let spec = state::StateData::open(id)
+        .map(|sd| sd.read_str("client"))
+        .unwrap_or_default();
     if spec.is_empty() {
         return;
     }
-    match Client::parse(spec) {
+    match Client::parse(&spec) {
         Ok(client) => client.reap_all(id),
         Err(e) => log::warn!("reap_client_for {id}: failed to parse client spec {spec:?}: {e}"),
     }
