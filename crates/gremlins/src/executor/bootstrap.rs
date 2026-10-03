@@ -11,7 +11,8 @@
 //!    a `gremlins:` DSL call runs inline; everything else is a shell command,
 //!    `{var}`-substituted and joined with `&&`.
 //! 3. `bootstrap.cli_out` — artifact bindings computed at launch, registered
-//!    directly into the main registry via [`StateStore::copy_into_registry`].
+//!    directly into the main registry via
+//!    [`crate::executor::state::StateStore::copy_into_registry`].
 //!
 //! The DSL exists so a launch can *bind* a source value into the registry —
 //! today only `gremlins:bind_artifact(uri, source_key)` — without shelling out

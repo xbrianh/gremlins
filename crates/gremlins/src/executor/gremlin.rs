@@ -825,7 +825,8 @@ impl Gremlin {
             log::debug!("fork: no parent worktree — child inherits no worktree");
         }
 
-        self.state
+        let forked_store = self
+            .state
             .fork_registry(&child_artifact_dir)
             .await
             .map_err(|error| RunError::Message(error.to_string()))?;
@@ -885,7 +886,7 @@ impl Gremlin {
         child.insert("exit_code".to_string(), Value::Null);
 
         state::write_state(&child_state_dir, &child)?;
-        let child_state = StateData::new(Some(child_id.to_string()));
+        let child_state = StateData::from_store(Some(child_id.to_string()), forked_store);
         child_state
             .open("log", state::BlobMode::Write)
             .map_err(|e| RunError::Message(format!("failed to create child log: {e}")))?;

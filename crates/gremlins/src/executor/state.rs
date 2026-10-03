@@ -1450,6 +1450,13 @@ impl StateData {
         Self { gremlin_id, store }
     }
 
+    pub fn from_store(
+        gremlin_id: Option<String>,
+        store: Box<dyn StateStore + Send + Sync>,
+    ) -> Self {
+        Self { gremlin_id, store }
+    }
+
     /// Access the inner [`StateStore`] for callers that need the trait object
     /// (e.g. `resolve_interpolation_map`, `prepare_agent`).
     pub(crate) fn store_ref(&self) -> &(dyn StateStore + Send + Sync) {
