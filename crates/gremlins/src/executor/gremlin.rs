@@ -432,9 +432,10 @@ impl Gremlin {
         // return the handle, so the spawned child always sees the
         // definition as it was at launch time — no TOCTTOU window.
         {
-            let yaml_bytes = _definition
-                .serialize()
-                .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
+            let yaml_bytes = _definition.serialize().map_err(|e| {
+                cleanup_worktree();
+                RunError::Message(format!("failed to serialize definition: {e}"))
+            })?;
             let mut blob = state
                 .open_blob("definition.yaml", state::BlobMode::Write)
                 .map_err(|e| {

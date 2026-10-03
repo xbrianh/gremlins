@@ -1743,7 +1743,7 @@ pub fn field_names() -> [&'static str; 20] {
 /// lives on disk. Every caller that needs to locate a gremlin's state dir
 /// — whether to open its `state.json`, read its log, or merge its
 /// artifacts — must go through this function, not through `config`.
-pub fn state_dir_for(gremlin_id: &str) -> PathBuf {
+pub(crate) fn state_dir_for(gremlin_id: &str) -> PathBuf {
     config::state_root().join(gremlin_id)
 }
 
@@ -1933,7 +1933,7 @@ fn copy_dir_sync(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
         let kind = entry.file_type()?;
         if kind.is_dir() {
             copy_dir_sync(&entry.path(), &target)?;
-        } else if kind.is_file() {
+        } else if kind.is_file() || kind.is_symlink() {
             std::fs::copy(entry.path(), &target)?;
         }
     }
