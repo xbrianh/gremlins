@@ -581,7 +581,7 @@ mod tests {
     use crate::builders::artifacts::output;
     use crate::builders::composite::ParallelBuilder;
     use crate::builders::exec::ExecBuilder;
-    
+
     use crate::definition::StageSpec;
     use crate::definition::{ExecutorStage, StaticDefinition};
     use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig};

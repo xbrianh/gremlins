@@ -428,7 +428,7 @@ mod tests {
 
     use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::clients::client::Client;
-    
+
     use crate::definition::StaticDefinition;
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::{self, StateData};
