@@ -696,7 +696,6 @@ These are set by the launcher or executor and should not be set manually:
 | `GREMLINS_GREMLIN_ID` | Launcher | The current gremlin's unique ID. Stages and state bookkeeping no-op without it. |
 | `GREMLINS_WORKTREE_PATH` | Executor | Path to the gremlin's git worktree. |
 | `GREMLIN_WORKSPACE_DIR` | Executor | The working directory for the gremlin process. Equal to `GREMLINS_WORKTREE_PATH` when a worktree exists; falls back to the process cwd. Referenced in the agent stage's system prompt preamble. |
-| `GREMLIN_STATE_DIR` | Executor | Path to the gremlin's state directory (where `state.json` and `bail_*.json` live). |
 | `GREMLINS_SCRATCH_DIR` | Executor | The gremlin-wide scratch root. Read by `config::scratch_dir()` for tool scratch space. |
 | `GREMLINS_BOOTSTRAP_CWD` | Launcher | The original cwd captured at launch time. |
 

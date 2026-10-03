@@ -959,6 +959,8 @@ pub(crate) fn truncate(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    use crate::config;
+
     use crate::artifacts::uri::Uri;
     use crate::builders::agent::AgentBuilder;
     use crate::builders::artifacts::output;
@@ -993,7 +995,7 @@ mod tests {
         bootstrap: Bootstrap,
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = state::state_dir_for("gr-test");
+        let state_dir = config::state_root().join("gr-test");
         let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -1006,7 +1008,7 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let state_data = StateData::open(&state_dir);
+        let state_data = StateData::open("gr-test").unwrap();
 
         let definition = StaticDefinition::new(
             "test".to_string(),

@@ -1101,9 +1101,8 @@ async fn land(id: &str) -> Result<(), String> {
     };
     let workdir = raw.get("workdir").and_then(Value::as_str).unwrap_or("");
     let worktree = (!workdir.is_empty()).then(|| PathBuf::from(workdir));
-    let overlay_dir = config::project_overlay_dir(&project_root);
 
-    let store = FileSystemStateStore::open(state_dir.to_path_buf());
+    let store = FileSystemStateStore::from_path(state_dir.to_path_buf());
 
     let prepared = prepare_exec(&exec, &store, &store, "", &HashMap::new())
         .await
@@ -1120,11 +1119,9 @@ async fn land(id: &str) -> Result<(), String> {
     let mut env: HashMap<String, String> = std::env::vars().collect();
     let scratch_dir = config::scratch_root(Some(id));
     env.extend(system_env(
-        &state_dir,
         id,
         &project_root,
         worktree.as_deref(),
-        &overlay_dir,
         &scratch_dir,
     ));
     for (k, v) in &prepared.substitution_env {

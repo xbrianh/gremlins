@@ -411,6 +411,8 @@ async fn run_cli_out(
 mod tests {
     use super::*;
 
+    use crate::config;
+
     use std::path::PathBuf;
 
     use crate::clients::client::Client;
@@ -603,7 +605,7 @@ mod tests {
         stage_inputs: HashMap<String, String>,
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = state::state_dir_for("gr-test");
+        let state_dir = config::state_root().join("gr-test");
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&worktree).unwrap();
@@ -616,7 +618,7 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let state_data = StateData::open(&state_dir);
+        let state_data = StateData::open("gr-test").unwrap();
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),

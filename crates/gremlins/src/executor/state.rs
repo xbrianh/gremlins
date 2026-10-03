@@ -351,6 +351,22 @@ fn is_file_artifact(data_uri: &str) -> bool {
     data_uri.starts_with('/')
 }
 
+/// Validate that a gremlin id component is safe to use as a path segment.
+///
+/// Rejects empty strings, strings containing `..`, and strings with
+/// characters outside `[A-Za-z0-9_-]`.
+fn validate_gremlin_id_component(id: &str) -> Result<(), StateError> {
+    if id.is_empty()
+        || id.contains("..")
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(StateError::Other(format!("invalid gremlin id {id:?}")));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // FileSystemStateStore — filesystem-backed implementation
 // ---------------------------------------------------------------------------
@@ -370,14 +386,31 @@ impl FileSystemStateStore {
     }
 
     /// Create a new state directory, write initial state.json, return a live store.
-    pub fn create(state_dir: PathBuf, initial: &Map<String, Value>) -> Result<Self, StateError> {
+    pub fn create(gremlin_id: &str, initial: &Map<String, Value>) -> Result<Self, StateError> {
+        validate_gremlin_id_component(gremlin_id)?;
+        let state_dir = config::state_root().join(gremlin_id);
+        std::fs::create_dir_all(&state_dir)?;
         std::fs::create_dir_all(state_dir.join("artifacts"))?;
         write_state(&state_dir, initial)?;
         Ok(FileSystemStateStore { state_dir })
     }
 
     /// Open an existing state directory. Does NOT write anything.
-    pub fn open(state_dir: PathBuf) -> Self {
+    pub fn open(gremlin_id: &str) -> Result<Self, StateError> {
+        validate_gremlin_id_component(gremlin_id)?;
+        let state_dir = config::state_root().join(gremlin_id);
+        if !state_dir.is_dir() {
+            return Err(StateError::Other(format!(
+                "no state directory: {}",
+                state_dir.display()
+            )));
+        }
+        Ok(FileSystemStateStore { state_dir })
+    }
+
+    /// Open a store from an explicit path (for callers that already have a
+    /// state directory path, e.g. the CLI).
+    pub fn from_path(state_dir: PathBuf) -> Self {
         FileSystemStateStore { state_dir }
     }
 
@@ -1089,7 +1122,8 @@ impl StateStore for FileSystemStateStore {
         &self,
         child_gremlin_id: &str,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
-        let child_dir = state_dir_for(child_gremlin_id);
+        validate_gremlin_id_component(child_gremlin_id)?;
+        let child_dir = config::state_root().join(child_gremlin_id);
         tokio::fs::create_dir_all(&child_dir).await?;
         let child_artifact_dir = child_dir.join("artifacts");
         tokio::fs::create_dir_all(&child_artifact_dir).await?;
@@ -1104,7 +1138,7 @@ impl StateStore for FileSystemStateStore {
         // Seed registry from parent, remapping file-backed bindings
         // that point into the parent artifact directory to the
         // corresponding child paths.
-        let mut child_store = FileSystemStateStore::open(child_dir);
+        let mut child_store = FileSystemStateStore::open(child_gremlin_id)?;
         let parent_registry = self.read_registry_json().await;
         if !parent_registry.is_empty() {
             let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
@@ -1362,23 +1396,19 @@ pub struct StateData {
 
 impl StateData {
     /// Create a new state directory, write initial state.json, return a live handle.
-    pub fn new(state_dir: &Path, initial: &Map<String, Value>) -> Result<Self, StateError> {
-        let store = Box::new(FileSystemStateStore::create(
-            state_dir.to_path_buf(),
-            initial,
-        )?);
-        let gremlin_id = initial.get("id").and_then(|v| v.as_str()).map(String::from);
+    pub fn new(gremlin_id: &str, initial: &Map<String, Value>) -> Result<Self, StateError> {
+        let store = Box::new(FileSystemStateStore::create(gremlin_id, initial)?);
+        let gremlin_id = Some(gremlin_id.to_string());
         Ok(Self { gremlin_id, store })
     }
 
     /// Open an existing state directory. Does NOT write anything.
-    pub fn open(state_dir: &Path) -> Self {
-        let store = Box::new(FileSystemStateStore::open(state_dir.to_path_buf()));
-        let gremlin_id = read_state_json(Some(&state_dir.join("state.json")))
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        Self { gremlin_id, store }
+    pub fn open(gremlin_id: &str) -> Result<Self, StateError> {
+        let store = Box::new(FileSystemStateStore::open(gremlin_id)?);
+        Ok(Self {
+            gremlin_id: Some(gremlin_id.to_string()),
+            store,
+        })
     }
 
     pub fn from_store(
@@ -1572,7 +1602,7 @@ impl StateData {
         }
         Self {
             gremlin_id: Some("test".into()),
-            store: Box::new(FileSystemStateStore::open(state_dir.to_path_buf())),
+            store: Box::new(FileSystemStateStore::from_path(state_dir.to_path_buf())),
         }
     }
 
@@ -1754,19 +1784,9 @@ pub fn field_names() -> [&'static str; 20] {
     ]
 }
 
-/// The state directory for `gremlin_id`.
-///
-/// This is the single source of truth for where a gremlin's state directory
-/// lives on disk. Every caller that needs to locate a gremlin's state dir
-/// — whether to open its `state.json`, read its log, or merge its
-/// artifacts — must go through this function, not through `config`.
-pub(crate) fn state_dir_for(gremlin_id: &str) -> PathBuf {
-    config::state_root().join(gremlin_id)
-}
-
 pub fn resolve_state_file(gremlin_id: Option<&str>) -> Option<PathBuf> {
     let id = gremlin_id.filter(|s| !s.is_empty())?;
-    Some(state_dir_for(id).join("state.json"))
+    Some(config::state_root().join(id).join("state.json"))
 }
 
 /// Enumerate `(id, state.json path)` pairs under the state root.
@@ -1998,7 +2018,7 @@ mod tests {
     fn field_reads_after_disk_write() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             assert_eq!(d.get_field("stage").unwrap(), "implement");
             let mut fields = Map::new();
             fields.insert("stage".into(), Value::String("review".into()));
@@ -2039,7 +2059,7 @@ mod tests {
     fn get_field_falls_back_to_default() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             assert_eq!(d.get_field("attempt").unwrap(), "");
             assert_eq!(d.get_field("stage").unwrap(), "implement");
             assert_eq!(
@@ -2055,7 +2075,7 @@ mod tests {
     fn patch_merges_and_deletes() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
             d.patch(&[], &fields);
@@ -2073,7 +2093,10 @@ mod tests {
     #[test]
     fn patch_noop_without_gremlin_id() {
         let dir = tempfile::tempdir().unwrap();
-        let d = StateData::open(dir.path());
+        let d = StateData::from_store(
+            None,
+            Box::new(FileSystemStateStore::from_path(dir.path().to_path_buf())),
+        );
         d.patch(&[], &Map::new());
         d.record_stage_error("other", "x");
         d.set_stage("running", None, "");
@@ -2083,7 +2106,7 @@ mod tests {
     fn set_stage_writes_stamp_and_deletes_sub_stage() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             d.set_stage("implement", Some(&serde_json::json!({"k": 1})), "");
             let raw = read_state_json(Some(&sf));
             assert_eq!(raw.get("stage").unwrap(), "implement");
@@ -2103,7 +2126,7 @@ mod tests {
     fn set_stage_parent_pins_stage_and_sub_stage() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             d.set_stage("github-review-pull-request", None, "reviews");
             let raw = read_state_json(Some(&sf));
             assert_eq!(raw.get("stage").unwrap(), "reviews");
@@ -2115,7 +2138,7 @@ mod tests {
     fn record_stage_error_requires_attempt() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             d.record_stage_error("other", "no attempt yet");
             let state_dir = sf.parent().unwrap();
             assert!(std::fs::read_dir(state_dir).unwrap().all(|e| !e
@@ -2150,16 +2173,16 @@ mod tests {
         // must win and no temporary files may be left behind.
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
             d.patch(&[], &fields);
 
             let handles: Vec<_> = (0..16)
                 .map(|i| {
-                    let state_dir = sandbox.path().join("state").join("gr-test");
+                    let _state_dir = sandbox.path().join("state").join("gr-test");
                     std::thread::spawn(move || {
-                        let data = StateData::open(&state_dir);
+                        let data = StateData::open("gr-test").unwrap();
                         data.record_stage_error("other", &format!("writer-{i}"));
                     })
                 })
@@ -2195,7 +2218,7 @@ mod tests {
     fn stage_error_keeps_non_string_values() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
             d.patch(&[], &fields);
@@ -2221,7 +2244,7 @@ mod tests {
     fn accumulate_token_usage_adds_integers() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             d.accumulate_token_usage(&HashMap::from([("prompt_tokens".to_string(), 5)]));
             d.accumulate_token_usage(&HashMap::from([
                 ("prompt_tokens".to_string(), 3),
@@ -2238,7 +2261,7 @@ mod tests {
     fn parallel_worktrees_add_and_clear() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             d.patch_parallel_worktrees(
                 "reviews",
                 Some("abc123"),
@@ -2258,7 +2281,7 @@ mod tests {
     fn subprocess_cost_accumulates_and_validates() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             d.add_subprocess_cost(0.25);
             d.add_subprocess_cost(0.5);
             d.add_subprocess_cost(-1.0);
@@ -2273,7 +2296,7 @@ mod tests {
     fn terminal_state_touches_finished_and_patches() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             d.write_terminal_state(0);
             let state_dir = sf.parent().unwrap();
             assert!(state_dir.join("finished").exists());
@@ -2290,39 +2313,42 @@ mod tests {
 
     #[test]
     fn state_data_new_creates_dir_and_writes_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join("child");
-        let mut payload = Map::new();
-        payload.insert("id".into(), Value::String("child".into()));
-        payload.insert("definition_path".into(), Value::String("/p.yaml".into()));
-        let d = StateData::new(&state_dir, &payload).unwrap();
-        let raw = d.state_tree();
-        assert_eq!(raw.get("id").unwrap(), "child");
-        assert_eq!(raw.get("definition_path").unwrap(), "/p.yaml");
-        assert!(state_dir.join("state.json").exists());
-        assert!(state_dir.join("artifacts").is_dir());
+        with_sandbox(None, |sandbox| {
+            let mut payload = Map::new();
+            payload.insert("id".into(), Value::String("child".into()));
+            payload.insert("definition_path".into(), Value::String("/p.yaml".into()));
+            let d = StateData::new("child", &payload).unwrap();
+            let raw = d.state_tree();
+            assert_eq!(raw.get("id").unwrap(), "child");
+            assert_eq!(raw.get("definition_path").unwrap(), "/p.yaml");
+            assert!(d.state_dir().join("state.json").exists());
+            assert!(d.state_dir().join("artifacts").is_dir());
+            let _ = sandbox;
+        });
     }
 
     #[test]
     fn state_data_open_reads_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join("existing");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(
-            state_dir.join("state.json"),
-            r#"{"id": "existing", "stage": "done"}"#,
-        )
-        .unwrap();
-        let d = StateData::open(&state_dir);
-        assert_eq!(d.read_str("stage"), "done");
-        assert_eq!(d.state_dir(), state_dir.as_path());
+        with_sandbox(None, |sandbox| {
+            let state_dir = sandbox.path().join("state").join("existing");
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::write(
+                state_dir.join("state.json"),
+                r#"{"id": "existing", "stage": "done"}"#,
+            )
+            .unwrap();
+            let d = StateData::open("existing").unwrap();
+            assert_eq!(d.read_str("stage"), "done");
+            assert_eq!(d.state_dir(), state_dir.as_path());
+            let _ = sandbox;
+        });
     }
 
     #[test]
     fn open_creates_and_reads_blob() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             // Write through open
             {
                 let mut blob = d.open_blob("test.txt", BlobMode::Write).unwrap();
@@ -2339,7 +2365,7 @@ mod tests {
     fn write_state_writes_and_tree_reads_it() {
         with_sandbox(None, |sandbox| {
             let _sf = seed(sandbox, "gr-test");
-            let mut d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let mut d = StateData::open("gr-test").unwrap();
             let mut data = Map::new();
             data.insert("stage".into(), Value::String("seeded".into()));
             d.write_state(&data).unwrap();
@@ -2352,7 +2378,7 @@ mod tests {
     fn clear_stage_error_removes_bail_file() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
             d.patch(&[], &fields);
@@ -2383,7 +2409,7 @@ mod tests {
     fn parallel_attempt_patch() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             d.patch_parallel_attempt("bail-child", "attempt-bail");
             let raw = read_state_json(Some(&sf));
             assert_eq!(raw["parallel_attempts"]["bail-child"], "attempt-bail");
@@ -2394,7 +2420,7 @@ mod tests {
     fn parallel_worktrees_reads_back() {
         with_sandbox(None, |sandbox| {
             let _sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             let mut paths = HashMap::new();
             paths.insert("a".to_string(), "/wt/a".to_string());
             d.patch_parallel_worktrees("reviews", Some("abc123"), Some(&paths));
@@ -2409,7 +2435,7 @@ mod tests {
     fn clear_parallel_attempts_removes_key() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
+            let d = StateData::open("gr-test").unwrap();
             d.patch_parallel_attempt("a", "attempt-a");
             d.clear_parallel_attempts();
             assert!(read_state_json(Some(&sf))
@@ -2464,7 +2490,7 @@ mod tests {
     #[tokio::test]
     async fn test_data_uri_unbound_raises_missing() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore::open(
+        let store = FileSystemStateStore::from_path(
             artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf(),
         );
         let err = store.data_uri("nonexistent").await.unwrap_err();
@@ -2475,14 +2501,14 @@ mod tests {
     async fn test_write_into_registry_persists_and_roundtrip() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir.clone());
+        let store = FileSystemStateStore::from_path(state_dir.clone());
         let uri = Uri::new("artifact".to_string(), "foo.txt".to_string());
         let path = store.write_into_registry(&uri, "hello").await.unwrap();
         assert!(path.contains("foo.txt"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
 
         // Reload from disk
-        let store2 = FileSystemStateStore::open(state_dir);
+        let store2 = FileSystemStateStore::from_path(state_dir);
         assert_eq!(store2.data_uri("artifact://foo.txt").await.unwrap(), path);
     }
 
@@ -2490,7 +2516,7 @@ mod tests {
     async fn test_path_for_uri_does_not_register() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let uri = Uri::parse("artifact://later.txt").unwrap();
         let path = store.path_for_uri(&uri).await.unwrap();
         assert!(path.ends_with("later.txt"));
@@ -2501,7 +2527,7 @@ mod tests {
     async fn test_commit_idempotent_same_path() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let uri = Uri::parse("artifact://a.txt").unwrap();
         let path = store.path_for_uri(&uri).await.unwrap();
         std::fs::write(&path, "").unwrap();
@@ -2513,7 +2539,7 @@ mod tests {
     async fn test_commit_with_missing_file_succeeds() {
         let (tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let missing = tmp.path().join("does-not-exist.txt");
         // commit does not check file existence; it only enforces key uniqueness
         store
@@ -2527,7 +2553,7 @@ mod tests {
     async fn test_commit_conflicting_path_raises() {
         let (tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let one = tmp.path().join("one");
         let two = tmp.path().join("two");
         std::fs::write(&one, "").unwrap();
@@ -2549,7 +2575,7 @@ mod tests {
         let src = tmp.path().join("src.txt");
         std::fs::write(&src, "copied").unwrap();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let uri = Uri::parse("artifact://dst.txt").unwrap();
         let path = store.copy_into_registry(&uri, &src).await.unwrap();
         assert!(store.is_registered("artifact://dst.txt").await);
@@ -2560,7 +2586,7 @@ mod tests {
     async fn test_path_escape_prevention() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let uri = Uri::new("artifact".to_string(), "../bad.txt".to_string());
         assert!(store.path_for_uri(&uri).await.is_err());
     }
@@ -2569,7 +2595,7 @@ mod tests {
     async fn test_content_reads_file() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "hello.txt", "world").await;
         assert_eq!(
             store.content("artifact://hello.txt", None).await.unwrap(),
@@ -2581,7 +2607,7 @@ mod tests {
     async fn test_content_with_json_path() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "data.json", r#"{"a":{"b":"c"}}"#).await;
         let content = store
             .content("artifact://data.json", Some("a.b"))
@@ -2594,7 +2620,7 @@ mod tests {
     async fn test_content_reads_file_containing_uri_text() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "range", "git://range/abc..def").await;
         assert_eq!(
             store.content("artifact://range", None).await.unwrap(),
@@ -2606,7 +2632,7 @@ mod tests {
     async fn test_is_registered_false_for_missing_key() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         assert!(!store.is_registered("nonexistent").await);
     }
 
@@ -2614,7 +2640,7 @@ mod tests {
     async fn test_is_registered_true_after_write() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "stuff.txt", "data").await;
         assert!(store.is_registered("artifact://stuff.txt").await);
     }
@@ -2623,7 +2649,7 @@ mod tests {
     async fn test_is_registered_true_after_file_deleted() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let path = write_file(&store, "dead.txt", "data").await;
         assert!(store.is_registered("artifact://dead.txt").await);
         std::fs::remove_file(&path).unwrap();
@@ -2634,7 +2660,7 @@ mod tests {
     async fn test_keys_returns_registered_keys() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "a", "").await;
         write_file(&store, "b", "").await;
         let mut keys = store.keys().await;
@@ -2648,11 +2674,11 @@ mod tests {
         let (_, other_dir) = setup_registry();
 
         let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
-        let other = FileSystemStateStore::open(other_state_dir);
+        let other = FileSystemStateStore::from_path(other_state_dir);
         write_file(&other, "k1", "v").await;
 
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let count = store.join(&other, Collision::Error, None).await.unwrap();
         assert_eq!(count, 1);
         // The key is registered and its content is accessible.
@@ -2666,11 +2692,11 @@ mod tests {
         let (_, other_dir) = setup_registry();
 
         let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
-        let other = FileSystemStateStore::open(other_state_dir);
+        let other = FileSystemStateStore::from_path(other_state_dir);
         write_file(&other, "child", "v").await;
 
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let count = store
             .join(&other, Collision::Error, Some("parent"))
             .await
@@ -2688,12 +2714,12 @@ mod tests {
         let _ = &tmp2;
 
         let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
-        let other = FileSystemStateStore::open(other_state_dir);
+        let other = FileSystemStateStore::from_path(other_state_dir);
         let src_file = write_file(&other, "note.txt", "hello").await;
         assert!(Path::new(&src_file).exists());
 
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         let count = store.join(&other, Collision::Error, None).await.unwrap();
         assert_eq!(count, 1);
         let stored = store.data_uri("artifact://note.txt").await.unwrap();
@@ -2710,11 +2736,11 @@ mod tests {
         let (tmp2, other_dir) = setup_registry();
 
         let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
-        let other = FileSystemStateStore::open(other_state_dir);
+        let other = FileSystemStateStore::from_path(other_state_dir);
         write_file(&other, "data.txt", "survive-me").await;
 
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         store.join(&other, Collision::Error, None).await.unwrap();
 
         // Delete the source registry's artifact directory.
@@ -2734,11 +2760,11 @@ mod tests {
         let (_, other_dir) = setup_registry();
 
         let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
-        let other = FileSystemStateStore::open(other_state_dir);
+        let other = FileSystemStateStore::from_path(other_state_dir);
         write_file(&other, "dup", "from-other").await;
 
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         // Pre-register the same key in the destination.
         write_file(&store, "dup", "existing").await;
 
@@ -2755,11 +2781,11 @@ mod tests {
         let (_, other_dir) = setup_registry();
 
         let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
-        let other = FileSystemStateStore::open(other_state_dir);
+        let other = FileSystemStateStore::from_path(other_state_dir);
         write_file(&other, "dup", "from-other").await;
 
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "dup", "existing").await;
 
         let count = store.join(&other, Collision::Ignore, None).await.unwrap();
@@ -2776,7 +2802,7 @@ mod tests {
     async fn test_filesystem_checkout_subset() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "a", "content-a").await;
         write_file(&store, "b", "content-b").await;
         write_file(&store, "c", "content-c").await;
@@ -2804,7 +2830,7 @@ mod tests {
     async fn test_filesystem_checkout_empty_keys() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "a", "content-a").await;
 
         let localized = store.checkout_registry(&[]).await.unwrap();
@@ -2815,7 +2841,7 @@ mod tests {
     async fn test_filesystem_checkout_isolated_directory() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "secret", "classified").await;
 
         let localized = store
@@ -2834,7 +2860,7 @@ mod tests {
     async fn test_filesystem_artifact_dir() {
         let (_tmp, artifact_dir) = setup_registry();
         let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
-        let store = FileSystemStateStore::open(state_dir);
+        let store = FileSystemStateStore::from_path(state_dir);
         assert_eq!(store.artifact_dir(), artifact_dir.as_path());
     }
 
