@@ -640,7 +640,7 @@ async fn run_exec(
         // non-zero status is an error *unless* one of the stage's binds is a
         // bail URI, in which case the stage's failure is its signal — the bail
         // artifact it wrote is what the enclosing loop or the run loop reads.
-        run_shell(&prepared)
+        run_shell(&prepared, &gremlin.state)
             .await
             .map_err(|error| RunError::StageFailed {
                 stage: prepared.name.clone(),
@@ -904,12 +904,7 @@ impl Gremlin {
             // stage runs) does not spuriously flag the resumed run as bailed.
             let existing_attempt = self.state.read_str("attempt");
             let attempt = if existing_attempt.starts_with(&format!("{}-", stage.name())) {
-                if let Some(sf) = self.state.state_file() {
-                    if let Some(parent) = sf.parent() {
-                        let bail_path = parent.join(format!("bail_{existing_attempt}.json"));
-                        let _ = std::fs::remove_file(&bail_path);
-                    }
-                }
+                self.state.clear_stage_error(&existing_attempt);
                 existing_attempt
             } else {
                 format!("{}-{}", stage.name(), state::token_hex(4))

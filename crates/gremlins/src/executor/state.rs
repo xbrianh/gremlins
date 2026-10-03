@@ -26,6 +26,22 @@ pub enum StateError {
     Other(String),
 }
 
+/// A general handle for named state-directory files.
+pub(crate) trait StateBlob: std::io::Read + std::io::Write + std::io::Seek + Send {}
+impl<T: std::io::Read + std::io::Write + std::io::Seek + Send> StateBlob for T {}
+
+/// How to open a named blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlobMode {
+    /// Open an existing file for reading and writing. Fails if absent.
+    #[allow(dead_code)]
+    ReadWrite,
+    /// Create or truncate for writing.
+    Write,
+    /// Create or append.
+    Append,
+}
+
 // ---------------------------------------------------------------------------
 // StateStore trait — the storage backend seam
 // ---------------------------------------------------------------------------
@@ -36,8 +52,21 @@ pub(crate) trait StateStore: Send + Sync + Debug {
     where
         Self: Sized;
 
-    /// The filesystem path to `state.json`, if this backend has one.
-    fn state_file(&self) -> Option<&Path>;
+    /// Lock-free snapshot of the full state tree.
+    fn state_tree(&self) -> Map<String, Value>;
+
+    /// Write `data` as `state.json` into the store's directory.
+    fn seed(&mut self, data: &Map<String, Value>) -> Result<(), StateError>;
+
+    /// Open a named blob in the state directory. Creates parent directories
+    /// as needed. The returned handle supports Read + Write + Seek.
+    fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError>;
+
+    /// Check whether a named blob exists without creating it.
+    fn exists(&self, name: &str) -> bool;
+
+    /// Remove a stale bail file for the given attempt.
+    fn clear_stage_error(&self, attempt: &str);
 
     // --- reads ---
 
@@ -99,8 +128,73 @@ impl StateStore for FileStateStore {
         }
     }
 
-    fn state_file(&self) -> Option<&Path> {
-        self.state_file.as_deref()
+    fn state_tree(&self) -> Map<String, Value> {
+        read_state_json(self.state_file.as_deref())
+    }
+
+    fn seed(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+        let state_dir = self
+            .state_file
+            .as_ref()
+            .and_then(|sf| sf.parent().map(|p| p.to_path_buf()))
+            .ok_or_else(|| StateError::Other("no state directory".into()))?;
+        write_state(&state_dir, data)?;
+        self.state_file = Some(state_dir.join("state.json"));
+        Ok(())
+    }
+
+    fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
+        // Reject traversal and absolute paths.
+        if name.contains("..") || name.starts_with('/') || name.contains('\0') {
+            return Err(StateError::Other(format!(
+                "invalid blob name {name:?}: traversal or absolute path rejected"
+            )));
+        }
+        let state_dir = self
+            .state_file
+            .as_ref()
+            .and_then(|sf| sf.parent())
+            .ok_or_else(|| StateError::Other("no state directory".into()))?;
+        let path = state_dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut opts = OpenOptions::new();
+        match mode {
+            BlobMode::ReadWrite => {
+                opts.read(true).write(true).create(false);
+            }
+            BlobMode::Write => {
+                opts.write(true).create(true).truncate(true);
+            }
+            BlobMode::Append => {
+                opts.append(true).create(true);
+            }
+        }
+        let file = opts.open(&path)?;
+        Ok(Box::new(file))
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        let Some(state_dir) = self.state_file.as_ref().and_then(|sf| sf.parent()) else {
+            return false;
+        };
+        // Reject traversal.
+        if name.contains("..") || name.starts_with('/') || name.contains('\0') {
+            return false;
+        }
+        state_dir.join(name).exists()
+    }
+
+    fn clear_stage_error(&self, attempt: &str) {
+        let Some(sf) = self.state_file.as_ref() else {
+            return;
+        };
+        let Some(parent) = sf.parent() else {
+            return;
+        };
+        let bail_path = parent.join(format!("bail_{attempt}.json"));
+        let _ = std::fs::remove_file(&bail_path);
     }
 
     fn get_field(&self, name: &str) -> Option<Value> {
@@ -371,11 +465,6 @@ impl StateData {
         Self { gremlin_id, store }
     }
 
-    /// The filesystem path to `state.json`, if this backend has one.
-    pub fn state_file(&self) -> Option<&Path> {
-        self.store.state_file()
-    }
-
     // --- delegating reads ---
 
     pub fn get_field(&self, name: &str) -> Option<Value> {
@@ -427,6 +516,30 @@ impl StateData {
         self.store.persist(state_dir, &out)
     }
 
+    pub fn state_tree(&self) -> Map<String, Value> {
+        self.store.state_tree()
+    }
+
+    pub fn seed(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+        self.store.seed(data)
+    }
+
+    pub(crate) fn open(
+        &self,
+        name: &str,
+        mode: BlobMode,
+    ) -> Result<Box<dyn StateBlob>, StateError> {
+        self.store.open(name, mode)
+    }
+
+    pub(crate) fn exists(&self, name: &str) -> bool {
+        self.store.exists(name)
+    }
+
+    pub fn clear_stage_error(&self, attempt: &str) {
+        self.store.clear_stage_error(attempt);
+    }
+
     pub fn patch_parallel_worktrees(
         &self,
         group_name: &str,
@@ -449,6 +562,24 @@ impl StateData {
     }
 
     // --- methods with guards that stay on StateData ---
+
+    /// Create a `StateData` pointed at an explicit state directory.
+    /// Only available in tests — production code uses [`StateData::new`]
+    /// which derives the directory from `config::state_root`.
+    #[cfg(test)]
+    pub(crate) fn with_state_dir(state_dir: &std::path::Path) -> Self {
+        let sf = state_dir.join("state.json");
+        let _ = std::fs::create_dir_all(state_dir);
+        if !sf.exists() {
+            let _ = std::fs::write(&sf, "{}");
+        }
+        Self {
+            gremlin_id: Some("test".into()),
+            store: Box::new(FileStateStore {
+                state_file: Some(sf),
+            }),
+        }
+    }
 
     pub fn set_stage(&self, stage: &str, sub_stage: Option<&Value>, parent_stage: &str) {
         if self.gremlin_id.as_deref().unwrap_or("").is_empty() {
@@ -1139,16 +1270,58 @@ mod tests {
         let mut payload = Map::new();
         payload.insert("definition_path".into(), Value::String("/p.yaml".into()));
         d.persist(dir.path(), &payload).unwrap();
-        assert_eq!(
-            d.state_file(),
-            Some(dir.path().join("state.json").as_path())
-        );
-        let raw = read_state_json(Some(&dir.path().join("state.json")));
+        let raw = d.state_tree();
         assert_eq!(raw.get("id").unwrap(), "child");
         assert_eq!(raw.get("definition_path").unwrap(), "/p.yaml");
 
         let mut none = StateData::new(None);
         assert!(none.persist(dir.path(), &Map::new()).is_err());
+    }
+
+    #[test]
+    fn open_creates_and_reads_blob() {
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            // Write through open
+            {
+                let mut blob = d.open("test.txt", BlobMode::Write).unwrap();
+                blob.write_all(b"hello").unwrap();
+            }
+            // Read back
+            let state_dir = sf.parent().unwrap();
+            let content = std::fs::read_to_string(state_dir.join("test.txt")).unwrap();
+            assert_eq!(content, "hello");
+        });
+    }
+
+    #[test]
+    fn seed_writes_state_and_tree_reads_it() {
+        with_sandbox(None, |sandbox| {
+            let _sf = seed(sandbox, "gr-test");
+            let mut d = StateData::new(Some("gr-test".into()));
+            let mut data = Map::new();
+            data.insert("stage".into(), Value::String("seeded".into()));
+            d.seed(&data).unwrap();
+            let tree = d.state_tree();
+            assert_eq!(tree.get("stage").unwrap(), "seeded");
+        });
+    }
+
+    #[test]
+    fn clear_stage_error_removes_bail_file() {
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            let mut fields = Map::new();
+            fields.insert("attempt".into(), Value::String("a1".into()));
+            d.patch(&[], &fields);
+            d.record_stage_error("other", "boom");
+            let state_dir = sf.parent().unwrap();
+            assert!(state_dir.join("bail_a1.json").exists());
+            d.clear_stage_error("a1");
+            assert!(!state_dir.join("bail_a1.json").exists());
+        });
     }
 
     #[test]

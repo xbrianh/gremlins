@@ -721,10 +721,7 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
         if live.contains_key(&id) {
             continue;
         }
-        let Some(state_dir) = state_json_path.parent() else {
-            continue;
-        };
-        if state_dir.join("closed").is_file() {
+        if state::StateData::new(Some(id.clone())).exists("closed") {
             continue;
         }
         let raw = state::read_state_json(Some(&state_json_path));
