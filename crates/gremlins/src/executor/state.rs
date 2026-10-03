@@ -371,7 +371,7 @@ impl StateStore for FileStateStore {
 
 pub struct StateData {
     pub gremlin_id: Option<String>,
-    store: Box<dyn StateStore>,
+    store: Box<dyn StateStore + Send + Sync>,
 }
 
 impl StateData {
@@ -381,7 +381,10 @@ impl StateData {
     }
 
     /// For tests: construct with a pre-built store.
-    pub(crate) fn from_store(gremlin_id: Option<String>, store: Box<dyn StateStore>) -> Self {
+    pub(crate) fn from_store(
+        gremlin_id: Option<String>,
+        store: Box<dyn StateStore + Send + Sync>,
+    ) -> Self {
         Self { gremlin_id, store }
     }
 
