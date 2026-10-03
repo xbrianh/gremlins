@@ -14,7 +14,6 @@
 //! "orphan" display in `gremlins ls` is gone.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::Arc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -212,15 +211,6 @@ pub(crate) async fn run_parallel(
         let mut state_rx = lc.state_rx;
         let registry_rx = lc.registry_rx;
         let sem = semaphore.clone();
-        // Derive the child state dir from the parent's state_dir parent —
-        // this is the same layout `fork()` uses and works regardless of
-        // whether `state_root` was overridden in tests.
-        let parent_state_root = gremlin
-            .state_dir
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .to_path_buf();
-
         let handle = tokio::spawn(async move {
             // Acquire semaphore permit inside the spawned task so the
             // launch loop never blocks on max_concurrent.
@@ -235,7 +225,7 @@ pub(crate) async fn run_parallel(
                         let state = state_rx.borrow().clone();
                         if state.status == "done" || state.status == "stopped" {
                             // Read the child's state.json to get the real outcome.
-                            let child_state_dir = parent_state_root.join(&child_id);
+                            let child_state_dir = state::state_dir_for(&child_id);
                             let child_state_file = child_state_dir.join("state.json");
                             let outcome = if child_state_file.is_file() {
                                 let raw = state::read_state_json(Some(&child_state_file));
@@ -403,10 +393,9 @@ pub(crate) async fn run_parallel(
         "parallel group {group_name}: merging artifacts from {} successful children",
         child_results.len() - failed_names.len()
     );
-    let state_root = gremlin.runtime_config.state_root.clone();
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
-            if let Err(e) = merge_child_artifacts(gremlin, outcome, &state_root).await {
+            if let Err(e) = merge_child_artifacts(gremlin, outcome).await {
                 log::warn!(
                     "parallel group {group_name}: failed to merge artifacts from {}: {e}",
                     outcome.child_name
@@ -471,7 +460,6 @@ struct ChildOutcome {
 async fn merge_child_artifacts(
     gremlin: &mut Gremlin,
     outcome: &ChildOutcome,
-    state_root: &Path,
 ) -> Result<(), RunError> {
     use crate::artifacts::registry::{Collision, FileSystemArtifactRegistry};
 
@@ -492,7 +480,7 @@ async fn merge_child_artifacts(
     }
 
     // Fallback: construct a FileSystemArtifactRegistry from disk.
-    let child_artifact_dir = state_root.join(&outcome.child_id).join("artifacts");
+    let child_artifact_dir = state::state_dir_for(&outcome.child_id).join("artifacts");
     if !child_artifact_dir.exists() {
         return Ok(());
     }
@@ -513,11 +501,7 @@ async fn merge_child_artifacts(
 
 /// Aggregate token usage and subprocess cost from a child into the parent.
 fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
-    let parent_state_root = gremlin
-        .state_dir
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let child_state_dir = parent_state_root.join(&outcome.child_id);
+    let child_state_dir = state::state_dir_for(&outcome.child_id);
     let child_state_file = child_state_dir.join("state.json");
     if !child_state_file.is_file() {
         return;
@@ -561,11 +545,7 @@ fn cleanup_child_fully(child_name: &str, child_id: &str) {
 fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &str) {
     use crate::core::git;
 
-    let parent_state_root = gremlin
-        .state_dir
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let child_state_dir = parent_state_root.join(child_id);
+    let child_state_dir = state::state_dir_for(child_id);
     let child_state_file = child_state_dir.join("state.json");
     if !child_state_file.is_file() {
         return;
@@ -601,7 +581,7 @@ mod tests {
     use crate::builders::artifacts::output;
     use crate::builders::composite::ParallelBuilder;
     use crate::builders::exec::ExecBuilder;
-    use crate::config;
+    
     use crate::definition::StageSpec;
     use crate::definition::{ExecutorStage, StaticDefinition};
     use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig};
@@ -628,7 +608,7 @@ mod tests {
 
     fn test_gremlin(stages: Vec<StageSpec>, default_client: &str) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = config::state_root().join("gr-test");
+        let state_dir = state::state_dir_for("gr-test");
         let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -673,11 +653,7 @@ mod tests {
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             dry_run: false,
-            runtime_config: {
-                let mut rc = RuntimeConfig::snapshot("gr-test");
-                rc.state_root = config::state_root();
-                rc
-            },
+            runtime_config: RuntimeConfig::snapshot("gr-test"),
             cancel_token: None,
             interactive_session: None,
         };

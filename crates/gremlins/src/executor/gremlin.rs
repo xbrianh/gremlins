@@ -126,8 +126,6 @@ pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
 pub(crate) struct RuntimeConfig {
     /// Resolved scratch directory for this gremlin.
     pub scratch_dir: PathBuf,
-    /// Resolved state root.
-    pub state_root: PathBuf,
     /// Exact-match stage→client mappings from config.
     pub stage_clients_exact: HashMap<String, String>,
     /// Prefix-match stage→client mappings from config.
@@ -151,7 +149,6 @@ impl Clone for RuntimeConfig {
     fn clone(&self) -> Self {
         Self {
             scratch_dir: self.scratch_dir.clone(),
-            state_root: self.state_root.clone(),
             stage_clients_exact: self.stage_clients_exact.clone(),
             stage_clients_prefix: self.stage_clients_prefix.clone(),
             task_clients_exact: self.task_clients_exact.clone(),
@@ -186,7 +183,6 @@ impl RuntimeConfig {
         let base_process_env: HashMap<String, String> = std::env::vars().collect();
         Self {
             scratch_dir: config::scratch_root(Some(gremlin_id)),
-            state_root: config::state_root(),
             stage_clients_exact: stage_exact,
             stage_clients_prefix: stage_prefix,
             task_clients_exact: task_exact,
@@ -203,7 +199,6 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             scratch_dir: PathBuf::new(),
-            state_root: PathBuf::new(),
             stage_clients_exact: HashMap::new(),
             stage_clients_prefix: HashMap::new(),
             task_clients_exact: HashMap::new(),
@@ -287,11 +282,10 @@ impl Gremlin {
         validate_gremlin_id(definition_name).map_err(RunError::Message)?;
 
         // 1. Generate a gremlin id with collision-avoidance.
-        let state_root = config::state_root();
         let gremlin_id = loop {
             let hex = state::token_hex(2);
             let candidate = format!("{definition_name}-{hex}");
-            match std::fs::create_dir(state_root.join(&candidate)) {
+            match std::fs::create_dir(state::state_dir_for(&candidate)) {
                 Ok(()) => break GremlinId(candidate),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => {
@@ -302,7 +296,7 @@ impl Gremlin {
             }
         };
 
-        let state_dir = state_root.join(gremlin_id.as_str());
+        let state_dir = state::state_dir_for(gremlin_id.as_str());
         let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&artifact_dir)?;
 
@@ -515,7 +509,7 @@ impl Gremlin {
     /// missing definition becomes a hard error.
     pub fn from(id: &str) -> Result<Gremlin, RunError> {
         let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
-        let state_dir = config::state_root().join(gremlin_id.as_str());
+        let state_dir = state::state_dir_for(gremlin_id.as_str());
         let state_file = state_dir.join("state.json");
 
         if !state_dir.is_dir() {
@@ -866,7 +860,7 @@ impl Gremlin {
             self.client.clone()
         };
 
-        let child_state_dir = config::state_root().join(child_gremlin_id.as_str());
+        let child_state_dir = state::state_dir_for(child_gremlin_id.as_str());
         let child_artifact_dir = child_state_dir.join("artifacts");
         std::fs::create_dir_all(&child_state_dir)?;
         std::fs::create_dir_all(&child_artifact_dir)?;

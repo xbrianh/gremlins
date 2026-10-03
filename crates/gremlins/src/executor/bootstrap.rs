@@ -428,7 +428,7 @@ mod tests {
 
     use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::clients::client::Client;
-    use crate::config;
+    
     use crate::definition::StaticDefinition;
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::{self, StateData};
@@ -617,7 +617,7 @@ mod tests {
         stage_inputs: HashMap<String, String>,
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = config::state_root().join("gr-test");
+        let state_dir = state::state_dir_for("gr-test");
         let artifact_dir = state_dir.join("artifacts");
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&artifact_dir).unwrap();

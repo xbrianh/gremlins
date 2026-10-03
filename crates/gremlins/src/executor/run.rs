@@ -1025,7 +1025,7 @@ mod tests {
     use crate::builders::artifacts::output;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
-    use crate::config;
+    
     use crate::definition::StageSpec;
     use crate::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
@@ -1054,7 +1054,7 @@ mod tests {
         bootstrap: Bootstrap,
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = config::state_root().join("gr-test");
+        let state_dir = state::state_dir_for("gr-test");
         let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();

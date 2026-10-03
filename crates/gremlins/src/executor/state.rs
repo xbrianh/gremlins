@@ -628,9 +628,19 @@ pub fn field_names() -> [&'static str; 20] {
     ]
 }
 
+/// The state directory for `gremlin_id`.
+///
+/// This is the single source of truth for where a gremlin's state directory
+/// lives on disk. Every caller that needs to locate a gremlin's state dir
+/// — whether to open its `state.json`, read its log, or merge its
+/// artifacts — must go through this function, not through `config`.
+pub fn state_dir_for(gremlin_id: &str) -> PathBuf {
+    config::state_root().join(gremlin_id)
+}
+
 pub fn resolve_state_file(gremlin_id: Option<&str>) -> Option<PathBuf> {
     let id = gremlin_id.filter(|s| !s.is_empty())?;
-    Some(config::state_root().join(id).join("state.json"))
+    Some(state_dir_for(id).join("state.json"))
 }
 
 /// Enumerate `(id, state.json path)` pairs under the state root.
