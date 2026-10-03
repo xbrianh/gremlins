@@ -27,6 +27,7 @@
 //! redirect the harness's own paths.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -426,13 +427,16 @@ impl Gremlin {
             // Write the hermetic definition.yaml snapshot now, before we
             // return the handle, so the spawned child always sees the
             // definition as it was at launch time — no TOCTTOU window.
+            {
+                let yaml_bytes = _definition.serialize().map_err(|e| {
+                    RunError::Message(format!("failed to serialize definition: {e}"))
+                })?;
+                let mut blob = state.open("definition.yaml", state::BlobMode::Write)?;
+                blob.write_all(&yaml_bytes).map_err(|e| {
+                    RunError::Message(format!("failed to write hermetic definition: {e}"))
+                })?;
+            }
             let hermetic = state_dir.join("definition.yaml");
-            let yaml_bytes = _definition
-                .serialize()
-                .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
-            std::fs::write(&hermetic, &yaml_bytes).map_err(|e| {
-                RunError::Message(format!("failed to write hermetic definition: {e}"))
-            })?;
             let hermetic = hermetic.canonicalize().unwrap_or(hermetic);
 
             // Point the stub at the hermetic snapshot so init_runtime
@@ -485,11 +489,13 @@ impl Gremlin {
         };
 
         // 5. Create an empty log file.
-        let log_path = gremlin.state_dir.join("log");
-        std::fs::write(&log_path, "").map_err(|e| {
-            cleanup_worktree();
-            RunError::Message(format!("failed to create log: {e}"))
-        })?;
+        gremlin
+            .state
+            .open("log", state::BlobMode::Write)
+            .map_err(|e| {
+                cleanup_worktree();
+                RunError::Message(format!("failed to create log: {e}"))
+            })?;
 
         Ok(gremlin)
     }
@@ -551,12 +557,18 @@ impl Gremlin {
         let recorded_path = str_field(&raw, "definition_path");
         let workdir = str_field(&raw, "workdir");
 
+        let artifact_dir = state_dir.join("artifacts");
+        let state_data = StateData::new(Some(gremlin_id.as_str().to_string()));
+
+        let worktree = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
+        let base_ref_sha = state_data.read_str("worktree_base");
+        let base_ref = state_data.read_str("base_ref");
+
         // A hermetic `definition.yaml` next to the state pins the definition the
         // run actually used; otherwise fall back to resolving the kind. Either
         // way the path is only recorded here — `init_runtime` reads it.
-        let hermetic = state_dir.join("definition.yaml");
-        let definition_path = if hermetic.is_file() {
-            Some(hermetic)
+        let definition_path = if state_data.exists("definition.yaml") {
+            Some(state_dir.join("definition.yaml"))
         } else if !kind.is_empty() {
             resolve_definition_in_project(&kind, &project_root)
         } else {
@@ -567,17 +579,10 @@ impl Gremlin {
         // one (the way `definition.path` is read) sees the same string.
         .map(|path| path.canonicalize().unwrap_or(path));
 
-        let artifact_dir = state_dir.join("artifacts");
-        let state = StateData::new(Some(gremlin_id.as_str().to_string()));
-
-        let worktree = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
-        let base_ref_sha = state.read_str("worktree_base");
-        let base_ref = state.read_str("base_ref");
-
         // `stage_inputs` is what bootstrap's `bind_artifact` resolves against;
         // an absent or null field is an empty map, exactly as the Python
         // `state_json.get("stage_inputs") or {}` read it.
-        let stage_inputs: HashMap<String, String> = state
+        let stage_inputs: HashMap<String, String> = state_data
             .read_field("stage_inputs")
             .and_then(|value| match value {
                 Value::Object(map) => Some(
@@ -613,7 +618,7 @@ impl Gremlin {
             project_root,
             base_ref_sha,
             base_ref,
-            state,
+            state: state_data,
             env: HashMap::new(),
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
             loop_iter: "1".to_string(),
@@ -750,12 +755,15 @@ impl Gremlin {
 
         // Write the hermetic definition.yaml snapshot so every entry point
         // that calls run() gets one — resume, fork, and fresh launch alike.
-        let hermetic = self.state_dir.join("definition.yaml");
-        if !hermetic.exists() {
+        if !self.state.exists("definition.yaml") {
             let yaml_bytes = definition
                 .serialize()
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
-            std::fs::write(&hermetic, &yaml_bytes)
+            let mut blob = self
+                .state
+                .open("definition.yaml", state::BlobMode::Write)
+                .map_err(|e| RunError::Message(format!("failed to snapshot definition: {e}")))?;
+            blob.write_all(&yaml_bytes)
                 .map_err(|e| RunError::Message(format!("failed to snapshot definition: {e}")))?;
         }
 
@@ -967,7 +975,10 @@ impl Gremlin {
         child.insert("exit_code".to_string(), Value::Null);
 
         state::write_state(&child_state_dir, &child)?;
-        std::fs::write(child_state_dir.join("log"), "")?;
+        let child_state = StateData::new(Some(child_id.to_string()));
+        child_state
+            .open("log", state::BlobMode::Write)
+            .map_err(|e| RunError::Message(format!("failed to create child log: {e}")))?;
 
         log::debug!(
             "fork: child {child_id} ready (provider={}, model={} — shares client with parent {parent_id})",
@@ -992,7 +1003,7 @@ impl Gremlin {
             project_root: self.project_root.clone(),
             base_ref_sha: child_worktree_base,
             base_ref: self.base_ref.clone(),
-            state: StateData::new(Some(child_id.to_string())),
+            state: child_state,
             env: self.env.clone(),
             client,
             loop_iter: "1".to_string(),
@@ -1028,9 +1039,8 @@ impl Gremlin {
     pub fn clean(self, remove_state_dir: bool) {
         // Mark closed before touching anything: a run that vanished without a
         // marker reads as a crash, not an intentional cleanup.
-        let closed = self.state_dir.join("closed");
-        if let Err(error) = std::fs::write(&closed, "") {
-            log::warn!("clean: could not touch {}: {error}", closed.display());
+        if let Err(error) = self.state.open("closed", state::BlobMode::Write) {
+            log::warn!("clean: could not touch closed marker: {error}");
         }
 
         self.clean_worktree();

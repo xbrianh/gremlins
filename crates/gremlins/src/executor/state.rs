@@ -27,15 +27,14 @@ pub enum StateError {
 }
 
 /// A general handle for named state-directory files.
-#[allow(dead_code)]
 pub(crate) trait StateBlob: std::io::Read + std::io::Write + std::io::Seek + Send {}
 impl<T: std::io::Read + std::io::Write + std::io::Seek + Send> StateBlob for T {}
 
 /// How to open a named blob.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlobMode {
     /// Open an existing file for reading and writing. Fails if absent.
+    #[allow(dead_code)]
     ReadWrite,
     /// Create or truncate for writing.
     Write,
@@ -61,11 +60,9 @@ pub(crate) trait StateStore: Send + Sync + Debug {
 
     /// Open a named blob in the state directory. Creates parent directories
     /// as needed. The returned handle supports Read + Write + Seek.
-    #[allow(dead_code)]
     fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError>;
 
     /// Check whether a named blob exists without creating it.
-    #[allow(dead_code)]
     fn exists(&self, name: &str) -> bool;
 
     /// Remove a stale bail file for the given attempt.
@@ -527,7 +524,6 @@ impl StateData {
         self.store.seed(data)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn open(
         &self,
         name: &str,
@@ -536,7 +532,6 @@ impl StateData {
         self.store.open(name, mode)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn exists(&self, name: &str) -> bool {
         self.store.exists(name)
     }
@@ -567,6 +562,24 @@ impl StateData {
     }
 
     // --- methods with guards that stay on StateData ---
+
+    /// Create a `StateData` pointed at an explicit state directory.
+    /// Only available in tests — production code uses [`StateData::new`]
+    /// which derives the directory from `config::state_root`.
+    #[cfg(test)]
+    pub(crate) fn with_state_dir(state_dir: &std::path::Path) -> Self {
+        let sf = state_dir.join("state.json");
+        let _ = std::fs::create_dir_all(state_dir);
+        if !sf.exists() {
+            let _ = std::fs::write(&sf, "{}");
+        }
+        Self {
+            gremlin_id: Some("test".into()),
+            store: Box::new(FileStateStore {
+                state_file: Some(sf),
+            }),
+        }
+    }
 
     pub fn set_stage(&self, stage: &str, sub_stage: Option<&Value>, parent_stage: &str) {
         if self.gremlin_id.as_deref().unwrap_or("").is_empty() {

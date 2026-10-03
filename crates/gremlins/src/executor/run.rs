@@ -640,7 +640,7 @@ async fn run_exec(
         // non-zero status is an error *unless* one of the stage's binds is a
         // bail URI, in which case the stage's failure is its signal — the bail
         // artifact it wrote is what the enclosing loop or the run loop reads.
-        run_shell(&prepared)
+        run_shell(&prepared, &gremlin.state)
             .await
             .map_err(|error| RunError::StageFailed {
                 stage: prepared.name.clone(),

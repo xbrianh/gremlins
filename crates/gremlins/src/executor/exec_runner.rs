@@ -9,6 +9,7 @@ use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_shell_async, ProcError, ProcResult};
 use crate::definition::Exec;
+use crate::executor::state::{BlobMode, StateData};
 use crate::executor::vars;
 
 #[derive(Error, Debug)]
@@ -297,7 +298,10 @@ fn build_instrumented_script(
 }
 
 /// Phase 2: run the shell commands. Uses only the prepared data; no registry access.
-pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError> {
+pub async fn run_shell(
+    prepared: &ExecPrepared,
+    state: &StateData,
+) -> Result<ShellResult, ExecError> {
     if prepared.cmds.is_empty() {
         return Ok(ShellResult {
             output: String::new(),
@@ -318,73 +322,45 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         env.insert(k.clone(), v.clone());
     }
 
-    let log_dir = prepared.state_dir.join("exec_stage_logs");
     let safe_name = sanitize_log_filename(&prepared.name);
-    let stream_path = log_dir.join(format!("exec-{safe_name}.log"));
+    let blob_name = format!("exec_stage_logs/exec-{safe_name}.log");
 
-    // Defend against path traversal: after sanitization, the resolved path
-    // must still be a child of the log directory.
-    let stream_path_arg: Option<&std::path::Path> = match std::fs::create_dir_all(&log_dir) {
-        Ok(()) => {
-            // Canonicalize the log dir so we can check containment.
-            let canonical_log_dir = log_dir.canonicalize().ok();
+    // Open the stream file through the state store, which creates parent
+    // directories and rejects traversal / absolute paths.
+    // We also compute the filesystem path for run_shell_async's streaming.
+    let stream_path = prepared.state_dir.join(&blob_name);
 
-            let contained = canonical_log_dir.as_ref().is_some_and(|canon_dir| {
-                // Resolve stream_path. The file may not exist yet, so
-                // canonicalize its parent and join the filename.
-                let resolved = stream_path.canonicalize().ok().unwrap_or_else(|| {
-                    stream_path
-                        .parent()
-                        .and_then(|p| p.canonicalize().ok())
-                        .map(|parent| parent.join(stream_path.file_name().unwrap_or_default()))
-                        .unwrap_or_default()
-                });
-                resolved.starts_with(canon_dir)
-            });
-
-            if !contained {
+    let mut stream_blob: Option<Box<dyn std::io::Write + Send>> =
+        match state.open(&blob_name, BlobMode::Append) {
+            Ok(blob) => {
                 if let Some(ref tx) = prepared.log_tx {
                     let _ = tx.send(format!(
-                        "exec {}: stream path escapes log dir, skipping stream",
+                        "exec {}: streaming output to {}",
+                        prepared.name, blob_name
+                    ));
+                }
+                Some(blob)
+            }
+            Err(e) => {
+                if let Some(ref tx) = prepared.log_tx {
+                    let _ = tx.send(format!(
+                        "exec {}: failed to open exec stage log: {e}",
                         prepared.name
                     ));
                 }
                 None
-            } else {
-                if let Some(ref tx) = prepared.log_tx {
-                    let _ = tx.send(format!(
-                        "exec {}: streaming output to {}",
-                        prepared.name,
-                        stream_path.display()
-                    ));
-                }
-                Some(&stream_path)
             }
-        }
-        Err(e) => {
-            if let Some(ref tx) = prepared.log_tx {
-                let _ = tx.send(format!(
-                    "exec {}: failed to create exec_stage_logs dir: {e}",
-                    prepared.name
-                ));
-            }
-            None
-        }
-    };
+        };
 
     // Write stage header to stream file (best-effort).
-    if stream_path_arg.is_some() {
+    if let Some(ref mut blob) = stream_blob {
         let header = format!(
             "=== exec stage: {} ===\ncwd: {}\ncmds: {}\n",
             prepared.name,
             prepared.cwd.display(),
             prepared.cmds.len(),
         );
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&stream_path)
-            .and_then(|mut f| f.write_all(header.as_bytes()));
+        let _ = blob.write_all(header.as_bytes());
     }
 
     // Run commands as a single instrumented shell script so shell state
@@ -413,6 +389,14 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         ));
     }
 
+    // Pass the filesystem path to run_shell_async for streaming stdout/stderr.
+    // The state store already created parent directories via state.open() above.
+    let stream_path_arg: Option<&std::path::Path> = if stream_blob.is_some() {
+        Some(&stream_path)
+    } else {
+        None
+    };
+
     let result = run_shell_async(
         &script,
         Some(&prepared.cwd),
@@ -433,16 +417,13 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
             );
 
             // Stage footer.
-            if let Some(sp) = stream_path_arg {
+            if let Some(ref mut blob) = stream_blob {
                 let footer = format!(
                     "--- exit: {} (duration: {:.1}s) ---\n",
                     r.returncode,
                     elapsed.as_secs_f64()
                 );
-                let _ = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(sp)
-                    .and_then(|mut f| f.write_all(footer.as_bytes()));
+                let _ = blob.write_all(footer.as_bytes());
             }
 
             if r.returncode != 0 {
@@ -460,15 +441,12 @@ pub async fn run_shell(prepared: &ExecPrepared) -> Result<ShellResult, ExecError
         }
         Err(e) => {
             // Stage footer on error.
-            if let Some(sp) = stream_path_arg {
+            if let Some(ref mut blob) = stream_blob {
                 let footer = format!(
                     "--- exit: error (duration: {:.1}s) ---\n",
                     elapsed.as_secs_f64()
                 );
-                let _ = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(sp)
-                    .and_then(|mut f| f.write_all(footer.as_bytes()));
+                let _ = blob.write_all(footer.as_bytes());
             }
 
             Err(ExecError::Proc(e))
@@ -545,6 +523,7 @@ pub async fn commit_exec(
 mod tests {
     use super::*;
     use crate::artifacts::registry::FileSystemArtifactRegistry;
+    use crate::executor::state::StateData;
     use std::fs;
     use std::path::Path;
 
@@ -705,7 +684,9 @@ mod tests {
             log_tx: None,
         };
 
-        let result = run_shell(&prepared).await.unwrap();
+        let state = StateData::with_state_dir(&state_dir);
+
+        let result = run_shell(&prepared, &state).await.unwrap();
         // The output must contain the literal payload — not execute it.
         // (Per-command markers are now part of the combined output.)
         assert!(result.output.contains(injection));
@@ -757,7 +738,8 @@ mod tests {
             log_tx: None,
             ..make_prepared("resolved", vec!["echo ok"], &state_dir)
         };
-        let result = run_shell(&prepared).await.unwrap();
+        let state = StateData::with_state_dir(&state_dir);
+        let result = run_shell(&prepared, &state).await.unwrap();
         assert!(result.output.contains("/tmp/input.md"));
 
         let log = read_log(&state_dir, "resolved");
@@ -774,7 +756,8 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
 
         let prepared = make_prepared("hello", vec!["echo UNIQUE_OUTPUT_MARKER"], &state_dir);
-        let result = run_shell(&prepared).await.unwrap();
+        let state = StateData::with_state_dir(&state_dir);
+        let result = run_shell(&prepared, &state).await.unwrap();
         assert!(result.output.contains("UNIQUE_OUTPUT_MARKER"));
         assert_eq!(result.rc, 0);
 
@@ -821,7 +804,8 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
 
         let prepared = make_prepared("silent", vec!["true"], &state_dir);
-        let result = run_shell(&prepared).await.unwrap();
+        let state = StateData::with_state_dir(&state_dir);
+        let result = run_shell(&prepared, &state).await.unwrap();
         // Output now includes per-command markers from the instrumented script.
         assert!(result.output.contains("--- cmd 1/1: true ---"));
         assert!(result.output.contains("--- cmd 1/1 exit: 0"));
@@ -850,8 +834,9 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
 
         let prepared = make_prepared("failing", vec!["exit 42"], &state_dir);
+        let state = StateData::with_state_dir(&state_dir);
 
-        let err = run_shell(&prepared).await.unwrap_err();
+        let err = run_shell(&prepared, &state).await.unwrap_err();
         assert!(matches!(err, ExecError::NonZeroExit { rc: 42, .. }));
 
         let log = read_log(&state_dir, "failing");
@@ -869,8 +854,9 @@ mod tests {
 
         let prepared1 = make_prepared("repeat", vec!["echo RUN_ONE"], &state_dir);
         let prepared2 = make_prepared("repeat", vec!["echo RUN_TWO"], &state_dir);
-        run_shell(&prepared1).await.unwrap();
-        run_shell(&prepared2).await.unwrap();
+        let state = StateData::with_state_dir(&state_dir);
+        run_shell(&prepared1, &state).await.unwrap();
+        run_shell(&prepared2, &state).await.unwrap();
 
         let log = read_log(&state_dir, "repeat");
         // Both runs appear.
@@ -900,7 +886,8 @@ mod tests {
         fs::write(&log_dir, "block").unwrap(); // file, not dir — create_dir_all will fail
 
         let prepared = make_prepared("resilient", vec!["echo still-works"], &state_dir);
-        let result = run_shell(&prepared).await.unwrap();
+        let state = StateData::with_state_dir(&state_dir);
+        let result = run_shell(&prepared, &state).await.unwrap();
         assert!(result.output.contains("still-works"));
         assert_eq!(result.rc, 0);
         // The log file was never created.
@@ -916,7 +903,8 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
 
         let prepared = make_prepared("../../../etc/passwd", vec!["echo ok"], &state_dir);
-        let result = run_shell(&prepared).await.unwrap();
+        let state = StateData::with_state_dir(&state_dir);
+        let result = run_shell(&prepared, &state).await.unwrap();
         assert!(result.output.contains("ok"));
 
         // The log file must be inside exec_stage_logs, not escaped.
