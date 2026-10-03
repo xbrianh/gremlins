@@ -81,7 +81,7 @@ allow agency and where we refuse to.
   authorship, PR opening — these are deterministic helpers. The model writes
   *content* (a commit message, a plan, a code change) but does not run `git`
   itself.
-- Bookkeeping. `StateData::set_stage` and `StateData::write_bail_file` write atomically
+- Bookkeeping. `StateData::set_stage` and `StateData::record_stage_error` write atomically
   and never panic. A gremlin that crashes mid-stage must leave behind a state
   file the rescue protocol can interpret.
 
@@ -160,7 +160,7 @@ we don't expect a third.
 ### 2.3 Bail as a control-flow channel
 
 A stage can halt the definition by returning a bail error or by calling
-`StateData::write_bail_file`, which writes a `class` (and optional
+`StateData::record_stage_error`, which writes a `class` (and optional
 `detail`) to `bail_{attempt}.json`.
 
 The two routes serve different jobs:
@@ -170,7 +170,7 @@ The two routes serve different jobs:
   `stages/agent.rs` parses this marker, extracts the `bail_class` (one of
   `reviewer_requested_changes`, `security`, `secrets`, `other`), and
   propagates the error up to halt the definition.
-- **`write_bail_file`** records a *structured*, *persistent* halt reason
+- **`record_stage_error`** records a *structured*, *persistent* halt reason
   in `bail_{attempt}.json`. Both `class` and `detail` (a one-line human note)
   live in that file after the process exits. Exec stages can also trigger
   bail by writing to `artifact://bail`.
@@ -179,16 +179,16 @@ The persistence is the point. `bail_class` is read by the rescue
 protocol (§5.3), the fleet manager, the boss recovery table, and shell
 hooks — exactly the cross-process consumers §2 says we serve with
 byte-stable strings rather than prose. A stage that only returns an error
-tells a human; a stage that calls `write_bail_file` first also tells a
+tells a human; a stage that calls `record_stage_error` first also tells a
 *script*.
 
-`write_bail_file` does not itself halt the definition. It writes the marker
+`record_stage_error` does not itself halt the definition. It writes the marker
 and returns; the caller returns an error immediately afterward. The
 pairing — write the marker, then return the error — is the pattern. The
 marker outlives the error.
 
 A bail error is returned when a structured bail condition is detected (e.g.,
-when calling `StateData::read_bail_info` in stages that follow
+when calling `StateData::stage_error` in stages that follow
 soft-failure points like `github-address-pull-request-reviews` and
 `github-review-pull-request`, or in the self-healing stages (§2.2) after
 each fixer agent runs). This allows a stage to halt cleanly when an agent

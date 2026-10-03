@@ -455,7 +455,7 @@ async fn status(id: &str) -> Result<(), String> {
 
 /// Fallback: read status directly from state.json.
 fn status_direct(id: &str) -> Result<(), String> {
-    let state_dir = config::state_root().join(id);
+    let state_dir = gremlins::executor::state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
@@ -539,7 +539,7 @@ async fn info(id: &str) -> Result<(), String> {
 }
 
 fn info_direct(id: &str) -> Result<(), String> {
-    let state_dir = config::state_root().join(id);
+    let state_dir = gremlins::executor::state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
@@ -577,7 +577,7 @@ fn info_direct(id: &str) -> Result<(), String> {
         "worktree_base": gremlin.base_ref_sha,
         "bail_info": gremlin
             .state
-            .read_bail_info()
+            .stage_error()
             .map(Value::Object)
             .unwrap_or(Value::Null),
     });
@@ -831,7 +831,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     // Tail the last ~20 lines of the gremlin log for immediate context.
     // Read only the tail of the file (append-only log, no rotation) so
     // startup time and memory stay bounded regardless of log length.
-    let log_path = config::state_root().join(id).join("log");
+    let log_path = gremlins::executor::state::state_dir_for(id).join("log");
     if let Ok(lines) = tail_log_lines(&log_path, 20).await {
         for line in &lines {
             eprintln!("log: {line}");
@@ -938,7 +938,7 @@ async fn rm(id: &str) -> Result<(), String> {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let state_dir = config::state_root().join(id);
+    let state_dir = gremlins::executor::state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
@@ -999,7 +999,7 @@ async fn clean(id: &str, keep: bool) -> Result<(), String> {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let state_dir = config::state_root().join(id);
+    let state_dir = gremlins::executor::state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
@@ -1047,7 +1047,7 @@ async fn land(id: &str) -> Result<(), String> {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let state_dir = config::state_root().join(id);
+    let state_dir = gremlins::executor::state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(format!(
@@ -1184,7 +1184,7 @@ async fn validate(definition: &str) -> Result<(), String> {
             let stage = gremlin.state.read_str("stage");
             let detail = gremlin
                 .state
-                .read_bail_info()
+                .stage_error()
                 .and_then(|info| info.get("detail").cloned())
                 .and_then(|v| {
                     if v.is_string() {

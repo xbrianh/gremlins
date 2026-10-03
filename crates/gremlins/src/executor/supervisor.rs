@@ -484,7 +484,8 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
             });
             // Write terminal state to disk so the aborted run isn't
             // reported as orphan and has a recorded exit_code.
-            let state_file = config::state_root().join(id).join("state.json");
+            let state_dir = state::state_dir_for(id);
+            let state_file = state_dir.join("state.json");
             let _ = state::locked_update(&state_file, |data| {
                 data.insert("status".to_string(), Value::String("stopped".to_string()));
                 data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
@@ -501,7 +502,7 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
     }
 
     // Not in run_map — check for orphaned or already-terminal gremlin.
-    let state_dir = config::state_root().join(id);
+    let state_dir = state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if state_file.is_file() {
         let raw = state::read_state_json(Some(&state_file));
@@ -576,7 +577,7 @@ async fn handle_resume(
         return error_response(&format!("gremlin {id} is already done"));
     }
 
-    let has_bail = gremlin.state.read_bail_info().is_some();
+    let has_bail = gremlin.state.stage_error().is_some();
     if status != "stopped" && !has_bail {
         return error_response(&format!(
             "gremlin {id} cannot be resumed — status is {status:?}"
@@ -787,7 +788,7 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
 // status
 // ---------------------------------------------------------------------------
 
-async fn handle_status(request: &Value, state_root: &Path) -> Value {
+async fn handle_status(request: &Value, _state_root: &Path) -> Value {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
         return error_response("missing 'id' field");
@@ -797,7 +798,7 @@ async fn handle_status(request: &Value, state_root: &Path) -> Value {
         return error_response(&format!("invalid gremlin id {id:?}"));
     }
 
-    let state_dir = state_root.join(id);
+    let state_dir = state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return error_response(&format!("unknown gremlin {id:?}"));
@@ -835,7 +836,7 @@ async fn handle_status(request: &Value, state_root: &Path) -> Value {
 // info
 // ---------------------------------------------------------------------------
 
-async fn handle_info(request: &Value, state_root: &Path) -> Value {
+async fn handle_info(request: &Value, _state_root: &Path) -> Value {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
         return error_response("missing 'id' field");
@@ -845,7 +846,7 @@ async fn handle_info(request: &Value, state_root: &Path) -> Value {
         return error_response(&format!("invalid gremlin id {id:?}"));
     }
 
-    let state_dir = state_root.join(id);
+    let state_dir = state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return error_response(&format!("unknown gremlin {id:?}"));
@@ -880,7 +881,7 @@ async fn handle_info(request: &Value, state_root: &Path) -> Value {
         "kind": gremlin.state.read_str("kind"),
         "base_ref": gremlin.base_ref,
         "worktree_base": gremlin.base_ref_sha,
-        "bail_info": gremlin.state.read_bail_info().map(Value::Object).unwrap_or(Value::Null),
+        "bail_info": gremlin.state.stage_error().map(Value::Object).unwrap_or(Value::Null),
     }))
 }
 
@@ -890,7 +891,7 @@ async fn handle_info(request: &Value, state_root: &Path) -> Value {
 
 async fn handle_log(
     request: &Value,
-    state_root: &Path,
+    _state_root: &Path,
     mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     write_half: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) {
@@ -907,7 +908,7 @@ async fn handle_log(
         return;
     }
 
-    let state_dir = state_root.join(id);
+    let state_dir = state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         let resp = error_response(&format!("unknown gremlin {id:?}"));
@@ -1001,7 +1002,7 @@ async fn handle_log(
 
 async fn handle_debug(
     request: &Value,
-    state_root: &Path,
+    _state_root: &Path,
     mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     write_half: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) {
@@ -1023,7 +1024,7 @@ async fn handle_debug(
         return;
     }
 
-    let state_dir = state_root.join(id);
+    let state_dir = state::state_dir_for(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         log::debug!("handle_debug: unknown gremlin {id:?}");
@@ -1573,7 +1574,8 @@ pub(crate) async fn stop_child(id: &str) {
         });
         // Write terminal state to disk so the aborted child isn't
         // reported as orphan and has a recorded exit_code.
-        let state_file = config::state_root().join(id).join("state.json");
+        let state_dir = state::state_dir_for(id);
+        let state_file = state_dir.join("state.json");
         let _ = state::locked_update(&state_file, |data| {
             data.insert("status".to_string(), Value::String("stopped".to_string()));
             data.insert("ended_at".to_string(), Value::String(state::now_stamp()));
@@ -1591,7 +1593,7 @@ pub(crate) async fn stop_child(id: &str) {
 /// If the client spec cannot be read or parsed this is a silent no-op —
 /// the gremlin may not have started running yet.
 fn reap_client_for(id: &str) {
-    let state_file = config::state_root().join(id).join("state.json");
+    let state_file = state::state_dir_for(id).join("state.json");
     let raw = state::read_state_json(Some(&state_file));
     let spec = raw.get("client").and_then(|v| v.as_str()).unwrap_or("");
     if spec.is_empty() {
