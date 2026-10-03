@@ -158,7 +158,7 @@ pub(crate) async fn run_parallel(
 
         // Launch the child via the supervisor — it becomes a first-class
         // gremlin visible in `gremlins ls`.
-        let LaunchResult { state_rx, .. } = supervisor::launch_child(child_gremlin);
+        let LaunchResult { state_rx } = supervisor::launch_child(child_gremlin);
 
         launched.push(LaunchedChild {
             child_name,
