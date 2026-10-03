@@ -1,11 +1,15 @@
-//! state.json I/O, flock-guarded updates, and StateData.
+//! state.json I/O, flock-guarded updates, StateData, and artifact registry.
 //!
 //! Every `state.json` mutation goes through [`write_state`] or [`locked_update`],
 //! both of which hold the flock. Reads ([`read_str`], [`read_field`], [`get_field`],
 //! [`stage_error`]) are lock-free snapshot reads, safe because
 //! every mutation is rename-atomic.
+//!
+//! The [`StateStore`] trait merges the old `StateStore` with the old
+//! `ArtifactRegistry` + `LocalizedArtifactRegistry` traits so that a single
+//! backend handles both state.json and artifact storage.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
@@ -14,7 +18,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use crate::artifacts::uri::Uri;
 use crate::config;
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -26,13 +35,40 @@ pub enum StateError {
     Other(String),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("artifact not bound: {key:?}")]
+pub struct MissingArtifact {
+    pub key: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("duplicate artifact: {key:?} already bound to {existing:?}, cannot rebind to {incoming:?}")]
+pub struct DuplicateArtifact {
+    pub key: String,
+    pub existing: String,
+    pub incoming: String,
+}
+
+/// Controls behaviour when a key being merged is already registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Collision {
+    /// Return a [`DuplicateArtifact`] error.
+    Error,
+    /// Skip the key silently.
+    Ignore,
+}
+
+// ---------------------------------------------------------------------------
+// StateBlob / BlobMode
+// ---------------------------------------------------------------------------
+
 /// A general handle for named state-directory files.
-pub(crate) trait StateBlob: std::io::Read + std::io::Write + std::io::Seek + Send {}
+pub trait StateBlob: std::io::Read + std::io::Write + std::io::Seek + Send {}
 impl<T: std::io::Read + std::io::Write + std::io::Seek + Send> StateBlob for T {}
 
 /// How to open a named blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BlobMode {
+pub enum BlobMode {
     /// Open an existing file for reading and writing. Fails if absent.
     #[allow(dead_code)]
     ReadWrite,
@@ -43,14 +79,22 @@ pub(crate) enum BlobMode {
 }
 
 // ---------------------------------------------------------------------------
-// StateStore trait — the storage backend seam
+// StateStore trait — the unified storage backend seam
 // ---------------------------------------------------------------------------
 
-pub(crate) trait StateStore: Send + Sync + Debug {
+/// The set of operations that the executor runtime requires from a storage
+/// backend: state.json reads/writes, blob I/O, and artifact registry
+/// operations.
+///
+/// Implemented by [`FileSystemStateStore`] (the real filesystem-backed store).
+#[async_trait::async_trait]
+pub trait StateStore: Send + Sync + Debug {
     /// Create a store for the given gremlin identity.
     fn new(gremlin_id: Option<String>) -> Self
     where
         Self: Sized;
+
+    // --- state.json ---
 
     /// Lock-free snapshot of the full state tree.
     fn state_tree(&self) -> Map<String, Value>;
@@ -110,21 +154,677 @@ pub(crate) trait StateStore: Send + Sync + Debug {
     fn add_subprocess_cost(&self, amount: f64);
 
     fn patch_parallel_attempt(&self, child_key: &str, attempt: &str);
+
+    // --- artifact registry ---
+
+    /// Return the data URI (storage path or external URI) bound to `key`.
+    async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact>;
+
+    /// Read the content of the artifact identified by `uri_str`,
+    /// optionally extracting a JSON path segment.
+    async fn content(
+        &self,
+        uri_str: &str,
+        json_path: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error>>;
+
+    /// Whether `key` is currently registered.
+    async fn is_registered(&self, key: &str) -> bool;
+
+    /// Compute the canonical filesystem path for `uri` without touching the registry.
+    async fn path_for_uri(&self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>>;
+
+    /// Bind `key` to `path` and persist.
+    async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Write `content` to the path for `uri`, then commit.
+    async fn write_into_registry(
+        &self,
+        uri: &Uri,
+        content: &str,
+    ) -> Result<String, Box<dyn std::error::Error>>;
+
+    /// Copy a filesystem file into the registry under `uri`.
+    async fn copy_into_registry(
+        &self,
+        uri: &Uri,
+        source: &Path,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let content = tokio::fs::read_to_string(source).await?;
+        self.write_into_registry(uri, &content).await
+    }
+
+    /// All artifact URIs currently registered.
+    async fn keys(&self) -> Vec<String>;
+
+    /// Merge every artifact from `other` into `self`.
+    ///
+    /// When `key_prefix` is set, each key from `other` is registered under
+    /// both `artifact://{prefix}/{bare}` and its original key (if different).
+    /// `collision` controls what happens when a destination key is already
+    /// registered. Returns the number of keys merged.
+    async fn merge_registry(
+        &self,
+        other: &(dyn StateStore + Sync),
+        collision: Collision,
+        key_prefix: Option<&str>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        merge_state_via_content(self, other, collision, key_prefix).await
+    }
+
+    /// Clone / fork this store's registry for use by a child gremlin.
+    ///
+    /// The child's artifacts will be stored under `child_artifact_dir`.
+    async fn fork_registry(
+        &self,
+        child_artifact_dir: &Path,
+    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>>;
+
+    /// Produce a localized (filesystem-scoped) store containing only the
+    /// given subset of keys. The returned store lives in a separate
+    /// directory so that unscoped artifacts cannot be discovered by
+    /// sniffing the filesystem.
+    async fn checkout_registry(
+        &self,
+        keys: &[String],
+    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+        let _ = keys;
+        Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "checkout not supported for this store type",
+        )))
+    }
+
+    /// Enable downcast to concrete store types (for optimisation paths).
+    /// Default returns `None` — backends that support downcasting override this.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+
+    // --- locality ---
+
+    /// The artifact storage directory.
+    fn artifact_dir(&self) -> &Path {
+        Path::new("")
+    }
+
+    /// Check whether a file exists at `path` (empty files are valid).
+    async fn has_file(&self, path: &str) -> bool {
+        tokio::fs::metadata(path).await.is_ok()
+    }
 }
 
 // ---------------------------------------------------------------------------
-// FileStateStore — filesystem-backed implementation
+// merge_state_via_content — content-based merge fallback
+// ---------------------------------------------------------------------------
+
+/// Content-based merge implementation used by the default
+/// [`StateStore::merge_registry`] and as a fallback by backends that
+/// cannot do a direct file-copy optimisation.
+async fn merge_state_via_content<D: StateStore + Sync + ?Sized>(
+    dest: &D,
+    src: &(dyn StateStore + Sync),
+    collision: Collision,
+    key_prefix: Option<&str>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut merged = 0usize;
+    for key in src.keys().await {
+        let data_uri = src.data_uri(&key).await.unwrap_or_default();
+        if data_uri.is_empty() {
+            continue;
+        }
+
+        // Snapshot content from the source before we compute destination
+        // keys or check collisions.
+        let content = src.content(&key, None).await.unwrap_or_default();
+
+        let bare = key.strip_prefix("artifact://").unwrap_or(&key);
+        let dest_key = if let Some(prefix) = key_prefix {
+            format!("artifact://{}/{}", prefix, bare)
+        } else {
+            key.clone()
+        };
+
+        // Check for collisions on the primary destination key.
+        if dest.is_registered(&dest_key).await {
+            match collision {
+                Collision::Error => {
+                    let existing = dest.data_uri(&dest_key).await.unwrap_or_default();
+                    return Err(Box::new(DuplicateArtifact {
+                        key: dest_key,
+                        existing,
+                        incoming: data_uri,
+                    }));
+                }
+                Collision::Ignore => continue,
+            }
+        }
+
+        // When a prefix is in use, also check collisions on the
+        // original (un-prefixed) key before committing anything.
+        if key_prefix.is_some() && key != dest_key && dest.is_registered(&key).await {
+            match collision {
+                Collision::Error => {
+                    let existing = dest.data_uri(&key).await.unwrap_or_default();
+                    return Err(Box::new(DuplicateArtifact {
+                        key,
+                        existing,
+                        incoming: data_uri,
+                    }));
+                }
+                Collision::Ignore => {
+                    // Fall through — skip the alias below.
+                }
+            }
+        }
+
+        let dest_uri = Uri::parse(&dest_key).map_err(|e| {
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid destination URI {dest_key:?}: {e}"),
+            ))
+        })?;
+        let _new_path = dest.write_into_registry(&dest_uri, &content).await?;
+        merged += 1;
+
+        // Also register under the original (un-prefixed) key so
+        // downstream stages can reference child artifacts by their
+        // bound URI.
+        if key_prefix.is_some() && key != dest_key && !dest.is_registered(&key).await {
+            let alias_uri = Uri::parse(&key).map_err(|e| {
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid alias URI {key:?}: {e}"),
+                ))
+            })?;
+            dest.write_into_registry(&alias_uri, &content).await?;
+            merged += 1;
+        }
+    }
+    Ok(merged)
+}
+
+/// Whether `data_uri` points to a filesystem path that can be copied.
+///
+/// Returns `true` for absolute paths (`/…`).
+/// Returns `false` for non-file URIs (`http://`, `s3://`, `data:`, etc.).
+fn is_file_artifact(data_uri: &str) -> bool {
+    data_uri.starts_with('/')
+}
+
+// ---------------------------------------------------------------------------
+// FileSystemStateStore — filesystem-backed implementation
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub(crate) struct FileStateStore {
+pub struct FileSystemStateStore {
     state_file: Option<PathBuf>,
+    artifact_dir: Option<PathBuf>,
+    registry_path: Option<PathBuf>,
 }
 
-impl StateStore for FileStateStore {
+impl FileSystemStateStore {
+    /// Derive `artifact_dir` and `registry_path` from `state_file`.
+    fn set_state_file(&mut self, sf: PathBuf) {
+        let parent = sf.parent().map(|p| p.to_path_buf());
+        self.artifact_dir = parent.as_ref().map(|p| p.join("artifacts"));
+        self.registry_path = parent.as_ref().map(|p| p.join("registry.json"));
+        self.state_file = Some(sf);
+    }
+
+    /// Create a store pointed at an explicit `state.json` path.
+    /// Derives `artifact_dir` and `registry_path` from the parent directory.
+    pub fn at_path(state_file: PathBuf) -> Self {
+        let parent = state_file.parent().map(|p| p.to_path_buf());
+        let artifact_dir = parent.as_ref().map(|p| p.join("artifacts"));
+        let registry_path = parent.as_ref().map(|p| p.join("registry.json"));
+        FileSystemStateStore {
+            state_file: Some(state_file),
+            artifact_dir,
+            registry_path,
+        }
+    }
+
+    /// Load a registry from an explicit `registry.json` path, storing
+    /// artifacts under `artifact_dir`.
+    pub async fn from_registry_file(
+        path: &Path,
+        artifact_dir: PathBuf,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let registry_path = artifact_dir
+            .parent()
+            .unwrap_or(&artifact_dir)
+            .join("registry.json");
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(registry_path),
+        };
+        if path != store.registry_path.as_deref().unwrap_or(path)
+            && tokio::fs::try_exists(path).await.unwrap_or(false)
+        {
+            let content = tokio::fs::read_to_string(path).await?;
+            let parsed: HashMap<String, String> = serde_json::from_str(&content)?;
+            let count = parsed.len();
+            store
+                .locked_write(|data| {
+                    *data = parsed;
+                    Ok(())
+                })
+                .await?;
+            log::info!(
+                "loaded custom registry from {} ({} entries)",
+                path.display(),
+                count,
+            );
+        }
+        Ok(store)
+    }
+
+    // --- registry helpers ---
+
+    /// Read and parse `registry.json`, returning an empty map when the file is
+    /// absent or unparseable (logging the reason).
+    async fn read_registry_json(&self) -> HashMap<String, String> {
+        let Some(rp) = self.registry_path.as_ref() else {
+            return HashMap::new();
+        };
+        match tokio::fs::read_to_string(rp).await {
+            Ok(content) => match serde_json::from_str::<HashMap<String, String>>(&content) {
+                Ok(data) => data,
+                Err(e) => {
+                    log::error!(
+                        "failed to parse registry.json at {}: {e} — starting with empty registry",
+                        rp.display(),
+                    );
+                    HashMap::new()
+                }
+            },
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::error!(
+                        "failed to read registry.json at {}: {e} — starting with empty registry",
+                        rp.display(),
+                    );
+                }
+                HashMap::new()
+            }
+        }
+    }
+
+    /// Acquire the flock on `registry_path`, read the current map, apply
+    /// `f`, and atomically write the result back.
+    async fn locked_write<R>(
+        &self,
+        apply: impl FnOnce(&mut HashMap<String, String>) -> Result<R, Box<dyn std::error::Error>>,
+    ) -> Result<R, Box<dyn std::error::Error>> {
+        let rp = self.registry_path.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no registry path configured")
+        })?;
+        if let Some(parent) = rp.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let _lock = acquire_lock_async(rp).await?;
+        let mut data = self.read_registry_json().await;
+        let result = apply(&mut data)?;
+        let data_map: serde_json::Map<String, serde_json::Value> = data
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        atomic_write_json_async(rp, &data_map).await?;
+        log::debug!(
+            "locked_write: wrote {} entries to {}",
+            data.len(),
+            rp.display(),
+        );
+        Ok(result)
+    }
+
+    // --- artifact methods (inherent, also exposed via trait) ---
+
+    pub async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
+        self.read_registry_json()
+            .await
+            .get(key)
+            .cloned()
+            .ok_or_else(|| MissingArtifact {
+                key: key.to_string(),
+            })
+    }
+
+    /// Compute the canonical filesystem path for `uri` without touching the registry.
+    pub async fn path_for_uri(&self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>> {
+        let key = uri.to_string();
+        if uri.scheme != "artifact" {
+            log::warn!(
+                "path_for_uri({:?}): unrecognized scheme {:?} — typo? (expected 'artifact')",
+                key,
+                uri.scheme,
+            );
+        }
+        let name = uri.path.trim_start_matches('/').to_string();
+        let ad = self.artifact_dir.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no artifact directory configured",
+            )
+        })?;
+        let path = ad.join(&name);
+        // Ensure artifact_dir exists before canonicalizing
+        tokio::fs::create_dir_all(ad).await?;
+        let base = tokio::fs::canonicalize(ad).await?;
+        // Create parent dirs so parent-side canonicalization works
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        // Resolve parent to handle symlinks, then rejoin filename (file may not exist yet)
+        let parent_resolved = path
+            .parent()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
+            })?
+            .canonicalize()?;
+        let resolved = parent_resolved.join(path.file_name().unwrap());
+        if !resolved.starts_with(&base) {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("path escapes artifact directory: {uri}"),
+            )));
+        }
+        Ok(resolved.to_string_lossy().to_string())
+    }
+
+    /// Bind `key` to `path` and persist. The file at `path` must already exist;
+    /// idempotent for an identical binding; a conflicting binding is a
+    /// `DuplicateArtifact` error.
+    pub async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.locked_write(|data| {
+            if let Some(existing) = data.get(key) {
+                if existing == path {
+                    log::debug!("commit: {:?} already bound to same path — idempotent", key);
+                    return Ok(());
+                }
+                return Err(Box::new(DuplicateArtifact {
+                    key: key.to_string(),
+                    existing: existing.clone(),
+                    incoming: path.to_string(),
+                }));
+            }
+            data.insert(key.to_string(), path.to_string());
+            log::debug!("commit: {:?} -> {:?}", key, path);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Write `content` to the path for `uri`, then commit. For bootstrap ingestion.
+    pub async fn write_into_registry(
+        &self,
+        uri: &Uri,
+        content: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let path = self.path_for_uri(uri).await?;
+        tokio::fs::write(&path, content).await?;
+        self.commit(&uri.to_string(), &path).await?;
+        Ok(path)
+    }
+
+    /// Copy `source` to the path for `uri`, then commit. For bootstrap ingestion.
+    pub async fn copy_into_registry(
+        &self,
+        uri: &Uri,
+        source: &Path,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let path = self.path_for_uri(uri).await?;
+        tokio::fs::copy(source, &path).await?;
+        self.commit(&uri.to_string(), &path).await?;
+        Ok(path)
+    }
+
+    pub async fn content(
+        &self,
+        uri_str: &str,
+        json_path: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let raw = self.data_uri(uri_str).await?;
+        let p = PathBuf::from(&raw);
+        if !p.exists() {
+            return Err(Box::new(MissingArtifact {
+                key: uri_str.to_string(),
+            }));
+        }
+        let text = tokio::fs::read_to_string(&p).await?;
+        log::debug!("content({:?}) read {} bytes", uri_str, text.len());
+        if let Some(jp) = json_path {
+            let mut data: serde_json::Value = serde_json::from_str(&text)?;
+            for segment in jp.split('.') {
+                data = data
+                    .get(segment)
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("json path segment {segment:?} not found"),
+                        )
+                    })?
+                    .clone();
+            }
+            Ok(match data {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            })
+        } else {
+            Ok(text)
+        }
+    }
+
+    pub async fn is_registered(&self, key: &str) -> bool {
+        self.read_registry_json().await.contains_key(key)
+    }
+
+    pub async fn keys(&self) -> Vec<String> {
+        self.read_registry_json().await.into_keys().collect()
+    }
+
+    /// The artifact storage directory.
+    pub fn artifact_dir(&self) -> &Path {
+        self.artifact_dir.as_deref().unwrap_or(Path::new(""))
+    }
+
+    pub async fn has_file(&self, path: &str) -> bool {
+        tokio::fs::metadata(path).await.is_ok()
+    }
+
+    /// Merge that prefers a direct file copy when `other` is also a
+    /// [`FileSystemStateStore`], falling back to the content-based
+    /// path otherwise.
+    pub async fn merge_registry(
+        &self,
+        other: &(dyn StateStore + Sync),
+        collision: Collision,
+        key_prefix: Option<&str>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        // Fast path: both sides are filesystem-backed — copy files directly.
+        // Also try to unwrap a ScopedFileSystemStateStore (the checkout
+        // wrapper) so that merging from a scoped store hits the fast path.
+        let fs: Option<&FileSystemStateStore> = other.as_any().and_then(|a| {
+            a.downcast_ref::<FileSystemStateStore>().or_else(|| {
+                a.downcast_ref::<ScopedFileSystemStateStore>()
+                    .map(|s| &s.inner)
+            })
+        });
+        if let Some(other_fs) = fs {
+            let mut merged = 0usize;
+            for key in other_fs.keys().await {
+                let data_uri = other_fs.data_uri(&key).await.unwrap_or_default();
+                if data_uri.is_empty() {
+                    continue;
+                }
+
+                let bare = key.strip_prefix("artifact://").unwrap_or(&key);
+                let dest_key = if let Some(prefix) = key_prefix {
+                    format!("artifact://{}/{}", prefix, bare)
+                } else {
+                    key.clone()
+                };
+
+                // Collision check on primary destination key.
+                if self.is_registered(&dest_key).await {
+                    match collision {
+                        Collision::Error => {
+                            let existing = self.data_uri(&dest_key).await.unwrap_or_default();
+                            return Err(Box::new(DuplicateArtifact {
+                                key: dest_key,
+                                existing,
+                                incoming: data_uri.clone(),
+                            }));
+                        }
+                        Collision::Ignore => continue,
+                    }
+                }
+
+                // Collision check on original key when prefix is in use.
+                if key_prefix.is_some() && key != dest_key && self.is_registered(&key).await {
+                    match collision {
+                        Collision::Error => {
+                            let existing = self.data_uri(&key).await.unwrap_or_default();
+                            return Err(Box::new(DuplicateArtifact {
+                                key,
+                                existing,
+                                incoming: data_uri.clone(),
+                            }));
+                        }
+                        Collision::Ignore => {
+                            // Fall through — skip the alias below.
+                        }
+                    }
+                }
+
+                // Resolve source path for file artifacts;
+                // register non-file URIs directly.
+                if is_file_artifact(&data_uri) {
+                    let src_path = PathBuf::from(&data_uri);
+
+                    let dest_uri = Uri::parse(&dest_key).map_err(|e| {
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("invalid destination URI {dest_key:?}: {e}"),
+                        ))
+                    })?;
+                    let dest_path_str = self.path_for_uri(&dest_uri).await?;
+                    let dest_path = Path::new(&dest_path_str);
+                    if let Some(parent) = dest_path.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::copy(&src_path, dest_path).await?;
+                    self.commit(&dest_key, &dest_path_str).await?;
+                    merged += 1;
+
+                    // Alias under original key.
+                    if key_prefix.is_some() && key != dest_key && !self.is_registered(&key).await {
+                        self.commit(&key, &dest_path_str).await?;
+                        merged += 1;
+                    }
+                } else {
+                    // Non-file artifact (e.g. http://, s3://): register the URI
+                    // string directly without a file copy.
+                    self.commit(&dest_key, &data_uri).await?;
+                    merged += 1;
+
+                    if key_prefix.is_some() && key != dest_key && !self.is_registered(&key).await {
+                        self.commit(&key, &data_uri).await?;
+                        merged += 1;
+                    }
+                }
+            }
+            return Ok(merged);
+        }
+
+        // Fallback: content-based merge.
+        merge_state_via_content(self, other, collision, key_prefix).await
+    }
+
+    /// Produce a localized store containing only the given keys.
+    pub async fn checkout_registry(
+        &self,
+        keys: &[String],
+    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let artifact_dir = temp_dir.path().join("artifacts");
+        tokio::fs::create_dir_all(&artifact_dir).await?;
+        let new_store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let mut allowed = HashSet::new();
+
+        for key in keys {
+            if self.is_registered(key).await {
+                let data_uri = self.data_uri(key).await?;
+                let uri = Uri::parse(key).map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("invalid key URI {key:?}: {e}"),
+                    ))
+                })?;
+
+                if is_file_artifact(&data_uri) {
+                    // Copy the file directly (handles binary artifacts).
+                    let src_path = PathBuf::from(&data_uri);
+                    new_store.copy_into_registry(&uri, &src_path).await?;
+                } else {
+                    // Non-file artifact: read content as string and write.
+                    let content = self.content(key, None).await?;
+                    new_store.write_into_registry(&uri, &content).await?;
+                }
+            } else {
+                // Key is not yet registered — pre-create the path so that
+                // path_for_uri works and the agent/exec can write to it.
+                // Do NOT commit — the stage's commit_agent/commit_exec will
+                // do that after the file is produced.
+                let uri = Uri::parse(key).map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("invalid key URI {key:?}: {e}"),
+                    ))
+                })?;
+                let path = new_store.path_for_uri(&uri).await?;
+                // Create parent dirs so the agent/exec can write the file.
+                if let Some(parent) = Path::new(&path).parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+            }
+            allowed.insert(key.clone());
+        }
+
+        Ok(Box::new(ScopedFileSystemStateStore {
+            inner: new_store,
+            _temp: temp_dir,
+            allowed_keys: allowed,
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StateStore impl for FileSystemStateStore
+// ---------------------------------------------------------------------------
+
+#[async_trait::async_trait]
+impl StateStore for FileSystemStateStore {
     fn new(gremlin_id: Option<String>) -> Self {
-        Self {
-            state_file: resolve_state_file(gremlin_id.as_deref()),
+        let sf = resolve_state_file(gremlin_id.as_deref());
+        match sf {
+            Some(path) => Self::at_path(path),
+            None => FileSystemStateStore {
+                state_file: None,
+                artifact_dir: None,
+                registry_path: None,
+            },
         }
     }
 
@@ -139,7 +839,7 @@ impl StateStore for FileStateStore {
             .and_then(|sf| sf.parent().map(|p| p.to_path_buf()))
             .ok_or_else(|| StateError::Other("no state directory".into()))?;
         write_state(&state_dir, data)?;
-        self.state_file = Some(state_dir.join("state.json"));
+        self.set_state_file(state_dir.join("state.json"));
         Ok(())
     }
 
@@ -232,7 +932,7 @@ impl StateStore for FileStateStore {
 
     fn persist(&mut self, state_dir: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
         write_state(state_dir, data)?;
-        self.state_file = Some(state_dir.join("state.json"));
+        self.set_state_file(state_dir.join("state.json"));
         Ok(())
     }
 
@@ -448,6 +1148,288 @@ impl StateStore for FileStateStore {
         fields.insert("exit_code".into(), Value::from(exit_code));
         self.patch(&[], &fields);
     }
+
+    // --- artifact methods ---
+
+    async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
+        self.data_uri(key).await
+    }
+
+    async fn content(
+        &self,
+        uri_str: &str,
+        json_path: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.content(uri_str, json_path).await
+    }
+
+    async fn is_registered(&self, key: &str) -> bool {
+        self.is_registered(key).await
+    }
+
+    async fn path_for_uri(&self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>> {
+        self.path_for_uri(uri).await
+    }
+
+    async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.commit(key, path).await
+    }
+
+    async fn write_into_registry(
+        &self,
+        uri: &Uri,
+        content: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.write_into_registry(uri, content).await
+    }
+
+    async fn copy_into_registry(
+        &self,
+        uri: &Uri,
+        source: &Path,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.copy_into_registry(uri, source).await
+    }
+
+    async fn keys(&self) -> Vec<String> {
+        self.keys().await
+    }
+
+    async fn merge_registry(
+        &self,
+        other: &(dyn StateStore + Sync),
+        collision: Collision,
+        key_prefix: Option<&str>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        self.merge_registry(other, collision, key_prefix).await
+    }
+
+    async fn fork_registry(
+        &self,
+        child_artifact_dir: &Path,
+    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+        FileSystemStateStore::from_registry_file(
+            self.registry_path
+                .as_deref()
+                .unwrap_or(Path::new("registry.json")),
+            child_artifact_dir.to_path_buf(),
+        )
+        .await
+        .map(|r| Box::new(r) as Box<dyn StateStore>)
+    }
+
+    async fn checkout_registry(
+        &self,
+        keys: &[String],
+    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+        self.checkout_registry(keys).await
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn artifact_dir(&self) -> &Path {
+        self.artifact_dir()
+    }
+
+    async fn has_file(&self, path: &str) -> bool {
+        self.has_file(path).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScopedFileSystemStateStore — checkout wrapper
+// ---------------------------------------------------------------------------
+
+/// A [`FileSystemStateStore`] that only allows access to a
+/// pre-approved set of keys. Owns a [`TempDir`] so the checkout directory
+/// is cleaned up when the store is dropped.
+struct ScopedFileSystemStateStore {
+    inner: FileSystemStateStore,
+    _temp: tempfile::TempDir,
+    allowed_keys: HashSet<String>,
+}
+
+impl ScopedFileSystemStateStore {
+    fn check_key(&self, key: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.allowed_keys.contains(key) {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("key {key:?} is not in the checked-out subset"),
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Debug for ScopedFileSystemStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopedFileSystemStateStore")
+            .field("inner", &self.inner)
+            .field("allowed_keys", &self.allowed_keys)
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl StateStore for ScopedFileSystemStateStore {
+    fn new(_gremlin_id: Option<String>) -> Self {
+        // Scoped stores are only created via checkout; new() is unreachable
+        // but must exist for the trait.
+        unimplemented!("ScopedFileSystemStateStore cannot be created via new()")
+    }
+
+    // --- state methods: delegate to inner ---
+
+    fn state_tree(&self) -> Map<String, Value> {
+        self.inner.state_tree()
+    }
+
+    fn seed(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+        self.inner.seed(data)
+    }
+
+    fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
+        self.inner.open(name, mode)
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        self.inner.exists(name)
+    }
+
+    fn clear_stage_error(&self, attempt: &str) {
+        self.inner.clear_stage_error(attempt)
+    }
+
+    fn read_str(&self, field: &str) -> String {
+        self.inner.read_str(field)
+    }
+
+    fn read_field(&self, field: &str) -> Option<Value> {
+        self.inner.read_field(field)
+    }
+
+    fn get_field(&self, field: &str) -> Option<Value> {
+        self.inner.get_field(field)
+    }
+
+    fn stage_error(&self) -> Option<Map<String, Value>> {
+        self.inner.stage_error()
+    }
+
+    fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>) {
+        self.inner.parallel_worktrees(group_name)
+    }
+
+    fn patch(&self, delete: &[String], fields: &Map<String, Value>) {
+        self.inner.patch(delete, fields)
+    }
+
+    fn record_stage_error(&self, class: &str, detail: &str) {
+        self.inner.record_stage_error(class, detail)
+    }
+
+    fn accumulate_token_usage(&self, usage: &HashMap<String, i64>) {
+        self.inner.accumulate_token_usage(usage)
+    }
+
+    fn write_terminal_state(&self, exit_code: i32) {
+        self.inner.write_terminal_state(exit_code)
+    }
+
+    fn persist(&mut self, state_dir: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
+        self.inner.persist(state_dir, data)
+    }
+
+    fn patch_parallel_worktrees(
+        &self,
+        group_name: &str,
+        base_head: Option<&str>,
+        paths: Option<&HashMap<String, String>>,
+    ) {
+        self.inner
+            .patch_parallel_worktrees(group_name, base_head, paths)
+    }
+
+    fn add_subprocess_cost(&self, amount: f64) {
+        self.inner.add_subprocess_cost(amount)
+    }
+
+    fn patch_parallel_attempt(&self, child_key: &str, attempt: &str) {
+        self.inner.patch_parallel_attempt(child_key, attempt)
+    }
+
+    // --- artifact methods: check key, then delegate ---
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
+        self.check_key(key).map_err(|e| MissingArtifact {
+            key: format!("{key}: {e}"),
+        })?;
+        self.inner.data_uri(key).await
+    }
+
+    async fn content(
+        &self,
+        uri_str: &str,
+        json_path: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.check_key(uri_str)?;
+        self.inner.content(uri_str, json_path).await
+    }
+
+    async fn is_registered(&self, key: &str) -> bool {
+        self.allowed_keys.contains(key) && self.inner.is_registered(key).await
+    }
+
+    async fn path_for_uri(&self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>> {
+        self.check_key(&uri.to_string())?;
+        self.inner.path_for_uri(uri).await
+    }
+
+    async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.check_key(key)?;
+        self.inner.commit(key, path).await
+    }
+
+    async fn write_into_registry(
+        &self,
+        uri: &Uri,
+        content: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.check_key(&uri.to_string())?;
+        self.inner.write_into_registry(uri, content).await
+    }
+
+    async fn keys(&self) -> Vec<String> {
+        self.allowed_keys.iter().cloned().collect()
+    }
+
+    async fn fork_registry(
+        &self,
+        child_artifact_dir: &Path,
+    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+        self.inner.fork_registry(child_artifact_dir).await
+    }
+
+    async fn checkout_registry(
+        &self,
+        keys: &[String],
+    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+        self.inner.checkout_registry(keys).await
+    }
+
+    fn artifact_dir(&self) -> &Path {
+        self.inner.artifact_dir()
+    }
+
+    async fn has_file(&self, path: &str) -> bool {
+        self.inner.has_file(path).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -461,8 +1443,14 @@ pub struct StateData {
 
 impl StateData {
     pub fn new(gremlin_id: Option<String>) -> Self {
-        let store = Box::new(FileStateStore::new(gremlin_id.clone()));
+        let store = Box::new(FileSystemStateStore::new(gremlin_id.clone()));
         Self { gremlin_id, store }
+    }
+
+    /// Access the inner [`StateStore`] for callers that need the trait object
+    /// (e.g. `resolve_interpolation_map`, `prepare_agent`).
+    pub(crate) fn store_ref(&self) -> &(dyn StateStore + Send + Sync) {
+        self.store.as_ref()
     }
 
     // --- delegating reads ---
@@ -561,6 +1549,85 @@ impl StateData {
         self.store.patch_parallel_attempt(child_key, attempt);
     }
 
+    // --- artifact delegating methods ---
+
+    pub async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
+        self.store.data_uri(key).await
+    }
+
+    pub async fn content(
+        &self,
+        uri_str: &str,
+        json_path: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.store.content(uri_str, json_path).await
+    }
+
+    pub async fn is_registered(&self, key: &str) -> bool {
+        self.store.is_registered(key).await
+    }
+
+    pub async fn path_for_uri(&self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>> {
+        self.store.path_for_uri(uri).await
+    }
+
+    pub async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.store.commit(key, path).await
+    }
+
+    pub async fn write_into_registry(
+        &self,
+        uri: &Uri,
+        content: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.store.write_into_registry(uri, content).await
+    }
+
+    pub async fn copy_into_registry(
+        &self,
+        uri: &Uri,
+        source: &Path,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.store.copy_into_registry(uri, source).await
+    }
+
+    pub async fn keys(&self) -> Vec<String> {
+        self.store.keys().await
+    }
+
+    pub async fn merge_registry(
+        &self,
+        other: &(dyn StateStore + Sync),
+        collision: Collision,
+        key_prefix: Option<&str>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        self.store
+            .merge_registry(other, collision, key_prefix)
+            .await
+    }
+
+    pub async fn fork_registry(
+        &self,
+        child_artifact_dir: &Path,
+    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+        self.store.fork_registry(child_artifact_dir).await
+    }
+
+    pub async fn checkout_registry(
+        &self,
+        keys: &[String],
+    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+        self.store.checkout_registry(keys).await
+    }
+
+    pub fn artifact_dir(&self) -> &Path {
+        self.store.artifact_dir()
+    }
+
+    pub async fn has_file(&self, path: &str) -> bool {
+        self.store.has_file(path).await
+    }
+
     // --- methods with guards that stay on StateData ---
 
     /// Create a `StateData` pointed at an explicit state directory.
@@ -575,9 +1642,7 @@ impl StateData {
         }
         Self {
             gremlin_id: Some("test".into()),
-            store: Box::new(FileStateStore {
-                state_file: Some(sf),
-            }),
+            store: Box::new(FileSystemStateStore::at_path(sf)),
         }
     }
 
@@ -959,6 +2024,10 @@ mod tests {
         .unwrap();
         sf
     }
+
+    // -----------------------------------------------------------------------
+    // State tests (existing)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn resolve_state_file_builds_path() {
@@ -1393,5 +2462,821 @@ mod tests {
         fn assert_sync<T: Sync>() {}
         assert_send::<StateData>();
         assert_sync::<StateData>();
+    }
+
+    // -----------------------------------------------------------------------
+    // Registry tests (adapted from registry.rs)
+    // -----------------------------------------------------------------------
+
+    fn setup_registry() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        (tmp, artifact_dir)
+    }
+
+    async fn write_file(store: &FileSystemStateStore, name: &str, content: &str) -> String {
+        let uri = Uri::parse(&format!("artifact://{name}")).unwrap();
+        store.write_into_registry(&uri, content).await.unwrap()
+    }
+
+    #[test]
+    fn file_system_state_store_is_send_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<FileSystemStateStore>();
+        assert_sync::<FileSystemStateStore>();
+    }
+
+    // --- FileSystemStateStore artifact tests ---
+
+    #[tokio::test]
+    async fn test_data_uri_unbound_raises_missing() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let err = store.data_uri("nonexistent").await.unwrap_err();
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn test_write_into_registry_persists_and_roundtrip() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let uri = Uri::new("artifact".to_string(), "foo.txt".to_string());
+        let path = store.write_into_registry(&uri, "hello").await.unwrap();
+        assert!(path.contains("foo.txt"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+
+        // Reload from disk
+        let store2 = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        // Note: store2's artifact_dir is moved; re-derive
+        let rp = store2.registry_path.clone();
+        let ad = store2.artifact_dir.clone();
+        assert_eq!(store2.data_uri("artifact://foo.txt").await.unwrap(), path);
+        let _ = (rp, ad);
+    }
+
+    #[tokio::test]
+    async fn test_path_for_uri_does_not_register() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let uri = Uri::parse("artifact://later.txt").unwrap();
+        let path = store.path_for_uri(&uri).await.unwrap();
+        assert!(path.ends_with("later.txt"));
+        assert!(!store.is_registered("artifact://later.txt").await);
+    }
+
+    #[tokio::test]
+    async fn test_commit_idempotent_same_path() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let uri = Uri::parse("artifact://a.txt").unwrap();
+        let path = store.path_for_uri(&uri).await.unwrap();
+        std::fs::write(&path, "").unwrap();
+        store.commit("artifact://a.txt", &path).await.unwrap();
+        store.commit("artifact://a.txt", &path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_commit_with_missing_file_succeeds() {
+        let (tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let missing = tmp.path().join("does-not-exist.txt");
+        // commit does not check file existence; it only enforces key uniqueness
+        store
+            .commit("artifact://gone.txt", &missing.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(store.is_registered("artifact://gone.txt").await);
+    }
+
+    #[tokio::test]
+    async fn test_commit_conflicting_path_raises() {
+        let (tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let one = tmp.path().join("one");
+        let two = tmp.path().join("two");
+        std::fs::write(&one, "").unwrap();
+        std::fs::write(&two, "").unwrap();
+        store
+            .commit("artifact://a.txt", &one.to_string_lossy())
+            .await
+            .unwrap();
+        let err = store
+            .commit("artifact://a.txt", &two.to_string_lossy())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("duplicate artifact"));
+    }
+
+    #[tokio::test]
+    async fn test_copy_into_registry() {
+        let (tmp, artifact_dir) = setup_registry();
+        let src = tmp.path().join("src.txt");
+        std::fs::write(&src, "copied").unwrap();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let uri = Uri::parse("artifact://dst.txt").unwrap();
+        let path = store.copy_into_registry(&uri, &src).await.unwrap();
+        assert!(store.is_registered("artifact://dst.txt").await);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "copied");
+    }
+
+    #[tokio::test]
+    async fn test_path_escape_prevention() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let uri = Uri::new("artifact".to_string(), "../bad.txt".to_string());
+        assert!(store.path_for_uri(&uri).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_content_reads_file() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&store, "hello.txt", "world").await;
+        assert_eq!(
+            store.content("artifact://hello.txt", None).await.unwrap(),
+            "world"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_content_with_json_path() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&store, "data.json", r#"{"a":{"b":"c"}}"#).await;
+        let content = store
+            .content("artifact://data.json", Some("a.b"))
+            .await
+            .unwrap();
+        assert_eq!(content, "c");
+    }
+
+    #[tokio::test]
+    async fn test_content_reads_file_containing_uri_text() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&store, "range", "git://range/abc..def").await;
+        assert_eq!(
+            store.content("artifact://range", None).await.unwrap(),
+            "git://range/abc..def",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_registered_false_for_missing_key() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        assert!(!store.is_registered("nonexistent").await);
+    }
+
+    #[tokio::test]
+    async fn test_is_registered_true_after_write() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&store, "stuff.txt", "data").await;
+        assert!(store.is_registered("artifact://stuff.txt").await);
+    }
+
+    #[tokio::test]
+    async fn test_is_registered_true_after_file_deleted() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let path = write_file(&store, "dead.txt", "data").await;
+        assert!(store.is_registered("artifact://dead.txt").await);
+        std::fs::remove_file(&path).unwrap();
+        assert!(store.is_registered("artifact://dead.txt").await);
+    }
+
+    #[tokio::test]
+    async fn test_keys_returns_registered_keys() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&store, "a", "").await;
+        write_file(&store, "b", "").await;
+        let mut keys = store.keys().await;
+        keys.sort();
+        assert_eq!(keys, vec!["artifact://a", "artifact://b"]);
+    }
+
+    #[tokio::test]
+    async fn test_merge_registry_identity() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let (_, other_dir) = setup_registry();
+
+        let other = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(other_dir.clone()),
+            registry_path: Some(
+                other_dir
+                    .parent()
+                    .unwrap_or(&other_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&other, "k1", "v").await;
+
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let count = store
+            .merge_registry(&other, Collision::Error, None)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        // The key is registered and its content is accessible.
+        assert!(store.is_registered("artifact://k1").await);
+        assert_eq!(store.content("artifact://k1", None).await.unwrap(), "v");
+    }
+
+    #[tokio::test]
+    async fn test_merge_registry_with_prefix() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let (_, other_dir) = setup_registry();
+
+        let other = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(other_dir.clone()),
+            registry_path: Some(
+                other_dir
+                    .parent()
+                    .unwrap_or(&other_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&other, "child", "v").await;
+
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let count = store
+            .merge_registry(&other, Collision::Error, Some("parent"))
+            .await
+            .unwrap();
+        // Both the prefixed key and the original key are registered.
+        assert!(count >= 1);
+        assert!(store.is_registered("artifact://parent/child").await);
+        assert!(store.is_registered("artifact://child").await);
+    }
+
+    #[tokio::test]
+    async fn test_merge_registry_with_file_copy() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let (tmp2, other_dir) = setup_registry();
+        let _ = &tmp2;
+
+        let other = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(other_dir.clone()),
+            registry_path: Some(
+                other_dir
+                    .parent()
+                    .unwrap_or(&other_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let src_file = write_file(&other, "note.txt", "hello").await;
+        assert!(Path::new(&src_file).exists());
+
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        let count = store
+            .merge_registry(&other, Collision::Error, None)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let stored = store.data_uri("artifact://note.txt").await.unwrap();
+        let p = PathBuf::from(stored);
+        assert!(p.exists());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello");
+    }
+
+    // --- merge_registry: dangling-reference regression test ---
+
+    #[tokio::test]
+    async fn test_merge_registry_survives_source_deletion() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let (tmp2, other_dir) = setup_registry();
+
+        let other = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(other_dir.clone()),
+            registry_path: Some(
+                other_dir
+                    .parent()
+                    .unwrap_or(&other_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&other, "data.txt", "survive-me").await;
+
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        store
+            .merge_registry(&other, Collision::Error, None)
+            .await
+            .unwrap();
+
+        // Delete the source registry's artifact directory.
+        drop(other);
+        drop(tmp2);
+
+        // The destination registry should still be able to read the content.
+        let content = store.content("artifact://data.txt", None).await.unwrap();
+        assert_eq!(content, "survive-me");
+    }
+
+    // --- merge_registry: collision mode tests ---
+
+    #[tokio::test]
+    async fn test_merge_registry_collision_error() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let (_, other_dir) = setup_registry();
+
+        let other = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(other_dir.clone()),
+            registry_path: Some(
+                other_dir
+                    .parent()
+                    .unwrap_or(&other_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&other, "dup", "from-other").await;
+
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        // Pre-register the same key in the destination.
+        write_file(&store, "dup", "existing").await;
+
+        let err = store
+            .merge_registry(&other, Collision::Error, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("duplicate artifact"));
+    }
+
+    #[tokio::test]
+    async fn test_merge_registry_collision_ignore() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let (_, other_dir) = setup_registry();
+
+        let other = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(other_dir.clone()),
+            registry_path: Some(
+                other_dir
+                    .parent()
+                    .unwrap_or(&other_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&other, "dup", "from-other").await;
+
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&store, "dup", "existing").await;
+
+        let count = store
+            .merge_registry(&other, Collision::Ignore, None)
+            .await
+            .unwrap();
+        // The duplicate key was skipped.
+        assert_eq!(count, 0);
+        // The existing value is preserved.
+        let content = store.content("artifact://dup", None).await.unwrap();
+        assert_eq!(content, "existing");
+    }
+
+    #[tokio::test]
+    async fn test_from_registry_file_constructor() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let reg_file = artifact_dir.parent().unwrap().join("custom_registry.json");
+        std::fs::write(&reg_file, r#"{"a":"b"}"#).unwrap();
+        let store = FileSystemStateStore::from_registry_file(&reg_file, artifact_dir)
+            .await
+            .unwrap();
+        assert_eq!(store.data_uri("a").await.unwrap(), "b");
+    }
+
+    // --- checkout tests ---
+
+    #[tokio::test]
+    async fn test_filesystem_checkout_subset() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&store, "a", "content-a").await;
+        write_file(&store, "b", "content-b").await;
+        write_file(&store, "c", "content-c").await;
+
+        let localized = store
+            .checkout_registry(&["artifact://a".to_string(), "artifact://c".to_string()])
+            .await
+            .unwrap();
+
+        assert!(localized.is_registered("artifact://a").await);
+        assert!(!localized.is_registered("artifact://b").await);
+        assert!(localized.is_registered("artifact://c").await);
+
+        assert_eq!(
+            localized.content("artifact://a", None).await.unwrap(),
+            "content-a"
+        );
+        assert_eq!(
+            localized.content("artifact://c", None).await.unwrap(),
+            "content-c"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_filesystem_checkout_empty_keys() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&store, "a", "content-a").await;
+
+        let localized = store.checkout_registry(&[]).await.unwrap();
+        assert!(localized.keys().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_filesystem_checkout_isolated_directory() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        write_file(&store, "secret", "classified").await;
+
+        let localized = store
+            .checkout_registry(&["artifact://secret".to_string()])
+            .await
+            .unwrap();
+
+        // The checkout lives in a different directory from the source.
+        assert_ne!(localized.artifact_dir(), store.artifact_dir());
+        assert!(!localized.artifact_dir().starts_with(store.artifact_dir()));
+    }
+
+    // --- artifact_dir / has_file tests ---
+
+    #[tokio::test]
+    async fn test_filesystem_artifact_dir() {
+        let (_tmp, artifact_dir) = setup_registry();
+        let store = FileSystemStateStore {
+            state_file: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            registry_path: Some(
+                artifact_dir
+                    .parent()
+                    .unwrap_or(&artifact_dir)
+                    .join("registry.json"),
+            ),
+        };
+        assert_eq!(store.artifact_dir(), artifact_dir.as_path());
+    }
+
+    #[tokio::test]
+    async fn test_default_checkout_unsupported() {
+        // Use a minimal struct that only implements StateStore to
+        // verify the default checkout stub.
+        struct StubStore;
+        impl Debug for StubStore {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("StubStore")
+            }
+        }
+        #[async_trait::async_trait]
+        impl StateStore for StubStore {
+            fn new(_gremlin_id: Option<String>) -> Self {
+                unimplemented!()
+            }
+            fn state_tree(&self) -> Map<String, Value> {
+                unimplemented!()
+            }
+            fn seed(&mut self, _data: &Map<String, Value>) -> Result<(), StateError> {
+                unimplemented!()
+            }
+            fn open(&self, _name: &str, _mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
+                unimplemented!()
+            }
+            fn exists(&self, _name: &str) -> bool {
+                unimplemented!()
+            }
+            fn clear_stage_error(&self, _attempt: &str) {
+                unimplemented!()
+            }
+            fn read_str(&self, _field: &str) -> String {
+                unimplemented!()
+            }
+            fn read_field(&self, _field: &str) -> Option<Value> {
+                unimplemented!()
+            }
+            fn get_field(&self, _field: &str) -> Option<Value> {
+                unimplemented!()
+            }
+            fn stage_error(&self) -> Option<Map<String, Value>> {
+                unimplemented!()
+            }
+            fn parallel_worktrees(&self, _group_name: &str) -> (String, HashMap<String, String>) {
+                unimplemented!()
+            }
+            fn patch(&self, _delete: &[String], _fields: &Map<String, Value>) {
+                unimplemented!()
+            }
+            fn record_stage_error(&self, _class: &str, _detail: &str) {
+                unimplemented!()
+            }
+            fn accumulate_token_usage(&self, _usage: &HashMap<String, i64>) {
+                unimplemented!()
+            }
+            fn write_terminal_state(&self, _exit_code: i32) {
+                unimplemented!()
+            }
+            fn persist(
+                &mut self,
+                _state_dir: &Path,
+                _data: &Map<String, Value>,
+            ) -> Result<(), StateError> {
+                unimplemented!()
+            }
+            fn patch_parallel_worktrees(
+                &self,
+                _group_name: &str,
+                _base_head: Option<&str>,
+                _paths: Option<&HashMap<String, String>>,
+            ) {
+                unimplemented!()
+            }
+            fn add_subprocess_cost(&self, _amount: f64) {
+                unimplemented!()
+            }
+            fn patch_parallel_attempt(&self, _child_key: &str, _attempt: &str) {
+                unimplemented!()
+            }
+            async fn data_uri(&self, _key: &str) -> Result<String, MissingArtifact> {
+                unimplemented!()
+            }
+            async fn content(
+                &self,
+                _uri_str: &str,
+                _json_path: Option<&str>,
+            ) -> Result<String, Box<dyn std::error::Error>> {
+                unimplemented!()
+            }
+            async fn is_registered(&self, _key: &str) -> bool {
+                unimplemented!()
+            }
+            async fn path_for_uri(&self, _uri: &Uri) -> Result<String, Box<dyn std::error::Error>> {
+                unimplemented!()
+            }
+            async fn commit(
+                &self,
+                _key: &str,
+                _path: &str,
+            ) -> Result<(), Box<dyn std::error::Error>> {
+                unimplemented!()
+            }
+            async fn write_into_registry(
+                &self,
+                _uri: &Uri,
+                _content: &str,
+            ) -> Result<String, Box<dyn std::error::Error>> {
+                unimplemented!()
+            }
+            async fn keys(&self) -> Vec<String> {
+                unimplemented!()
+            }
+            async fn fork_registry(
+                &self,
+                _child_artifact_dir: &Path,
+            ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+                unimplemented!()
+            }
+            fn as_any(&self) -> Option<&dyn std::any::Any> {
+                None
+            }
+        }
+
+        let store = StubStore;
+        let result = store.checkout_registry(&["key".to_string()]).await;
+        match result {
+            Err(e) => assert!(e.to_string().contains("not supported")),
+            Ok(_) => panic!("expected error"),
+        }
     }
 }

@@ -19,13 +19,13 @@ use std::sync::Arc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::watch;
 
-use crate::artifacts::registry::ArtifactRegistry;
 use crate::artifacts::uri::Uri;
 use crate::definition::ErrorPolicy;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::stage_key;
 use crate::executor::state;
+use crate::executor::state::StateData;
 use crate::executor::supervisor::{self, LaunchResult, RunState};
 use crate::executor::RunError;
 
@@ -35,11 +35,11 @@ fn done_uri(scope: &str, child_name: &str) -> String {
 }
 
 /// Record `child_name` as done under `scope` in the artifact registry.
-async fn mark_child_done(registry: &dyn ArtifactRegistry, scope: &str, child_name: &str) {
+async fn mark_child_done(state: &StateData, scope: &str, child_name: &str) {
     let uri_str = done_uri(scope, child_name);
     match Uri::parse(&uri_str) {
         Ok(uri) => {
-            if let Err(e) = registry.write_into_registry(&uri, "").await {
+            if let Err(e) = state.write_into_registry(&uri, "").await {
                 log::warn!("parallel group: failed to mark {child_name} done at {uri_str}: {e}");
             }
         }
@@ -79,7 +79,7 @@ pub(crate) async fn run_parallel(
     for child in children {
         let child_name = child.first_stage_name().to_string();
         if gremlin
-            .registry
+            .state
             .is_registered(&done_uri(&scope, &child_name))
             .await
         {
@@ -153,7 +153,7 @@ pub(crate) async fn run_parallel(
         log::debug!(
             "parallel group {group_name}: child {child_name} forked (state_dir={}, artifact_dir={})",
             child_gremlin.state_dir.display(),
-            child_gremlin.artifact_dir.display()
+            child_gremlin.state.artifact_dir().display()
         );
 
         // Launch the child via the supervisor — it becomes a first-class
@@ -396,7 +396,7 @@ pub(crate) async fn run_parallel(
     // --- Mark children done ---
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
-            mark_child_done(gremlin.registry.as_ref(), &scope, &outcome.child_name).await;
+            mark_child_done(&gremlin.state, &scope, &outcome.child_name).await;
         }
     }
 
@@ -440,17 +440,17 @@ async fn merge_child_artifacts(
     gremlin: &mut Gremlin,
     outcome: &ChildOutcome,
 ) -> Result<(), RunError> {
-    use crate::artifacts::registry::{Collision, FileSystemArtifactRegistry};
+    use crate::executor::state::{Collision, FileSystemStateStore};
 
-    // Construct a FileSystemArtifactRegistry from disk.
-    let child_artifact_dir = state::state_dir_for(&outcome.child_id).join("artifacts");
-    if !child_artifact_dir.exists() {
+    // Construct a FileSystemStateStore from the child's state.json.
+    let child_state_file = state::state_dir_for(&outcome.child_id).join("state.json");
+    if !child_state_file.exists() {
         return Ok(());
     }
 
-    let child_registry = FileSystemArtifactRegistry::new(child_artifact_dir);
+    let child_registry = FileSystemStateStore::at_path(child_state_file);
     gremlin
-        .registry
+        .state
         .merge_registry(
             &child_registry,
             Collision::Ignore,
@@ -572,8 +572,6 @@ mod tests {
     fn test_gremlin(stages: Vec<StageSpec>, default_client: &str) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
         let state_dir = state::state_dir_for("gr-test");
-        let artifact_dir = state_dir.join("artifacts");
-        std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 
         let data = serde_json::json!({
@@ -589,7 +587,6 @@ mod tests {
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
             state_dir,
-            artifact_dir: artifact_dir.clone(),
             definition_path: None,
             client_override: None,
             definition: Box::new(StaticDefinition::new(
@@ -601,9 +598,6 @@ mod tests {
                 stages.clone(),
                 None,
                 serde_yaml::Value::Null,
-            )),
-            registry: Box::new(crate::artifacts::registry::FileSystemArtifactRegistry::new(
-                artifact_dir,
             )),
             worktree: None,
             worktree_parent: None,
@@ -836,26 +830,14 @@ mod tests {
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
         let scope = stage_key(&gremlin.loop_iter, "group");
-        mark_child_done(gremlin.registry.as_ref(), &scope, "a").await;
+        mark_child_done(&gremlin.state, &scope, "a").await;
 
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
-        assert!(
-            gremlin
-                .registry
-                .as_ref()
-                .is_registered(&done_uri(&scope, "a"))
-                .await
-        );
-        assert!(
-            gremlin
-                .registry
-                .as_ref()
-                .is_registered(&done_uri(&scope, "b"))
-                .await
-        );
+        assert!(gremlin.state.is_registered(&done_uri(&scope, "a")).await);
+        assert!(gremlin.state.is_registered(&done_uri(&scope, "b")).await);
     }
 
     #[tokio::test]
@@ -878,8 +860,8 @@ mod tests {
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
         let scope = stage_key(&gremlin.loop_iter, "group");
-        mark_child_done(gremlin.registry.as_ref(), &scope, "a").await;
-        mark_child_done(gremlin.registry.as_ref(), &scope, "b").await;
+        mark_child_done(&gremlin.state, &scope, "a").await;
+        mark_child_done(&gremlin.state, &scope, "b").await;
 
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -927,7 +909,7 @@ mod tests {
 
         let merged_key = "writer/out.txt";
         let registered = gremlin
-            .registry
+            .state
             .is_registered(&format!("artifact://{merged_key}"))
             .await;
         assert!(registered, "parent registry should contain {merged_key}");

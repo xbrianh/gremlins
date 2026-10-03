@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use thiserror::Error;
 
-use crate::artifacts::registry::{ArtifactRegistry, MissingArtifact};
+use crate::executor::state::{MissingArtifact, StateStore};
 
 /// Check whether a raw interpolation value is a `content("...")` expression.
 pub(crate) fn is_content_interpolation(raw: &str) -> bool {
@@ -57,7 +57,7 @@ pub enum ResolveError {
 }
 
 pub async fn resolve_interpolation_map(
-    artifacts: &(impl ArtifactRegistry + ?Sized),
+    artifacts: &(impl StateStore + ?Sized),
     interpolation_map: &HashMap<String, String>,
     loop_iter: &str,
 ) -> Result<HashMap<String, String>, ResolveError> {
@@ -141,21 +141,23 @@ pub async fn resolve_interpolation_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifacts::registry::FileSystemArtifactRegistry;
+    use crate::executor::state::FileSystemStateStore;
     use std::fs;
     use tempfile::TempDir;
 
-    fn setup_registry() -> (TempDir, FileSystemArtifactRegistry) {
+    fn setup_registry() -> (TempDir, FileSystemStateStore) {
         let tmp = TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let reg = FileSystemArtifactRegistry::new(artifact_dir);
-        (tmp, reg)
+        let state_file = tmp.path().join("state.json");
+        fs::write(&state_file, "{}").unwrap();
+        let store = FileSystemStateStore::at_path(state_file);
+        (tmp, store)
     }
 
-    async fn register_file(reg: &FileSystemArtifactRegistry, name: &str, content: &str) -> String {
+    async fn register_file(store: &FileSystemStateStore, name: &str, content: &str) -> String {
         let uri = crate::artifacts::uri::Uri::parse(&format!("artifact://{name}")).unwrap();
-        reg.write_into_registry(&uri, content).await.unwrap()
+        store.write_into_registry(&uri, content).await.unwrap()
     }
 
     fn unwrap_result<T>(r: Result<T, ResolveError>) -> T {

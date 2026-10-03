@@ -2,7 +2,7 @@
 //!
 //! A [`Gremlin`] is the runtime handle for one run — the thing the run loop
 //! drives a stage tree through. It owns the resolved [`GremlinDefinition`], the
-//! [`FileSystemArtifactRegistry`], and the [`StateData`] handle, and it is the single
+//! [`StateData`] handle, and it is the single
 //! place where a gremlin's environment is assembled.
 //!
 //! Three constructors cover the lifecycles the Python executor had:
@@ -33,7 +33,6 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use crate::artifacts::registry::{ArtifactRegistry, FileSystemArtifactRegistry};
 use crate::artifacts::uri::Uri;
 use crate::clients::agent_loop::CancelToken;
 use crate::clients::client::Client;
@@ -213,7 +212,6 @@ impl Default for RuntimeConfig {
 pub struct Gremlin {
     pub id: GremlinId,
     pub state_dir: PathBuf,
-    pub artifact_dir: PathBuf,
     /// Where the definition YAML lives, resolved at construction time but not
     /// read until [`Gremlin::init_runtime`]. `None` means no definition could be
     /// located — a handle that reaches `init_runtime` without one is an error.
@@ -222,7 +220,6 @@ pub struct Gremlin {
     /// definition is finally loaded.
     pub client_override: Option<String>,
     pub definition: Box<dyn GremlinDefinition>,
-    pub registry: Box<dyn ArtifactRegistry>,
     pub worktree: Option<PathBuf>,
     pub worktree_parent: Option<PathBuf>,
     pub project_root: PathBuf,
@@ -294,8 +291,7 @@ impl Gremlin {
         };
 
         let state_dir = state::state_dir_for(gremlin_id.as_str());
-        let artifact_dir = state_dir.join("artifacts");
-        std::fs::create_dir_all(&artifact_dir)?;
+        std::fs::create_dir_all(&state_dir)?;
 
         let definition_path = definition_path
             .canonicalize()
@@ -447,11 +443,9 @@ impl Gremlin {
             Ok(Gremlin {
                 id: gremlin_id,
                 state_dir: state_dir.to_path_buf(),
-                artifact_dir: artifact_dir.to_path_buf(),
                 definition_path: Some(hermetic),
                 client_override: client_override.map(String::from),
                 definition: stub,
-                registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir.to_path_buf())),
                 worktree,
                 worktree_parent: worktree_parent.map(Path::to_path_buf),
                 project_root: project_root.to_path_buf(),
@@ -552,7 +546,6 @@ impl Gremlin {
         let recorded_path = str_field(&raw, "definition_path");
         let workdir = str_field(&raw, "workdir");
 
-        let artifact_dir = state_dir.join("artifacts");
         let state_data = StateData::new(Some(gremlin_id.as_str().to_string()));
 
         let worktree = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
@@ -603,11 +596,9 @@ impl Gremlin {
         Ok(Gremlin {
             id: gremlin_id,
             state_dir,
-            artifact_dir: artifact_dir.clone(),
             definition_path,
             client_override: None,
             definition,
-            registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree,
             worktree_parent: None,
             project_root,
@@ -702,11 +693,9 @@ impl Gremlin {
             self.base_ref.clone()
         };
 
-        let registry: Box<dyn ArtifactRegistry> =
-            Box::new(FileSystemArtifactRegistry::new(self.artifact_dir.clone()));
-        register_stage_inputs(registry.as_ref(), &definition.bootstrap, &self.stage_inputs).await;
+        register_stage_inputs(&self.state, &definition.bootstrap, &self.stage_inputs).await;
         register_base_sha(
-            registry.as_ref(),
+            &self.state,
             self.worktree.as_deref().unwrap_or(&self.project_root),
         )
         .await;
@@ -731,7 +720,6 @@ impl Gremlin {
         self.definition = Box::new(definition);
         self.client = client;
         self.base_ref = base_ref;
-        self.registry = registry;
 
         // The Python launcher sources bootstrap.env before the worktree
         // exists, so GREMLINS_WORKTREE_PATH (and any variable the script
@@ -797,7 +785,7 @@ impl Gremlin {
             child_artifact_dir.display()
         );
 
-        copy_tree(&self.artifact_dir, &child_artifact_dir)?;
+        copy_tree(self.state.artifact_dir(), &child_artifact_dir)?;
         log::debug!("fork: copied parent artifacts to child artifact dir");
 
         // A child of a run that has no worktree has none either: there is no
@@ -832,8 +820,7 @@ impl Gremlin {
             log::debug!("fork: no parent worktree — child inherits no worktree");
         }
 
-        let registry = self
-            .registry
+        self.state
             .fork_registry(&child_artifact_dir)
             .await
             .map_err(|error| RunError::Message(error.to_string()))?;
@@ -909,13 +896,11 @@ impl Gremlin {
         Ok(Gremlin {
             id: child_gremlin_id,
             state_dir: child_state_dir,
-            artifact_dir: child_artifact_dir,
             definition_path: child_definition_path
                 .map(Path::to_path_buf)
                 .or_else(|| self.definition_path.clone()),
             client_override: self.client_override.clone(),
             definition: child_provider,
-            registry,
             worktree: child_worktree,
             worktree_parent: self.worktree_parent.clone(),
             project_root: self.project_root.clone(),
@@ -1074,7 +1059,7 @@ fn project_root_for(definition_path: &Path) -> PathBuf {
 /// about, but it must not abort a launch, because the stage that wanted the
 /// artifact will report it precisely.
 async fn register_stage_inputs(
-    registry: &dyn ArtifactRegistry,
+    state: &StateData,
     bootstrap: &Bootstrap,
     stage_inputs: &HashMap<String, String>,
 ) {
@@ -1088,12 +1073,12 @@ async fn register_stage_inputs(
             continue;
         }
         let uri_str = format!("artifact://{key}");
-        if registry.is_registered(&uri_str).await {
+        if state.is_registered(&uri_str).await {
             continue;
         }
         match Uri::parse(&uri_str) {
             Ok(uri) => {
-                if let Err(error) = registry.write_into_registry(&uri, value).await {
+                if let Err(error) = state.write_into_registry(&uri, value).await {
                     log::warn!("launch: could not register stage input {key:?}: {error}");
                 }
             }
@@ -1103,8 +1088,8 @@ async fn register_stage_inputs(
 }
 
 /// Record the commit the run started from, once, as `artifact://base_sha`.
-async fn register_base_sha(registry: &dyn ArtifactRegistry, cwd: &Path) {
-    if registry.is_registered("artifact://base_sha").await {
+async fn register_base_sha(state: &StateData, cwd: &Path) {
+    if state.is_registered("artifact://base_sha").await {
         return;
     }
     let sha = git::head_sha(Some(cwd));
@@ -1112,7 +1097,7 @@ async fn register_base_sha(registry: &dyn ArtifactRegistry, cwd: &Path) {
         return;
     }
     if let Ok(uri) = Uri::parse("artifact://base_sha") {
-        if let Err(error) = registry.write_into_registry(&uri, &sha).await {
+        if let Err(error) = state.write_into_registry(&uri, &sha).await {
             log::warn!("launch: could not register artifact://base_sha: {error}");
         }
     }
@@ -1585,7 +1570,7 @@ mod tests {
         gremlin.init_runtime(None).await.unwrap();
         assert_eq!(gremlin.definition.name(), "demo");
         assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], gremlin.id.as_str());
-        assert!(gremlin.artifact_dir.ends_with("artifacts"));
+        assert!(gremlin.state.artifact_dir().ends_with("artifacts"));
         let raw = read_state(&state_file);
         assert_eq!(raw["client"], "cmd:true");
 
@@ -1726,7 +1711,8 @@ mod tests {
         )
         .unwrap();
 
-        std::fs::write(parent.artifact_dir.join("note.txt"), "hello").unwrap();
+        std::fs::create_dir_all(parent.state.artifact_dir()).unwrap();
+        std::fs::write(parent.state.artifact_dir().join("note.txt"), "hello").unwrap();
 
         let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
@@ -1735,9 +1721,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_ne!(child.artifact_dir, parent.artifact_dir);
-        assert!(child.artifact_dir.ends_with("artifacts"));
-        assert!(child.artifact_dir.join("note.txt").is_file());
+        assert_ne!(child.state.artifact_dir(), parent.state.artifact_dir());
+        assert!(child.state.artifact_dir().ends_with("artifacts"));
+        assert!(child.state.artifact_dir().join("note.txt").is_file());
 
         let child_state = child.state_dir.join("state.json");
         let raw = read_state(&child_state);
@@ -1847,21 +1833,19 @@ mod tests {
 
     /// A hand-built gremlin whose paths point wherever the test wants.
     ///
-    /// `clean` only reads `id`, `state_dir`, `artifact_dir`, `worktree` and
+    /// `clean` only reads `id`, `state_dir`, `worktree` and
     /// `project_root`, so a full `launch` would just be git fixture noise for
     /// the cases that are not about launch at all.
     fn test_gremlin(
         id: &str,
         state_dir: PathBuf,
-        artifact_dir: PathBuf,
+        _artifact_dir: PathBuf,
         worktree: Option<PathBuf>,
         project_root: PathBuf,
     ) -> Gremlin {
         Gremlin {
             id: validate_gremlin_id(id).unwrap(),
             state_dir,
-            registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir.clone())),
-            artifact_dir,
             definition_path: None,
             client_override: None,
             definition: Box::new(StaticDefinition::stub()),

@@ -11,7 +11,7 @@
 //!    a `gremlins:` DSL call runs inline; everything else is a shell command,
 //!    `{var}`-substituted and joined with `&&`.
 //! 3. `bootstrap.cli_out` — artifact bindings computed at launch, registered
-//!    directly into the main registry via [`ArtifactRegistry::copy_into_registry`].
+//!    directly into the main registry via [`StateStore::copy_into_registry`].
 //!
 //! The DSL exists so a launch can *bind* a source value into the registry —
 //! today only `gremlins:bind_artifact(uri, source_key)` — without shelling out
@@ -280,23 +280,11 @@ async fn bind_artifact(
         .filter(|path| path.is_file());
 
     let bound = if direct.is_file() {
-        gremlin
-            .registry
-            .as_ref()
-            .copy_into_registry(&uri, direct)
-            .await
+        gremlin.state.copy_into_registry(&uri, direct).await
     } else if let Some(path) = from_project {
-        gremlin
-            .registry
-            .as_ref()
-            .copy_into_registry(&uri, &path)
-            .await
+        gremlin.state.copy_into_registry(&uri, &path).await
     } else {
-        gremlin
-            .registry
-            .as_ref()
-            .write_into_registry(&uri, &value)
-            .await
+        gremlin.state.write_into_registry(&uri, &value).await
     };
 
     bound
@@ -395,8 +383,7 @@ async fn run_cli_out(
     for uri_str in cli_out.values() {
         let uri = Uri::parse(uri_str).map_err(|e| failed(e.to_string()))?;
         let path = gremlin
-            .registry
-            .as_ref()
+            .state
             .path_for_uri(&uri)
             .await
             .map_err(|e| failed(e.to_string()))?;
@@ -406,8 +393,7 @@ async fn run_cli_out(
             )));
         }
         gremlin
-            .registry
-            .as_ref()
+            .state
             .commit(&uri.to_string(), &path)
             .await
             .map_err(|e| failed(e.to_string()))?;
@@ -426,7 +412,6 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::clients::client::Client;
 
     use crate::definition::StaticDefinition;
@@ -618,9 +603,7 @@ mod tests {
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
         let state_dir = state::state_dir_for("gr-test");
-        let artifact_dir = state_dir.join("artifacts");
         let worktree = sandbox.path().join("worktree");
-        std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&worktree).unwrap();
 
@@ -637,7 +620,6 @@ mod tests {
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
             state_dir,
-            artifact_dir: artifact_dir.clone(),
             definition_path: None,
             client_override: None,
             definition: Box::new(StaticDefinition::new(
@@ -650,7 +632,6 @@ mod tests {
                 None,
                 serde_yaml::Value::Null,
             )),
-            registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: Some(worktree),
             worktree_parent: None,
             project_root: sandbox.path().to_path_buf(),
@@ -696,17 +677,10 @@ mod tests {
 
         run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
-        assert!(
-            gremlin
-                .registry
-                .as_ref()
-                .is_registered("artifact://plan.md")
-                .await
-        );
+        assert!(gremlin.state.is_registered("artifact://plan.md").await);
         assert_eq!(
             gremlin
-                .registry
-                .as_ref()
+                .state
                 .content("artifact://plan.md", None)
                 .await
                 .unwrap(),
@@ -727,7 +701,7 @@ mod tests {
 
         assert_eq!(
             gremlin
-                .registry
+                .state
                 .content("artifact://note.txt", None)
                 .await
                 .unwrap(),
@@ -745,13 +719,7 @@ mod tests {
 
         run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
-        assert!(
-            !gremlin
-                .registry
-                .as_ref()
-                .is_registered("artifact://plan.md")
-                .await
-        );
+        assert!(!gremlin.state.is_registered("artifact://plan.md").await);
     }
 
     #[tokio::test]
@@ -794,18 +762,12 @@ mod tests {
 
         // run_cli_out verifies the bound file exists, so stage the output first.
         let uri = Uri::parse("artifact://pr.txt").unwrap();
-        let path = gremlin.registry.as_ref().path_for_uri(&uri).await.unwrap();
+        let path = gremlin.state.path_for_uri(&uri).await.unwrap();
         std::fs::write(&path, "123").unwrap();
 
         run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
-        assert!(
-            gremlin
-                .registry
-                .as_ref()
-                .is_registered("artifact://pr.txt")
-                .await
-        );
+        assert!(gremlin.state.is_registered("artifact://pr.txt").await);
     }
 
     #[tokio::test]
