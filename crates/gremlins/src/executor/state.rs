@@ -27,10 +27,12 @@ pub enum StateError {
 }
 
 /// A general handle for named state-directory files.
+#[allow(dead_code)]
 pub(crate) trait StateBlob: std::io::Read + std::io::Write + std::io::Seek + Send {}
 impl<T: std::io::Read + std::io::Write + std::io::Seek + Send> StateBlob for T {}
 
 /// How to open a named blob.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlobMode {
     /// Open an existing file for reading and writing. Fails if absent.
@@ -59,9 +61,11 @@ pub(crate) trait StateStore: Send + Sync + Debug {
 
     /// Open a named blob in the state directory. Creates parent directories
     /// as needed. The returned handle supports Read + Write + Seek.
+    #[allow(dead_code)]
     fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError>;
 
     /// Check whether a named blob exists without creating it.
+    #[allow(dead_code)]
     fn exists(&self, name: &str) -> bool;
 
     /// Remove a stale bail file for the given attempt.
@@ -523,6 +527,7 @@ impl StateData {
         self.store.seed(data)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn open(
         &self,
         name: &str,
@@ -531,6 +536,7 @@ impl StateData {
         self.store.open(name, mode)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn exists(&self, name: &str) -> bool {
         self.store.exists(name)
     }
