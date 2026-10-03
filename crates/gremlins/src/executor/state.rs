@@ -93,7 +93,7 @@ pub(crate) struct FileStateStore {
 }
 
 impl FileStateStore {
-    /// Build a store pointed at an explicit path (for tests).
+    /// Build a store pointed at an explicit path (for tests and fork).
     pub(crate) fn at(path: PathBuf) -> Self {
         Self {
             state_file: Some(path),
@@ -380,7 +380,7 @@ impl StateData {
         Self { gremlin_id, store }
     }
 
-    /// For tests: construct with a pre-built store.
+    /// Construct with a pre-built store (for tests and fork).
     pub(crate) fn from_store(
         gremlin_id: Option<String>,
         store: Box<dyn StateStore + Send + Sync>,
@@ -450,6 +450,9 @@ impl StateData {
         base_head: Option<&str>,
         paths: Option<&HashMap<String, String>>,
     ) {
+        if self.gremlin_id.as_deref().unwrap_or("").is_empty() {
+            return;
+        }
         self.store
             .patch_parallel_worktrees(group_name, base_head, paths);
     }
