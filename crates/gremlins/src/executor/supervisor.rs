@@ -484,7 +484,7 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
             });
             // Write terminal state to disk so the aborted run isn't
             // reported as orphan and has a recorded exit_code.
-            let state_dir = state::state_dir_for(id);
+            let state_dir = config::state_root().join(id);
             let state_file = state_dir.join("state.json");
             let _ = state::locked_update(&state_file, |data| {
                 data.insert("status".to_string(), Value::String("stopped".to_string()));
@@ -502,7 +502,7 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
     }
 
     // Not in run_map — check for orphaned or already-terminal gremlin.
-    let state_dir = state::state_dir_for(id);
+    let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
     if state_file.is_file() {
         let raw = state::read_state_json(Some(&state_file));
@@ -721,7 +721,11 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
         if live.contains_key(&id) {
             continue;
         }
-        if state::StateData::open(&state_root.join(&id)).exists("closed") {
+        if state::StateData::open(&id)
+            .ok()
+            .map(|sd| sd.exists("closed"))
+            .unwrap_or(false)
+        {
             continue;
         }
         let raw = state::read_state_json(Some(&state_json_path));
@@ -795,7 +799,7 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
         return error_response(&format!("invalid gremlin id {id:?}"));
     }
 
-    let state_dir = state::state_dir_for(id);
+    let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return error_response(&format!("unknown gremlin {id:?}"));
@@ -843,7 +847,7 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         return error_response(&format!("invalid gremlin id {id:?}"));
     }
 
-    let state_dir = state::state_dir_for(id);
+    let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         return error_response(&format!("unknown gremlin {id:?}"));
@@ -905,7 +909,7 @@ async fn handle_log(
         return;
     }
 
-    let state_dir = state::state_dir_for(id);
+    let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         let resp = error_response(&format!("unknown gremlin {id:?}"));
@@ -1021,7 +1025,7 @@ async fn handle_debug(
         return;
     }
 
-    let state_dir = state::state_dir_for(id);
+    let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
     if !state_dir.is_dir() || !state_file.is_file() {
         log::debug!("handle_debug: unknown gremlin {id:?}");
@@ -1558,7 +1562,7 @@ pub(crate) async fn stop_child(id: &str) {
         });
         // Write terminal state to disk so the aborted child isn't
         // reported as orphan and has a recorded exit_code.
-        let state_dir = state::state_dir_for(id);
+        let state_dir = config::state_root().join(id);
         let state_file = state_dir.join("state.json");
         let _ = state::locked_update(&state_file, |data| {
             data.insert("status".to_string(), Value::String("stopped".to_string()));
@@ -1577,7 +1581,7 @@ pub(crate) async fn stop_child(id: &str) {
 /// If the client spec cannot be read or parsed this is a silent no-op —
 /// the gremlin may not have started running yet.
 fn reap_client_for(id: &str) {
-    let state_file = state::state_dir_for(id).join("state.json");
+    let state_file = config::state_root().join(id).join("state.json");
     let raw = state::read_state_json(Some(&state_file));
     let spec = raw.get("client").and_then(|v| v.as_str()).unwrap_or("");
     if spec.is_empty() {

@@ -20,6 +20,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::watch;
 
 use crate::artifacts::uri::Uri;
+use crate::config;
 use crate::definition::ErrorPolicy;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
@@ -211,7 +212,7 @@ pub(crate) async fn run_parallel(
                         let state = state_rx.borrow().clone();
                         if state.status == "done" || state.status == "stopped" {
                             // Read the child's state.json to get the real outcome.
-                            let child_state_dir = state::state_dir_for(&child_id);
+                            let child_state_dir = config::state_root().join(&child_id);
                             let child_state_file = child_state_dir.join("state.json");
                             let outcome = if child_state_file.is_file() {
                                 let raw = state::read_state_json(Some(&child_state_file));
@@ -443,8 +444,7 @@ async fn merge_child_artifacts(
     use crate::executor::state::{Collision, StateData};
 
     // Open the child's state.
-    let child_state_dir = state::state_dir_for(&outcome.child_id);
-    let child_state = StateData::open(&child_state_dir);
+    let child_state = StateData::open(&outcome.child_id)?;
     gremlin
         .state
         .join(
@@ -460,7 +460,7 @@ async fn merge_child_artifacts(
 
 /// Aggregate token usage and subprocess cost from a child into the parent.
 fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
-    let child_state_dir = state::state_dir_for(&outcome.child_id);
+    let child_state_dir = config::state_root().join(&outcome.child_id);
     let child_state_file = child_state_dir.join("state.json");
     if !child_state_file.is_file() {
         return;
@@ -504,7 +504,7 @@ fn cleanup_child_fully(child_name: &str, child_id: &str) {
 fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &str) {
     use crate::core::git;
 
-    let child_state_dir = state::state_dir_for(child_id);
+    let child_state_dir = config::state_root().join(child_id);
     let child_state_file = child_state_dir.join("state.json");
     if !child_state_file.is_file() {
         return;
@@ -567,7 +567,7 @@ mod tests {
 
     fn test_gremlin(stages: Vec<StageSpec>, default_client: &str) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = state::state_dir_for("gr-test");
+        let state_dir = config::state_root().join("gr-test");
         std::fs::create_dir_all(&state_dir).unwrap();
 
         let data = serde_json::json!({
@@ -578,7 +578,7 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let state_data = StateData::open(&state_dir);
+        let state_data = StateData::open("gr-test").unwrap();
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),

@@ -278,7 +278,7 @@ impl Gremlin {
         let gremlin_id = loop {
             let hex = state::token_hex(2);
             let candidate = format!("{definition_name}-{hex}");
-            match std::fs::create_dir(state::state_dir_for(&candidate)) {
+            match std::fs::create_dir(config::state_root().join(&candidate)) {
                 Ok(()) => break GremlinId(candidate),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => {
@@ -288,9 +288,6 @@ impl Gremlin {
                 }
             }
         };
-
-        let state_dir = state::state_dir_for(gremlin_id.as_str());
-        std::fs::create_dir_all(&state_dir)?;
 
         let definition_path = definition_path
             .canonicalize()
@@ -341,7 +338,7 @@ impl Gremlin {
             .map(|(key, value)| (key.clone(), Value::String(value.clone())))
             .collect();
 
-        let existing = state::read_state_json(Some(&state_dir.join("state.json")));
+        let existing = Map::new();
         let mut initial = existing;
         initial.insert("id".to_string(), Value::String(gremlin_id.to_string()));
         if !initial.contains_key("kind") {
@@ -404,7 +401,7 @@ impl Gremlin {
             }
         };
 
-        let state = match StateData::new(&state_dir, &initial) {
+        let state = match StateData::new(gremlin_id.as_str(), &initial) {
             Ok(s) => s,
             Err(error) => {
                 cleanup_worktree();
@@ -425,8 +422,6 @@ impl Gremlin {
             Value::String("worktree-detached".to_string()),
         );
         state.patch(&[], &patch);
-
-        stage_overlay(&project_root, state.state_dir());
 
         // Write the hermetic definition.yaml snapshot now, before we
         // return the handle, so the spawned child always sees the
@@ -506,7 +501,7 @@ impl Gremlin {
     /// missing definition becomes a hard error.
     pub fn from(id: &str) -> Result<Gremlin, RunError> {
         let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
-        let state_dir = state::state_dir_for(gremlin_id.as_str());
+        let state_dir = config::state_root().join(gremlin_id.as_str());
         let state_file = state_dir.join("state.json");
 
         if !state_dir.is_dir() {
@@ -548,7 +543,7 @@ impl Gremlin {
         let recorded_path = str_field(&raw, "definition_path");
         let workdir = str_field(&raw, "workdir");
 
-        let state_data = StateData::open(&state_dir);
+        let state_data = StateData::open(gremlin_id.as_str())?;
 
         let worktree = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
         let base_ref_sha = state_data.read_str("worktree_base");
@@ -706,14 +701,11 @@ impl Gremlin {
         )
         .await;
 
-        let overlay_dir = self.state.state_dir().join(config::overlay_dirname());
         let env = resolve_env(
             bootstrap_script(&definition.bootstrap),
-            self.state.state_dir(),
             self.id.as_str(),
             &self.project_root,
             self.worktree.as_deref(),
-            &overlay_dir,
             &self.runtime_config.scratch_dir,
             &self.runtime_config.base_process_env,
         )?;
@@ -1099,53 +1091,6 @@ async fn register_base_sha(state: &dyn StateStore, cwd: &Path) {
     }
 }
 
-/// Copy the project's `.gremlins` overlay into `state_dir`, best-effort.
-///
-/// Nothing is copied when the project has no overlay, or when the overlay and
-/// the destination are the same directory (a state dir inside the project).
-fn stage_overlay(project_root: &Path, state_dir: &Path) {
-    let dirname = config::overlay_dirname();
-    let source = project_root.join(dirname);
-    if !source.is_dir() {
-        return;
-    }
-    let destination = state_dir.join(dirname);
-    let same = match (source.canonicalize(), destination.canonicalize()) {
-        (Ok(from), Ok(to)) => from == to,
-        _ => false,
-    };
-    if same {
-        return;
-    }
-    if let Err(error) = copy_tree(&source, &destination) {
-        log::warn!(
-            "launch: could not stage {} into {}: {error}",
-            source.display(),
-            destination.display()
-        );
-    }
-}
-
-/// Recursively copy `source` into `destination`, creating directories as
-/// needed. A missing source is not an error — it simply copies nothing.
-pub(crate) fn copy_tree(source: &Path, destination: &Path) -> Result<(), RunError> {
-    if !source.is_dir() {
-        return Ok(());
-    }
-    std::fs::create_dir_all(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let target = destination.join(entry.file_name());
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_tree(&entry.path(), &target)?;
-        } else if kind.is_file() {
-            std::fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
-}
-
 /// Resolve a definition kind against `project_root`, ignoring the process-wide
 /// overlay override.
 ///
@@ -1203,17 +1148,15 @@ pub fn framework_subs(
     ])
 }
 
-/// The seven harness-owned system variables, built from a gremlin's paths.
+/// The five harness-owned system variables, built from a gremlin's paths.
 ///
 /// These are both *seeded into* the base the bootstrap script is sourced
 /// against and *re-asserted* on top of the result, so the script can read
 /// them but can never override them.
 pub fn system_env(
-    state_dir: &Path,
     gremlin_id: &str,
     project_root: &Path,
     worktree: Option<&Path>,
-    overlay_dir: &Path,
     scratch_dir: &Path,
 ) -> HashMap<String, String> {
     let worktree_path = worktree
@@ -1236,16 +1179,8 @@ pub fn system_env(
         "GREMLINS_PROJECT_ROOT".to_string(),
         project_root.to_string_lossy().into_owned(),
     );
-    vars.insert(
-        "GREMLINS_OVERLAY_DIR".to_string(),
-        overlay_dir.to_string_lossy().into_owned(),
-    );
     vars.insert("GREMLINS_WORKTREE_PATH".to_string(), worktree_path);
     vars.insert("GREMLIN_WORKSPACE_DIR".to_string(), workspace_dir);
-    vars.insert(
-        "GREMLIN_STATE_DIR".to_string(),
-        state_dir.to_string_lossy().into_owned(),
-    );
     vars.insert(
         "GREMLINS_SCRATCH_DIR".to_string(),
         scratch_dir.to_string_lossy().into_owned(),
@@ -1262,22 +1197,13 @@ pub fn system_env(
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_env(
     bootstrap_env: Option<&str>,
-    state_dir: &Path,
     gremlin_id: &str,
     project_root: &Path,
     worktree: Option<&Path>,
-    overlay_dir: &Path,
     scratch_dir: &Path,
     base_env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, RunError> {
-    let system = system_env(
-        state_dir,
-        gremlin_id,
-        project_root,
-        worktree,
-        overlay_dir,
-        scratch_dir,
-    );
+    let system = system_env(gremlin_id, project_root, worktree, scratch_dir);
 
     let mut base: HashMap<String, String> = base_env.clone();
     base.extend(system.clone());
@@ -1346,20 +1272,15 @@ mod tests {
     fn resolve_env_injects_system_vars() {
         let _guard = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join("state").join("gr-test");
         let project_root = dir.path().join("project");
-        let overlay_dir = state_dir.join(config::overlay_dirname());
-        std::fs::create_dir_all(&overlay_dir).unwrap();
 
         let scratch_dir = config::scratch_root(Some("gr-test"));
         let base_env: HashMap<String, String> = std::env::vars().collect();
         let env = resolve_env(
             None,
-            &state_dir,
             "gr-test",
             &project_root,
             None,
-            &overlay_dir,
             &scratch_dir,
             &base_env,
         )
@@ -1367,13 +1288,11 @@ mod tests {
 
         assert_eq!(env["GREMLINS_GREMLIN_ID"], "gr-test");
         assert_eq!(env["GREMLINS_PROJECT_ROOT"], project_root.to_string_lossy());
-        assert_eq!(env["GREMLINS_OVERLAY_DIR"], overlay_dir.to_string_lossy());
         assert_eq!(env["GREMLINS_WORKTREE_PATH"], "");
         assert_eq!(
             env["GREMLIN_WORKSPACE_DIR"],
             std::env::current_dir().unwrap().to_string_lossy()
         );
-        assert_eq!(env["GREMLIN_STATE_DIR"], state_dir.to_string_lossy());
         assert_eq!(env["GREMLINS_SCRATCH_DIR"], scratch_dir.to_string_lossy());
     }
 
@@ -1395,11 +1314,8 @@ mod tests {
     fn resolve_env_sources_and_keeps_system_vars() {
         let _guard = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join("state").join("gr-test");
         let project_root = dir.path().join("project");
-        let overlay_dir = state_dir.join(config::overlay_dirname());
         std::fs::create_dir_all(&project_root).unwrap();
-        std::fs::create_dir_all(&overlay_dir).unwrap();
 
         // The script replaces `PATH`, so it pins `env`'s location first: the
         // loader reads the resulting environment back with `env -0`.
@@ -1411,11 +1327,9 @@ mod tests {
         let base_env: HashMap<String, String> = std::env::vars().collect();
         let env = resolve_env(
             Some(&script),
-            &state_dir,
             "gr-test",
             &project_root,
             None,
-            &overlay_dir,
             &scratch_dir,
             &base_env,
         )
@@ -1426,13 +1340,11 @@ mod tests {
         assert_eq!(env["PATH"], "/custom");
         assert_eq!(env["GREMLINS_GREMLIN_ID"], "gr-test");
         assert_eq!(env["GREMLINS_PROJECT_ROOT"], project_root.to_string_lossy());
-        assert_eq!(env["GREMLINS_OVERLAY_DIR"], overlay_dir.to_string_lossy());
         assert_eq!(env["GREMLINS_WORKTREE_PATH"], "");
         assert_eq!(
             env["GREMLIN_WORKSPACE_DIR"],
             std::env::current_dir().unwrap().to_string_lossy()
         );
-        assert_eq!(env["GREMLIN_STATE_DIR"], state_dir.to_string_lossy());
         assert_eq!(env["GREMLINS_SCRATCH_DIR"], scratch_dir.to_string_lossy());
     }
 
@@ -1440,12 +1352,9 @@ mod tests {
     fn resolve_env_lets_the_script_read_system_vars() {
         let _guard = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join("state").join("gr-test");
         let project_root = dir.path().join("project");
         let worktree = dir.path().join("wt");
-        let overlay_dir = state_dir.join(config::overlay_dirname());
         std::fs::create_dir_all(&project_root).unwrap();
-        std::fs::create_dir_all(&overlay_dir).unwrap();
 
         // The script derives VIRTUAL_ENV from the worktree path — the shape the
         // bundled definitions use — then tries to redirect a system variable.
@@ -1455,11 +1364,9 @@ mod tests {
         let base_env: HashMap<String, String> = std::env::vars().collect();
         let env = resolve_env(
             Some(script),
-            &state_dir,
             "gr-test",
             &project_root,
             Some(&worktree),
-            &overlay_dir,
             &scratch_dir,
             &base_env,
         )
@@ -1473,18 +1380,14 @@ mod tests {
     #[test]
     fn resolve_env_reports_bootstrap_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join("state").join("gr-test");
-        std::fs::create_dir_all(&state_dir).unwrap();
 
         let scratch_dir = config::scratch_root(Some("gr-test"));
         let base_env: HashMap<String, String> = std::env::vars().collect();
         let error = resolve_env(
             Some("exit 3"),
-            &state_dir,
             "gr-test",
             dir.path(),
             None,
-            &state_dir.join(config::overlay_dirname()),
             &scratch_dir,
             &base_env,
         )
@@ -1834,7 +1737,7 @@ mod tests {
     /// the cases that are not about launch at all.
     fn test_gremlin(
         id: &str,
-        state_dir: PathBuf,
+        _state_dir: PathBuf,
         _artifact_dir: PathBuf,
         worktree: Option<PathBuf>,
         project_root: PathBuf,
@@ -1849,7 +1752,7 @@ mod tests {
             project_root,
             base_ref_sha: String::new(),
             base_ref: String::new(),
-            state: StateData::open(&state_dir),
+            state: StateData::open(id).unwrap(),
             env: HashMap::new(),
             client: Client::parse("cmd:true").unwrap(),
             loop_iter: "1".to_string(),
