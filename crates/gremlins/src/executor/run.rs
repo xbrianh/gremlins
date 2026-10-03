@@ -441,7 +441,7 @@ async fn run_agent(
     // Merge the localized registry back into the main registry.
     gremlin
         .state
-        .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
+        .join(local_registry.as_ref(), Collision::Ignore, None)
         .await
         .map_err(|error| RunError::StageFailed {
             stage: prepared.name.clone(),
@@ -566,7 +566,7 @@ async fn run_exec(
 
     prepared.cwd = gremlin.cwd();
     prepared.artifact_dir = local_registry.artifact_dir().to_path_buf();
-    prepared.state_dir = gremlin.state_dir.clone();
+    prepared.state_dir = gremlin.state.state_dir().to_path_buf();
     prepared.env = gremlin.env.clone();
     prepared.base_env = gremlin.runtime_config.base_process_env.clone();
     prepared.log_tx = gremlin.runtime_config.log_tx.clone();
@@ -609,7 +609,7 @@ async fn run_exec(
     // Merge the localized registry back into the main registry.
     gremlin
         .state
-        .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
+        .join(local_registry.as_ref(), Collision::Ignore, None)
         .await
         .map_err(|error| RunError::StageFailed {
             stage: prepared.name.clone(),
@@ -1006,7 +1006,7 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let state_data = StateData::new(Some("gr-test".to_string()));
+        let state_data = StateData::open(&state_dir);
 
         let definition = StaticDefinition::new(
             "test".to_string(),
@@ -1021,7 +1021,6 @@ mod tests {
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
-            state_dir,
             definition_path: None,
             client_override: None,
             definition: Box::new(definition),
@@ -1744,7 +1743,7 @@ mod tests {
         // override is shared process state, and the pre-existing
         // config tests clear it for their own duration; the path the
         // launch actually resolved is the honest one to assert on.
-        let state_file = gremlin.state_dir.join("state.json");
+        let state_file = gremlin.state.state_dir().join("state.json");
         let raw: Value =
             serde_json::from_str(&std::fs::read_to_string(&state_file).unwrap()).unwrap();
         assert_eq!(code, 0);

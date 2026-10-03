@@ -397,7 +397,7 @@ async fn handle_launch(
 
     // Spawn the log writer: reads from the channel, appends to $state_dir/log,
     // and broadcasts to live subscribers.
-    let log_path = gremlin.state_dir.join("log");
+    let log_path = gremlin.state.state_dir().join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
     let cancel_token = CancelToken::new();
@@ -618,7 +618,7 @@ async fn handle_resume(
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.
-    let log_path = gremlin.state_dir.join("log");
+    let log_path = gremlin.state.state_dir().join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
     let cancel_token = CancelToken::new();
@@ -721,7 +721,7 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
         if live.contains_key(&id) {
             continue;
         }
-        if state::StateData::new(Some(id.clone())).exists("closed") {
+        if state::StateData::open(&state_root.join(&id)).exists("closed") {
             continue;
         }
         let raw = state::read_state_json(Some(&state_json_path));
@@ -817,7 +817,7 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
         "definition": definition_display_name(&gremlin),
         "project_root": gremlin.project_root.to_string_lossy(),
         "workdir": gremlin.worktree.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-        "state_dir": gremlin.state_dir.to_string_lossy(),
+        "state_dir": gremlin.state.state_dir().to_string_lossy(),
         "artifact_dir": gremlin.state.artifact_dir().to_string_lossy(),
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
@@ -865,10 +865,10 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         "definition": definition_display_name(&gremlin),
         "project_root": gremlin.project_root.to_string_lossy(),
         "workdir": gremlin.worktree.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-        "state_dir": gremlin.state_dir.to_string_lossy(),
+        "state_dir": gremlin.state.state_dir().to_string_lossy(),
         "artifact_dir": gremlin.state.artifact_dir().to_string_lossy(),
         "scratch_dir": config::scratch_root(Some(id)).to_string_lossy(),
-        "log_file": gremlin.state_dir.join("log").to_string_lossy(),
+        "log_file": gremlin.state.state_dir().join("log").to_string_lossy(),
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
@@ -1461,7 +1461,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.
-    let log_path = gremlin.state_dir.join("log");
+    let log_path = gremlin.state.state_dir().join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
     // Reuse the cancel token inherited from the parent via Gremlin::fork;

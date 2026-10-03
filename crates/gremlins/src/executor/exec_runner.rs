@@ -331,7 +331,7 @@ pub async fn run_shell(
     let stream_path = prepared.state_dir.join(&blob_name);
 
     let mut stream_blob: Option<Box<dyn std::io::Write + Send>> =
-        match state.open(&blob_name, BlobMode::Append) {
+        match state.open_blob(&blob_name, BlobMode::Append) {
             Ok(blob) => {
                 if let Some(ref tx) = prepared.log_tx {
                     let _ = tx.send(format!(
@@ -529,7 +529,7 @@ mod tests {
     fn make_state_store(artifact_dir: &Path) -> FileSystemStateStore {
         let state_file = artifact_dir.parent().unwrap().join("state.json");
         std::fs::write(&state_file, "{}").unwrap();
-        FileSystemStateStore::at_path(state_file)
+        FileSystemStateStore::open(state_file.parent().unwrap().to_path_buf())
     }
 
     #[tokio::test]

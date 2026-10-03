@@ -151,7 +151,7 @@ mod tests {
         fs::create_dir_all(&artifact_dir).unwrap();
         let state_file = tmp.path().join("state.json");
         fs::write(&state_file, "{}").unwrap();
-        let store = FileSystemStateStore::at_path(state_file);
+        let store = FileSystemStateStore::open(state_file.parent().unwrap().to_path_buf());
         (tmp, store)
     }
 

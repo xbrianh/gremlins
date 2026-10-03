@@ -234,7 +234,7 @@ mod tests {
     fn make_state_store(artifact_dir: PathBuf) -> FileSystemStateStore {
         let state_file = artifact_dir.parent().unwrap().join("state.json");
         std::fs::write(&state_file, "{}").unwrap();
-        FileSystemStateStore::at_path(state_file)
+        FileSystemStateStore::open(state_file.parent().unwrap().to_path_buf())
     }
 
     async fn register_file(store: &FileSystemStateStore, name: &str, content: &str) -> String {

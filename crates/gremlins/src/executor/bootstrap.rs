@@ -616,11 +616,10 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let state_data = StateData::new(Some("gr-test".to_string()));
+        let state_data = StateData::open(&state_dir);
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
-            state_dir,
             definition_path: None,
             client_override: None,
             definition: Box::new(StaticDefinition::new(
