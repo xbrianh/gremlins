@@ -131,7 +131,6 @@ pub trait LocalizedArtifactRegistry: ArtifactRegistry {
     fn artifact_dir(&self) -> &Path;
 
     /// Check whether a file exists at `path` (empty files are valid).
-    /// For dry-run registries this always returns true.
     async fn has_file(&self, path: &str) -> bool;
 }
 
@@ -208,8 +207,7 @@ async fn merge_registry_via_content<D: ArtifactRegistry + Sync + ?Sized>(
 
         // Also register under the original (un-prefixed) key so
         // downstream stages can reference child artifacts by their
-        // bound URI. Use write_into_registry so that dry-run backends
-        // preserve the content string for the alias.
+        // bound URI.
         if key_prefix.is_some() && key != dest_key && !dest.is_registered(&key).await {
             let alias_uri = Uri::parse(&key).map_err(|e| {
                 Box::new(std::io::Error::new(
