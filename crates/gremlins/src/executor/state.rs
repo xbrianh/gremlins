@@ -1386,13 +1386,10 @@ impl StateData {
     /// Open an existing state directory. Does NOT write anything.
     pub fn open(gremlin_id: &str) -> Result<Self, StateError> {
         let store = Box::new(FileSystemStateStore::open(gremlin_id)?);
-        let gremlin_id = read_state_json(Some(
-            &config::state_root().join(gremlin_id).join("state.json"),
-        ))
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-        Ok(Self { gremlin_id, store })
+        Ok(Self {
+            gremlin_id: Some(gremlin_id.to_string()),
+            store,
+        })
     }
 
     pub fn from_store(

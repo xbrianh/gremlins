@@ -338,8 +338,7 @@ impl Gremlin {
             .map(|(key, value)| (key.clone(), Value::String(value.clone())))
             .collect();
 
-        let existing = Map::new();
-        let mut initial = existing;
+        let mut initial = Map::new();
         initial.insert("id".to_string(), Value::String(gremlin_id.to_string()));
         if !initial.contains_key("kind") {
             initial.insert("kind".to_string(), Value::String(String::new()));
@@ -1229,6 +1228,7 @@ pub fn resolve_env(
 mod tests {
     use super::*;
 
+    use crate::executor::state::FileSystemStateStore;
     use crate::test_support::{with_sandbox, EnvGuard, GitSandbox};
 
     #[test]
@@ -1737,7 +1737,7 @@ mod tests {
     /// the cases that are not about launch at all.
     fn test_gremlin(
         id: &str,
-        _state_dir: PathBuf,
+        state_dir: PathBuf,
         _artifact_dir: PathBuf,
         worktree: Option<PathBuf>,
         project_root: PathBuf,
@@ -1752,7 +1752,10 @@ mod tests {
             project_root,
             base_ref_sha: String::new(),
             base_ref: String::new(),
-            state: StateData::open(id).unwrap(),
+            state: StateData::from_store(
+                Some(id.to_string()),
+                Box::new(FileSystemStateStore::from_path(state_dir)),
+            ),
             env: HashMap::new(),
             client: Client::parse("cmd:true").unwrap(),
             loop_iter: "1".to_string(),

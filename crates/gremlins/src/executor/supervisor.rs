@@ -721,11 +721,7 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
         if live.contains_key(&id) {
             continue;
         }
-        if state::StateData::open(&id)
-            .ok()
-            .map(|sd| sd.exists("closed"))
-            .unwrap_or(false)
-        {
+        if state_root.join(&id).join("closed").exists() {
             continue;
         }
         let raw = state::read_state_json(Some(&state_json_path));
