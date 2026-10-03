@@ -922,7 +922,7 @@ impl Gremlin {
             .await
             .map_err(|error| RunError::Message(error.to_string()))?;
 
-        let parent = state::read_state_json(self.state.state_file.as_deref());
+        let parent = state::read_state_json(self.state.state_file());
         let mut child = Map::new();
         for name in state::field_names() {
             if FORK_TRANSIENT.contains(&name) {
@@ -1009,11 +1009,10 @@ impl Gremlin {
             project_root: self.project_root.clone(),
             base_ref_sha: child_worktree_base,
             base_ref: self.base_ref.clone(),
-            state: {
-                let mut child_state = StateData::new(Some(child_id.to_string()));
-                child_state.state_file = Some(child_state_file);
-                child_state
-            },
+            state: StateData::from_store(
+                Some(child_id.to_string()),
+                Box::new(state::FileStateStore::at(child_state_file)),
+            ),
             env: self.env.clone(),
             client,
             loop_iter: "1".to_string(),

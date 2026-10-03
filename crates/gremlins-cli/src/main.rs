@@ -577,7 +577,7 @@ fn info_direct(id: &str) -> Result<(), String> {
         "worktree_base": gremlin.base_ref_sha,
         "bail_info": gremlin
             .state
-            .read_bail_info()
+            .stage_error()
             .map(Value::Object)
             .unwrap_or(Value::Null),
     });
@@ -1184,7 +1184,7 @@ async fn validate(definition: &str) -> Result<(), String> {
             let stage = gremlin.state.read_str("stage");
             let detail = gremlin
                 .state
-                .read_bail_info()
+                .stage_error()
                 .and_then(|info| info.get("detail").cloned())
                 .and_then(|v| {
                     if v.is_string() {

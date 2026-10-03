@@ -576,7 +576,7 @@ async fn handle_resume(
         return error_response(&format!("gremlin {id} is already done"));
     }
 
-    let has_bail = gremlin.state.read_bail_info().is_some();
+    let has_bail = gremlin.state.stage_error().is_some();
     if status != "stopped" && !has_bail {
         return error_response(&format!(
             "gremlin {id} cannot be resumed — status is {status:?}"
@@ -880,7 +880,7 @@ async fn handle_info(request: &Value, state_root: &Path) -> Value {
         "kind": gremlin.state.read_str("kind"),
         "base_ref": gremlin.base_ref,
         "worktree_base": gremlin.base_ref_sha,
-        "bail_info": gremlin.state.read_bail_info().map(Value::Object).unwrap_or(Value::Null),
+        "bail_info": gremlin.state.stage_error().map(Value::Object).unwrap_or(Value::Null),
     }))
 }
 

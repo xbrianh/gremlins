@@ -630,8 +630,10 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let mut state_data = StateData::new(Some("gr-test".to_string()));
-        state_data.state_file = Some(state_dir.join("state.json"));
+        let state_data = StateData::from_store(
+            Some("gr-test".to_string()),
+            Box::new(state::FileStateStore::at(state_dir.join("state.json"))),
+        );
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),

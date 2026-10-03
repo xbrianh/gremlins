@@ -854,7 +854,7 @@ impl Gremlin {
         if first_start && has_bootstrap {
             if let Err(error) = run_definition_bootstrap(self, is_fork).await {
                 send_log(&self.runtime_config.log_tx, "bootstrap failed".to_string());
-                self.state.write_bail_file(
+                self.state.record_stage_error(
                     "other",
                     &truncate(&format!("bootstrap failed: {error}"), 200),
                 );
@@ -869,7 +869,7 @@ impl Gremlin {
             let stage = match self.definition.next_stage().await {
                 Ok(stage) => stage,
                 Err(error) => {
-                    self.state.write_bail_file(
+                    self.state.record_stage_error(
                         "other",
                         &truncate(&format!("definition error: {error}"), 200),
                     );
@@ -900,11 +900,11 @@ impl Gremlin {
             // prior attempt for this stage.
             //
             // Stale bail files from the previous run are removed when the
-            // attempt is reused so that read_bail_info (checked after the
+            // attempt is reused so that stage_error (checked after the
             // stage runs) does not spuriously flag the resumed run as bailed.
             let existing_attempt = self.state.read_str("attempt");
             let attempt = if existing_attempt.starts_with(&format!("{}-", stage.name())) {
-                if let Some(ref sf) = self.state.state_file {
+                if let Some(sf) = self.state.state_file() {
                     if let Some(parent) = sf.parent() {
                         let bail_path = parent.join(format!("bail_{existing_attempt}.json"));
                         let _ = std::fs::remove_file(&bail_path);
@@ -942,12 +942,13 @@ impl Gremlin {
             match stage_result {
                 Ok(()) => {}
                 Err(RunError::Bail { reason }) => {
-                    self.state.write_bail_file("other", &truncate(&reason, 200));
+                    self.state
+                        .record_stage_error("other", &truncate(&reason, 200));
                     exit_code = 1;
                     break;
                 }
                 Err(error) => {
-                    self.state.write_bail_file(
+                    self.state.record_stage_error(
                         "other",
                         &truncate(&format!("unexpected error: {error}"), 200),
                     );
@@ -1065,8 +1066,10 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let mut state_data = StateData::new(Some("gr-test".to_string()));
-        state_data.state_file = Some(state_dir.join("state.json"));
+        let state_data = StateData::from_store(
+            Some("gr-test".to_string()),
+            Box::new(state::FileStateStore::at(state_dir.join("state.json"))),
+        );
 
         let definition = StaticDefinition::new(
             "test".to_string(),
