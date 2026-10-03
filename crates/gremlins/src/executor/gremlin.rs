@@ -866,11 +866,7 @@ impl Gremlin {
             self.client.clone()
         };
 
-        let child_state_dir = self
-            .state_dir
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(child_gremlin_id.as_str());
+        let child_state_dir = config::state_root().join(child_gremlin_id.as_str());
         let child_artifact_dir = child_state_dir.join("artifacts");
         std::fs::create_dir_all(&child_state_dir)?;
         std::fs::create_dir_all(&child_artifact_dir)?;
@@ -985,14 +981,7 @@ impl Gremlin {
             client.model(),
         );
 
-        let child_scratch_dir = self
-            .runtime_config
-            .scratch_dir
-            .parent()
-            .map(|p| p.join(child_gremlin_id.as_str()))
-            .unwrap_or_else(|| config::scratch_root(Some(child_gremlin_id.as_str())));
-
-        let child_state_file = child_state_dir.join("state.json");
+        let child_scratch_dir = config::scratch_root(Some(child_gremlin_id.as_str()));
 
         Ok(Gremlin {
             id: child_gremlin_id,
@@ -1009,10 +998,7 @@ impl Gremlin {
             project_root: self.project_root.clone(),
             base_ref_sha: child_worktree_base,
             base_ref: self.base_ref.clone(),
-            state: StateData::from_store(
-                Some(child_id.to_string()),
-                Box::new(state::FileStateStore::at(child_state_file)),
-            ),
+            state: StateData::new(Some(child_id.to_string())),
             env: self.env.clone(),
             client,
             loop_iter: "1".to_string(),

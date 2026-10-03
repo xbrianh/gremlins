@@ -92,15 +92,6 @@ pub(crate) struct FileStateStore {
     state_file: Option<PathBuf>,
 }
 
-impl FileStateStore {
-    /// Build a store pointed at an explicit path (for tests and fork).
-    pub(crate) fn at(path: PathBuf) -> Self {
-        Self {
-            state_file: Some(path),
-        }
-    }
-}
-
 impl StateStore for FileStateStore {
     fn new(gremlin_id: Option<String>) -> Self {
         Self {
@@ -377,14 +368,6 @@ pub struct StateData {
 impl StateData {
     pub fn new(gremlin_id: Option<String>) -> Self {
         let store = Box::new(FileStateStore::new(gremlin_id.clone()));
-        Self { gremlin_id, store }
-    }
-
-    /// Construct with a pre-built store (for tests and fork).
-    pub(crate) fn from_store(
-        gremlin_id: Option<String>,
-        store: Box<dyn StateStore + Send + Sync>,
-    ) -> Self {
         Self { gremlin_id, store }
     }
 
@@ -822,9 +805,12 @@ fn as_i64_f64(v: &Value) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_sandbox;
 
-    fn seed(dir: &Path, gremlin_id: &str) -> PathBuf {
-        let sf = dir.join("state.json");
+    fn seed(sandbox: &crate::test_support::Sandbox, gremlin_id: &str) -> PathBuf {
+        let state_dir = sandbox.path().join("state").join(gremlin_id);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let sf = state_dir.join("state.json");
         std::fs::write(
             &sf,
             format!(r#"{{"id": "{gremlin_id}", "stage": "implement"}}"#),
@@ -833,31 +819,29 @@ mod tests {
         sf
     }
 
-    fn data_with(sf: &Path) -> StateData {
-        StateData::from_store(
-            Some("gr-test".into()),
-            Box::new(FileStateStore::at(sf.to_path_buf())),
-        )
-    }
-
     #[test]
     fn resolve_state_file_builds_path() {
-        let p = resolve_state_file(Some("abc")).unwrap();
-        assert!(p.ends_with("abc/state.json"), "{p:?}");
-        assert!(resolve_state_file(None).is_none());
-        assert!(resolve_state_file(Some("")).is_none());
+        with_sandbox(None, |sandbox| {
+            let p = resolve_state_file(Some("abc")).unwrap();
+            assert!(p.ends_with("abc/state.json"), "{p:?}");
+            assert!(resolve_state_file(None).is_none());
+            assert!(resolve_state_file(Some("")).is_none());
+            let _ = sandbox;
+        });
     }
 
     #[test]
     fn field_reads_after_disk_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        assert_eq!(d.get_field("stage").unwrap(), "implement");
-        let mut fields = Map::new();
-        fields.insert("stage".into(), Value::String("review".into()));
-        d.patch(&[], &fields);
-        assert_eq!(d.get_field("stage").unwrap(), "review");
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            assert_eq!(d.get_field("stage").unwrap(), "implement");
+            let mut fields = Map::new();
+            fields.insert("stage".into(), Value::String("review".into()));
+            d.patch(&[], &fields);
+            assert_eq!(d.get_field("stage").unwrap(), "review");
+            let _ = sf;
+        });
     }
 
     #[test]
@@ -889,247 +873,253 @@ mod tests {
 
     #[test]
     fn get_field_falls_back_to_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        assert_eq!(d.get_field("attempt").unwrap(), "");
-        assert_eq!(d.get_field("stage").unwrap(), "implement");
-        assert_eq!(
-            d.get_field("definition_args").unwrap(),
-            Value::Array(vec![])
-        );
-        assert!(d.get_field("bogus").is_none());
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            assert_eq!(d.get_field("attempt").unwrap(), "");
+            assert_eq!(d.get_field("stage").unwrap(), "implement");
+            assert_eq!(
+                d.get_field("definition_args").unwrap(),
+                Value::Array(vec![])
+            );
+            assert!(d.get_field("bogus").is_none());
+            let _ = sf;
+        });
     }
 
     #[test]
     fn patch_merges_and_deletes() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        let mut fields = Map::new();
-        fields.insert("attempt".into(), Value::String("a1".into()));
-        d.patch(&[], &fields);
-        let mut fields = Map::new();
-        fields.insert("stage".into(), Value::String("review".into()));
-        d.patch(&["sub_stage".into()], &fields);
-        let raw = read_state_json(Some(&sf));
-        assert_eq!(raw.get("attempt").unwrap(), "a1");
-        assert_eq!(raw.get("stage").unwrap(), "review");
-        assert_eq!(raw.get("id").unwrap(), "gr-test");
-        assert!(!raw.contains_key("sub_stage"));
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            let mut fields = Map::new();
+            fields.insert("attempt".into(), Value::String("a1".into()));
+            d.patch(&[], &fields);
+            let mut fields = Map::new();
+            fields.insert("stage".into(), Value::String("review".into()));
+            d.patch(&["sub_stage".into()], &fields);
+            let raw = read_state_json(Some(&sf));
+            assert_eq!(raw.get("attempt").unwrap(), "a1");
+            assert_eq!(raw.get("stage").unwrap(), "review");
+            assert_eq!(raw.get("id").unwrap(), "gr-test");
+            assert!(!raw.contains_key("sub_stage"));
+        });
     }
 
     #[test]
     fn patch_noop_without_gremlin_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let d = StateData::from_store(
-            None,
-            Box::new(FileStateStore::at(dir.path().join("missing.json"))),
-        );
+        let d = StateData::new(None);
         d.patch(&[], &Map::new());
         d.record_stage_error("other", "x");
         d.set_stage("running", None, "");
-        assert!(!dir.path().join("missing.json").exists());
     }
 
     #[test]
     fn set_stage_writes_stamp_and_deletes_sub_stage() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.set_stage("implement", Some(&serde_json::json!({"k": 1})), "");
-        let raw = read_state_json(Some(&sf));
-        assert_eq!(raw.get("stage").unwrap(), "implement");
-        assert_eq!(raw.get("sub_stage").unwrap(), &serde_json::json!({"k": 1}));
-        let ts = raw.get("stage_updated_at").unwrap().as_str().unwrap();
-        assert!(ts.ends_with('Z'));
-        assert_eq!(ts.len(), 20);
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            d.set_stage("implement", Some(&serde_json::json!({"k": 1})), "");
+            let raw = read_state_json(Some(&sf));
+            assert_eq!(raw.get("stage").unwrap(), "implement");
+            assert_eq!(raw.get("sub_stage").unwrap(), &serde_json::json!({"k": 1}));
+            let ts = raw.get("stage_updated_at").unwrap().as_str().unwrap();
+            assert!(ts.ends_with('Z'));
+            assert_eq!(ts.len(), 20);
 
-        d.set_stage("review-code", None, "");
-        let raw = read_state_json(Some(&sf));
-        assert_eq!(raw.get("stage").unwrap(), "review-code");
-        assert!(!raw.contains_key("sub_stage"));
+            d.set_stage("review-code", None, "");
+            let raw = read_state_json(Some(&sf));
+            assert_eq!(raw.get("stage").unwrap(), "review-code");
+            assert!(!raw.contains_key("sub_stage"));
+        });
     }
 
     #[test]
     fn set_stage_parent_pins_stage_and_sub_stage() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.set_stage("github-review-pull-request", None, "reviews");
-        let raw = read_state_json(Some(&sf));
-        assert_eq!(raw.get("stage").unwrap(), "reviews");
-        assert_eq!(raw.get("sub_stage").unwrap(), "github-review-pull-request");
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            d.set_stage("github-review-pull-request", None, "reviews");
+            let raw = read_state_json(Some(&sf));
+            assert_eq!(raw.get("stage").unwrap(), "reviews");
+            assert_eq!(raw.get("sub_stage").unwrap(), "github-review-pull-request");
+        });
     }
 
     #[test]
     fn record_stage_error_requires_attempt() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.record_stage_error("other", "no attempt yet");
-        assert!(std::fs::read_dir(dir.path()).unwrap().all(|e| !e
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with("bail_")));
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            d.record_stage_error("other", "no attempt yet");
+            let state_dir = sf.parent().unwrap();
+            assert!(std::fs::read_dir(state_dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("bail_")));
 
-        let mut fields = Map::new();
-        fields.insert("attempt".into(), Value::String("a1".into()));
-        d.patch(&[], &fields);
-        d.record_stage_error("other", "boom");
-        let bail = dir.path().join("bail_a1.json");
-        assert!(bail.exists());
-        let info = d.stage_error().unwrap();
-        assert_eq!(info.get("class").unwrap().as_str(), Some("other"));
-        assert_eq!(info.get("detail").unwrap().as_str(), Some("boom"));
-        assert!(info.get("ts").unwrap().as_str().unwrap().len() > 20);
+            let mut fields = Map::new();
+            fields.insert("attempt".into(), Value::String("a1".into()));
+            d.patch(&[], &fields);
+            d.record_stage_error("other", "boom");
+            let bail = state_dir.join("bail_a1.json");
+            assert!(bail.exists());
+            let info = d.stage_error().unwrap();
+            assert_eq!(info.get("class").unwrap().as_str(), Some("other"));
+            assert_eq!(info.get("detail").unwrap().as_str(), Some("boom"));
+            assert!(info.get("ts").unwrap().as_str().unwrap().len() > 20);
 
-        // Second write must not clobber the existing bail file.
-        d.record_stage_error("security", "second");
-        assert_eq!(
-            d.stage_error().unwrap().get("class"),
-            Some(&Value::String("other".into()))
-        );
+            // Second write must not clobber the existing bail file.
+            d.record_stage_error("security", "second");
+            assert_eq!(
+                d.stage_error().unwrap().get("class"),
+                Some(&Value::String("other".into()))
+            );
+        });
     }
 
     #[test]
     fn record_stage_error_is_first_writer_wins_under_concurrency() {
         // Many threads race to write the same bail file; exactly one payload
         // must win and no temporary files may be left behind.
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        let mut fields = Map::new();
-        fields.insert("attempt".into(), Value::String("a1".into()));
-        d.patch(&[], &fields);
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            let mut fields = Map::new();
+            fields.insert("attempt".into(), Value::String("a1".into()));
+            d.patch(&[], &fields);
 
-        let sf_path = sf.clone();
-        let handles: Vec<_> = (0..16)
-            .map(|i| {
-                let sf_path = sf_path.clone();
-                std::thread::spawn(move || {
-                    let data = StateData::from_store(
-                        Some("gr-test".into()),
-                        Box::new(FileStateStore::at(sf_path)),
-                    );
-                    data.record_stage_error("other", &format!("writer-{i}"));
+            let handles: Vec<_> = (0..16)
+                .map(|i| {
+                    std::thread::spawn(move || {
+                        let data = StateData::new(Some("gr-test".into()));
+                        data.record_stage_error("other", &format!("writer-{i}"));
+                    })
                 })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
 
-        let bail = dir.path().join("bail_a1.json");
-        assert!(bail.exists());
-        // The file is valid JSON with a single winner's detail.
-        let info = d.stage_error().unwrap();
-        assert_eq!(info.get("class").unwrap().as_str(), Some("other"));
-        let detail = info.get("detail").unwrap().as_str().unwrap();
-        assert!(
-            detail.starts_with("writer-"),
-            "unexpected detail {detail:?}"
-        );
+            let state_dir = sf.parent().unwrap();
+            let bail = state_dir.join("bail_a1.json");
+            assert!(bail.exists());
+            // The file is valid JSON with a single winner's detail.
+            let info = d.stage_error().unwrap();
+            assert_eq!(info.get("class").unwrap().as_str(), Some("other"));
+            let detail = info.get("detail").unwrap().as_str().unwrap();
+            assert!(
+                detail.starts_with("writer-"),
+                "unexpected detail {detail:?}"
+            );
 
-        // No leftover temp files.
-        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n.starts_with(".bail_"))
-            .collect();
-        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+            // No leftover temp files.
+            let leftovers: Vec<String> = std::fs::read_dir(state_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.starts_with(".bail_"))
+                .collect();
+            assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+        });
     }
 
     #[test]
     fn stage_error_keeps_non_string_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        let mut fields = Map::new();
-        fields.insert("attempt".into(), Value::String("a1".into()));
-        d.patch(&[], &fields);
-        std::fs::write(
-            dir.path().join("bail_a1.json"),
-            r#"{"class": "other", "detail": "boom", "count": 3, "nested": {"k": [1, null]}}"#,
-        )
-        .unwrap();
-        let info = d.stage_error().unwrap();
-        assert_eq!(info.get("count"), Some(&Value::from(3)));
-        assert_eq!(
-            info.get("nested"),
-            Some(&serde_json::json!({"k": [1, null]}))
-        );
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            let mut fields = Map::new();
+            fields.insert("attempt".into(), Value::String("a1".into()));
+            d.patch(&[], &fields);
+            let state_dir = sf.parent().unwrap();
+            std::fs::write(
+                state_dir.join("bail_a1.json"),
+                r#"{"class": "other", "detail": "boom", "count": 3, "nested": {"k": [1, null]}}"#,
+            )
+            .unwrap();
+            let info = d.stage_error().unwrap();
+            assert_eq!(info.get("count"), Some(&Value::from(3)));
+            assert_eq!(
+                info.get("nested"),
+                Some(&serde_json::json!({"k": [1, null]}))
+            );
 
-        std::fs::write(dir.path().join("bail_a1.json"), "[1, 2]").unwrap();
-        assert!(d.stage_error().is_none());
+            std::fs::write(state_dir.join("bail_a1.json"), "[1, 2]").unwrap();
+            assert!(d.stage_error().is_none());
+        });
     }
 
     #[test]
     fn accumulate_token_usage_adds_integers() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.accumulate_token_usage(&HashMap::from([("prompt_tokens".to_string(), 5)]));
-        d.accumulate_token_usage(&HashMap::from([
-            ("prompt_tokens".to_string(), 3),
-            ("turns".to_string(), 2),
-        ]));
-        let raw = read_state_json(Some(&sf));
-        let usage = raw.get("token_usage").unwrap().as_object().unwrap();
-        assert_eq!(usage.get("prompt_tokens").unwrap(), 8);
-        assert_eq!(usage.get("turns").unwrap(), 2);
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            d.accumulate_token_usage(&HashMap::from([("prompt_tokens".to_string(), 5)]));
+            d.accumulate_token_usage(&HashMap::from([
+                ("prompt_tokens".to_string(), 3),
+                ("turns".to_string(), 2),
+            ]));
+            let raw = read_state_json(Some(&sf));
+            let usage = raw.get("token_usage").unwrap().as_object().unwrap();
+            assert_eq!(usage.get("prompt_tokens").unwrap(), 8);
+            assert_eq!(usage.get("turns").unwrap(), 2);
+        });
     }
 
     #[test]
     fn parallel_worktrees_add_and_clear() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.patch_parallel_worktrees(
-            "reviews",
-            Some("abc123"),
-            Some(&HashMap::from([("a".to_string(), "/wt/a".to_string())])),
-        );
-        let raw = read_state_json(Some(&sf));
-        let entry = &raw.get("parallel_worktrees").unwrap()["reviews"];
-        assert_eq!(entry["base_head"], "abc123");
-        assert_eq!(entry["paths"]["a"], "/wt/a");
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            d.patch_parallel_worktrees(
+                "reviews",
+                Some("abc123"),
+                Some(&HashMap::from([("a".to_string(), "/wt/a".to_string())])),
+            );
+            let raw = read_state_json(Some(&sf));
+            let entry = &raw.get("parallel_worktrees").unwrap()["reviews"];
+            assert_eq!(entry["base_head"], "abc123");
+            assert_eq!(entry["paths"]["a"], "/wt/a");
 
-        d.patch_parallel_worktrees("reviews", None, None);
-        assert!(!read_state_json(Some(&sf)).contains_key("parallel_worktrees"));
+            d.patch_parallel_worktrees("reviews", None, None);
+            assert!(!read_state_json(Some(&sf)).contains_key("parallel_worktrees"));
+        });
     }
 
     #[test]
     fn subprocess_cost_accumulates_and_validates() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.add_subprocess_cost(0.25);
-        d.add_subprocess_cost(0.5);
-        d.add_subprocess_cost(-1.0);
-        d.add_subprocess_cost(f64::NAN);
-        d.add_subprocess_cost(0.0);
-        let raw = read_state_json(Some(&sf));
-        assert_eq!(raw.get("subprocess_cost_usd").unwrap(), 0.75);
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            d.add_subprocess_cost(0.25);
+            d.add_subprocess_cost(0.5);
+            d.add_subprocess_cost(-1.0);
+            d.add_subprocess_cost(f64::NAN);
+            d.add_subprocess_cost(0.0);
+            let raw = read_state_json(Some(&sf));
+            assert_eq!(raw.get("subprocess_cost_usd").unwrap(), 0.75);
+        });
     }
 
     #[test]
     fn terminal_state_touches_finished_and_patches() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.write_terminal_state(0);
-        assert!(dir.path().join("finished").exists());
-        let raw = read_state_json(Some(&sf));
-        assert_eq!(raw.get("status").unwrap(), "done");
-        assert_eq!(raw.get("exit_code").unwrap(), 0);
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            d.write_terminal_state(0);
+            let state_dir = sf.parent().unwrap();
+            assert!(state_dir.join("finished").exists());
+            let raw = read_state_json(Some(&sf));
+            assert_eq!(raw.get("status").unwrap(), "done");
+            assert_eq!(raw.get("exit_code").unwrap(), 0);
 
-        d.write_terminal_state(3);
-        let raw = read_state_json(Some(&sf));
-        assert_eq!(raw.get("status").unwrap(), "stopped");
-        assert_eq!(raw.get("exit_code").unwrap(), 3);
+            d.write_terminal_state(3);
+            let raw = read_state_json(Some(&sf));
+            assert_eq!(raw.get("status").unwrap(), "stopped");
+            assert_eq!(raw.get("exit_code").unwrap(), 3);
+        });
     }
 
     #[test]
@@ -1153,51 +1143,56 @@ mod tests {
 
     #[test]
     fn locked_update_read_modify_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        locked_update(&sf, |data| {
-            let n = data.get("counter").map(as_i64).unwrap_or(0) + 1;
-            data.insert("counter".into(), Value::from(n));
-        })
-        .unwrap();
-        assert_eq!(read_state_json(Some(&sf)).get("counter").unwrap(), 1);
-        assert!(dir.path().join("state.json.lock").exists());
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            locked_update(&sf, |data| {
+                let n = data.get("counter").map(as_i64).unwrap_or(0) + 1;
+                data.insert("counter".into(), Value::from(n));
+            })
+            .unwrap();
+            assert_eq!(read_state_json(Some(&sf)).get("counter").unwrap(), 1);
+            let state_dir = sf.parent().unwrap();
+            assert!(state_dir.join("state.json.lock").exists());
+        });
     }
 
     #[test]
     fn parallel_attempt_patch() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.patch_parallel_attempt("bail-child", "attempt-bail");
-        let raw = read_state_json(Some(&sf));
-        assert_eq!(raw["parallel_attempts"]["bail-child"], "attempt-bail");
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            d.patch_parallel_attempt("bail-child", "attempt-bail");
+            let raw = read_state_json(Some(&sf));
+            assert_eq!(raw["parallel_attempts"]["bail-child"], "attempt-bail");
+        });
     }
 
     #[test]
     fn parallel_worktrees_reads_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        let mut paths = HashMap::new();
-        paths.insert("a".to_string(), "/wt/a".to_string());
-        d.patch_parallel_worktrees("reviews", Some("abc123"), Some(&paths));
-        let (base, read_paths) = d.parallel_worktrees("reviews");
-        assert_eq!(base, "abc123");
-        assert_eq!(read_paths.get("a").map(String::as_str), Some("/wt/a"));
-        assert!(d.parallel_worktrees("missing").1.is_empty());
+        with_sandbox(None, |sandbox| {
+            let _sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            let mut paths = HashMap::new();
+            paths.insert("a".to_string(), "/wt/a".to_string());
+            d.patch_parallel_worktrees("reviews", Some("abc123"), Some(&paths));
+            let (base, read_paths) = d.parallel_worktrees("reviews");
+            assert_eq!(base, "abc123");
+            assert_eq!(read_paths.get("a").map(String::as_str), Some("/wt/a"));
+            assert!(d.parallel_worktrees("missing").1.is_empty());
+        });
     }
 
     #[test]
     fn clear_parallel_attempts_removes_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let sf = seed(dir.path(), "gr-test");
-        let d = data_with(&sf);
-        d.patch_parallel_attempt("a", "attempt-a");
-        d.clear_parallel_attempts();
-        assert!(read_state_json(Some(&sf))
-            .get("parallel_attempts")
-            .is_none());
+        with_sandbox(None, |sandbox| {
+            let sf = seed(sandbox, "gr-test");
+            let d = StateData::new(Some("gr-test".into()));
+            d.patch_parallel_attempt("a", "attempt-a");
+            d.clear_parallel_attempts();
+            assert!(read_state_json(Some(&sf))
+                .get("parallel_attempts")
+                .is_none());
+        });
     }
 
     #[test]

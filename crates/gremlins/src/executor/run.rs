@@ -1025,16 +1025,17 @@ mod tests {
     use crate::builders::artifacts::output;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
+    use crate::config;
     use crate::definition::StageSpec;
     use crate::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
     use crate::executor::gremlin::validate_gremlin_id;
-    use crate::executor::state::StateData;
+    use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
-    use crate::test_support::GitSandbox;
+    use crate::test_support::{GitSandbox, Sandbox};
 
     /// A gremlin with no git, no worktree, and a seeded state directory: the
     /// smallest thing `run_stage` needs to dispatch a stage.
-    fn test_gremlin(stages: Vec<StageSpec>, default_client: &str) -> (tempfile::TempDir, Gremlin) {
+    fn test_gremlin(stages: Vec<StageSpec>, default_client: &str) -> (Sandbox, Gremlin) {
         test_gremlin_with_bootstrap(stages, default_client, Bootstrap::default())
     }
 
@@ -1042,7 +1043,7 @@ mod tests {
         stages: Vec<StageSpec>,
         default_client: &str,
         bootstrap: Bootstrap,
-    ) -> (tempfile::TempDir, Gremlin) {
+    ) -> (Sandbox, Gremlin) {
         test_gremlin_full(stages, None, default_client, bootstrap)
     }
 
@@ -1051,9 +1052,9 @@ mod tests {
         land: Option<StageSpec>,
         default_client: &str,
         bootstrap: Bootstrap,
-    ) -> (tempfile::TempDir, Gremlin) {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_dir = tmp.path().join("state").join("gr-test");
+    ) -> (Sandbox, Gremlin) {
+        let sandbox = Sandbox::new();
+        let state_dir = config::state_root().join("gr-test");
         let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -1066,10 +1067,7 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let state_data = StateData::from_store(
-            Some("gr-test".to_string()),
-            Box::new(state::FileStateStore::at(state_dir.join("state.json"))),
-        );
+        let state_data = StateData::new(Some("gr-test".to_string()));
 
         let definition = StaticDefinition::new(
             "test".to_string(),
@@ -1092,7 +1090,7 @@ mod tests {
             registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: None,
             worktree_parent: None,
-            project_root: tmp.path().to_path_buf(),
+            project_root: sandbox.path().to_path_buf(),
             base_ref_sha: String::new(),
             base_ref: "main".to_string(),
             state: state_data,
@@ -1105,7 +1103,7 @@ mod tests {
             cancel_token: None,
             interactive_session: None,
         };
-        (tmp, gremlin)
+        (sandbox, gremlin)
     }
 
     /// Take the first stage from the gremlin's definition via `next_stage()`.
@@ -1124,7 +1122,7 @@ mod tests {
 
     #[test]
     fn loop_iter_defaults_to_one() {
-        let (_tmp, gremlin) = test_gremlin(vec![], "cmd:true");
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd:true");
         assert_eq!(gremlin.loop_iter, "1");
     }
 
@@ -1151,7 +1149,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         gremlin
             .registry
             .as_ref()
@@ -1178,7 +1176,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         gremlin
             .registry
             .as_ref()
@@ -1199,7 +1197,7 @@ mod tests {
             .prompt("write {out}")
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         // Use a dry-run registry so has_file always returns true — the cmd
         // backend doesn't write real files, but commit_agent needs to see
         // a produced file.
@@ -1224,7 +1222,7 @@ mod tests {
             .prompt("write {out}")
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1241,7 +1239,7 @@ mod tests {
             .cmds(vec!["true".to_string()])
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
         assert!(run_stage(&stage, &mut gremlin).await.is_ok());
     }
@@ -1252,7 +1250,7 @@ mod tests {
             .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1280,12 +1278,12 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         run_stage(&stage, &mut gremlin).await.unwrap();
-        assert!(tmp.path().join("one.marker").exists());
-        assert!(tmp.path().join("two.marker").exists());
+        assert!(sandbox.path().join("one.marker").exists());
+        assert!(sandbox.path().join("two.marker").exists());
     }
 
     #[tokio::test]
@@ -1299,7 +1297,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1325,7 +1323,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         gremlin
             .registry
             .as_ref()
@@ -1352,7 +1350,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1378,7 +1376,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1406,7 +1404,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         // Should run without error — the inner sequence runs twice.
@@ -1431,7 +1429,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         run_stage(&stage, &mut gremlin).await.unwrap();
@@ -1453,7 +1451,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         // Should run 3 iterations with 10ms sleeps, then bail on exhaustion.
@@ -1481,7 +1479,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
 
         let result = run_stage(&stage, &mut gremlin).await;
@@ -1502,8 +1500,8 @@ mod tests {
                 .build()
                 .unwrap(),
         ];
-        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
-        let state_dir = tmp.path().join("state").join("gr-test");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let state_dir = sandbox.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 0);
         assert!(state_dir.join("finished").is_file());
@@ -1523,8 +1521,8 @@ mod tests {
             .prompt("hi {out}")
             .build()
             .unwrap()];
-        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
-        let state_dir = tmp.path().join("state").join("gr-test");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let state_dir = sandbox.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
 
@@ -1565,12 +1563,12 @@ mod tests {
                 .build()
                 .unwrap(),
         ];
-        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
 
         assert_eq!(gremlin.run(Some("second")).await.unwrap(), 0);
-        assert!(!tmp.path().join("first.marker").exists());
-        assert!(tmp.path().join("second.marker").exists());
-        assert!(tmp.path().join("third.marker").exists());
+        assert!(!sandbox.path().join("first.marker").exists());
+        assert!(sandbox.path().join("second.marker").exists());
+        assert!(sandbox.path().join("third.marker").exists());
     }
 
     #[tokio::test]
@@ -1594,8 +1592,8 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
-        let state_dir = tmp.path().join("state").join("gr-test");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let state_dir = sandbox.path().join("state").join("gr-test");
 
         // First run: group fails because "bad" exits non-zero.
         match gremlin.run(None).await {
@@ -1674,8 +1672,8 @@ mod tests {
             .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
             .build()
             .unwrap()];
-        let (tmp, mut gremlin) = test_gremlin(stages, "cmd:true");
-        let state_dir = tmp.path().join("state").join("gr-test");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let state_dir = sandbox.path().join("state").join("gr-test");
 
         match gremlin.run(None).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "broken"),
@@ -1703,7 +1701,7 @@ mod tests {
             .cmds(vec!["touch never.marker".to_string()])
             .build()
             .unwrap()];
-        let (tmp, mut gremlin) = test_gremlin_with_bootstrap(
+        let (sandbox, mut gremlin) = test_gremlin_with_bootstrap(
             stages,
             "cmd:true",
             Bootstrap {
@@ -1711,10 +1709,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        let worktree = tmp.path().join("worktree");
+        let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
-        let state_dir = tmp.path().join("state").join("gr-test");
+        let state_dir = sandbox.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
         assert!(!worktree.join("never.marker").exists());
@@ -1741,7 +1739,7 @@ mod tests {
             .cmds(vec!["cat marker.txt > read.txt".to_string()])
             .build()
             .unwrap()];
-        let (tmp, mut gremlin) = test_gremlin_with_bootstrap(
+        let (sandbox, mut gremlin) = test_gremlin_with_bootstrap(
             stages,
             "cmd:true",
             Bootstrap {
@@ -1749,7 +1747,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let worktree = tmp.path().join("worktree");
+        let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
 
@@ -1766,7 +1764,7 @@ mod tests {
             .cmds(vec!["true".to_string()])
             .build()
             .unwrap()];
-        let (tmp, mut gremlin) = test_gremlin_with_bootstrap(
+        let (sandbox, mut gremlin) = test_gremlin_with_bootstrap(
             stages,
             "cmd:true",
             Bootstrap {
@@ -1774,7 +1772,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let worktree = tmp.path().join("worktree");
+        let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.worktree = Some(worktree.clone());
 

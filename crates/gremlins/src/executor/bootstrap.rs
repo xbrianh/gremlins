@@ -428,10 +428,12 @@ mod tests {
 
     use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::clients::client::Client;
+    use crate::config;
     use crate::definition::StaticDefinition;
     use crate::executor::gremlin::validate_gremlin_id;
     use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
+    use crate::test_support::Sandbox;
 
     // --- DSL parsing ---
 
@@ -613,11 +615,11 @@ mod tests {
     fn test_gremlin(
         bootstrap: Bootstrap,
         stage_inputs: HashMap<String, String>,
-    ) -> (tempfile::TempDir, Gremlin) {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_dir = tmp.path().join("state").join("gr-test");
+    ) -> (Sandbox, Gremlin) {
+        let sandbox = Sandbox::new();
+        let state_dir = config::state_root().join("gr-test");
         let artifact_dir = state_dir.join("artifacts");
-        let worktree = tmp.path().join("worktree");
+        let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&worktree).unwrap();
@@ -630,10 +632,7 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let state_data = StateData::from_store(
-            Some("gr-test".to_string()),
-            Box::new(state::FileStateStore::at(state_dir.join("state.json"))),
-        );
+        let state_data = StateData::new(Some("gr-test".to_string()));
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
@@ -654,7 +653,7 @@ mod tests {
             registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: Some(worktree),
             worktree_parent: None,
-            project_root: tmp.path().to_path_buf(),
+            project_root: sandbox.path().to_path_buf(),
             base_ref_sha: String::new(),
             base_ref: "main".to_string(),
             state: state_data,
@@ -667,7 +666,7 @@ mod tests {
             cancel_token: None,
             interactive_session: None,
         };
-        (tmp, gremlin)
+        (sandbox, gremlin)
     }
 
     #[tokio::test]
@@ -676,11 +675,11 @@ mod tests {
             cmds: vec!["echo hello > marker.txt".to_string()],
             ..Default::default()
         };
-        let (tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
+        let (sandbox, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
         run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
-        assert!(tmp.path().join("worktree").join("marker.txt").is_file());
+        assert!(sandbox.path().join("worktree").join("marker.txt").is_file());
     }
 
     #[tokio::test]
@@ -694,7 +693,7 @@ mod tests {
             ..Default::default()
         };
         let inputs = HashMap::from([("plan".to_string(), source.to_string_lossy().into_owned())]);
-        let (_tmp, mut gremlin) = test_gremlin(bootstrap, inputs);
+        let (_sandbox, mut gremlin) = test_gremlin(bootstrap, inputs);
 
         run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
@@ -723,7 +722,7 @@ mod tests {
             ..Default::default()
         };
         let inputs = HashMap::from([("note".to_string(), "hello".to_string())]);
-        let (_tmp, mut gremlin) = test_gremlin(bootstrap, inputs);
+        let (_sandbox, mut gremlin) = test_gremlin(bootstrap, inputs);
 
         run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
@@ -743,7 +742,7 @@ mod tests {
             launch_cmds: vec![r#"gremlins:bind_artifact("artifact://plan.md", plan)"#.to_string()],
             ..Default::default()
         };
-        let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
+        let (_sandbox, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
         run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
@@ -762,7 +761,7 @@ mod tests {
             launch_cmds: vec!["gremlins:nonsense(a, b)".to_string()],
             ..Default::default()
         };
-        let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
+        let (_sandbox, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
         let error = run_definition_bootstrap(&mut gremlin, false)
             .await
@@ -777,12 +776,12 @@ mod tests {
             ..Default::default()
         };
         let inputs = HashMap::from([("greeting".to_string(), "hi".to_string())]);
-        let (tmp, mut gremlin) = test_gremlin(bootstrap, inputs);
+        let (sandbox, mut gremlin) = test_gremlin(bootstrap, inputs);
 
         run_definition_bootstrap(&mut gremlin, false).await.unwrap();
 
         let written =
-            std::fs::read_to_string(tmp.path().join("worktree").join("greeting.txt")).unwrap();
+            std::fs::read_to_string(sandbox.path().join("worktree").join("greeting.txt")).unwrap();
         assert_eq!(written.trim(), "hi");
     }
 
@@ -792,7 +791,7 @@ mod tests {
             cli_out: HashMap::from([("pr".to_string(), "artifact://pr.txt".to_string())]),
             ..Default::default()
         };
-        let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
+        let (_sandbox, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
         // run_cli_out verifies the bound file exists, so stage the output first.
         let uri = Uri::parse("artifact://pr.txt").unwrap();
@@ -816,7 +815,7 @@ mod tests {
             cmds: vec!["exit 3".to_string()],
             ..Default::default()
         };
-        let (_tmp, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
+        let (_sandbox, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
 
         let error = run_definition_bootstrap(&mut gremlin, false)
             .await
@@ -829,7 +828,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_bootstrap_does_nothing() {
-        let (_tmp, mut gremlin) = test_gremlin(Bootstrap::default(), HashMap::new());
+        let (_sandbox, mut gremlin) = test_gremlin(Bootstrap::default(), HashMap::new());
         assert!(run_definition_bootstrap(&mut gremlin, false).await.is_ok());
     }
 }
