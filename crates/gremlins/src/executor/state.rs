@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -89,18 +89,13 @@ pub enum BlobMode {
 /// Implemented by [`FileSystemStateStore`] (the real filesystem-backed store).
 #[async_trait::async_trait]
 pub trait StateStore: Send + Sync + Debug {
-    /// Create a store for the given gremlin identity.
-    fn new(gremlin_id: Option<String>) -> Self
-    where
-        Self: Sized;
-
     // --- state.json ---
 
     /// Lock-free snapshot of the full state tree.
     fn state_tree(&self) -> Map<String, Value>;
 
     /// Write `data` as `state.json` into the store's directory.
-    fn seed(&mut self, data: &Map<String, Value>) -> Result<(), StateError>;
+    fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError>;
 
     /// Open a named blob in the state directory. Creates parent directories
     /// as needed. The returned handle supports Read + Write + Seek.
@@ -140,9 +135,6 @@ pub trait StateStore: Send + Sync + Debug {
 
     /// Create the `finished` marker and patch terminal fields.
     fn write_terminal_state(&self, exit_code: i32);
-
-    /// Write `data` to `state_dir/state.json` and update the store's path.
-    fn persist(&mut self, state_dir: &Path, data: &Map<String, Value>) -> Result<(), StateError>;
 
     fn patch_parallel_worktrees(
         &self,
@@ -203,22 +195,24 @@ pub trait StateStore: Send + Sync + Debug {
     /// both `artifact://{prefix}/{bare}` and its original key (if different).
     /// `collision` controls what happens when a destination key is already
     /// registered. Returns the number of keys merged.
-    async fn merge_registry(
+    async fn join(
         &self,
         other: &(dyn StateStore + Sync),
         collision: Collision,
         key_prefix: Option<&str>,
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        merge_state_via_content(self, other, collision, key_prefix).await
+        join_state_via_content(self, other, collision, key_prefix).await
     }
 
-    /// Clone / fork this store's registry for use by a child gremlin.
+    /// Fork this store for a child gremlin.
     ///
-    /// The child's artifacts will be stored under `child_artifact_dir`.
-    async fn fork_registry(
+    /// Creates the child's state directory, copies parent artifacts,
+    /// copies parent registry bindings, writes initial `state.json`
+    /// (with `id` stamped), and returns a `StateStore` pointed at the child.
+    async fn fork(
         &self,
-        child_artifact_dir: &Path,
-    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>>;
+        child_gremlin_id: &str,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>>;
 
     /// Produce a localized (filesystem-scoped) store containing only the
     /// given subset of keys. The returned store lives in a separate
@@ -243,6 +237,11 @@ pub trait StateStore: Send + Sync + Debug {
 
     // --- locality ---
 
+    /// The state directory.
+    fn state_dir(&self) -> &Path {
+        Path::new("")
+    }
+
     /// The artifact storage directory.
     fn artifact_dir(&self) -> &Path {
         Path::new("")
@@ -255,13 +254,13 @@ pub trait StateStore: Send + Sync + Debug {
 }
 
 // ---------------------------------------------------------------------------
-// merge_state_via_content — content-based merge fallback
+// join_state_via_content — content-based merge fallback
 // ---------------------------------------------------------------------------
 
 /// Content-based merge implementation used by the default
-/// [`StateStore::merge_registry`] and as a fallback by backends that
+/// [`StateStore::join`] and as a fallback by backends that
 /// cannot do a direct file-copy optimisation.
-async fn merge_state_via_content<D: StateStore + Sync + ?Sized>(
+async fn join_state_via_content<D: StateStore + Sync + ?Sized>(
     dest: &D,
     src: &(dyn StateStore + Sync),
     collision: Collision,
@@ -358,68 +357,35 @@ fn is_file_artifact(data_uri: &str) -> bool {
 
 #[derive(Debug)]
 pub struct FileSystemStateStore {
-    state_file: Option<PathBuf>,
-    artifact_dir: Option<PathBuf>,
-    registry_path: Option<PathBuf>,
+    state_dir: PathBuf,
+    artifact_dir: PathBuf,
 }
 
 impl FileSystemStateStore {
-    /// Derive `artifact_dir` and `registry_path` from `state_file`.
-    fn set_state_file(&mut self, sf: PathBuf) {
-        let parent = sf.parent().map(|p| p.to_path_buf());
-        self.artifact_dir = parent.as_ref().map(|p| p.join("artifacts"));
-        self.registry_path = parent.as_ref().map(|p| p.join("registry.json"));
-        self.state_file = Some(sf);
+    fn state_file(&self) -> PathBuf {
+        self.state_dir.join("state.json")
     }
 
-    /// Create a store pointed at an explicit `state.json` path.
-    /// Derives `artifact_dir` and `registry_path` from the parent directory.
-    pub fn at_path(state_file: PathBuf) -> Self {
-        let parent = state_file.parent().map(|p| p.to_path_buf());
-        let artifact_dir = parent.as_ref().map(|p| p.join("artifacts"));
-        let registry_path = parent.as_ref().map(|p| p.join("registry.json"));
+    fn registry_path(&self) -> PathBuf {
+        self.state_dir.join("registry.json")
+    }
+
+    /// Create a new state directory, write initial state.json, return a live store.
+    pub fn create(state_dir: PathBuf, initial: &Map<String, Value>) -> Result<Self, StateError> {
+        std::fs::create_dir_all(state_dir.join("artifacts"))?;
+        write_state(&state_dir, initial)?;
+        Ok(FileSystemStateStore {
+            artifact_dir: state_dir.join("artifacts"),
+            state_dir,
+        })
+    }
+
+    /// Open an existing state directory. Does NOT write anything.
+    pub fn open(state_dir: PathBuf) -> Self {
         FileSystemStateStore {
-            state_file: Some(state_file),
-            artifact_dir,
-            registry_path,
+            artifact_dir: state_dir.join("artifacts"),
+            state_dir,
         }
-    }
-
-    /// Load a registry from an explicit `registry.json` path, storing
-    /// artifacts under `artifact_dir`.
-    pub async fn from_registry_file(
-        path: &Path,
-        artifact_dir: PathBuf,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let registry_path = artifact_dir
-            .parent()
-            .unwrap_or(&artifact_dir)
-            .join("registry.json");
-        let state_file = artifact_dir.parent().map(|p| p.join("state.json"));
-        let store = FileSystemStateStore {
-            state_file,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(registry_path),
-        };
-        if path != store.registry_path.as_deref().unwrap_or(path)
-            && tokio::fs::try_exists(path).await.unwrap_or(false)
-        {
-            let content = tokio::fs::read_to_string(path).await?;
-            let parsed: HashMap<String, String> = serde_json::from_str(&content)?;
-            let count = parsed.len();
-            store
-                .locked_write(|data| {
-                    *data = parsed;
-                    Ok(())
-                })
-                .await?;
-            log::info!(
-                "loaded custom registry from {} ({} entries)",
-                path.display(),
-                count,
-            );
-        }
-        Ok(store)
     }
 
     // --- registry helpers ---
@@ -427,10 +393,8 @@ impl FileSystemStateStore {
     /// Read and parse `registry.json`, returning an empty map when the file is
     /// absent or unparseable (logging the reason).
     async fn read_registry_json(&self) -> HashMap<String, String> {
-        let Some(rp) = self.registry_path.as_ref() else {
-            return HashMap::new();
-        };
-        match tokio::fs::read_to_string(rp).await {
+        let rp = self.registry_path();
+        match tokio::fs::read_to_string(&rp).await {
             Ok(content) => match serde_json::from_str::<HashMap<String, String>>(&content) {
                 Ok(data) => data,
                 Err(e) => {
@@ -459,20 +423,18 @@ impl FileSystemStateStore {
         &self,
         apply: impl FnOnce(&mut HashMap<String, String>) -> Result<R, Box<dyn std::error::Error>>,
     ) -> Result<R, Box<dyn std::error::Error>> {
-        let rp = self.registry_path.as_ref().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "no registry path configured")
-        })?;
+        let rp = self.registry_path();
         if let Some(parent) = rp.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let _lock = acquire_lock_async(rp).await?;
+        let _lock = acquire_lock_async(&rp).await?;
         let mut data = self.read_registry_json().await;
         let result = apply(&mut data)?;
         let data_map: serde_json::Map<String, serde_json::Value> = data
             .iter()
             .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
             .collect();
-        atomic_write_json_async(rp, &data_map).await?;
+        atomic_write_json_async(&rp, &data_map).await?;
         log::debug!(
             "locked_write: wrote {} entries to {}",
             data.len(),
@@ -504,12 +466,7 @@ impl FileSystemStateStore {
             );
         }
         let name = uri.path.trim_start_matches('/').to_string();
-        let ad = self.artifact_dir.as_ref().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no artifact directory configured",
-            )
-        })?;
+        let ad = &self.artifact_dir;
         let path = ad.join(&name);
         // Ensure artifact_dir exists before canonicalizing
         tokio::fs::create_dir_all(ad).await?;
@@ -626,11 +583,6 @@ impl FileSystemStateStore {
         self.read_registry_json().await.into_keys().collect()
     }
 
-    /// The artifact storage directory.
-    pub fn artifact_dir(&self) -> &Path {
-        self.artifact_dir.as_deref().unwrap_or(Path::new(""))
-    }
-
     pub async fn has_file(&self, path: &str) -> bool {
         tokio::fs::metadata(path).await.is_ok()
     }
@@ -638,7 +590,7 @@ impl FileSystemStateStore {
     /// Merge that prefers a direct file copy when `other` is also a
     /// [`FileSystemStateStore`], falling back to the content-based
     /// path otherwise.
-    pub async fn merge_registry(
+    pub async fn join(
         &self,
         other: &(dyn StateStore + Sync),
         collision: Collision,
@@ -741,7 +693,7 @@ impl FileSystemStateStore {
         }
 
         // Fallback: content-based merge.
-        merge_state_via_content(self, other, collision, key_prefix).await
+        join_state_via_content(self, other, collision, key_prefix).await
     }
 
     /// Produce a localized store containing only the given keys.
@@ -752,16 +704,9 @@ impl FileSystemStateStore {
         let temp_dir = tempfile::TempDir::new()?;
         let artifact_dir = temp_dir.path().join("artifacts");
         tokio::fs::create_dir_all(&artifact_dir).await?;
-        let state_file = temp_dir.path().join("state.json");
         let new_store = FileSystemStateStore {
-            state_file: Some(state_file),
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
+            state_dir: temp_dir.path().to_path_buf(),
+            artifact_dir: artifact_dir.clone(),
         };
         let mut allowed = HashSet::new();
 
@@ -818,31 +763,12 @@ impl FileSystemStateStore {
 
 #[async_trait::async_trait]
 impl StateStore for FileSystemStateStore {
-    fn new(gremlin_id: Option<String>) -> Self {
-        let sf = resolve_state_file(gremlin_id.as_deref());
-        match sf {
-            Some(path) => Self::at_path(path),
-            None => FileSystemStateStore {
-                state_file: None,
-                artifact_dir: None,
-                registry_path: None,
-            },
-        }
-    }
-
     fn state_tree(&self) -> Map<String, Value> {
-        read_state_json(self.state_file.as_deref())
+        read_state_json(Some(&self.state_file()))
     }
 
-    fn seed(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
-        let state_dir = self
-            .state_file
-            .as_ref()
-            .and_then(|sf| sf.parent().map(|p| p.to_path_buf()))
-            .ok_or_else(|| StateError::Other("no state directory".into()))?;
-        write_state(&state_dir, data)?;
-        self.set_state_file(state_dir.join("state.json"));
-        Ok(())
+    fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+        write_state(&self.state_dir, data)
     }
 
     fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
@@ -852,16 +778,11 @@ impl StateStore for FileSystemStateStore {
                 "invalid blob name {name:?}: traversal or absolute path rejected"
             )));
         }
-        let state_dir = self
-            .state_file
-            .as_ref()
-            .and_then(|sf| sf.parent())
-            .ok_or_else(|| StateError::Other("no state directory".into()))?;
-        let path = state_dir.join(name);
+        let path = self.state_dir.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut opts = OpenOptions::new();
+        let mut opts = std::fs::OpenOptions::new();
         match mode {
             BlobMode::ReadWrite => {
                 opts.read(true).write(true).create(false);
@@ -878,39 +799,30 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn exists(&self, name: &str) -> bool {
-        let Some(state_dir) = self.state_file.as_ref().and_then(|sf| sf.parent()) else {
-            return false;
-        };
         // Reject traversal.
         if name.contains("..") || name.starts_with('/') || name.contains('\0') {
             return false;
         }
-        state_dir.join(name).exists()
+        self.state_dir.join(name).exists()
     }
 
     fn clear_stage_error(&self, attempt: &str) {
-        let Some(sf) = self.state_file.as_ref() else {
-            return;
-        };
-        let Some(parent) = sf.parent() else {
-            return;
-        };
-        let bail_path = parent.join(format!("bail_{attempt}.json"));
+        let bail_path = self.state_dir.join(format!("bail_{attempt}.json"));
         let _ = std::fs::remove_file(&bail_path);
     }
 
     fn get_field(&self, name: &str) -> Option<Value> {
         let default = default_for(name)?;
-        let data = read_state_json(self.state_file.as_deref());
+        let data = read_state_json(Some(&self.state_file()));
         Some(data.get(name).cloned().unwrap_or(default))
     }
 
     fn read_field(&self, field: &str) -> Option<Value> {
-        let sf = self.state_file.as_ref()?;
+        let sf = self.state_file();
         if !sf.exists() {
             return None;
         }
-        let data = read_state_json(Some(sf));
+        let data = read_state_json(Some(&sf));
         match data.get(field) {
             None | Some(Value::Null) => None,
             Some(v) => Some(v.clone()),
@@ -918,13 +830,11 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn read_str(&self, field: &str) -> String {
-        let Some(sf) = self.state_file.as_ref() else {
-            return String::new();
-        };
+        let sf = self.state_file();
         if !sf.exists() {
             return String::new();
         }
-        match read_state_json(Some(sf)).get(field) {
+        match read_state_json(Some(&sf)).get(field) {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Number(n)) if n.as_f64() != Some(0.0) => n.to_string(),
             Some(Value::Bool(true)) => "True".into(),
@@ -932,22 +842,14 @@ impl StateStore for FileSystemStateStore {
         }
     }
 
-    fn persist(&mut self, state_dir: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
-        write_state(state_dir, data)?;
-        self.set_state_file(state_dir.join("state.json"));
-        Ok(())
-    }
-
     fn patch(&self, delete: &[String], fields: &Map<String, Value>) {
-        let Some(sf) = self.state_file.as_ref() else {
-            return;
-        };
+        let sf = self.state_file();
         if !sf.exists() {
             return;
         }
         let fields = fields.clone();
         let delete = delete.to_vec();
-        let _ = locked_update(sf, move |data| {
+        let _ = locked_update(&sf, move |data| {
             for k in &delete {
                 data.remove(k);
             }
@@ -958,40 +860,33 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn record_stage_error(&self, class: &str, detail: &str) {
-        let Some(sf) = self.state_file.as_ref() else {
-            return;
-        };
+        let sf = self.state_file();
         if !sf.exists() || class.is_empty() {
             return;
         }
-        let attempt = attempt_of(&read_state_json(Some(sf)));
+        let attempt = attempt_of(&read_state_json(Some(&sf)));
         if attempt.is_empty() {
             return;
         }
-        let Some(state_dir) = sf.parent() else {
-            return;
-        };
-        let bail_path = state_dir.join(format!("bail_{attempt}.json"));
+        let bail_path = self.state_dir.join(format!("bail_{attempt}.json"));
         let payload = serde_json::json!({
             "class": class,
             "detail": detail,
             "ts": now_iso(),
         });
-        write_bail_atomically(state_dir, &bail_path, &attempt, &payload);
+        write_bail_atomically(&self.state_dir, &bail_path, &attempt, &payload);
     }
 
     fn accumulate_token_usage(&self, usage: &HashMap<String, i64>) {
         if usage.is_empty() {
             return;
         }
-        let Some(sf) = self.state_file.as_ref() else {
-            return;
-        };
+        let sf = self.state_file();
         if !sf.exists() {
             return;
         }
         let usage = usage.clone();
-        let _ = locked_update(sf, move |data| {
+        let _ = locked_update(&sf, move |data| {
             let mut total: Map<String, Value> = data
                 .get("token_usage")
                 .and_then(|v| v.as_object().cloned())
@@ -1005,15 +900,15 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn stage_error(&self) -> Option<Map<String, Value>> {
-        let sf = self.state_file.as_ref()?;
+        let sf = self.state_file();
         if !sf.exists() {
             return None;
         }
-        let attempt = attempt_of(&read_state_json(Some(sf)));
+        let attempt = attempt_of(&read_state_json(Some(&sf)));
         if attempt.is_empty() {
             return None;
         }
-        let bail_path = sf.parent()?.join(format!("bail_{attempt}.json"));
+        let bail_path = self.state_dir.join(format!("bail_{attempt}.json"));
         serde_json::from_str(&std::fs::read_to_string(bail_path).ok()?).ok()
     }
 
@@ -1026,16 +921,14 @@ impl StateStore for FileSystemStateStore {
         if group_name.is_empty() {
             return;
         }
-        let Some(sf) = self.state_file.as_ref() else {
-            return;
-        };
+        let sf = self.state_file();
         if !sf.exists() {
             return;
         }
         let group_name = group_name.to_string();
         let base_head = base_head.map(String::from);
         let paths = paths.cloned();
-        let _ = locked_update(sf, move |data| {
+        let _ = locked_update(&sf, move |data| {
             let mut groups = data
                 .get("parallel_worktrees")
                 .and_then(|v| v.as_object().cloned())
@@ -1067,13 +960,11 @@ impl StateStore for FileSystemStateStore {
         if amount == 0.0 || !amount.is_finite() || amount < 0.0 {
             return;
         }
-        let Some(sf) = self.state_file.as_ref() else {
-            return;
-        };
+        let sf = self.state_file();
         if !sf.exists() {
             return;
         }
-        let _ = locked_update(sf, move |data| {
+        let _ = locked_update(&sf, move |data| {
             let current = data
                 .get("subprocess_cost_usd")
                 .map(as_i64_f64)
@@ -1083,15 +974,13 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn patch_parallel_attempt(&self, child_key: &str, attempt: &str) {
-        let Some(sf) = self.state_file.as_ref() else {
-            return;
-        };
+        let sf = self.state_file();
         if !sf.exists() || attempt.is_empty() {
             return;
         }
         let child_key = child_key.to_string();
         let attempt = attempt.to_string();
-        let _ = locked_update(sf, move |data| {
+        let _ = locked_update(&sf, move |data| {
             let mut pa = data
                 .get("parallel_attempts")
                 .and_then(|v| v.as_object().cloned())
@@ -1102,13 +991,11 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>) {
-        let Some(sf) = self.state_file.as_ref() else {
-            return (String::new(), HashMap::new());
-        };
+        let sf = self.state_file();
         if !sf.exists() {
             return (String::new(), HashMap::new());
         }
-        let data = read_state_json(Some(sf));
+        let data = read_state_json(Some(&sf));
         let Some(entry) = data
             .get("parallel_worktrees")
             .and_then(|v| v.as_object())
@@ -1135,12 +1022,7 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn write_terminal_state(&self, exit_code: i32) {
-        let Some(sf) = self.state_file.as_ref() else {
-            return;
-        };
-        if let Some(state_dir) = sf.parent() {
-            let _ = File::create(state_dir.join("finished"));
-        }
+        let _ = File::create(self.state_dir.join("finished"));
         let mut fields = Map::new();
         fields.insert(
             "status".into(),
@@ -1197,28 +1079,47 @@ impl StateStore for FileSystemStateStore {
         self.keys().await
     }
 
-    async fn merge_registry(
+    async fn join(
         &self,
         other: &(dyn StateStore + Sync),
         collision: Collision,
         key_prefix: Option<&str>,
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        self.merge_registry(other, collision, key_prefix).await
+        self.join(other, collision, key_prefix).await
     }
 
-    async fn fork_registry(
+    async fn fork(
         &self,
-        child_artifact_dir: &Path,
-    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
-        let rp = self.registry_path.as_ref().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no registry path configured for fork",
-            )
-        })?;
-        FileSystemStateStore::from_registry_file(rp, child_artifact_dir.to_path_buf())
-            .await
-            .map(|r| Box::new(r) as Box<dyn StateStore>)
+        child_gremlin_id: &str,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        let child_dir = state_dir_for(child_gremlin_id);
+        tokio::fs::create_dir_all(&child_dir).await?;
+        let child_artifact_dir = child_dir.join("artifacts");
+        tokio::fs::create_dir_all(&child_artifact_dir).await?;
+
+        // Copy parent artifact files.
+        if self.artifact_dir.is_dir() {
+            copy_dir_sync(&self.artifact_dir, &child_artifact_dir)?;
+        }
+
+        // Seed registry from parent.
+        let mut child_store = FileSystemStateStore::open(child_dir);
+        let parent_registry = self.read_registry_json().await;
+        if !parent_registry.is_empty() {
+            child_store
+                .locked_write(|data| {
+                    *data = parent_registry;
+                    Ok(())
+                })
+                .await?;
+        }
+
+        // Write initial state.json with id stamped.
+        let mut initial = Map::new();
+        initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
+        child_store.write_state(&initial)?;
+
+        Ok(Box::new(child_store))
     }
 
     async fn checkout_registry(
@@ -1232,8 +1133,12 @@ impl StateStore for FileSystemStateStore {
         Some(self)
     }
 
+    fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     fn artifact_dir(&self) -> &Path {
-        self.artifact_dir()
+        &self.artifact_dir
     }
 
     async fn has_file(&self, path: &str) -> bool {
@@ -1277,20 +1182,14 @@ impl Debug for ScopedFileSystemStateStore {
 
 #[async_trait::async_trait]
 impl StateStore for ScopedFileSystemStateStore {
-    fn new(_gremlin_id: Option<String>) -> Self {
-        // Scoped stores are only created via checkout; new() is unreachable
-        // but must exist for the trait.
-        unimplemented!("ScopedFileSystemStateStore cannot be created via new()")
-    }
-
     // --- state methods: delegate to inner ---
 
     fn state_tree(&self) -> Map<String, Value> {
         self.inner.state_tree()
     }
 
-    fn seed(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
-        self.inner.seed(data)
+    fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+        self.inner.write_state(data)
     }
 
     fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
@@ -1339,10 +1238,6 @@ impl StateStore for ScopedFileSystemStateStore {
 
     fn write_terminal_state(&self, exit_code: i32) {
         self.inner.write_terminal_state(exit_code)
-    }
-
-    fn persist(&mut self, state_dir: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
-        self.inner.persist(state_dir, data)
     }
 
     fn patch_parallel_worktrees(
@@ -1412,11 +1307,11 @@ impl StateStore for ScopedFileSystemStateStore {
         self.allowed_keys.iter().cloned().collect()
     }
 
-    async fn fork_registry(
+    async fn fork(
         &self,
-        child_artifact_dir: &Path,
-    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
-        self.inner.fork_registry(child_artifact_dir).await
+        child_gremlin_id: &str,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        self.inner.fork(child_gremlin_id).await
     }
 
     async fn checkout_registry(
@@ -1424,6 +1319,10 @@ impl StateStore for ScopedFileSystemStateStore {
         keys: &[String],
     ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
         self.inner.checkout_registry(keys).await
+    }
+
+    fn state_dir(&self) -> &Path {
+        self.inner.state_dir()
     }
 
     fn artifact_dir(&self) -> &Path {
@@ -1445,8 +1344,23 @@ pub struct StateData {
 }
 
 impl StateData {
-    pub fn new(gremlin_id: Option<String>) -> Self {
-        let store = Box::new(FileSystemStateStore::new(gremlin_id.clone()));
+    /// Create a new state directory, write initial state.json, return a live handle.
+    pub fn new(state_dir: &Path, initial: &Map<String, Value>) -> Result<Self, StateError> {
+        let store = Box::new(FileSystemStateStore::create(
+            state_dir.to_path_buf(),
+            initial,
+        )?);
+        let gremlin_id = initial.get("id").and_then(|v| v.as_str()).map(String::from);
+        Ok(Self { gremlin_id, store })
+    }
+
+    /// Open an existing state directory. Does NOT write anything.
+    pub fn open(state_dir: &Path) -> Self {
+        let store = Box::new(FileSystemStateStore::open(state_dir.to_path_buf()));
+        let gremlin_id = read_state_json(Some(&state_dir.join("state.json")))
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         Self { gremlin_id, store }
     }
 
@@ -1499,30 +1413,15 @@ impl StateData {
         self.store.accumulate_token_usage(usage);
     }
 
-    pub fn persist(
-        &mut self,
-        state_dir: &Path,
-        data: &Map<String, Value>,
-    ) -> Result<(), StateError> {
-        let Some(gid) = self.gremlin_id.clone() else {
-            return Err(StateError::Other(
-                "cannot persist StateData with no gremlin_id".into(),
-            ));
-        };
-        let mut out = data.clone();
-        out.insert("id".into(), Value::String(gid));
-        self.store.persist(state_dir, &out)
-    }
-
     pub fn state_tree(&self) -> Map<String, Value> {
         self.store.state_tree()
     }
 
-    pub fn seed(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
-        self.store.seed(data)
+    pub fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+        self.store.write_state(data)
     }
 
-    pub(crate) fn open(
+    pub(crate) fn open_blob(
         &self,
         name: &str,
         mode: BlobMode,
@@ -1557,6 +1456,16 @@ impl StateData {
 
     pub fn patch_parallel_attempt(&self, child_key: &str, attempt: &str) {
         self.store.patch_parallel_attempt(child_key, attempt);
+    }
+
+    // --- locality ---
+
+    pub fn state_dir(&self) -> &Path {
+        self.store.state_dir()
+    }
+
+    pub fn artifact_dir(&self) -> &Path {
+        self.store.artifact_dir()
     }
 
     // --- artifact delegating methods ---
@@ -1605,22 +1514,20 @@ impl StateData {
         self.store.keys().await
     }
 
-    pub async fn merge_registry(
+    pub async fn join(
         &self,
         other: &(dyn StateStore + Sync),
         collision: Collision,
         key_prefix: Option<&str>,
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        self.store
-            .merge_registry(other, collision, key_prefix)
-            .await
+        self.store.join(other, collision, key_prefix).await
     }
 
-    pub async fn fork_registry(
+    pub async fn fork(
         &self,
-        child_artifact_dir: &Path,
-    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
-        self.store.fork_registry(child_artifact_dir).await
+        child_gremlin_id: &str,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        self.store.fork(child_gremlin_id).await
     }
 
     pub async fn checkout_registry(
@@ -1628,10 +1535,6 @@ impl StateData {
         keys: &[String],
     ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
         self.store.checkout_registry(keys).await
-    }
-
-    pub fn artifact_dir(&self) -> &Path {
-        self.store.artifact_dir()
     }
 
     pub async fn has_file(&self, path: &str) -> bool {
@@ -1645,14 +1548,14 @@ impl StateData {
     /// which derives the directory from `config::state_root`.
     #[cfg(test)]
     pub(crate) fn with_state_dir(state_dir: &std::path::Path) -> Self {
-        let sf = state_dir.join("state.json");
         let _ = std::fs::create_dir_all(state_dir);
+        let sf = state_dir.join("state.json");
         if !sf.exists() {
             let _ = std::fs::write(&sf, "{}");
         }
         Self {
             gremlin_id: Some("test".into()),
-            store: Box::new(FileSystemStateStore::at_path(sf)),
+            store: Box::new(FileSystemStateStore::open(state_dir.to_path_buf())),
         }
     }
 
@@ -1910,7 +1813,7 @@ fn lock_path(sf: &Path) -> PathBuf {
 }
 
 pub fn acquire_lock(sf: &Path) -> Result<File, StateError> {
-    let f = OpenOptions::new()
+    let f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(lock_path(sf))?;
@@ -2018,6 +1921,25 @@ fn as_i64_f64(v: &Value) -> f64 {
     }
 }
 
+/// Recursively copy `src` into `dst`, creating directories as needed.
+fn copy_dir_sync(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_dir_sync(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2054,7 +1976,7 @@ mod tests {
     fn field_reads_after_disk_write() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             assert_eq!(d.get_field("stage").unwrap(), "implement");
             let mut fields = Map::new();
             fields.insert("stage".into(), Value::String("review".into()));
@@ -2095,7 +2017,7 @@ mod tests {
     fn get_field_falls_back_to_default() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             assert_eq!(d.get_field("attempt").unwrap(), "");
             assert_eq!(d.get_field("stage").unwrap(), "implement");
             assert_eq!(
@@ -2111,7 +2033,7 @@ mod tests {
     fn patch_merges_and_deletes() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
             d.patch(&[], &fields);
@@ -2128,7 +2050,8 @@ mod tests {
 
     #[test]
     fn patch_noop_without_gremlin_id() {
-        let d = StateData::new(None);
+        let dir = tempfile::tempdir().unwrap();
+        let d = StateData::open(dir.path());
         d.patch(&[], &Map::new());
         d.record_stage_error("other", "x");
         d.set_stage("running", None, "");
@@ -2138,7 +2061,7 @@ mod tests {
     fn set_stage_writes_stamp_and_deletes_sub_stage() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             d.set_stage("implement", Some(&serde_json::json!({"k": 1})), "");
             let raw = read_state_json(Some(&sf));
             assert_eq!(raw.get("stage").unwrap(), "implement");
@@ -2158,7 +2081,7 @@ mod tests {
     fn set_stage_parent_pins_stage_and_sub_stage() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             d.set_stage("github-review-pull-request", None, "reviews");
             let raw = read_state_json(Some(&sf));
             assert_eq!(raw.get("stage").unwrap(), "reviews");
@@ -2170,7 +2093,7 @@ mod tests {
     fn record_stage_error_requires_attempt() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             d.record_stage_error("other", "no attempt yet");
             let state_dir = sf.parent().unwrap();
             assert!(std::fs::read_dir(state_dir).unwrap().all(|e| !e
@@ -2205,15 +2128,16 @@ mod tests {
         // must win and no temporary files may be left behind.
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
             d.patch(&[], &fields);
 
             let handles: Vec<_> = (0..16)
                 .map(|i| {
+                    let state_dir = sandbox.path().join("state").join("gr-test");
                     std::thread::spawn(move || {
-                        let data = StateData::new(Some("gr-test".into()));
+                        let data = StateData::open(&state_dir);
                         data.record_stage_error("other", &format!("writer-{i}"));
                     })
                 })
@@ -2249,7 +2173,7 @@ mod tests {
     fn stage_error_keeps_non_string_values() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
             d.patch(&[], &fields);
@@ -2275,7 +2199,7 @@ mod tests {
     fn accumulate_token_usage_adds_integers() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             d.accumulate_token_usage(&HashMap::from([("prompt_tokens".to_string(), 5)]));
             d.accumulate_token_usage(&HashMap::from([
                 ("prompt_tokens".to_string(), 3),
@@ -2292,7 +2216,7 @@ mod tests {
     fn parallel_worktrees_add_and_clear() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             d.patch_parallel_worktrees(
                 "reviews",
                 Some("abc123"),
@@ -2312,7 +2236,7 @@ mod tests {
     fn subprocess_cost_accumulates_and_validates() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             d.add_subprocess_cost(0.25);
             d.add_subprocess_cost(0.5);
             d.add_subprocess_cost(-1.0);
@@ -2327,7 +2251,7 @@ mod tests {
     fn terminal_state_touches_finished_and_patches() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             d.write_terminal_state(0);
             let state_dir = sf.parent().unwrap();
             assert!(state_dir.join("finished").exists());
@@ -2343,28 +2267,43 @@ mod tests {
     }
 
     #[test]
-    fn persist_writes_id_and_sets_state_file() {
+    fn state_data_new_creates_dir_and_writes_state() {
         let dir = tempfile::tempdir().unwrap();
-        let mut d = StateData::new(Some("child".into()));
+        let state_dir = dir.path().join("child");
         let mut payload = Map::new();
+        payload.insert("id".into(), Value::String("child".into()));
         payload.insert("definition_path".into(), Value::String("/p.yaml".into()));
-        d.persist(dir.path(), &payload).unwrap();
+        let d = StateData::new(&state_dir, &payload).unwrap();
         let raw = d.state_tree();
         assert_eq!(raw.get("id").unwrap(), "child");
         assert_eq!(raw.get("definition_path").unwrap(), "/p.yaml");
+        assert!(state_dir.join("state.json").exists());
+        assert!(state_dir.join("artifacts").is_dir());
+    }
 
-        let mut none = StateData::new(None);
-        assert!(none.persist(dir.path(), &Map::new()).is_err());
+    #[test]
+    fn state_data_open_reads_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("existing");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("state.json"),
+            r#"{"id": "existing", "stage": "done"}"#,
+        )
+        .unwrap();
+        let d = StateData::open(&state_dir);
+        assert_eq!(d.read_str("stage"), "done");
+        assert_eq!(d.state_dir(), state_dir.as_path());
     }
 
     #[test]
     fn open_creates_and_reads_blob() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             // Write through open
             {
-                let mut blob = d.open("test.txt", BlobMode::Write).unwrap();
+                let mut blob = d.open_blob("test.txt", BlobMode::Write).unwrap();
                 blob.write_all(b"hello").unwrap();
             }
             // Read back
@@ -2375,13 +2314,13 @@ mod tests {
     }
 
     #[test]
-    fn seed_writes_state_and_tree_reads_it() {
+    fn write_state_writes_and_tree_reads_it() {
         with_sandbox(None, |sandbox| {
             let _sf = seed(sandbox, "gr-test");
-            let mut d = StateData::new(Some("gr-test".into()));
+            let mut d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             let mut data = Map::new();
             data.insert("stage".into(), Value::String("seeded".into()));
-            d.seed(&data).unwrap();
+            d.write_state(&data).unwrap();
             let tree = d.state_tree();
             assert_eq!(tree.get("stage").unwrap(), "seeded");
         });
@@ -2391,7 +2330,7 @@ mod tests {
     fn clear_stage_error_removes_bail_file() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
             d.patch(&[], &fields);
@@ -2422,7 +2361,7 @@ mod tests {
     fn parallel_attempt_patch() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             d.patch_parallel_attempt("bail-child", "attempt-bail");
             let raw = read_state_json(Some(&sf));
             assert_eq!(raw["parallel_attempts"]["bail-child"], "attempt-bail");
@@ -2433,7 +2372,7 @@ mod tests {
     fn parallel_worktrees_reads_back() {
         with_sandbox(None, |sandbox| {
             let _sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             let mut paths = HashMap::new();
             paths.insert("a".to_string(), "/wt/a".to_string());
             d.patch_parallel_worktrees("reviews", Some("abc123"), Some(&paths));
@@ -2448,7 +2387,7 @@ mod tests {
     fn clear_parallel_attempts_removes_key() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
-            let d = StateData::new(Some("gr-test".into()));
+            let d = StateData::open(&sandbox.path().join("state").join("gr-test"));
             d.patch_parallel_attempt("a", "attempt-a");
             d.clear_parallel_attempts();
             assert!(read_state_json(Some(&sf))
@@ -2503,16 +2442,9 @@ mod tests {
     #[tokio::test]
     async fn test_data_uri_unbound_raises_missing() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let store = FileSystemStateStore::open(
+            artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf(),
+        );
         let err = store.data_uri("nonexistent").await.unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
     }
@@ -2520,48 +2452,23 @@ mod tests {
     #[tokio::test]
     async fn test_write_into_registry_persists_and_roundtrip() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir.clone());
         let uri = Uri::new("artifact".to_string(), "foo.txt".to_string());
         let path = store.write_into_registry(&uri, "hello").await.unwrap();
         assert!(path.contains("foo.txt"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
 
         // Reload from disk
-        let store2 = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let store2 = FileSystemStateStore::open(state_dir);
         assert_eq!(store2.data_uri("artifact://foo.txt").await.unwrap(), path);
     }
 
     #[tokio::test]
     async fn test_path_for_uri_does_not_register() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         let uri = Uri::parse("artifact://later.txt").unwrap();
         let path = store.path_for_uri(&uri).await.unwrap();
         assert!(path.ends_with("later.txt"));
@@ -2571,16 +2478,8 @@ mod tests {
     #[tokio::test]
     async fn test_commit_idempotent_same_path() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         let uri = Uri::parse("artifact://a.txt").unwrap();
         let path = store.path_for_uri(&uri).await.unwrap();
         std::fs::write(&path, "").unwrap();
@@ -2591,16 +2490,8 @@ mod tests {
     #[tokio::test]
     async fn test_commit_with_missing_file_succeeds() {
         let (tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         let missing = tmp.path().join("does-not-exist.txt");
         // commit does not check file existence; it only enforces key uniqueness
         store
@@ -2613,16 +2504,8 @@ mod tests {
     #[tokio::test]
     async fn test_commit_conflicting_path_raises() {
         let (tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         let one = tmp.path().join("one");
         let two = tmp.path().join("two");
         std::fs::write(&one, "").unwrap();
@@ -2643,16 +2526,8 @@ mod tests {
         let (tmp, artifact_dir) = setup_registry();
         let src = tmp.path().join("src.txt");
         std::fs::write(&src, "copied").unwrap();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         let uri = Uri::parse("artifact://dst.txt").unwrap();
         let path = store.copy_into_registry(&uri, &src).await.unwrap();
         assert!(store.is_registered("artifact://dst.txt").await);
@@ -2662,16 +2537,8 @@ mod tests {
     #[tokio::test]
     async fn test_path_escape_prevention() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         let uri = Uri::new("artifact".to_string(), "../bad.txt".to_string());
         assert!(store.path_for_uri(&uri).await.is_err());
     }
@@ -2679,16 +2546,8 @@ mod tests {
     #[tokio::test]
     async fn test_content_reads_file() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         write_file(&store, "hello.txt", "world").await;
         assert_eq!(
             store.content("artifact://hello.txt", None).await.unwrap(),
@@ -2699,16 +2558,8 @@ mod tests {
     #[tokio::test]
     async fn test_content_with_json_path() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         write_file(&store, "data.json", r#"{"a":{"b":"c"}}"#).await;
         let content = store
             .content("artifact://data.json", Some("a.b"))
@@ -2720,16 +2571,8 @@ mod tests {
     #[tokio::test]
     async fn test_content_reads_file_containing_uri_text() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         write_file(&store, "range", "git://range/abc..def").await;
         assert_eq!(
             store.content("artifact://range", None).await.unwrap(),
@@ -2740,32 +2583,16 @@ mod tests {
     #[tokio::test]
     async fn test_is_registered_false_for_missing_key() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         assert!(!store.is_registered("nonexistent").await);
     }
 
     #[tokio::test]
     async fn test_is_registered_true_after_write() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         write_file(&store, "stuff.txt", "data").await;
         assert!(store.is_registered("artifact://stuff.txt").await);
     }
@@ -2773,16 +2600,8 @@ mod tests {
     #[tokio::test]
     async fn test_is_registered_true_after_file_deleted() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         let path = write_file(&store, "dead.txt", "data").await;
         assert!(store.is_registered("artifact://dead.txt").await);
         std::fs::remove_file(&path).unwrap();
@@ -2792,16 +2611,8 @@ mod tests {
     #[tokio::test]
     async fn test_keys_returns_registered_keys() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         write_file(&store, "a", "").await;
         write_file(&store, "b", "").await;
         let mut keys = store.keys().await;
@@ -2810,36 +2621,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_merge_registry_identity() {
+    async fn test_join_registry_identity() {
         let (_tmp, artifact_dir) = setup_registry();
         let (_, other_dir) = setup_registry();
 
-        let other = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(other_dir.clone()),
-            registry_path: Some(
-                other_dir
-                    .parent()
-                    .unwrap_or(&other_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
+        let other = FileSystemStateStore::open(other_state_dir);
         write_file(&other, "k1", "v").await;
 
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
-        let count = store
-            .merge_registry(&other, Collision::Error, None)
-            .await
-            .unwrap();
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
+        let count = store.join(&other, Collision::Error, None).await.unwrap();
         assert_eq!(count, 1);
         // The key is registered and its content is accessible.
         assert!(store.is_registered("artifact://k1").await);
@@ -2847,34 +2639,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_merge_registry_with_prefix() {
+    async fn test_join_registry_with_prefix() {
         let (_tmp, artifact_dir) = setup_registry();
         let (_, other_dir) = setup_registry();
 
-        let other = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(other_dir.clone()),
-            registry_path: Some(
-                other_dir
-                    .parent()
-                    .unwrap_or(&other_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
+        let other = FileSystemStateStore::open(other_state_dir);
         write_file(&other, "child", "v").await;
 
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         let count = store
-            .merge_registry(&other, Collision::Error, Some("parent"))
+            .join(&other, Collision::Error, Some("parent"))
             .await
             .unwrap();
         // Both the prefixed key and the original key are registered.
@@ -2884,38 +2660,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_merge_registry_with_file_copy() {
+    async fn test_join_registry_with_file_copy() {
         let (_tmp, artifact_dir) = setup_registry();
         let (tmp2, other_dir) = setup_registry();
         let _ = &tmp2;
 
-        let other = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(other_dir.clone()),
-            registry_path: Some(
-                other_dir
-                    .parent()
-                    .unwrap_or(&other_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
+        let other = FileSystemStateStore::open(other_state_dir);
         let src_file = write_file(&other, "note.txt", "hello").await;
         assert!(Path::new(&src_file).exists());
 
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
-        let count = store
-            .merge_registry(&other, Collision::Error, None)
-            .await
-            .unwrap();
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
+        let count = store.join(&other, Collision::Error, None).await.unwrap();
         assert_eq!(count, 1);
         let stored = store.data_uri("artifact://note.txt").await.unwrap();
         let p = PathBuf::from(stored);
@@ -2923,39 +2680,20 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello");
     }
 
-    // --- merge_registry: dangling-reference regression test ---
+    // --- join: dangling-reference regression test ---
 
     #[tokio::test]
-    async fn test_merge_registry_survives_source_deletion() {
+    async fn test_join_survives_source_deletion() {
         let (_tmp, artifact_dir) = setup_registry();
         let (tmp2, other_dir) = setup_registry();
 
-        let other = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(other_dir.clone()),
-            registry_path: Some(
-                other_dir
-                    .parent()
-                    .unwrap_or(&other_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
+        let other = FileSystemStateStore::open(other_state_dir);
         write_file(&other, "data.txt", "survive-me").await;
 
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
-        store
-            .merge_registry(&other, Collision::Error, None)
-            .await
-            .unwrap();
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
+        store.join(&other, Collision::Error, None).await.unwrap();
 
         // Delete the source registry's artifact directory.
         drop(other);
@@ -2966,78 +2704,43 @@ mod tests {
         assert_eq!(content, "survive-me");
     }
 
-    // --- merge_registry: collision mode tests ---
+    // --- join: collision mode tests ---
 
     #[tokio::test]
-    async fn test_merge_registry_collision_error() {
+    async fn test_join_collision_error() {
         let (_tmp, artifact_dir) = setup_registry();
         let (_, other_dir) = setup_registry();
 
-        let other = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(other_dir.clone()),
-            registry_path: Some(
-                other_dir
-                    .parent()
-                    .unwrap_or(&other_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
+        let other = FileSystemStateStore::open(other_state_dir);
         write_file(&other, "dup", "from-other").await;
 
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         // Pre-register the same key in the destination.
         write_file(&store, "dup", "existing").await;
 
         let err = store
-            .merge_registry(&other, Collision::Error, None)
+            .join(&other, Collision::Error, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("duplicate artifact"));
     }
 
     #[tokio::test]
-    async fn test_merge_registry_collision_ignore() {
+    async fn test_join_collision_ignore() {
         let (_tmp, artifact_dir) = setup_registry();
         let (_, other_dir) = setup_registry();
 
-        let other = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(other_dir.clone()),
-            registry_path: Some(
-                other_dir
-                    .parent()
-                    .unwrap_or(&other_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let other_state_dir = other_dir.parent().unwrap_or(&other_dir).to_path_buf();
+        let other = FileSystemStateStore::open(other_state_dir);
         write_file(&other, "dup", "from-other").await;
 
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         write_file(&store, "dup", "existing").await;
 
-        let count = store
-            .merge_registry(&other, Collision::Ignore, None)
-            .await
-            .unwrap();
+        let count = store.join(&other, Collision::Ignore, None).await.unwrap();
         // The duplicate key was skipped.
         assert_eq!(count, 0);
         // The existing value is preserved.
@@ -3045,32 +2748,13 @@ mod tests {
         assert_eq!(content, "existing");
     }
 
-    #[tokio::test]
-    async fn test_from_registry_file_constructor() {
-        let (_tmp, artifact_dir) = setup_registry();
-        let reg_file = artifact_dir.parent().unwrap().join("custom_registry.json");
-        std::fs::write(&reg_file, r#"{"a":"b"}"#).unwrap();
-        let store = FileSystemStateStore::from_registry_file(&reg_file, artifact_dir)
-            .await
-            .unwrap();
-        assert_eq!(store.data_uri("a").await.unwrap(), "b");
-    }
-
     // --- checkout tests ---
 
     #[tokio::test]
     async fn test_filesystem_checkout_subset() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         write_file(&store, "a", "content-a").await;
         write_file(&store, "b", "content-b").await;
         write_file(&store, "c", "content-c").await;
@@ -3097,16 +2781,8 @@ mod tests {
     #[tokio::test]
     async fn test_filesystem_checkout_empty_keys() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         write_file(&store, "a", "content-a").await;
 
         let localized = store.checkout_registry(&[]).await.unwrap();
@@ -3116,16 +2792,8 @@ mod tests {
     #[tokio::test]
     async fn test_filesystem_checkout_isolated_directory() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         write_file(&store, "secret", "classified").await;
 
         let localized = store
@@ -3143,16 +2811,8 @@ mod tests {
     #[tokio::test]
     async fn test_filesystem_artifact_dir() {
         let (_tmp, artifact_dir) = setup_registry();
-        let store = FileSystemStateStore {
-            state_file: None,
-            artifact_dir: Some(artifact_dir.clone()),
-            registry_path: Some(
-                artifact_dir
-                    .parent()
-                    .unwrap_or(&artifact_dir)
-                    .join("registry.json"),
-            ),
-        };
+        let state_dir = artifact_dir.parent().unwrap_or(&artifact_dir).to_path_buf();
+        let store = FileSystemStateStore::open(state_dir);
         assert_eq!(store.artifact_dir(), artifact_dir.as_path());
     }
 
@@ -3168,13 +2828,10 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl StateStore for StubStore {
-            fn new(_gremlin_id: Option<String>) -> Self {
-                unimplemented!()
-            }
             fn state_tree(&self) -> Map<String, Value> {
                 unimplemented!()
             }
-            fn seed(&mut self, _data: &Map<String, Value>) -> Result<(), StateError> {
+            fn write_state(&mut self, _data: &Map<String, Value>) -> Result<(), StateError> {
                 unimplemented!()
             }
             fn open(&self, _name: &str, _mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
@@ -3211,13 +2868,6 @@ mod tests {
                 unimplemented!()
             }
             fn write_terminal_state(&self, _exit_code: i32) {
-                unimplemented!()
-            }
-            fn persist(
-                &mut self,
-                _state_dir: &Path,
-                _data: &Map<String, Value>,
-            ) -> Result<(), StateError> {
                 unimplemented!()
             }
             fn patch_parallel_worktrees(
@@ -3267,10 +2917,10 @@ mod tests {
             async fn keys(&self) -> Vec<String> {
                 unimplemented!()
             }
-            async fn fork_registry(
+            async fn fork(
                 &self,
-                _child_artifact_dir: &Path,
-            ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+                _child_gremlin_id: &str,
+            ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
                 unimplemented!()
             }
             fn as_any(&self) -> Option<&dyn std::any::Any> {

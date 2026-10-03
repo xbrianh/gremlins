@@ -211,7 +211,6 @@ impl Default for RuntimeConfig {
 /// One gremlin run, reconstructed from its state directory.
 pub struct Gremlin {
     pub id: GremlinId,
-    pub state_dir: PathBuf,
     /// Where the definition YAML lives, resolved at construction time but not
     /// read until [`Gremlin::init_runtime`]. `None` means no definition could be
     /// located — a handle that reaches `init_runtime` without one is an error.
@@ -330,138 +329,74 @@ impl Gremlin {
             .unwrap_or_default();
         let base_ref = base_ref.unwrap_or("");
 
-        // 4. Write state.json (the body of the old write_launch_state).
-        let build_handle = |project_root: &Path| -> Result<Gremlin, RunError> {
-            let workdir = worktree
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let definition_path_str = definition_path.to_string_lossy().into_owned();
+        // 4. Build initial state and create StateData (which writes state.json).
+        let workdir = worktree
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let definition_path_str = definition_path.to_string_lossy().into_owned();
 
-            let mut state = StateData::new(Some(gremlin_id.as_str().to_string()));
-            let inputs: Map<String, Value> = stage_inputs
-                .iter()
-                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
-                .collect();
+        let inputs: Map<String, Value> = stage_inputs
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+            .collect();
 
-            let existing = state::read_state_json(Some(&state_dir.join("state.json")));
-            let mut initial = existing;
-            initial.insert("id".to_string(), Value::String(gremlin_id.to_string()));
-            if !initial.contains_key("kind") {
-                initial.insert("kind".to_string(), Value::String(String::new()));
-            }
-            initial.insert(
-                "project_root".to_string(),
-                Value::String(project_root.to_string_lossy().into_owned()),
-            );
-            initial.insert("workdir".to_string(), Value::String(workdir.clone()));
-            initial.insert(
-                "setup_kind".to_string(),
-                Value::String("worktree-detached".to_string()),
-            );
-            initial.insert(
-                "worktree_base".to_string(),
-                Value::String(base_ref_sha.clone()),
-            );
-            if !base_ref.is_empty() {
-                initial.insert("base_ref".to_string(), Value::String(base_ref.to_string()));
-            }
-            initial.insert("status".to_string(), Value::String("running".to_string()));
-            if !initial.contains_key("started_at") {
-                initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
-            }
-            if !initial.contains_key("description") {
-                initial.insert("description".to_string(), Value::String(String::new()));
-            }
-            if !initial.contains_key("parent_id") {
-                initial.insert("parent_id".to_string(), Value::String(String::new()));
-            }
-            if !initial.contains_key("definition_args") {
-                initial.insert("definition_args".to_string(), Value::Array(Vec::new()));
-            }
-            initial.insert("client".to_string(), Value::String(String::new()));
-            initial.insert(
-                "definition_path".to_string(),
-                Value::String(definition_path_str.clone()),
-            );
-            initial.insert("stage".to_string(), Value::String("starting".to_string()));
-            initial.insert("pid".to_string(), Value::from(std::process::id() as i64));
-            initial.insert("stage_inputs".to_string(), Value::Object(inputs));
-            if !initial.contains_key("attempt") {
-                initial.insert("attempt".to_string(), Value::String(String::new()));
-            }
-            if !initial.contains_key("group_name") {
-                initial.insert("group_name".to_string(), Value::String(String::new()));
-            }
-            if !initial.contains_key("child_key") {
-                initial.insert("child_key".to_string(), Value::String(String::new()));
-            }
-            initial.insert("exit_code".to_string(), Value::Null);
-            if !initial.contains_key("metadata") {
-                initial.insert("metadata".to_string(), Value::Object(Map::new()));
-            }
-            state.persist(&state_dir, &initial)?;
-
-            let mut patch = Map::new();
-            patch.insert("workdir".to_string(), Value::String(workdir));
-            patch.insert(
-                "worktree_base".to_string(),
-                Value::String(base_ref_sha.clone()),
-            );
-            patch.insert(
-                "setup_kind".to_string(),
-                Value::String("worktree-detached".to_string()),
-            );
-            state.patch(&[], &patch);
-
-            stage_overlay(project_root, &state_dir);
-
-            // Write the hermetic definition.yaml snapshot now, before we
-            // return the handle, so the spawned child always sees the
-            // definition as it was at launch time — no TOCTTOU window.
-            {
-                let yaml_bytes = _definition.serialize().map_err(|e| {
-                    RunError::Message(format!("failed to serialize definition: {e}"))
-                })?;
-                let mut blob = state.open("definition.yaml", state::BlobMode::Write)?;
-                blob.write_all(&yaml_bytes).map_err(|e| {
-                    RunError::Message(format!("failed to write hermetic definition: {e}"))
-                })?;
-            }
-            let hermetic = state_dir.join("definition.yaml");
-            let hermetic = hermetic.canonicalize().unwrap_or(hermetic);
-
-            // Point the stub at the hermetic snapshot so init_runtime
-            // loads from it rather than reparsing the original source.
-            let mut stub = StaticDefinition::stub();
-            stub.path = hermetic.clone();
-            let stub: Box<dyn GremlinDefinition> = Box::new(stub);
-
-            // Snapshot the runtime config before gremlin_id is moved.
-            let runtime_config = RuntimeConfig::snapshot(gremlin_id.as_str());
-
-            Ok(Gremlin {
-                id: gremlin_id,
-                state_dir: state_dir.to_path_buf(),
-                definition_path: Some(hermetic),
-                client_override: client_override.map(String::from),
-                definition: stub,
-                worktree,
-                worktree_parent: worktree_parent.map(Path::to_path_buf),
-                project_root: project_root.to_path_buf(),
-                base_ref_sha,
-                base_ref: base_ref.to_string(),
-                state,
-                env: HashMap::new(),
-                client: Client::parse("cmd:true")
-                    .expect("'cmd:true' is always a valid client spec"),
-                loop_iter: "1".to_string(),
-                stage_inputs: stage_inputs.clone(),
-                runtime_config,
-                cancel_token: None,
-                interactive_session: None,
-            })
-        };
+        let existing = state::read_state_json(Some(&state_dir.join("state.json")));
+        let mut initial = existing;
+        initial.insert("id".to_string(), Value::String(gremlin_id.to_string()));
+        if !initial.contains_key("kind") {
+            initial.insert("kind".to_string(), Value::String(String::new()));
+        }
+        initial.insert(
+            "project_root".to_string(),
+            Value::String(project_root.to_string_lossy().into_owned()),
+        );
+        initial.insert("workdir".to_string(), Value::String(workdir.clone()));
+        initial.insert(
+            "setup_kind".to_string(),
+            Value::String("worktree-detached".to_string()),
+        );
+        initial.insert(
+            "worktree_base".to_string(),
+            Value::String(base_ref_sha.clone()),
+        );
+        if !base_ref.is_empty() {
+            initial.insert("base_ref".to_string(), Value::String(base_ref.to_string()));
+        }
+        initial.insert("status".to_string(), Value::String("running".to_string()));
+        if !initial.contains_key("started_at") {
+            initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
+        }
+        if !initial.contains_key("description") {
+            initial.insert("description".to_string(), Value::String(String::new()));
+        }
+        if !initial.contains_key("parent_id") {
+            initial.insert("parent_id".to_string(), Value::String(String::new()));
+        }
+        if !initial.contains_key("definition_args") {
+            initial.insert("definition_args".to_string(), Value::Array(Vec::new()));
+        }
+        initial.insert("client".to_string(), Value::String(String::new()));
+        initial.insert(
+            "definition_path".to_string(),
+            Value::String(definition_path_str.clone()),
+        );
+        initial.insert("stage".to_string(), Value::String("starting".to_string()));
+        initial.insert("pid".to_string(), Value::from(std::process::id() as i64));
+        initial.insert("stage_inputs".to_string(), Value::Object(inputs));
+        if !initial.contains_key("attempt") {
+            initial.insert("attempt".to_string(), Value::String(String::new()));
+        }
+        if !initial.contains_key("group_name") {
+            initial.insert("group_name".to_string(), Value::String(String::new()));
+        }
+        if !initial.contains_key("child_key") {
+            initial.insert("child_key".to_string(), Value::String(String::new()));
+        }
+        initial.insert("exit_code".to_string(), Value::Null);
+        if !initial.contains_key("metadata") {
+            initial.insert("metadata".to_string(), Value::Object(Map::new()));
+        }
 
         let cleanup_worktree = || {
             if let Some(ref path) = created_worktree {
@@ -469,18 +404,84 @@ impl Gremlin {
             }
         };
 
-        let gremlin = match build_handle(&project_root) {
-            Ok(g) => g,
+        let state = match StateData::new(&state_dir, &initial) {
+            Ok(s) => s,
             Err(error) => {
                 cleanup_worktree();
-                return Err(error);
+                return Err(RunError::Message(format!(
+                    "failed to create state: {error}"
+                )));
             }
+        };
+
+        let mut patch = Map::new();
+        patch.insert("workdir".to_string(), Value::String(workdir));
+        patch.insert(
+            "worktree_base".to_string(),
+            Value::String(base_ref_sha.clone()),
+        );
+        patch.insert(
+            "setup_kind".to_string(),
+            Value::String("worktree-detached".to_string()),
+        );
+        state.patch(&[], &patch);
+
+        stage_overlay(&project_root, state.state_dir());
+
+        // Write the hermetic definition.yaml snapshot now, before we
+        // return the handle, so the spawned child always sees the
+        // definition as it was at launch time — no TOCTTOU window.
+        {
+            let yaml_bytes = _definition
+                .serialize()
+                .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
+            let mut blob = state
+                .open_blob("definition.yaml", state::BlobMode::Write)
+                .map_err(|e| {
+                    cleanup_worktree();
+                    RunError::Message(format!("failed to write hermetic definition: {e}"))
+                })?;
+            blob.write_all(&yaml_bytes).map_err(|e| {
+                cleanup_worktree();
+                RunError::Message(format!("failed to write hermetic definition: {e}"))
+            })?;
+        }
+        let hermetic = state.state_dir().join("definition.yaml");
+        let hermetic = hermetic.canonicalize().unwrap_or(hermetic);
+
+        // Point the stub at the hermetic snapshot so init_runtime
+        // loads from it rather than reparsing the original source.
+        let mut stub = StaticDefinition::stub();
+        stub.path = hermetic.clone();
+        let stub: Box<dyn GremlinDefinition> = Box::new(stub);
+
+        // Snapshot the runtime config before gremlin_id is moved.
+        let runtime_config = RuntimeConfig::snapshot(gremlin_id.as_str());
+
+        let gremlin = Gremlin {
+            id: gremlin_id,
+            definition_path: Some(hermetic),
+            client_override: client_override.map(String::from),
+            definition: stub,
+            worktree,
+            worktree_parent: worktree_parent.map(Path::to_path_buf),
+            project_root: project_root.to_path_buf(),
+            base_ref_sha,
+            base_ref: base_ref.to_string(),
+            state,
+            env: HashMap::new(),
+            client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
+            loop_iter: "1".to_string(),
+            stage_inputs: stage_inputs.clone(),
+            runtime_config,
+            cancel_token: None,
+            interactive_session: None,
         };
 
         // 5. Create an empty log file.
         gremlin
             .state
-            .open("log", state::BlobMode::Write)
+            .open_blob("log", state::BlobMode::Write)
             .map_err(|e| {
                 cleanup_worktree();
                 RunError::Message(format!("failed to create log: {e}"))
@@ -546,7 +547,7 @@ impl Gremlin {
         let recorded_path = str_field(&raw, "definition_path");
         let workdir = str_field(&raw, "workdir");
 
-        let state_data = StateData::new(Some(gremlin_id.as_str().to_string()));
+        let state_data = StateData::open(&state_dir);
 
         let worktree = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
         let base_ref_sha = state_data.read_str("worktree_base");
@@ -595,7 +596,6 @@ impl Gremlin {
 
         Ok(Gremlin {
             id: gremlin_id,
-            state_dir,
             definition_path,
             client_override: None,
             definition,
@@ -670,7 +670,7 @@ impl Gremlin {
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
             let mut blob = self
                 .state
-                .open("definition.yaml", state::BlobMode::Write)
+                .open_blob("definition.yaml", state::BlobMode::Write)
                 .map_err(|e| RunError::Message(format!("failed to snapshot definition: {e}")))?;
             blob.write_all(&yaml_bytes)
                 .map_err(|e| RunError::Message(format!("failed to snapshot definition: {e}")))?;
@@ -705,10 +705,10 @@ impl Gremlin {
         )
         .await;
 
-        let overlay_dir = self.state_dir.join(config::overlay_dirname());
+        let overlay_dir = self.state.state_dir().join(config::overlay_dirname());
         let env = resolve_env(
             bootstrap_script(&definition.bootstrap),
-            &self.state_dir,
+            self.state.state_dir(),
             self.id.as_str(),
             &self.project_root,
             self.worktree.as_deref(),
@@ -779,20 +779,6 @@ impl Gremlin {
             self.client.clone()
         };
 
-        let child_state_dir = state::state_dir_for(child_gremlin_id.as_str());
-        let child_artifact_dir = child_state_dir.join("artifacts");
-        std::fs::create_dir_all(&child_state_dir)?;
-        std::fs::create_dir_all(&child_artifact_dir)?;
-
-        log::debug!(
-            "fork: child_state_dir={}, child_artifact_dir={}",
-            child_state_dir.display(),
-            child_artifact_dir.display()
-        );
-
-        copy_tree(self.state.artifact_dir(), &child_artifact_dir)?;
-        log::debug!("fork: copied parent artifacts to child artifact dir");
-
         // A child of a run that has no worktree has none either: there is no
         // commit for it to branch from. When it does branch one, the commit it
         // landed on is the child's own base.
@@ -825,9 +811,11 @@ impl Gremlin {
             log::debug!("fork: no parent worktree — child inherits no worktree");
         }
 
+        // fork creates the child state directory, copies artifacts, seeds the
+        // registry, and writes an initial state.json with the child id.
         let forked_store = self
             .state
-            .fork_registry(&child_artifact_dir)
+            .fork(child_gremlin_id.as_str())
             .await
             .map_err(|error| RunError::Message(error.to_string()))?;
 
@@ -885,10 +873,12 @@ impl Gremlin {
         child.insert("pid".to_string(), Value::Null);
         child.insert("exit_code".to_string(), Value::Null);
 
-        state::write_state(&child_state_dir, &child)?;
-        let child_state = StateData::from_store(Some(child_id.to_string()), forked_store);
+        let mut child_state = StateData::from_store(Some(child_id.to_string()), forked_store);
         child_state
-            .open("log", state::BlobMode::Write)
+            .write_state(&child)
+            .map_err(|e| RunError::Message(format!("failed to write child state: {e}")))?;
+        child_state
+            .open_blob("log", state::BlobMode::Write)
             .map_err(|e| RunError::Message(format!("failed to create child log: {e}")))?;
 
         log::debug!(
@@ -901,7 +891,6 @@ impl Gremlin {
 
         Ok(Gremlin {
             id: child_gremlin_id,
-            state_dir: child_state_dir,
             definition_path: child_definition_path
                 .map(Path::to_path_buf)
                 .or_else(|| self.definition_path.clone()),
@@ -947,7 +936,7 @@ impl Gremlin {
     pub fn clean(self, remove_state_dir: bool) {
         // Mark closed before touching anything: a run that vanished without a
         // marker reads as a crash, not an intentional cleanup.
-        if let Err(error) = self.state.open("closed", state::BlobMode::Write) {
+        if let Err(error) = self.state.open_blob("closed", state::BlobMode::Write) {
             log::warn!("clean: could not touch closed marker: {error}");
         }
 
@@ -955,10 +944,10 @@ impl Gremlin {
         self.clean_scratch();
 
         if remove_state_dir {
-            if let Err(error) = std::fs::remove_dir_all(&self.state_dir) {
+            if let Err(error) = std::fs::remove_dir_all(self.state.state_dir()) {
                 log::warn!(
                     "clean: could not remove state dir {}: {error}",
-                    self.state_dir.display()
+                    self.state.state_dir().display()
                 );
             }
         }
@@ -1549,7 +1538,7 @@ mod tests {
         let worktree = gremlin.worktree.clone().expect("a worktree");
         assert!(worktree.is_dir(), "{worktree:?}");
 
-        let state_file = gremlin.state_dir.join("state.json");
+        let state_file = gremlin.state.state_dir().join("state.json");
         assert!(state_file.is_file(), "{state_file:?}");
         let raw = read_state(&state_file);
         assert_eq!(raw["id"], gremlin.id.as_str());
@@ -1611,7 +1600,7 @@ mod tests {
         let mut opened = Gremlin::from(&id).unwrap();
 
         assert_eq!(opened.id, launched.id);
-        assert_eq!(opened.state_dir, launched.state_dir);
+        assert_eq!(opened.state.state_dir(), launched.state.state_dir());
         assert_eq!(opened.project_root, launched.project_root);
         assert_eq!(opened.worktree, launched.worktree);
         assert_eq!(opened.definition_path, launched.definition_path);
@@ -1731,7 +1720,7 @@ mod tests {
         assert!(child.state.artifact_dir().ends_with("artifacts"));
         assert!(child.state.artifact_dir().join("note.txt").is_file());
 
-        let child_state = child.state_dir.join("state.json");
+        let child_state = child.state.state_dir().join("state.json");
         let raw = read_state(&child_state);
         assert_eq!(raw["id"], "gr-child");
         assert_eq!(raw["status"], "running");
@@ -1851,7 +1840,6 @@ mod tests {
     ) -> Gremlin {
         Gremlin {
             id: validate_gremlin_id(id).unwrap(),
-            state_dir,
             definition_path: None,
             client_override: None,
             definition: Box::new(StaticDefinition::stub()),
@@ -1860,7 +1848,7 @@ mod tests {
             project_root,
             base_ref_sha: String::new(),
             base_ref: String::new(),
-            state: StateData::new(Some(id.to_string())),
+            state: StateData::open(&state_dir),
             env: HashMap::new(),
             client: Client::parse("cmd:true").unwrap(),
             loop_iter: "1".to_string(),

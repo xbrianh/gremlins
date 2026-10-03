@@ -152,7 +152,7 @@ pub(crate) async fn run_parallel(
 
         log::debug!(
             "parallel group {group_name}: child {child_name} forked (state_dir={}, artifact_dir={})",
-            child_gremlin.state_dir.display(),
+            child_gremlin.state.state_dir().display(),
             child_gremlin.state.artifact_dir().display()
         );
 
@@ -440,25 +440,15 @@ async fn merge_child_artifacts(
     gremlin: &mut Gremlin,
     outcome: &ChildOutcome,
 ) -> Result<(), RunError> {
-    use crate::executor::state::{Collision, FileSystemStateStore};
+    use crate::executor::state::{Collision, StateData};
 
-    // Construct a FileSystemStateStore from the child's registry.json.
+    // Open the child's state.
     let child_state_dir = state::state_dir_for(&outcome.child_id);
-    let child_registry_file = child_state_dir.join("registry.json");
-    if !child_registry_file.exists() {
-        return Ok(());
-    }
-
-    let child_registry = FileSystemStateStore::from_registry_file(
-        &child_registry_file,
-        child_state_dir.join("artifacts"),
-    )
-    .await
-    .map_err(|e| RunError::Message(format!("failed to open child registry: {e}")))?;
+    let child_state = StateData::open(&child_state_dir);
     gremlin
         .state
-        .merge_registry(
-            &child_registry,
+        .join(
+            child_state.store_ref(),
             Collision::Ignore,
             Some(&outcome.child_name),
         )
@@ -588,11 +578,10 @@ mod tests {
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
-        let state_data = StateData::new(Some("gr-test".to_string()));
+        let state_data = StateData::open(&state_dir);
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
-            state_dir,
             definition_path: None,
             client_override: None,
             definition: Box::new(StaticDefinition::new(

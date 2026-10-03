@@ -475,7 +475,7 @@ fn status_direct(id: &str) -> Result<(), String> {
             .map(|path| path.display().to_string())
             .unwrap_or_default()
     );
-    println!("state_dir:     {}", gremlin.state_dir.display());
+    println!("state_dir:     {}", gremlin.state.state_dir().display());
     println!("artifact_dir:  {}", gremlin.state.artifact_dir().display());
     println!(
         "started_at:    {}",
@@ -556,10 +556,10 @@ fn info_direct(id: &str) -> Result<(), String> {
         "definition": definition_display_name(&gremlin.state),
         "project_root": gremlin.project_root.display().to_string(),
         "workdir": workdir,
-        "state_dir": gremlin.state_dir.display().to_string(),
+        "state_dir": gremlin.state.state_dir().display().to_string(),
         "artifact_dir": gremlin.state.artifact_dir().display().to_string(),
         "scratch_dir": config::scratch_root(Some(id)).display().to_string(),
-        "log_file": gremlin.state_dir.join("log").display().to_string(),
+        "log_file": gremlin.state.state_dir().join("log").display().to_string(),
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
@@ -1042,8 +1042,7 @@ async fn land(id: &str) -> Result<(), String> {
     })?;
 
     let state_dir = gremlins::executor::state::state_dir_for(id);
-    let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
+    if !state_dir.is_dir() || !state_dir.join("state.json").is_file() {
         return Err(format!(
             "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
         ));
@@ -1075,7 +1074,7 @@ async fn land(id: &str) -> Result<(), String> {
         }
     };
 
-    let raw = state::read_state_json(Some(&state_file));
+    let raw = state::read_state_json(Some(&state_dir.join("state.json")));
 
     if raw.get("status").and_then(Value::as_str) == Some("running") {
         match is_live_in_executor(id).await {
@@ -1104,8 +1103,7 @@ async fn land(id: &str) -> Result<(), String> {
     let worktree = (!workdir.is_empty()).then(|| PathBuf::from(workdir));
     let overlay_dir = config::project_overlay_dir(&project_root);
 
-    let state_file = state_dir.join("state.json");
-    let store = FileSystemStateStore::at_path(state_file);
+    let store = FileSystemStateStore::open(state_dir.to_path_buf());
 
     let prepared = prepare_exec(&exec, &store, &store, "", &HashMap::new())
         .await
