@@ -243,8 +243,8 @@ pub trait StateStore: Send + Sync + Debug {
     }
 
     /// The artifact storage directory.
-    fn artifact_dir(&self) -> &Path {
-        Path::new("")
+    fn artifact_dir(&self) -> PathBuf {
+        PathBuf::new()
     }
 
     /// Check whether a file exists at `path` (empty files are valid).
@@ -358,7 +358,6 @@ fn is_file_artifact(data_uri: &str) -> bool {
 #[derive(Debug)]
 pub struct FileSystemStateStore {
     state_dir: PathBuf,
-    artifact_dir: PathBuf,
 }
 
 impl FileSystemStateStore {
@@ -374,21 +373,20 @@ impl FileSystemStateStore {
     pub fn create(state_dir: PathBuf, initial: &Map<String, Value>) -> Result<Self, StateError> {
         std::fs::create_dir_all(state_dir.join("artifacts"))?;
         write_state(&state_dir, initial)?;
-        Ok(FileSystemStateStore {
-            artifact_dir: state_dir.join("artifacts"),
-            state_dir,
-        })
+        Ok(FileSystemStateStore { state_dir })
     }
 
     /// Open an existing state directory. Does NOT write anything.
     pub fn open(state_dir: PathBuf) -> Self {
-        FileSystemStateStore {
-            artifact_dir: state_dir.join("artifacts"),
-            state_dir,
-        }
+        FileSystemStateStore { state_dir }
     }
 
     // --- registry helpers ---
+
+    /// The artifact storage directory, derived from `state_dir`.
+    fn artifact_dir(&self) -> PathBuf {
+        self.state_dir.join("artifacts")
+    }
 
     /// Read and parse `registry.json`, returning an empty map when the file is
     /// absent or unparseable (logging the reason).
@@ -466,11 +464,11 @@ impl FileSystemStateStore {
             );
         }
         let name = uri.path.trim_start_matches('/').to_string();
-        let ad = &self.artifact_dir;
+        let ad = self.artifact_dir();
         let path = ad.join(&name);
         // Ensure artifact_dir exists before canonicalizing
-        tokio::fs::create_dir_all(ad).await?;
-        let base = tokio::fs::canonicalize(ad).await?;
+        tokio::fs::create_dir_all(&ad).await?;
+        let base = tokio::fs::canonicalize(&ad).await?;
         // Create parent dirs so parent-side canonicalization works
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -706,7 +704,6 @@ impl FileSystemStateStore {
         tokio::fs::create_dir_all(&artifact_dir).await?;
         let new_store = FileSystemStateStore {
             state_dir: temp_dir.path().to_path_buf(),
-            artifact_dir: artifact_dir.clone(),
         };
         let mut allowed = HashSet::new();
 
@@ -1097,18 +1094,38 @@ impl StateStore for FileSystemStateStore {
         let child_artifact_dir = child_dir.join("artifacts");
         tokio::fs::create_dir_all(&child_artifact_dir).await?;
 
+        let parent_artifact_dir = self.artifact_dir();
+
         // Copy parent artifact files.
-        if self.artifact_dir.is_dir() {
-            copy_dir_sync(&self.artifact_dir, &child_artifact_dir)?;
+        if parent_artifact_dir.is_dir() {
+            copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
         }
 
-        // Seed registry from parent.
+        // Seed registry from parent, remapping file-backed bindings
+        // that point into the parent artifact directory to the
+        // corresponding child paths.
         let mut child_store = FileSystemStateStore::open(child_dir);
         let parent_registry = self.read_registry_json().await;
         if !parent_registry.is_empty() {
+            let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
             child_store
                 .locked_write(|data| {
-                    *data = parent_registry;
+                    for (key, path) in &parent_registry {
+                        // If the binding points inside the parent artifact
+                        // directory, remap it to the child's artifact
+                        // directory. External / non-file URIs are kept
+                        // as-is.
+                        if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
+                            let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
+                            let rel = rel.trim_start_matches('/');
+                            data.insert(
+                                key.clone(),
+                                child_artifact_dir.join(rel).to_string_lossy().to_string(),
+                            );
+                        } else {
+                            data.insert(key.clone(), path.clone());
+                        }
+                    }
                     Ok(())
                 })
                 .await?;
@@ -1137,8 +1154,8 @@ impl StateStore for FileSystemStateStore {
         &self.state_dir
     }
 
-    fn artifact_dir(&self) -> &Path {
-        &self.artifact_dir
+    fn artifact_dir(&self) -> PathBuf {
+        self.artifact_dir()
     }
 
     async fn has_file(&self, path: &str) -> bool {
@@ -1325,7 +1342,7 @@ impl StateStore for ScopedFileSystemStateStore {
         self.inner.state_dir()
     }
 
-    fn artifact_dir(&self) -> &Path {
+    fn artifact_dir(&self) -> PathBuf {
         self.inner.artifact_dir()
     }
 
@@ -1464,7 +1481,7 @@ impl StateData {
         self.store.state_dir()
     }
 
-    pub fn artifact_dir(&self) -> &Path {
+    pub fn artifact_dir(&self) -> PathBuf {
         self.store.artifact_dir()
     }
 
@@ -1922,6 +1939,7 @@ fn as_i64_f64(v: &Value) -> f64 {
 }
 
 /// Recursively copy `src` into `dst`, creating directories as needed.
+/// Symlinks are recreated as symlinks (not followed).
 fn copy_dir_sync(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     if !src.is_dir() {
         return Ok(());
@@ -1930,10 +1948,14 @@ fn copy_dir_sync(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let target = dst.join(entry.file_name());
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            // Recreate the symlink pointing to the same target.
+            let link_dest = std::fs::read_link(entry.path())?;
+            std::os::unix::fs::symlink(&link_dest, &target)?;
+        } else if ft.is_dir() {
             copy_dir_sync(&entry.path(), &target)?;
-        } else if kind.is_file() || kind.is_symlink() {
+        } else if ft.is_file() {
             std::fs::copy(entry.path(), &target)?;
         }
     }
