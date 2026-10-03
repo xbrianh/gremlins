@@ -912,7 +912,7 @@ impl Gremlin {
             .await
             .map_err(|error| RunError::Message(error.to_string()))?;
 
-        let parent = state::read_state_json(self.state.state_file());
+        let parent = self.state.state_tree();
         let mut child = Map::new();
         for name in state::field_names() {
             if FORK_TRANSIENT.contains(&name) {
