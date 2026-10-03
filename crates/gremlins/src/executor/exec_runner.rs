@@ -4,11 +4,11 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::artifacts::registry::{ArtifactRegistry, LocalizedArtifactRegistry};
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_shell_async, ProcError, ProcResult};
 use crate::definition::Exec;
+use crate::executor::state::StateStore;
 use crate::executor::state::{BlobMode, StateData};
 use crate::executor::vars;
 
@@ -82,33 +82,33 @@ pub struct ExecPrepared {
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
-/// Content interpolation entries are resolved against `main_registry`;
-/// filepath entries and bind paths are resolved against `local_registry`.
+/// Content interpolation entries are resolved against `main_state`;
+/// filepath entries and bind paths are resolved against `local_state`.
 /// Returns a fully-prepared struct that can be passed to `run_shell` and
 /// `commit_exec` without further registry mutation.
 pub async fn prepare_exec(
     exec: &Exec,
-    main_registry: &dyn ArtifactRegistry,
-    local_registry: &dyn LocalizedArtifactRegistry,
+    main_state: &dyn StateStore,
+    local_state: &dyn StateStore,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<ExecPrepared, ExecError> {
     let name = &exec.name;
     let str_opts = vars::string_options(&exec.options);
 
-    // Split interpolation: content() entries resolved against main_registry,
-    // bare-URI (filepath) entries resolved against local_registry.
+    // Split interpolation: content() entries resolved against main_state,
+    // bare-URI (filepath) entries resolved against local_state.
     let (content_map, filepath_map) =
         crate::artifacts::resolve::split_interpolation_map(&exec.interpolation_map);
 
-    let content_interpolated = resolve_interpolation_map(main_registry, &content_map, loop_iter)
+    let content_interpolated = resolve_interpolation_map(main_state, &content_map, loop_iter)
         .await
         .map_err(|e| ExecError::Resolve {
             name: name.clone(),
             source: e,
         })?;
 
-    let filepath_interpolated = resolve_interpolation_map(local_registry, &filepath_map, loop_iter)
+    let filepath_interpolated = resolve_interpolation_map(local_state, &filepath_map, loop_iter)
         .await
         .map_err(|e| ExecError::Resolve {
             name: name.clone(),
@@ -135,14 +135,14 @@ pub async fn prepare_exec(
             detail: e.to_string(),
         })?;
         // Optional binds are skipped when a sibling already committed the URI.
-        // Check against the main registry (the authority for what exists).
-        if !optional && main_registry.is_registered(&uri_str).await {
+        // Check against the main state (the authority for what exists).
+        if !optional && main_state.is_registered(&uri_str).await {
             return Err(ExecError::Generic {
                 name: name.clone(),
                 detail: format!("artifact {uri_str:?} is already produced — duplicate producer"),
             });
         }
-        let path = local_registry
+        let path = local_state
             .path_for_uri(&uri)
             .await
             .map_err(|e| ExecError::Generic {
@@ -492,17 +492,17 @@ pub fn process_shell_result(
     })
 }
 
-/// Phase 3: commit produced artifacts into the localized registry.
+/// Phase 3: commit produced artifacts into the localized state store.
 /// Non-optional artifacts that are absent abort the stage, except bail URIs.
 pub async fn commit_exec(
     prepared: &ExecPrepared,
-    local_registry: &dyn LocalizedArtifactRegistry,
+    local_state: &dyn StateStore,
 ) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.output_uris {
         let path = &prepared.output_paths[key];
-        let produced = local_registry.has_file(path).await;
+        let produced = local_state.has_file(path).await;
         if produced {
-            local_registry
+            local_state
                 .commit(uri_str, path)
                 .await
                 .map_err(|e| ExecError::Generic {
@@ -522,24 +522,26 @@ pub async fn commit_exec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifacts::registry::FileSystemArtifactRegistry;
-    use crate::executor::state::StateData;
+    use crate::executor::state::{FileSystemStateStore, StateData};
     use std::fs;
     use std::path::Path;
+
+    fn make_state_store(artifact_dir: &Path) -> FileSystemStateStore {
+        let state_file = artifact_dir.parent().unwrap().join("state.json");
+        std::fs::write(&state_file, "{}").unwrap();
+        FileSystemStateStore::at_path(state_file)
+    }
 
     #[tokio::test]
     async fn test_commit_exec_optional_bind_ignores_duplicate_registration() {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = FileSystemArtifactRegistry::new(artifact_dir);
+        let store = make_state_store(&artifact_dir);
 
         // A sibling already committed this URI.
         let uri = Uri::parse("artifact://out.txt").unwrap();
-        registry
-            .write_into_registry(&uri, "existing")
-            .await
-            .unwrap();
+        store.write_into_registry(&uri, "existing").await.unwrap();
 
         let fw = HashMap::new();
 
@@ -550,7 +552,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
-        let prepared = prepare_exec(&optional_exec, &registry, &registry, "", &fw)
+        let prepared = prepare_exec(&optional_exec, &store, &store, "", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].0, "out");
@@ -563,7 +565,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
-        let err = prepare_exec(&non_optional_exec, &registry, &registry, "", &fw)
+        let err = prepare_exec(&non_optional_exec, &store, &store, "", &fw)
             .await
             .err()
             .expect("expected duplicate-producer error");
@@ -575,7 +577,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = FileSystemArtifactRegistry::new(artifact_dir);
+        let store = make_state_store(&artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -584,12 +586,10 @@ mod tests {
             outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &registry, &registry, "", &fw)
-            .await
-            .unwrap();
-        let err = commit_exec(&prepared, &registry).await.unwrap_err();
+        let prepared = prepare_exec(&exec, &store, &store, "", &fw).await.unwrap();
+        let err = commit_exec(&prepared, &store).await.unwrap_err();
         assert!(matches!(err, ExecError::MissingArtifact { .. }));
-        assert!(!registry.is_registered("artifact://out.txt").await);
+        assert!(!store.is_registered("artifact://out.txt").await);
     }
 
     #[tokio::test]
@@ -597,7 +597,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = FileSystemArtifactRegistry::new(artifact_dir);
+        let store = make_state_store(&artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -606,11 +606,9 @@ mod tests {
             outputs_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &registry, &registry, "", &fw)
-            .await
-            .unwrap();
-        commit_exec(&prepared, &registry).await.unwrap();
-        assert!(!registry.is_registered("artifact://out.txt").await);
+        let prepared = prepare_exec(&exec, &store, &store, "", &fw).await.unwrap();
+        commit_exec(&prepared, &store).await.unwrap();
+        assert!(!store.is_registered("artifact://out.txt").await);
     }
 
     #[tokio::test]
@@ -618,7 +616,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let artifact_dir = tmp.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
-        let registry = FileSystemArtifactRegistry::new(artifact_dir);
+        let store = make_state_store(&artifact_dir);
 
         let exec = Exec {
             name: "test".to_string(),
@@ -627,12 +625,10 @@ mod tests {
             outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &registry, &registry, "", &fw)
-            .await
-            .unwrap();
+        let prepared = prepare_exec(&exec, &store, &store, "", &fw).await.unwrap();
         fs::write(&prepared.output_paths["out"], "data").unwrap();
-        commit_exec(&prepared, &registry).await.unwrap();
-        assert!(registry.is_registered("artifact://out.txt").await);
+        commit_exec(&prepared, &store).await.unwrap();
+        assert!(store.is_registered("artifact://out.txt").await);
     }
 
     // --- run_shell integration: injection payloads are not executed ---

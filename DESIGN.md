@@ -343,32 +343,34 @@ Artifacts are the only communication channel between stages (§3.1). Every
 artifact lives in an **artifact registry** — a key-value store that maps
 artifact URIs (`artifact://plan.md`) to filesystem paths or inline content.
 
-### 4.1 Two views of the registry
+### 4.1 One trait, two roles
 
-The `ArtifactRegistry` trait provides content lookup, URI resolution, and
-registration. Its companion `LocalizedArtifactRegistry` adds filesystem-scoped
-operations — path resolution, file-existence checks, and file copy — that
-require a concrete directory.
+The `StateStore` trait is the unified storage backend. It provides both
+state.json operations (read, patch, lock) and artifact operations (content
+lookup, URI resolution, registration, path resolution, file-existence
+checks, and file copy) through a single trait. There is no separate
+"localized" companion trait — the filesystem-scoped operations are part of
+`StateStore` itself.
 
-The registry has two consumers with different needs:
+The store has two consumers with different needs:
 
 - **Agent stages** must be constrained. An agent that can see every artifact
   in the registry can read files it was never meant to see. Section 3 says
   each agent gets exactly the information it needs and nothing else. To
   enforce this, agent stages receive a **checkout** — a scoped, temporary
-  registry containing only the stage's declared bind and interpolation keys.
+  `StateStore` containing only the stage's declared bind and interpolation keys.
 - **Exec stages** also use a checkout. They run shell commands and need
   filesystem access to artifacts. The checkout gives them a scoped directory
   containing only their declared inputs.
 - **Everything else** — bootstrap, `bind_artifact`, the `cli_out` binding
-  step — populates the main registry directly. These are deterministic
+  step — populates the main store directly. These are deterministic
   mechanical operations, not agentic stages. There is no context to
   constrain.
 
 ### 4.2 Checkout as the canonical entry point for stages
 
-`ArtifactRegistry::checkout(&keys)` creates a scoped `LocalizedArtifactRegistry`
-in a temporary directory. For each key:
+`StateStore::checkout_registry(&keys)` creates a scoped `StateStore` in a
+temporary directory. For each key:
 
 - If the key is already registered, the artifact file (or content) is copied
   into the checkout.
@@ -377,7 +379,7 @@ in a temporary directory. For each key:
   then registers it.
 
 After the stage completes, `merge_registry` copies the checkout's new
-artifacts back into the main registry. The checkout directory is discarded.
+artifacts back into the main store. The checkout directory is discarded.
 
 Agent and exec stages **must** use checkout to move objects into the
 registry. The checkout is what guarantees that:
@@ -385,18 +387,18 @@ registry. The checkout is what guarantees that:
 1. The stage cannot discover artifacts outside its declared inputs.
 2. The stage cannot read or write files in the main artifact directory.
 3. The `artifact_dir` path injected into the agent's system prompt points
-   into the checkout, not the main registry.
+   into the checkout, not the main store.
 
 ### 4.3 Why checkout exists
 
-The `FileSystemArtifactRegistry` is backed by the filesystem. The
-alternative — forcing agent and exec stages to never touch the filesystem and
-instead call registry APIs for every read and write — is too constraining.
-Agents already have filesystem tools (Read, Write, Edit, Bash); exec stages
-run arbitrary shell commands. Both need real files to work with.
+The `FileSystemStateStore` is the single filesystem-backed implementation of
+`StateStore`. The alternative — forcing agent and exec stages to never touch
+the filesystem and instead call store APIs for every read and write — is too
+constraining. Agents already have filesystem tools (Read, Write, Edit, Bash);
+exec stages run arbitrary shell commands. Both need real files to work with.
 
 Checkout gives them real files, scoped to exactly what they should see. The
-main registry remains the authoritative store; checkouts are transient
+main store remains the authoritative store; checkouts are transient
 workspaces.
 
 ## 5. Boss gremlins and chained workflows

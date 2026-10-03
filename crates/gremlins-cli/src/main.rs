@@ -5,7 +5,6 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use gremlins::artifacts::registry::FileSystemArtifactRegistry;
 use gremlins::config;
 use gremlins::core::discovery;
 use gremlins::core::proc::run_shell_async;
@@ -13,6 +12,7 @@ use gremlins::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
 use gremlins::executor::exec_runner::prepare_exec;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::socket::{self, GremlinsDaemonLock};
+use gremlins::executor::state::FileSystemStateStore;
 use gremlins::executor::state::{self, StateData};
 use gremlins::executor::supervisor;
 use gremlins::schemas::bootstrap;
@@ -476,7 +476,7 @@ fn status_direct(id: &str) -> Result<(), String> {
             .unwrap_or_default()
     );
     println!("state_dir:     {}", gremlin.state_dir.display());
-    println!("artifact_dir:  {}", gremlin.artifact_dir.display());
+    println!("artifact_dir:  {}", gremlin.state.artifact_dir().display());
     println!(
         "started_at:    {}",
         field_display(&gremlin.state, "started_at")
@@ -557,7 +557,7 @@ fn info_direct(id: &str) -> Result<(), String> {
         "project_root": gremlin.project_root.display().to_string(),
         "workdir": workdir,
         "state_dir": gremlin.state_dir.display().to_string(),
-        "artifact_dir": gremlin.artifact_dir.display().to_string(),
+        "artifact_dir": gremlin.state.artifact_dir().display().to_string(),
         "scratch_dir": config::scratch_root(Some(id)).display().to_string(),
         "log_file": gremlin.state_dir.join("log").display().to_string(),
         "started_at": gremlin.state.read_str("started_at"),
@@ -1104,10 +1104,10 @@ async fn land(id: &str) -> Result<(), String> {
     let worktree = (!workdir.is_empty()).then(|| PathBuf::from(workdir));
     let overlay_dir = config::project_overlay_dir(&project_root);
 
-    let artifact_dir = state_dir.join("artifacts");
-    let registry = FileSystemArtifactRegistry::new(artifact_dir.clone());
+    let state_file = state_dir.join("state.json");
+    let store = FileSystemStateStore::at_path(state_file);
 
-    let prepared = prepare_exec(&exec, &registry, &registry, "", &HashMap::new())
+    let prepared = prepare_exec(&exec, &store, &store, "", &HashMap::new())
         .await
         .map_err(|e| format!("gremlin {id}: {e}"))?;
 

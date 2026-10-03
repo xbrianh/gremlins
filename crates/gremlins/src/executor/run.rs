@@ -15,7 +15,6 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
-use crate::artifacts::registry::{ArtifactRegistry, Collision};
 use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::Client;
@@ -26,6 +25,7 @@ use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell, ExecErr
 use crate::executor::gremlin::Gremlin;
 use crate::executor::parallel::run_parallel;
 use crate::executor::state;
+use crate::executor::state::{Collision, StateStore};
 use crate::executor::supervisor::get_run_map;
 use crate::executor::vars;
 use crate::executor::RunError;
@@ -53,8 +53,8 @@ pub(crate) fn stage_key(scope: &str, name: &str) -> String {
 
 /// Whether `key` is registered, accepting both a bare key and its `artifact://` URI:
 /// guards and stop conditions are spelled either way in the wild.
-async fn is_registered_uri(registry: &dyn ArtifactRegistry, key: &str) -> bool {
-    registry.is_registered(key).await || registry.is_registered(&format!("artifact://{key}")).await
+async fn is_registered_uri(state: &dyn StateStore, key: &str) -> bool {
+    state.is_registered(key).await || state.is_registered(&format!("artifact://{key}")).await
 }
 
 /// Run one top-level stage.
@@ -218,7 +218,7 @@ async fn run_agent(
     let (content_map, filepath_map) =
         crate::artifacts::resolve::split_interpolation_map(&agent.interpolation_map);
     let content_interpolated = crate::artifacts::resolve::resolve_interpolation_map(
-        gremlin.registry.as_ref(),
+        gremlin.state.store_ref(),
         &content_map,
         &loop_iter,
     )
@@ -272,8 +272,8 @@ async fn run_agent(
     }
 
     let local_registry = gremlin
-        .registry
-        .checkout(&checkout_keys)
+        .state
+        .checkout_registry(&checkout_keys)
         .await
         .map_err(|error| RunError::StageFailed {
             stage: agent.name.clone(),
@@ -282,7 +282,7 @@ async fn run_agent(
 
     let mut prepared = prepare_agent(
         agent,
-        gremlin.registry.as_ref(),
+        gremlin.state.store_ref(),
         local_registry.as_ref(),
         &loop_iter,
         &framework_subs,
@@ -319,7 +319,8 @@ async fn run_agent(
             .or_else(|| Some(client.model().to_string())),
         raw_path: Some(
             gremlin
-                .artifact_dir
+                .state
+                .artifact_dir()
                 .join(format!("stream-{}.jsonl", prepared.name)),
         ),
         capture_events: false,
@@ -439,7 +440,7 @@ async fn run_agent(
 
     // Merge the localized registry back into the main registry.
     gremlin
-        .registry
+        .state
         .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
         .await
         .map_err(|error| RunError::StageFailed {
@@ -482,7 +483,7 @@ async fn run_exec(
     let (content_map, filepath_map) =
         crate::artifacts::resolve::split_interpolation_map(&exec.interpolation_map);
     let content_interpolated = crate::artifacts::resolve::resolve_interpolation_map(
-        gremlin.registry.as_ref(),
+        gremlin.state.store_ref(),
         &content_map,
         &loop_iter,
     )
@@ -534,8 +535,8 @@ async fn run_exec(
     }
 
     let local_registry = gremlin
-        .registry
-        .checkout(&checkout_keys)
+        .state
+        .checkout_registry(&checkout_keys)
         .await
         .map_err(|error| RunError::StageFailed {
             stage: exec.name.clone(),
@@ -544,7 +545,7 @@ async fn run_exec(
 
     let mut prepared = prepare_exec(
         exec,
-        gremlin.registry.as_ref(),
+        gremlin.state.store_ref(),
         local_registry.as_ref(),
         &loop_iter,
         &framework_subs,
@@ -607,7 +608,7 @@ async fn run_exec(
 
     // Merge the localized registry back into the main registry.
     gremlin
-        .registry
+        .state
         .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
         .await
         .map_err(|error| RunError::StageFailed {
@@ -656,7 +657,7 @@ async fn run_sequence(
     if max_iterations == 1 {
         if !skip_guard.is_empty() {
             let resolved = skip_guard.replace("{loop_iter}", &gremlin.loop_iter);
-            if is_registered_uri(gremlin.registry.as_ref(), &resolved).await {
+            if is_registered_uri(gremlin.state.store_ref(), &resolved).await {
                 send_log(
                     &gremlin.runtime_config.log_tx,
                     format!("sequence '{}': skipped (artifact exists)", seq.name),
@@ -690,7 +691,7 @@ async fn run_sequence(
         // Guard before body: skip on iteration 1, stop on later iterations.
         if !skip_guard.is_empty() {
             let resolved = skip_guard.replace("{loop_iter}", &loop_iter);
-            if is_registered_uri(gremlin.registry.as_ref(), &resolved).await {
+            if is_registered_uri(gremlin.state.store_ref(), &resolved).await {
                 if iteration == 1 {
                     send_log(
                         &gremlin.runtime_config.log_tx,
@@ -735,7 +736,7 @@ async fn run_sequence(
         // loop immediately (checked with the *current* iteration scope).
         if !skip_guard.is_empty() {
             let resolved = skip_guard.replace("{loop_iter}", &loop_iter);
-            if is_registered_uri(gremlin.registry.as_ref(), &resolved).await {
+            if is_registered_uri(gremlin.state.store_ref(), &resolved).await {
                 send_log(
                     &gremlin.runtime_config.log_tx,
                     format!("sequence '{}': stopped (artifact produced)", seq.name),
@@ -958,7 +959,6 @@ pub(crate) fn truncate(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::artifacts::uri::Uri;
     use crate::builders::agent::AgentBuilder;
     use crate::builders::artifacts::output;
@@ -1022,11 +1022,9 @@ mod tests {
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
             state_dir,
-            artifact_dir: artifact_dir.clone(),
             definition_path: None,
             client_override: None,
             definition: Box::new(definition),
-            registry: Box::new(FileSystemArtifactRegistry::new(artifact_dir)),
             worktree: None,
             worktree_parent: None,
             project_root: sandbox.path().to_path_buf(),
@@ -1089,8 +1087,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         gremlin
-            .registry
-            .as_ref()
+            .state
             .write_into_registry(&Uri::parse("artifact://done.md").unwrap(), "done")
             .await
             .unwrap();
@@ -1116,8 +1113,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         gremlin
-            .registry
-            .as_ref()
+            .state
             .write_into_registry(&Uri::parse("artifact://done.md").unwrap(), "done")
             .await
             .unwrap();
@@ -1140,13 +1136,7 @@ mod tests {
         let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         let stage = take_first_stage(&mut gremlin).await;
         run_stage(&stage, &mut gremlin).await.unwrap();
-        assert!(
-            gremlin
-                .registry
-                .as_ref()
-                .is_registered("artifact://writer.md")
-                .await
-        );
+        assert!(gremlin.state.is_registered("artifact://writer.md").await);
     }
 
     #[tokio::test]
@@ -1260,8 +1250,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
         gremlin
-            .registry
-            .as_ref()
+            .state
             .write_into_registry(&Uri::parse("artifact://done").unwrap(), "yes")
             .await
             .unwrap();
@@ -1551,11 +1540,7 @@ mod tests {
         let scope = stage_key(&format!("1~{first_attempt}"), "group");
         let good_done_uri = format!("artifact://{scope}/done/good");
         assert!(
-            gremlin
-                .registry
-                .as_ref()
-                .is_registered(&good_done_uri)
-                .await,
+            gremlin.state.is_registered(&good_done_uri).await,
             "good child should be marked done at {good_done_uri}"
         );
 
@@ -1592,11 +1577,7 @@ mod tests {
         // The good child's done marker must still be present under the
         // original scope — confirming it was skipped, not overwritten.
         assert!(
-            gremlin
-                .registry
-                .as_ref()
-                .is_registered(&good_done_uri)
-                .await,
+            gremlin.state.is_registered(&good_done_uri).await,
             "good child done marker should survive resume at {good_done_uri}"
         );
     }

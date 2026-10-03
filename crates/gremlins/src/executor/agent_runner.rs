@@ -3,10 +3,10 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::artifacts::registry::{ArtifactRegistry, LocalizedArtifactRegistry};
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::definition::Agent;
+use crate::executor::state::StateStore;
 use crate::executor::vars;
 
 // ---------------------------------------------------------------------------
@@ -59,27 +59,27 @@ impl From<ResolveError> for AgentError {
 
 pub async fn prepare_agent(
     agent: &Agent,
-    main_registry: &dyn ArtifactRegistry,
-    local_registry: &dyn LocalizedArtifactRegistry,
+    main_state: &dyn StateStore,
+    local_state: &dyn StateStore,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
 ) -> Result<AgentPrepared, AgentError> {
     let name = &agent.name;
     let str_opts = vars::string_options(&agent.options);
 
-    // Split interpolation: content() entries resolved against main_registry,
-    // bare-URI (filepath) entries resolved against local_registry.
+    // Split interpolation: content() entries resolved against main_state,
+    // bare-URI (filepath) entries resolved against local_state.
     let (content_map, filepath_map) =
         crate::artifacts::resolve::split_interpolation_map(&agent.interpolation_map);
 
-    let content_interpolated = resolve_interpolation_map(main_registry, &content_map, loop_iter)
+    let content_interpolated = resolve_interpolation_map(main_state, &content_map, loop_iter)
         .await
         .map_err(|e| AgentError::Resolve {
             name: name.clone(),
             source: e,
         })?;
 
-    let filepath_interpolated = resolve_interpolation_map(local_registry, &filepath_map, loop_iter)
+    let filepath_interpolated = resolve_interpolation_map(local_state, &filepath_map, loop_iter)
         .await
         .map_err(|e| AgentError::Resolve {
             name: name.clone(),
@@ -106,14 +106,14 @@ pub async fn prepare_agent(
             detail: e.to_string(),
         })?;
         // Optional binds are skipped when a sibling already committed the URI.
-        // Check against the main registry (the authority for what exists).
-        if !optional && main_registry.is_registered(&uri_str).await {
+        // Check against the main state (the authority for what exists).
+        if !optional && main_state.is_registered(&uri_str).await {
             return Err(AgentError::Generic {
                 name: name.clone(),
                 detail: format!("artifact {uri_str:?} is already produced — duplicate producer"),
             });
         }
-        let path = local_registry
+        let path = local_state
             .path_for_uri(&uri)
             .await
             .map_err(|e| AgentError::Generic {
@@ -159,18 +159,18 @@ pub async fn prepare_agent(
 // commit_agent
 // ---------------------------------------------------------------------------
 
-/// Commit produced artifacts into the localized registry. Every non-optional
+/// Commit produced artifacts into the localized state store. Every non-optional
 /// bind must have a file that exists; only extant files are committed.
 /// Optional binds may be absent.
 pub async fn commit_agent(
     prepared: &AgentPrepared,
-    local_registry: &dyn LocalizedArtifactRegistry,
+    local_state: &dyn StateStore,
 ) -> Result<(), AgentError> {
     for (key, uri_str, optional) in &prepared.output_uris {
         let path = &prepared.output_paths[key];
-        let produced = local_registry.has_file(path).await;
+        let produced = local_state.has_file(path).await;
         if produced {
-            local_registry
+            local_state
                 .commit(uri_str, path)
                 .await
                 .map_err(|e| AgentError::Generic {
@@ -227,17 +227,19 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use crate::artifacts::registry::FileSystemArtifactRegistry;
+    use crate::executor::state::FileSystemStateStore;
 
     // ---- prepare_agent tests ----
 
-    fn make_registry(artifact_dir: PathBuf) -> FileSystemArtifactRegistry {
-        FileSystemArtifactRegistry::new(artifact_dir)
+    fn make_state_store(artifact_dir: PathBuf) -> FileSystemStateStore {
+        let state_file = artifact_dir.parent().unwrap().join("state.json");
+        std::fs::write(&state_file, "{}").unwrap();
+        FileSystemStateStore::at_path(state_file)
     }
 
-    async fn register_file(reg: &FileSystemArtifactRegistry, name: &str, content: &str) -> String {
+    async fn register_file(store: &FileSystemStateStore, name: &str, content: &str) -> String {
         let uri = Uri::parse(&format!("artifact://{name}")).unwrap();
-        reg.write_into_registry(&uri, content).await.unwrap()
+        store.write_into_registry(&uri, content).await.unwrap()
     }
 
     fn ensure_artifact_dir(tmp: &tempfile::TempDir) -> PathBuf {
@@ -250,8 +252,8 @@ mod tests {
     async fn test_prepare_basic_prompt_substitution() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
-        register_file(&reg, "world", "world-value").await;
+        let store = make_state_store(ad);
+        register_file(&store, "world", "world-value").await;
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["Hello {var}".to_string()],
@@ -263,7 +265,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert!(prepared.prompt.contains("world-value"));
     }
 
@@ -271,8 +275,8 @@ mod tests {
     async fn test_prepare_framework_subs_win() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
-        register_file(&reg, "interp-src", "from-interp").await;
+        let store = make_state_store(ad);
+        register_file(&store, "interp-src", "from-interp").await;
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["Hello {name}".to_string()],
@@ -284,7 +288,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert!(prepared.prompt.contains("from-fw"));
         assert!(!prepared.prompt.contains("from-interp"));
     }
@@ -293,8 +299,8 @@ mod tests {
     async fn test_prepare_bind_shadows_interpolation() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad.clone());
-        register_file(&reg, "interp-val", "interp-val").await;
+        let store = make_state_store(ad.clone());
+        register_file(&store, "interp-val", "interp-val").await;
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{key}".to_string()],
@@ -306,7 +312,9 @@ mod tests {
             outputs_map: HashMap::from([("key".to_string(), "artifact://out.md".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         // output_paths should contain the registered path, not "interp-val"
         assert!(prepared.output_paths.contains_key("key"));
         let path = &prepared.output_paths["key"];
@@ -320,7 +328,7 @@ mod tests {
     async fn test_prepare_missing_interpolation_key_errors() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{missing}".to_string()],
@@ -329,7 +337,7 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let err = prepare_agent(&agent, &reg, &reg, "", &fw)
+        let err = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap_err();
         assert!(matches!(err, AgentError::Resolve { .. }));
@@ -339,7 +347,7 @@ mod tests {
     async fn test_prepare_loop_iter_in_bind_uri() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{out}".to_string()],
@@ -351,7 +359,7 @@ mod tests {
             )]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "my-agent~3", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "my-agent~3", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].1, "artifact://my-agent~3/out.txt");
@@ -361,10 +369,13 @@ mod tests {
     async fn test_prepare_loop_iter_in_interpolation_value() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad.clone());
+        let store = make_state_store(ad.clone());
         // Pre-register the artifact that content() will look up
         let plan_uri = Uri::parse("artifact://my-agent~2/plan.md").unwrap();
-        reg.write_into_registry(&plan_uri, "# Plan").await.unwrap();
+        store
+            .write_into_registry(&plan_uri, "# Plan")
+            .await
+            .unwrap();
         // Register bind for the output so verify doesn't fail
         let agent = Agent {
             name: "test".to_string(),
@@ -377,7 +388,7 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "my-agent~2", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "my-agent~2", &fw)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("Plan: # Plan"));
@@ -387,7 +398,7 @@ mod tests {
     async fn test_prepare_optional_bind_key() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{result}".to_string()],
@@ -396,7 +407,9 @@ mod tests {
             outputs_map: HashMap::from([("result?".to_string(), "artifact://out.md".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert_eq!(prepared.output_uris[0].0, "result");
         assert!(prepared.output_uris[0].2); // optional
     }
@@ -405,8 +418,8 @@ mod tests {
     async fn test_prepare_model_substituted() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
-        register_file(&reg, "openai", "openai").await;
+        let store = make_state_store(ad);
+        register_file(&store, "openai", "openai").await;
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -421,7 +434,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert_eq!(prepared.model, Some("openai:{variant}".to_string()));
     }
 
@@ -429,7 +444,7 @@ mod tests {
     async fn test_prepare_model_none_when_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -438,7 +453,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert!(prepared.model.is_none());
     }
 
@@ -446,7 +463,7 @@ mod tests {
     async fn test_prepare_workspace_preamble_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -455,7 +472,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         prepared.cwd = String::new();
         let preamble = build_workspace_preamble(&prepared.cwd);
         assert_eq!(
@@ -470,7 +489,7 @@ mod tests {
     async fn test_prepare_workspace_preamble_present() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -479,7 +498,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         prepared.cwd = "/work".to_string();
         let preamble = build_workspace_preamble(&prepared.cwd);
         let full = format!("{preamble}\n\n{}", prepared.prompt);
@@ -491,7 +512,7 @@ mod tests {
     async fn test_prepare_name_substitution_in_bind_key() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{my-agent}".to_string()],
@@ -503,7 +524,9 @@ mod tests {
             )]),
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert_eq!(prepared.output_uris[0].0, "my-agent");
         assert!(prepared.output_uris[0].1.contains("my-agent.md"));
     }
@@ -512,7 +535,7 @@ mod tests {
     async fn test_prepare_prompts_joined() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec![
@@ -525,7 +548,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert_eq!(prepared.prompt, "Line 1\n\nLine 2\n\nLine 3");
     }
 
@@ -533,8 +558,8 @@ mod tests {
     async fn test_prepare_hyphen_normalization_in_prompt() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
-        register_file(&reg, "value", "value").await;
+        let store = make_state_store(ad);
+        register_file(&store, "value", "value").await;
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{child-plan}".to_string()],
@@ -546,7 +571,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert!(prepared.prompt.contains("value"));
     }
 
@@ -554,7 +581,7 @@ mod tests {
     async fn test_prepare_options_string_filtering() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let mut opts: HashMap<String, serde_json::Value> = HashMap::new();
         opts.insert(
             "string_k".to_string(),
@@ -569,7 +596,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         // {string_k} and {num_k} are both substituted
         assert!(prepared.prompt.contains("v 42"));
     }
@@ -578,7 +607,7 @@ mod tests {
     async fn test_prepare_multi_bind_verification_flag() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{a} {b} {c}".to_string()],
@@ -591,7 +620,9 @@ mod tests {
             ]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert_eq!(prepared.output_uris.len(), 3);
         assert_eq!(prepared.expected_artifact_paths.len(), 3);
     }
@@ -600,7 +631,7 @@ mod tests {
     async fn test_prepare_no_interpolation_map_runs_prompt_unchanged() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let reg = make_registry(ad);
+        let store = make_state_store(ad);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["Static prompt".to_string()],
@@ -609,7 +640,9 @@ mod tests {
             outputs_map: HashMap::new(),
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &fw).await.unwrap();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
         assert!(prepared.prompt.ends_with("Static prompt"));
     }
 
@@ -637,45 +670,45 @@ mod tests {
     #[tokio::test]
     async fn test_commit_agent_rejects_missing_non_optional() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let reg = make_registry(ensure_artifact_dir(&tmp));
+        let store = make_state_store(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
-        let err = commit_agent(&prepared, &reg).await.unwrap_err();
+        let err = commit_agent(&prepared, &store).await.unwrap_err();
         assert!(matches!(err, AgentError::MissingArtifact { .. }));
-        assert!(!reg.is_registered("artifact://out.md").await);
+        assert!(!store.is_registered("artifact://out.md").await);
     }
 
     #[tokio::test]
     async fn test_commit_agent_accepts_empty_file() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let reg = make_registry(ensure_artifact_dir(&tmp));
+        let store = make_state_store(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "").unwrap();
-        commit_agent(&prepared, &reg).await.unwrap();
-        assert!(reg.is_registered("artifact://out.md").await);
+        commit_agent(&prepared, &store).await.unwrap();
+        assert!(store.is_registered("artifact://out.md").await);
     }
 
     #[tokio::test]
     async fn test_commit_agent_allows_missing_optional() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let reg = make_registry(ensure_artifact_dir(&tmp));
+        let store = make_state_store(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out?", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
-        commit_agent(&prepared, &reg).await.unwrap();
-        assert!(!reg.is_registered("artifact://out.md").await);
+        commit_agent(&prepared, &store).await.unwrap();
+        assert!(!store.is_registered("artifact://out.md").await);
     }
 
     #[tokio::test]
     async fn test_commit_agent_multi_output_missing_non_optional_errors() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let reg = make_registry(ensure_artifact_dir(&tmp));
+        let store = make_state_store(ensure_artifact_dir(&tmp));
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -686,23 +719,23 @@ mod tests {
                 ("b".to_string(), "artifact://b.md".to_string()),
             ]),
         };
-        let mut prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         // Pin iteration order so the missing bind is evaluated last.
         prepared.output_uris.sort_by(|x, y| x.0.cmp(&y.0));
         std::fs::write(&prepared.output_paths["a"], "content").unwrap();
-        let err = commit_agent(&prepared, &reg).await.unwrap_err();
+        let err = commit_agent(&prepared, &store).await.unwrap_err();
         assert!(matches!(err, AgentError::MissingArtifact { key, .. } if key == "b"));
         // The file that was written is still committed.
-        assert!(reg.is_registered("artifact://a.md").await);
-        assert!(!reg.is_registered("artifact://b.md").await);
+        assert!(store.is_registered("artifact://a.md").await);
+        assert!(!store.is_registered("artifact://b.md").await);
     }
 
     #[tokio::test]
     async fn test_commit_agent_multi_output_missing_optional_ok() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let reg = make_registry(ensure_artifact_dir(&tmp));
+        let store = make_state_store(ensure_artifact_dir(&tmp));
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -713,25 +746,25 @@ mod tests {
                 ("b?".to_string(), "artifact://b.md".to_string()),
             ]),
         };
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["a"], "content").unwrap();
-        commit_agent(&prepared, &reg).await.unwrap();
-        assert!(reg.is_registered("artifact://a.md").await);
-        assert!(!reg.is_registered("artifact://b.md").await);
+        commit_agent(&prepared, &store).await.unwrap();
+        assert!(store.is_registered("artifact://a.md").await);
+        assert!(!store.is_registered("artifact://b.md").await);
     }
 
     #[tokio::test]
     async fn test_commit_agent_registers_produced_file() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let reg = make_registry(ensure_artifact_dir(&tmp));
+        let store = make_state_store(ensure_artifact_dir(&tmp));
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "content").unwrap();
-        commit_agent(&prepared, &reg).await.unwrap();
-        assert!(reg.is_registered("artifact://out.md").await);
+        commit_agent(&prepared, &store).await.unwrap();
+        assert!(store.is_registered("artifact://out.md").await);
     }
 }
