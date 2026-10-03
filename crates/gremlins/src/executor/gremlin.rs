@@ -40,7 +40,7 @@ use crate::clients::interactive::{InteractiveHandle, InteractiveSession};
 use crate::config;
 use crate::core::{discovery, env_file, git};
 use crate::definition::{GremlinDefinition, StaticDefinition};
-use crate::executor::state::{self, StateData};
+use crate::executor::state::{self, StateData, StateStore};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
 
@@ -693,9 +693,14 @@ impl Gremlin {
             self.base_ref.clone()
         };
 
-        register_stage_inputs(&self.state, &definition.bootstrap, &self.stage_inputs).await;
+        register_stage_inputs(
+            self.state.store_ref(),
+            &definition.bootstrap,
+            &self.stage_inputs,
+        )
+        .await;
         register_base_sha(
-            &self.state,
+            self.state.store_ref(),
             self.worktree.as_deref().unwrap_or(&self.project_root),
         )
         .await;
@@ -1059,7 +1064,7 @@ fn project_root_for(definition_path: &Path) -> PathBuf {
 /// about, but it must not abort a launch, because the stage that wanted the
 /// artifact will report it precisely.
 async fn register_stage_inputs(
-    state: &StateData,
+    state: &dyn StateStore,
     bootstrap: &Bootstrap,
     stage_inputs: &HashMap<String, String>,
 ) {
@@ -1088,7 +1093,7 @@ async fn register_stage_inputs(
 }
 
 /// Record the commit the run started from, once, as `artifact://base_sha`.
-async fn register_base_sha(state: &StateData, cwd: &Path) {
+async fn register_base_sha(state: &dyn StateStore, cwd: &Path) {
     if state.is_registered("artifact://base_sha").await {
         return;
     }

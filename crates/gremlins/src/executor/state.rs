@@ -395,8 +395,9 @@ impl FileSystemStateStore {
             .parent()
             .unwrap_or(&artifact_dir)
             .join("registry.json");
+        let state_file = artifact_dir.parent().map(|p| p.join("state.json"));
         let store = FileSystemStateStore {
-            state_file: None,
+            state_file,
             artifact_dir: Some(artifact_dir.clone()),
             registry_path: Some(registry_path),
         };
@@ -751,8 +752,9 @@ impl FileSystemStateStore {
         let temp_dir = tempfile::TempDir::new()?;
         let artifact_dir = temp_dir.path().join("artifacts");
         tokio::fs::create_dir_all(&artifact_dir).await?;
+        let state_file = temp_dir.path().join("state.json");
         let new_store = FileSystemStateStore {
-            state_file: None,
+            state_file: Some(state_file),
             artifact_dir: Some(artifact_dir.clone()),
             registry_path: Some(
                 artifact_dir
@@ -1208,14 +1210,15 @@ impl StateStore for FileSystemStateStore {
         &self,
         child_artifact_dir: &Path,
     ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
-        FileSystemStateStore::from_registry_file(
-            self.registry_path
-                .as_deref()
-                .unwrap_or(Path::new("registry.json")),
-            child_artifact_dir.to_path_buf(),
-        )
-        .await
-        .map(|r| Box::new(r) as Box<dyn StateStore>)
+        let rp = self.registry_path.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no registry path configured for fork",
+            )
+        })?;
+        FileSystemStateStore::from_registry_file(rp, child_artifact_dir.to_path_buf())
+            .await
+            .map(|r| Box::new(r) as Box<dyn StateStore>)
     }
 
     async fn checkout_registry(
@@ -2536,11 +2539,7 @@ mod tests {
                     .join("registry.json"),
             ),
         };
-        // Note: store2's artifact_dir is moved; re-derive
-        let rp = store2.registry_path.clone();
-        let ad = store2.artifact_dir.clone();
         assert_eq!(store2.data_uri("artifact://foo.txt").await.unwrap(), path);
-        let _ = (rp, ad);
     }
 
     #[tokio::test]

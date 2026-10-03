@@ -25,7 +25,7 @@ use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::stage_key;
 use crate::executor::state;
-use crate::executor::state::StateData;
+use crate::executor::state::StateStore;
 use crate::executor::supervisor::{self, LaunchResult, RunState};
 use crate::executor::RunError;
 
@@ -35,7 +35,7 @@ fn done_uri(scope: &str, child_name: &str) -> String {
 }
 
 /// Record `child_name` as done under `scope` in the artifact registry.
-async fn mark_child_done(state: &StateData, scope: &str, child_name: &str) {
+async fn mark_child_done(state: &dyn StateStore, scope: &str, child_name: &str) {
     let uri_str = done_uri(scope, child_name);
     match Uri::parse(&uri_str) {
         Ok(uri) => {
@@ -396,7 +396,7 @@ pub(crate) async fn run_parallel(
     // --- Mark children done ---
     for outcome in &child_results {
         if !failed_names.contains(&outcome.child_name) {
-            mark_child_done(&gremlin.state, &scope, &outcome.child_name).await;
+            mark_child_done(gremlin.state.store_ref(), &scope, &outcome.child_name).await;
         }
     }
 
@@ -442,13 +442,19 @@ async fn merge_child_artifacts(
 ) -> Result<(), RunError> {
     use crate::executor::state::{Collision, FileSystemStateStore};
 
-    // Construct a FileSystemStateStore from the child's state.json.
-    let child_state_file = state::state_dir_for(&outcome.child_id).join("state.json");
-    if !child_state_file.exists() {
+    // Construct a FileSystemStateStore from the child's registry.json.
+    let child_state_dir = state::state_dir_for(&outcome.child_id);
+    let child_registry_file = child_state_dir.join("registry.json");
+    if !child_registry_file.exists() {
         return Ok(());
     }
 
-    let child_registry = FileSystemStateStore::at_path(child_state_file);
+    let child_registry = FileSystemStateStore::from_registry_file(
+        &child_registry_file,
+        child_state_dir.join("artifacts"),
+    )
+    .await
+    .map_err(|e| RunError::Message(format!("failed to open child registry: {e}")))?;
     gremlin
         .state
         .merge_registry(
@@ -830,7 +836,7 @@ mod tests {
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
         let scope = stage_key(&gremlin.loop_iter, "group");
-        mark_child_done(&gremlin.state, &scope, "a").await;
+        mark_child_done(gremlin.state.store_ref(), &scope, "a").await;
 
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -860,8 +866,8 @@ mod tests {
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
         let scope = stage_key(&gremlin.loop_iter, "group");
-        mark_child_done(&gremlin.state, &scope, "a").await;
-        mark_child_done(&gremlin.state, &scope, "b").await;
+        mark_child_done(gremlin.state.store_ref(), &scope, "a").await;
+        mark_child_done(gremlin.state.store_ref(), &scope, "b").await;
 
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None).await;
