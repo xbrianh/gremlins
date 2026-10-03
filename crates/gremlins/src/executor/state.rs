@@ -27,8 +27,19 @@ pub enum StateError {
 }
 
 /// A general handle for named state-directory files.
-pub trait StateBlob: std::io::Read + std::io::Write + std::io::Seek + Send {}
+pub(crate) trait StateBlob: std::io::Read + std::io::Write + std::io::Seek + Send {}
 impl<T: std::io::Read + std::io::Write + std::io::Seek + Send> StateBlob for T {}
+
+/// How to open a named blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlobMode {
+    /// Open an existing file for reading and writing. Fails if absent.
+    ReadWrite,
+    /// Create or truncate for writing.
+    Write,
+    /// Create or append.
+    Append,
+}
 
 // ---------------------------------------------------------------------------
 // StateStore trait — the storage backend seam
@@ -48,7 +59,10 @@ pub(crate) trait StateStore: Send + Sync + Debug {
 
     /// Open a named blob in the state directory. Creates parent directories
     /// as needed. The returned handle supports Read + Write + Seek.
-    fn open(&self, name: &str) -> Result<Box<dyn StateBlob>, StateError>;
+    fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError>;
+
+    /// Check whether a named blob exists without creating it.
+    fn exists(&self, name: &str) -> bool;
 
     /// Remove a stale bail file for the given attempt.
     fn clear_stage_error(&self, attempt: &str);
@@ -128,7 +142,13 @@ impl StateStore for FileStateStore {
         Ok(())
     }
 
-    fn open(&self, name: &str) -> Result<Box<dyn StateBlob>, StateError> {
+    fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
+        // Reject traversal and absolute paths.
+        if name.contains("..") || name.starts_with('/') || name.contains('\0') {
+            return Err(StateError::Other(format!(
+                "invalid blob name {name:?}: traversal or absolute path rejected"
+            )));
+        }
         let state_dir = self
             .state_file
             .as_ref()
@@ -138,13 +158,31 @@ impl StateStore for FileStateStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
+        let mut opts = OpenOptions::new();
+        match mode {
+            BlobMode::ReadWrite => {
+                opts.read(true).write(true).create(false);
+            }
+            BlobMode::Write => {
+                opts.write(true).create(true).truncate(true);
+            }
+            BlobMode::Append => {
+                opts.append(true).create(true);
+            }
+        }
+        let file = opts.open(&path)?;
         Ok(Box::new(file))
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        let Some(state_dir) = self.state_file.as_ref().and_then(|sf| sf.parent()) else {
+            return false;
+        };
+        // Reject traversal.
+        if name.contains("..") || name.starts_with('/') || name.contains('\0') {
+            return false;
+        }
+        state_dir.join(name).exists()
     }
 
     fn clear_stage_error(&self, attempt: &str) {
@@ -485,8 +523,16 @@ impl StateData {
         self.store.seed(data)
     }
 
-    pub fn open(&self, name: &str) -> Result<Box<dyn StateBlob>, StateError> {
-        self.store.open(name)
+    pub(crate) fn open(
+        &self,
+        name: &str,
+        mode: BlobMode,
+    ) -> Result<Box<dyn StateBlob>, StateError> {
+        self.store.open(name, mode)
+    }
+
+    pub(crate) fn exists(&self, name: &str) -> bool {
+        self.store.exists(name)
     }
 
     pub fn clear_stage_error(&self, attempt: &str) {
@@ -1220,7 +1266,7 @@ mod tests {
             let d = StateData::new(Some("gr-test".into()));
             // Write through open
             {
-                let mut blob = d.open("test.txt").unwrap();
+                let mut blob = d.open("test.txt", BlobMode::Write).unwrap();
                 blob.write_all(b"hello").unwrap();
             }
             // Read back
