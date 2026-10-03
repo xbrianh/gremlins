@@ -306,34 +306,6 @@ async fn run_agent(
     prepared.cwd = gremlin.cwd().to_string_lossy().into_owned();
     prepared.artifact_dir = local_registry.artifact_dir().to_string_lossy().into_owned();
 
-    if gremlin.dry_run {
-        log::debug!(
-            "agent stage '{}' (gremlin={}): dry-run — skipping client.run",
-            prepared.name,
-            gremlin.id.as_str()
-        );
-        commit_agent(&prepared, local_registry.as_ref())
-            .await
-            .map_err(|error| match error {
-                AgentError::MissingArtifact { .. } => RunError::Bail {
-                    reason: error.to_string(),
-                },
-                other => RunError::StageFailed {
-                    stage: prepared.name.clone(),
-                    message: other.to_string(),
-                },
-            })?;
-        gremlin
-            .registry
-            .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
-            .await
-            .map_err(|error| RunError::StageFailed {
-                stage: prepared.name.clone(),
-                message: error.to_string(),
-            })?;
-        return Ok(());
-    }
-
     std::fs::create_dir_all(local_registry.artifact_dir())?;
 
     let stage_env = gremlin.env.clone();
@@ -597,34 +569,6 @@ async fn run_exec(
     prepared.env = gremlin.env.clone();
     prepared.base_env = gremlin.runtime_config.base_process_env.clone();
     prepared.log_tx = gremlin.runtime_config.log_tx.clone();
-
-    if gremlin.dry_run {
-        log::debug!(
-            "exec stage '{}' (gremlin={}): dry-run — skipping run_shell",
-            prepared.name,
-            gremlin.id.as_str()
-        );
-        commit_exec(&prepared, local_registry.as_ref())
-            .await
-            .map_err(|error| match error {
-                ExecError::MissingArtifact { .. } => RunError::Bail {
-                    reason: error.to_string(),
-                },
-                other => RunError::StageFailed {
-                    stage: prepared.name.clone(),
-                    message: other.to_string(),
-                },
-            })?;
-        gremlin
-            .registry
-            .merge_registry(local_registry.as_ref(), Collision::Ignore, None)
-            .await
-            .map_err(|error| RunError::StageFailed {
-                stage: prepared.name.clone(),
-                message: error.to_string(),
-            })?;
-        return Ok(());
-    }
 
     if !prepared.cmds.is_empty() {
         send_log(
@@ -1014,7 +958,7 @@ pub(crate) fn truncate(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    use crate::artifacts::registry::{DryRunArtifactRegistry, FileSystemArtifactRegistry};
+    use crate::artifacts::registry::FileSystemArtifactRegistry;
     use crate::artifacts::uri::Uri;
     use crate::builders::agent::AgentBuilder;
     use crate::builders::artifacts::output;
@@ -1093,7 +1037,6 @@ mod tests {
             client: Client::parse(default_client).unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
-            dry_run: false,
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot("gr-test"),
             cancel_token: None,
             interactive_session: None,
@@ -1187,17 +1130,14 @@ mod tests {
     #[tokio::test]
     async fn agent_commits_a_produced_bound_artifact() {
         let stages = vec![AgentBuilder::new("writer")
-            .client("cmd:sh -c 'cat >/dev/null'")
+            // The cmd backend appends --model <model> --add-dir <artifact_dir>
+            // after the command, so $3 is the artifact_dir.
+            .client("cmd:sh -c 'touch \"$3\"/writer.md'")
             .output("out?", output("artifact://{name}.md"))
             .prompt("write {out}")
             .build()
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
-        // Use a dry-run registry so has_file always returns true — the cmd
-        // backend doesn't write real files, but commit_agent needs to see
-        // a produced file.
-        gremlin.registry = Box::new(DryRunArtifactRegistry::new());
-        gremlin.dry_run = true;
         let stage = take_first_stage(&mut gremlin).await;
         run_stage(&stage, &mut gremlin).await.unwrap();
         assert!(

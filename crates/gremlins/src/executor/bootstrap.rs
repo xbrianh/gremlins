@@ -661,7 +661,6 @@ mod tests {
             client: Client::parse("cmd:true").unwrap(),
             stage_inputs,
             loop_iter: "1".to_string(),
-            dry_run: false,
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot("gr-test"),
             cancel_token: None,
             interactive_session: None,

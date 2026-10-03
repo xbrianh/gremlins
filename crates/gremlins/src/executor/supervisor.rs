@@ -426,7 +426,7 @@ async fn handle_launch(
     let (go_tx, go_rx) = tokio::sync::oneshot::channel();
     let join_handle = tokio::spawn(async move {
         let _ = go_rx.await;
-        let (result, _registry) = run_gremlin_task(gremlin, None).await;
+        let result = run_gremlin_task(gremlin, None).await;
         if !aborted_for_task.load(Ordering::Relaxed) {
             RunHandle::finish(&id_clone, result, &state_tx_clone, Some(&shutdown_tx_clone));
         }
@@ -645,7 +645,7 @@ async fn handle_resume(
     let (go_tx, go_rx) = tokio::sync::oneshot::channel();
     let join_handle = tokio::spawn(async move {
         let _ = go_rx.await;
-        let (result, _registry) = run_gremlin_task(gremlin, Some(&resume_stage)).await;
+        let result = run_gremlin_task(gremlin, Some(&resume_stage)).await;
         if !aborted_for_task.load(Ordering::Relaxed) {
             RunHandle::finish(&id_clone, result, &state_tx_clone, Some(&shutdown_tx_clone));
         }
@@ -1281,10 +1281,7 @@ async fn handle_debug(
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn run_gremlin_task(
-    mut gremlin: Gremlin,
-    resume_from: Option<&str>,
-) -> (i32, Box<dyn crate::artifacts::registry::ArtifactRegistry>) {
+async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> i32 {
     let exit_code = match gremlin.run(resume_from).await {
         Ok(ec) => ec,
         Err(e) => {
@@ -1296,7 +1293,7 @@ async fn run_gremlin_task(
             1
         }
     };
-    (exit_code, gremlin.registry)
+    exit_code
 }
 
 /// Spawn a background task that reads from the log channel, appends each
@@ -1427,13 +1424,10 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
 // launch_child / stop_child — public API for the parallel executor
 // ---------------------------------------------------------------------------
 
-/// Result of [`launch_child`]: a state watch receiver and a oneshot for the
-/// child's artifact registry (sent after the child reaches a terminal state).
+/// Result of [`launch_child`]: a state watch receiver that fires when the
+/// child reaches a terminal state.
 pub(crate) struct LaunchResult {
     pub state_rx: watch::Receiver<RunState>,
-    pub registry_rx: tokio::sync::oneshot::Receiver<
-        Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
-    >,
 }
 
 /// Launch a pre-configured child gremlin, registering it in the run_map so
@@ -1483,8 +1477,6 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
         started_at: state::now_stamp(),
     });
 
-    let (registry_tx, registry_rx) = tokio::sync::oneshot::channel();
-
     let state_tx_clone = state_tx.clone();
 
     let aborted = Arc::new(AtomicBool::new(false));
@@ -1502,9 +1494,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     let (go_tx, go_rx) = tokio::sync::oneshot::channel();
     let join_handle = tokio::spawn(async move {
         let _ = go_rx.await;
-        let (result, registry) = run_gremlin_task(gremlin, None).await;
-        // Send the registry before updating state so the parent can read it.
-        let _ = registry_tx.send(Some(registry));
+        let result = run_gremlin_task(gremlin, None).await;
         if !aborted_for_task.load(Ordering::Relaxed) {
             // Don't signal shutdown — the parent gremlin is still running.
             RunHandle::finish(
@@ -1530,10 +1520,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     // Now the entry is visible — let the task proceed.
     let _ = go_tx.send(());
 
-    LaunchResult {
-        state_rx,
-        registry_rx,
-    }
+    LaunchResult { state_rx }
 }
 
 /// Stop a child gremlin by aborting its task and cleaning up.

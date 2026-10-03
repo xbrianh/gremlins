@@ -110,9 +110,6 @@ pub(crate) async fn run_parallel(
         child_name: String,
         child_id: String,
         state_rx: watch::Receiver<RunState>,
-        registry_rx: tokio::sync::oneshot::Receiver<
-            Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
-        >,
     }
 
     let mut launched: Vec<LaunchedChild> = Vec::with_capacity(children.len());
@@ -161,16 +158,12 @@ pub(crate) async fn run_parallel(
 
         // Launch the child via the supervisor — it becomes a first-class
         // gremlin visible in `gremlins ls`.
-        let LaunchResult {
-            state_rx,
-            registry_rx,
-        } = supervisor::launch_child(child_gremlin);
+        let LaunchResult { state_rx } = supervisor::launch_child(child_gremlin);
 
         launched.push(LaunchedChild {
             child_name,
             child_id,
             state_rx,
-            registry_rx,
         });
 
         log::debug!("parallel group {group_name}: launched child via supervisor");
@@ -196,20 +189,13 @@ pub(crate) async fn run_parallel(
     // Spawn a future for each child that waits for its state_rx to change
     // to a terminal status, then reads the child's state.json to determine
     // the real outcome (exit code, error message).
-    type ChildResult = (
-        usize,
-        String,
-        String,
-        Result<(), RunError>,
-        Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
-    );
+    type ChildResult = (usize, String, String, Result<(), RunError>);
     let mut futs: FuturesUnordered<tokio::task::JoinHandle<ChildResult>> = FuturesUnordered::new();
 
     for (idx, lc) in launched.into_iter().enumerate() {
         let child_name = lc.child_name.clone();
         let child_id = lc.child_id.clone();
         let mut state_rx = lc.state_rx;
-        let registry_rx = lc.registry_rx;
         let sem = semaphore.clone();
         let handle = tokio::spawn(async move {
             // Acquire semaphore permit inside the spawned task so the
@@ -251,9 +237,7 @@ pub(crate) async fn run_parallel(
                                     "child {child_name} state file not found"
                                 )))
                             };
-                            // Collect the child's registry (for dry-run support).
-                            let registry = registry_rx.await.unwrap_or(None);
-                            return (idx, child_name, child_id, outcome, registry);
+                            return (idx, child_name, child_id, outcome);
                         }
                     }
                     Err(_) => {
@@ -267,7 +251,6 @@ pub(crate) async fn run_parallel(
                             Err(RunError::Message(format!(
                                 "child {child_name} terminated without reporting status"
                             ))),
-                            None,
                         );
                     }
                 }
@@ -279,7 +262,7 @@ pub(crate) async fn run_parallel(
 
     while let Some(result) = futs.next().await {
         match result {
-            Ok((idx, child_name, child_id, outcome, child_registry)) => {
+            Ok((idx, child_name, child_id, outcome)) => {
                 running.remove(&idx);
                 log::debug!(
                     "parallel group {group_name}: child {child_name} completed (outcome={})",
@@ -295,7 +278,6 @@ pub(crate) async fn run_parallel(
                             child_name,
                             child_id,
                             outcome: Ok(()),
-                            child_registry,
                         });
                     }
                     Err(err) => {
@@ -315,14 +297,12 @@ pub(crate) async fn run_parallel(
                                 child_name,
                                 child_id,
                                 outcome: Err(err),
-                                child_registry,
                             });
                         } else {
                             child_results.push(ChildOutcome {
                                 child_name,
                                 child_id,
                                 outcome: Err(err),
-                                child_registry,
                             });
                         }
                     }
@@ -453,7 +433,6 @@ struct ChildOutcome {
     child_name: String,
     child_id: String,
     outcome: Result<(), RunError>,
-    child_registry: Option<Box<dyn crate::artifacts::registry::ArtifactRegistry>>,
 }
 
 /// Merge artifacts from a successful child into the parent registry.
@@ -463,23 +442,7 @@ async fn merge_child_artifacts(
 ) -> Result<(), RunError> {
     use crate::artifacts::registry::{Collision, FileSystemArtifactRegistry};
 
-    // Prefer the in-memory registry the child passed back. This handles
-    // dry-run children (whose DryRunArtifactRegistry never writes files)
-    // and avoids re-reading registry.json from disk for filesystem children.
-    if let Some(ref child_registry) = outcome.child_registry {
-        gremlin
-            .registry
-            .merge_registry(
-                child_registry.as_ref(),
-                Collision::Ignore,
-                Some(&outcome.child_name),
-            )
-            .await
-            .map_err(|e| RunError::Message(format!("artifact merge failed: {e}")))?;
-        return Ok(());
-    }
-
-    // Fallback: construct a FileSystemArtifactRegistry from disk.
+    // Construct a FileSystemArtifactRegistry from disk.
     let child_artifact_dir = state::state_dir_for(&outcome.child_id).join("artifacts");
     if !child_artifact_dir.exists() {
         return Ok(());
@@ -652,7 +615,6 @@ mod tests {
             client: crate::clients::client::Client::parse(default_client).unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
-            dry_run: false,
             runtime_config: RuntimeConfig::snapshot("gr-test"),
             cancel_token: None,
             interactive_session: None,

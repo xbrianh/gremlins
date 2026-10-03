@@ -26,7 +26,3 @@ jobs:
         run: make test
       - name: Test (Overlay Tools)
         run: make test-overlay-tools
-      - name: Validate Gremlin Definitions
-        run: make validate-gremlin-definitions
-        env:
-          GREMLINS_DEFAULT_CLIENT: cmd:true

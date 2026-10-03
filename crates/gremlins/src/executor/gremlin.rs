@@ -33,9 +33,7 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use crate::artifacts::registry::{
-    ArtifactRegistry, DryRunArtifactRegistry, FileSystemArtifactRegistry,
-};
+use crate::artifacts::registry::{ArtifactRegistry, FileSystemArtifactRegistry};
 use crate::artifacts::uri::Uri;
 use crate::clients::agent_loop::CancelToken;
 use crate::clients::client::Client;
@@ -43,7 +41,6 @@ use crate::clients::interactive::{InteractiveHandle, InteractiveSession};
 use crate::config;
 use crate::core::{discovery, env_file, git};
 use crate::definition::{GremlinDefinition, StaticDefinition};
-use crate::executor::bootstrap::parse_gremlins_command;
 use crate::executor::state::{self, StateData};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
@@ -240,7 +237,6 @@ pub struct Gremlin {
     /// Bootstrap's `bind_artifact` DSL reads from here: a source key that is
     /// absent or empty is an optional source with nothing to bind.
     pub stage_inputs: HashMap<String, String>,
-    pub dry_run: bool,
     pub(crate) runtime_config: RuntimeConfig,
     /// Supervisor-owned cancel token. When set, the run loop passes it to the
     /// backend so `gremlins stop` cancels in-flight agent loops.
@@ -467,7 +463,6 @@ impl Gremlin {
                     .expect("'cmd:true' is always a valid client spec"),
                 loop_iter: "1".to_string(),
                 stage_inputs: stage_inputs.clone(),
-                dry_run: false,
                 runtime_config,
                 cancel_token: None,
                 interactive_session: None,
@@ -623,87 +618,10 @@ impl Gremlin {
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
             loop_iter: "1".to_string(),
             stage_inputs,
-            dry_run: false,
             runtime_config,
             cancel_token: None,
             interactive_session: None,
         })
-    }
-
-    /// Create a dry-run gremlin for validation.
-    ///
-    /// The definition is injected directly (bypassing YAML load and bootstrap).
-    /// The registry is an in-memory [`DryRunArtifactRegistry`] seeded with
-    /// implicit and bootstrap-declared artifacts. No filesystem access, no
-    /// shell commands, no model calls.
-    pub fn for_dry_run(definition: StaticDefinition) -> Gremlin {
-        let tmp = tempfile::tempdir().unwrap();
-        let artifact_dir = tmp.path().join("artifacts");
-        let state_dir = tmp.path().join("state");
-        std::fs::create_dir_all(&artifact_dir).ok();
-        std::fs::create_dir_all(&state_dir).ok();
-
-        // Seed the dry-run registry with bootstrap artifacts.
-        let seed_keys = bootstrap_artifact_keys(&definition);
-        let registry = DryRunArtifactRegistry::seeded(seed_keys);
-
-        // Snapshot base_ref before moving definition.
-        let base_ref = definition.base_ref().to_string();
-        let definition_path = definition.path().to_path_buf();
-
-        // Write a minimal state.json so the run loop's state operations don't crash.
-        let mut state_data = StateData::new(Some("dry-run".to_string()));
-        let mut initial = serde_json::Map::new();
-        initial.insert(
-            "id".to_string(),
-            serde_json::Value::String("dry-run".to_string()),
-        );
-        initial.insert(
-            "status".to_string(),
-            serde_json::Value::String("running".to_string()),
-        );
-        initial.insert(
-            "attempt".to_string(),
-            serde_json::Value::String("dry-run-0001".to_string()),
-        );
-        initial.insert(
-            "stage".to_string(),
-            serde_json::Value::String("starting".to_string()),
-        );
-        initial.insert(
-            "client".to_string(),
-            serde_json::Value::String("cmd:true".to_string()),
-        );
-        initial.insert("pid".to_string(), serde_json::Value::Null);
-        initial.insert("exit_code".to_string(), serde_json::Value::Null);
-        state_data.persist(&state_dir, &initial).ok();
-
-        // Leak the temp dir so it lives as long as the Gremlin.
-        let tmp_path = tmp.keep();
-
-        Gremlin {
-            id: validate_gremlin_id("dry-run").expect("dry-run is a valid id"),
-            state_dir: tmp_path.join("state"),
-            artifact_dir: tmp_path.join("artifacts"),
-            definition_path: Some(definition_path),
-            client_override: None,
-            definition: Box::new(definition),
-            registry: Box::new(registry),
-            worktree: None,
-            worktree_parent: None,
-            project_root: PathBuf::from("."),
-            base_ref_sha: String::new(),
-            base_ref,
-            state: state_data,
-            env: HashMap::new(),
-            client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
-            loop_iter: "1".to_string(),
-            stage_inputs: HashMap::new(),
-            dry_run: true,
-            runtime_config: RuntimeConfig::snapshot("dry-run"),
-            cancel_token: None,
-            interactive_session: None,
-        }
     }
 
     /// Load the definition, build the registry, create the client, and resolve the
@@ -732,7 +650,7 @@ impl Gremlin {
         // catches a handle that was somehow constructed without one.
         if self.runtime_config.scratch_dir.as_os_str().is_empty() {
             return Err(RunError::Message(
-                "gremlin runtime_config is uninitialized — construct the handle through Gremlin::init, from, or for_dry_run".to_string(),
+                "gremlin runtime_config is uninitialized — construct the handle through Gremlin::init or from".to_string(),
             ));
         }
 
@@ -1010,7 +928,6 @@ impl Gremlin {
             // A child inherits the parent's source values: its bootstrap binds
             // the same inputs the parent launched with.
             stage_inputs: self.stage_inputs.clone(),
-            dry_run: self.dry_run,
             runtime_config: {
                 let mut child_runtime_config = self.runtime_config.clone();
                 child_runtime_config.scratch_dir = child_scratch_dir;
@@ -1399,47 +1316,6 @@ pub fn resolve_env(
     // Re-assert the system variables on top of whatever the script produced.
     env.extend(system);
     Ok(env)
-}
-
-/// Collect artifact keys the bootstrap declares so the dry-run registry can
-/// seed them — stages that consume them will find them.
-fn bootstrap_artifact_keys(definition: &StaticDefinition) -> Vec<String> {
-    let mut keys: Vec<String> = definition
-        .bootstrap
-        .cli_out
-        .keys()
-        .map(|name| {
-            if name.starts_with("artifact://") {
-                name.clone()
-            } else {
-                format!("artifact://{name}")
-            }
-        })
-        .collect();
-
-    // `launch_cmds` can contain `gremlins:bind_artifact` DSL calls — use the
-    // same parser as the real bootstrap runner so validate agrees with runtime.
-    for cmd in &definition.bootstrap.launch_cmds {
-        if let Some((cmd_name, args)) = parse_gremlins_command(cmd) {
-            if cmd_name == "bind_artifact" && !args.is_empty() {
-                let uri = &args[0];
-                if !uri.is_empty() {
-                    let normalized = if uri.starts_with("artifact://") {
-                        uri.clone()
-                    } else {
-                        format!("artifact://{uri}")
-                    };
-                    keys.push(normalized);
-                }
-            }
-        }
-    }
-
-    // Implicit artifacts always bound at launch.
-    keys.push("artifact://base_sha".to_string());
-    keys.push("artifact://base_ref".to_string());
-
-    keys
 }
 
 #[cfg(test)]
@@ -1999,7 +1875,6 @@ mod tests {
             client: Client::parse("cmd:true").unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
-            dry_run: false,
             runtime_config: RuntimeConfig {
                 scratch_dir: config::scratch_root(Some(id)),
                 ..RuntimeConfig::default()

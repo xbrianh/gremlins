@@ -22,7 +22,6 @@ parallelism and ensures consistent flags.
 | `make fmt-check` | `cargo fmt --all -- --check`. | CI format gate. |
 | `make clippy` | `cargo clippy -q --all-targets -- -D warnings`. | Lint gate. |
 | `make install` | `cargo install --path crates/gremlins-cli`. | System-wide install. |
-| `make validate-gremlin-definitions` | Validates `.gremlins/*.yaml` pipeline files. | After editing pipelines. |
 | `make test-overlay-tools` | `bats .gremlins/bin/tests/`. | After editing overlay scripts. |
 
 ### Running tests
