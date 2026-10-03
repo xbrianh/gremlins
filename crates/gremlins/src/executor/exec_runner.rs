@@ -635,23 +635,6 @@ mod tests {
         assert!(registry.is_registered("artifact://out.txt").await);
     }
 
-    #[tokio::test]
-    async fn test_commit_exec_dry_run_succeeds_without_files() {
-        let reg = crate::artifacts::registry::DryRunArtifactRegistry::new();
-
-        let exec = Exec {
-            name: "test".to_string(),
-            options: HashMap::new(),
-            interpolation_map: HashMap::new(),
-            outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
-        };
-        let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &reg, &reg, "", &fw).await.unwrap();
-        // No file written — DryRunArtifactRegistry::has_file always returns true.
-        commit_exec(&prepared, &reg).await.unwrap();
-        assert!(reg.is_registered("artifact://out.txt").await);
-    }
-
     // --- run_shell integration: injection payloads are not executed ---
 
     #[tokio::test]

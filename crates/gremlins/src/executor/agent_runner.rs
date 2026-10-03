@@ -734,16 +734,4 @@ mod tests {
         commit_agent(&prepared, &reg).await.unwrap();
         assert!(reg.is_registered("artifact://out.md").await);
     }
-
-    #[tokio::test]
-    async fn test_commit_agent_dry_run_succeeds_without_files() {
-        let reg = crate::artifacts::registry::DryRunArtifactRegistry::new();
-        let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &reg, &reg, "", &HashMap::new())
-            .await
-            .unwrap();
-        // No file written — DryRunArtifactRegistry::has_file always returns true.
-        commit_agent(&prepared, &reg).await.unwrap();
-        assert!(reg.is_registered("artifact://out.md").await);
-    }
 }

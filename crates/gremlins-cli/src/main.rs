@@ -86,11 +86,6 @@ enum Cmds {
         /// Gremlin id whose land block to run.
         id: String,
     },
-    /// Validate a definition without executing it.
-    Validate {
-        /// Gremlin definition: a bare name (resolved under .gremlins/) or a path.
-        definition: String,
-    },
     #[command(hide = true, name = "serve")]
     Serve {
         /// Lock file descriptor (internal, inherited from parent).
@@ -120,7 +115,6 @@ async fn main() {
         Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
         Some(Cmds::Rm { id }) => rm(&id).await,
         Some(Cmds::Land { id }) => land(&id).await,
-        Some(Cmds::Validate { definition }) => validate(&definition).await,
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::External(args)) => status_external(&args).await,
         None => {
@@ -1156,60 +1150,6 @@ async fn land(id: &str) -> Result<(), String> {
         std::process::exit(result.returncode);
     }
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// validate
-// ---------------------------------------------------------------------------
-
-async fn validate(definition: &str) -> Result<(), String> {
-    config::init_global().map_err(|e| e.to_string())?;
-
-    let project_root = config::project_root();
-    let definition_path = discovery::resolve_definition_path(definition, project_root.clone())
-        .map_err(|e| format!("definition not found: {e}"))?;
-
-    let default_client = config::global_config()
-        .ok()
-        .and_then(|c| c.default_client().map(String::from));
-    let gremlin_def =
-        StaticDefinition::from_yaml_file(&definition_path, None, default_client.as_deref())
-            .map_err(|e| format!("invalid definition: {e}"))?;
-
-    let mut gremlin = Gremlin::for_dry_run(gremlin_def);
-
-    match gremlin.run(None).await {
-        Ok(0) => Ok(()),
-        Ok(exit_code) => {
-            let stage = gremlin.state.read_str("stage");
-            let detail = gremlin
-                .state
-                .stage_error()
-                .and_then(|info| info.get("detail").cloned())
-                .and_then(|v| {
-                    if v.is_string() {
-                        Some(v.as_str().unwrap().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-            if !detail.is_empty() {
-                eprintln!("stage {stage}: {detail}");
-            }
-            Err(format!(
-                "definition validation failed with exit code {exit_code}"
-            ))
-        }
-        Err(gremlins::executor::RunError::StageFailed { stage, message }) => {
-            eprintln!("stage {stage}: {message}");
-            Err("definition validation failed".to_string())
-        }
-        Err(error) => {
-            eprintln!("{error}");
-            Err("definition validation failed".to_string())
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
