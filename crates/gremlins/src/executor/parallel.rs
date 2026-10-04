@@ -21,6 +21,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::watch;
 
 use crate::artifacts::uri::Uri;
+use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::definition::ErrorPolicy;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
@@ -158,13 +159,16 @@ pub(crate) async fn run_parallel(
         // and clean the partial workspace before propagating the error —
         // otherwise no child task ever finalizes the state and the
         // workspace is stranded.
-        if let Err(error) = gremlin.run_fork_cmds(
-            &child_id,
-            &child_name,
-            &parent_id,
-            &group_name_owned,
-            fork.as_ref().map(|f| f.cmds.as_slice()),
-        ) {
+        if let Err(error) = gremlin
+            .run_fork_cmds(
+                &child_id,
+                &child_name,
+                &parent_id,
+                &group_name_owned,
+                fork.as_ref().map(|f| f.cmds.as_slice()),
+            )
+            .await
+        {
             child_gremlin.state.write_terminal_state(1);
             child_gremlin.clean(false);
             return Err(error);
@@ -399,6 +403,7 @@ pub(crate) async fn run_parallel(
         } else {
             PathBuf::from(&parent_workdir)
         };
+        let cmd_strings: Vec<String> = join_spec.cmds.clone();
         for child_id in &child_ids {
             let child_workdir = match StateData::open(child_id) {
                 Ok(s) => s.read_str("workdir"),
@@ -412,31 +417,46 @@ pub(crate) async fn run_parallel(
                 .find(|o| &o.child_id == child_id)
                 .map(|o| o.child_name.as_str())
                 .unwrap_or(child_id.as_str());
-            for cmd in &join_spec.cmds {
-                let status = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .current_dir(&join_cwd)
-                    .env("GREMLIN_WORKDIR", &parent_workdir)
-                    .env("GREMLIN_FORK_WORKDIR", &child_workdir)
-                    .status();
-                match status {
-                    Ok(s) if !s.success() => {
-                        log::warn!(
-                            "parallel group {group_name}: join command '{}' for child {} exited {}",
-                            cmd,
-                            child_name,
-                            s.code().unwrap_or(-1)
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "parallel group {group_name}: join command '{}' for child {} failed: {e}",
-                            cmd,
-                            child_name
-                        );
-                    }
-                    _ => {}
+
+            let log_name = format!("join-{child_name}");
+            let safe_name = sanitize_log_filename(child_name);
+            let stream_path = gremlin
+                .state
+                .state_dir()
+                .join("command_logs")
+                .join(format!("join-{safe_name}.log"));
+
+            let mut env: HashMap<String, String> = gremlin.env.clone();
+            env.insert("GREMLIN_WORKDIR".to_string(), parent_workdir.clone());
+            env.insert("GREMLIN_FORK_WORKDIR".to_string(), child_workdir.clone());
+            let empty_subs = HashMap::new();
+            let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+
+            let result = run_logged_commands(
+                &log_name,
+                &cmd_strings,
+                &join_cwd,
+                &env,
+                &empty_subs,
+                None,
+                Some(&stream_path),
+                &log_tx,
+            )
+            .await;
+
+            match result {
+                Ok(r) if r.rc == 0 => {}
+                Ok(r) => {
+                    log::warn!(
+                        "parallel group {group_name}: join command(s) for child {child_name} exited {}: {}",
+                        r.rc,
+                        crate::executor::run::truncate(&r.output, 500),
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "parallel group {group_name}: join command(s) for child {child_name} failed: {e}",
+                    );
                 }
             }
         }

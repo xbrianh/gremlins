@@ -14,6 +14,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc::UnboundedSender;
+
 use tokio::io::AsyncReadExt;
 
 #[cfg(unix)]
@@ -688,6 +690,278 @@ pub async fn run_shell_async(
         stdout: stdout_buf,
         stderr: stderr_buf,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Central command execution: header + instrumented script + footer
+// ---------------------------------------------------------------------------
+
+/// Return type for `run_logged_commands`.
+#[derive(Debug)]
+pub struct ShellResult {
+    pub output: String,
+    pub rc: i32,
+}
+
+/// Run a set of shell commands as a single instrumented script, streaming
+/// stdout/stderr to `stream_path` with a header and footer.
+///
+/// Empty `cmds` is a no-op returning `ShellResult { output: "", rc: 0 }`.
+/// Header and footer writes are best-effort: a failed write logs a warning
+/// and the command still runs.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_logged_commands(
+    log_name: &str,
+    cmds: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    substitution_env: &HashMap<String, String>,
+    timeout: Option<f64>,
+    stream_path: Option<&Path>,
+    log_tx: &Option<UnboundedSender<String>>,
+) -> Result<ShellResult, ProcError> {
+    if cmds.is_empty() {
+        return Ok(ShellResult {
+            output: String::new(),
+            rc: 0,
+        });
+    }
+
+    if let Some(t) = timeout {
+        if !t.is_finite() || t < 0.0 || t > Duration::MAX.as_secs_f64() {
+            return Err(ProcError::InvalidTimeout(t));
+        }
+    }
+
+    // Ensure parent directory exists.
+    if let Some(sp) = stream_path {
+        if let Some(parent) = sp.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::warn!(
+                    "run_logged_commands: failed to create log dir {}: {e}",
+                    parent.display()
+                );
+            }
+        }
+    }
+
+    let t0 = Instant::now();
+
+    // Write header (best-effort).
+    write_log_header(
+        stream_path,
+        log_name,
+        cmds,
+        cwd,
+        env,
+        substitution_env,
+        timeout,
+        log_tx,
+    );
+
+    // Build instrumented script.
+    let script = build_instrumented_script(cmds, substitution_env);
+
+    // Run the script.
+    let result = run_shell_async(&script, Some(cwd), Some(env), timeout, stream_path).await;
+
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    match result {
+        Ok(r) => {
+            let combined_output = format!(
+                "{}{}",
+                String::from_utf8_lossy(&r.stdout),
+                String::from_utf8_lossy(&r.stderr),
+            );
+            write_log_footer(stream_path, r.returncode, elapsed, log_tx);
+            Ok(ShellResult {
+                output: combined_output.trim().to_string(),
+                rc: r.returncode,
+            })
+        }
+        Err(e) => {
+            write_log_footer(stream_path, -1, elapsed, log_tx);
+            Err(e)
+        }
+    }
+}
+
+/// Write the log header: metadata, env vars, and command listing.
+#[allow(clippy::too_many_arguments)]
+fn write_log_header(
+    stream_path: Option<&Path>,
+    log_name: &str,
+    cmds: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    substitution_env: &HashMap<String, String>,
+    timeout: Option<f64>,
+    log_tx: &Option<UnboundedSender<String>>,
+) {
+    let Some(sp) = stream_path else {
+        return;
+    };
+    let mut f = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(sp)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!(
+                "run_logged_commands: failed to open log {} for header: {e}",
+                sp.display()
+            );
+            return;
+        }
+    };
+    let _ = writeln!(f, "=== {log_name} ===");
+    let _ = writeln!(f, "cwd: {}", cwd.display());
+    if let Some(t) = timeout {
+        let _ = writeln!(f, "timeout: {t}s");
+    }
+    let _ = writeln!(f, "cmds: {}", cmds.len());
+
+    // Environment (compact one-per-line).
+    if !env.is_empty() {
+        let _ = writeln!(f, "env:");
+        let mut keys: Vec<&String> = env.keys().collect();
+        keys.sort();
+        for k in keys {
+            let _ = writeln!(f, "  {k}={}", env[k]);
+        }
+    }
+
+    // Substitution env.
+    if !substitution_env.is_empty() {
+        let _ = writeln!(f, "substitution_env:");
+        let mut keys: Vec<&String> = substitution_env.keys().collect();
+        keys.sort();
+        for k in keys {
+            let _ = writeln!(f, "  {k}={}", substitution_env[k]);
+        }
+    }
+
+    // Commands: original + resolved.
+    let _ = writeln!(f, "commands:");
+    for cmd in cmds {
+        let _ = writeln!(f, "  original: {cmd}");
+        let resolved = resolve_cmd_for_log(cmd, substitution_env);
+        let _ = writeln!(f, "  resolved: {resolved}");
+    }
+
+    let _ = f.flush();
+
+    if let Some(ref tx) = log_tx {
+        let _ = tx.send(format!("{log_name}: streaming output to {}", sp.display()));
+    }
+}
+
+/// Write the log footer with exit code and duration.
+fn write_log_footer(
+    stream_path: Option<&Path>,
+    rc: i32,
+    elapsed: f64,
+    log_tx: &Option<UnboundedSender<String>>,
+) {
+    let Some(sp) = stream_path else {
+        return;
+    };
+    let mut f = match std::fs::OpenOptions::new().append(true).open(sp) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!(
+                "run_logged_commands: failed to open log {} for footer: {e}",
+                sp.display()
+            );
+            return;
+        }
+    };
+    let _ = writeln!(f, "--- exit: {rc} (duration: {elapsed:.1}s) ---");
+    let _ = f.flush();
+
+    if let Some(ref tx) = log_tx {
+        let _ = tx.send(format!("done rc={rc} elapsed={elapsed:.1}s"));
+    }
+}
+
+/// Sanitize a name for use as a log filename component.
+///
+/// Replaces path separators, `..`, and other dangerous characters with `_`.
+/// The result is safe to embed in a file path without escaping the parent
+/// directory.
+pub(crate) fn sanitize_log_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' => '_',
+            _ if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' => c,
+            _ => '_',
+        })
+        .collect::<String>()
+        .replace("..", "__")
+}
+
+/// Resolve `${VAR}` references in `s` using the substitution env.
+/// `${GREMLINS_FOO}` → the value of `GREMLINS_FOO` in the env map;
+/// unknown variables are left as-is.
+fn resolve_cmd_for_log(s: &str, env: &HashMap<String, String>) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(dollar) = rest.find("${") {
+        result.push_str(&rest[..dollar]);
+        rest = &rest[dollar + 2..];
+        let close = rest.find('}');
+        match close {
+            Some(end) => {
+                let var = &rest[..end];
+                if let Some(val) = env.get(var) {
+                    result.push_str(val);
+                } else {
+                    result.push_str("${");
+                    result.push_str(&rest[..end + 1]);
+                }
+                rest = &rest[end + 1..];
+            }
+            None => {
+                result.push_str("${");
+                break;
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+/// Build a single bash script that executes every command in `cmds` within one
+/// shell session, preserving shell state (variables, `cd`, functions, `umask`,
+/// etc.) across command boundaries. Each command is wrapped with `printf`
+/// header/footer markers so the stream log shows which command produced which
+/// output and which command failed or timed out. The script stops on the first
+/// non-zero exit (mirroring `&&` semantics).
+fn build_instrumented_script(
+    cmds: &[String],
+    substitution_env: &HashMap<String, String>,
+) -> String {
+    let total = cmds.len();
+    let mut script = String::with_capacity(cmds.iter().map(|c| c.len() + 80).sum());
+    script.push_str("set +e\n");
+    for (i, cmd) in cmds.iter().enumerate() {
+        let resolved = resolve_cmd_for_log(cmd, substitution_env);
+        let escaped = resolved.replace('\'', "'\\''");
+        script.push_str(&format!(
+            "printf -- '\\n--- cmd {i1}/{total}: %s ---\\n' '{escaped}'\n",
+            i1 = i + 1,
+        ));
+        script.push_str(&resolved);
+        script.push('\n');
+        script.push_str(&format!(
+            "_rc=$?\nprintf -- '--- cmd {i1}/{total} exit: %d ---\\n' \"$_rc\"\n",
+            i1 = i + 1,
+        ));
+        script.push_str("if [ \"$_rc\" -ne 0 ]; then exit \"$_rc\"; fi\n");
+    }
+    script
 }
 
 /// Capture a human-readable snapshot of the process tree rooted at `pid`
