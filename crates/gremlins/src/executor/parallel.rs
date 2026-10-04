@@ -669,7 +669,7 @@ mod tests {
             client: crate::clients::client::Client::parse(default_client).unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
-            runtime_config: RuntimeConfig::snapshot("gr-test"),
+            runtime_config: RuntimeConfig::snapshot(),
             cancel_token: None,
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),

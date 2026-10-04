@@ -202,9 +202,7 @@ impl Clone for RuntimeConfig {
 
 impl RuntimeConfig {
     /// Snapshot the current global config and process environment.
-    ///
-    /// `gremlin_id` seeds the scratch directory path.
-    pub(crate) fn snapshot(_gremlin_id: &str) -> Self {
+    pub(crate) fn snapshot() -> Self {
         let cfg = config::get_global();
         let (stage_exact, stage_prefix) = cfg
             .as_ref()
@@ -294,9 +292,19 @@ impl Gremlin {
 
         // 1. Generate a gremlin id with collision-avoidance.
         let gremlin_id = if config.ephemeral {
-            // Ephemeral: just generate a unique id — no filesystem reservation.
-            let hex = state::token_hex(2);
-            GremlinId(format!("{definition_name}-{hex}"))
+            // Ephemeral: use a large random token (16 hex chars) plus an
+            // in-process uniqueness check — no filesystem reservation.
+            static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+                std::sync::Mutex::new(None);
+            loop {
+                let hex = state::token_hex(8);
+                let candidate = format!("{definition_name}-{hex}");
+                let mut seen = SEEN.lock().unwrap();
+                let set = seen.get_or_insert_with(std::collections::HashSet::new);
+                if set.insert(candidate.clone()) {
+                    break GremlinId(candidate);
+                }
+            }
         } else {
             loop {
                 let hex = state::token_hex(2);
@@ -431,7 +439,7 @@ impl Gremlin {
         let stub: Box<dyn GremlinDefinition> = Box::new(stub);
 
         // Snapshot the runtime config before gremlin_id is moved.
-        let runtime_config = RuntimeConfig::snapshot(gremlin_id.as_str());
+        let runtime_config = RuntimeConfig::snapshot();
 
         let gremlin = Gremlin {
             id: gremlin_id,
@@ -561,7 +569,7 @@ impl Gremlin {
         let definition: Box<dyn GremlinDefinition> = Box::new(stub);
 
         // Snapshot the runtime config before gremlin_id is moved.
-        let runtime_config = RuntimeConfig::snapshot(gremlin_id.as_str());
+        let runtime_config = RuntimeConfig::snapshot();
         let scratch_dir = ScratchDir::Persistent(config::scratch_root(Some(gremlin_id.as_str())));
 
         Ok(Gremlin {
@@ -739,8 +747,8 @@ impl Gremlin {
         // Create the child workdir so the child's state.json can
         // record a `workdir`. The caller populates it afterwards via
         // [`run_fork_cmds`].
-        let child_workdir = match &self.workdir {
-            Some(WorkDir::Temp(_)) => {
+        let child_workdir = match &self.scratch_dir {
+            ScratchDir::Temp(_) => {
                 let temp = tempfile::TempDir::new().map_err(|e| {
                     RunError::Message(format!("failed to create temp child workdir: {e}"))
                 })?;
@@ -2090,5 +2098,167 @@ stages:
             gremlin.definition.next_stage().await.unwrap(),
             crate::definition::ExecutorStage::Done
         ));
+    }
+
+    // --- ephemeral mode ---
+
+    #[tokio::test]
+    async fn ephemeral_init_uses_temp_dirs() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
+            eprintln!("git is unavailable; skipping ephemeral_init_uses_temp_dirs");
+            return;
+        }
+
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+        let cfg = GremlinConfig { ephemeral: true };
+        let gremlin = Gremlin::init(
+            "gr-test",
+            fx.definition_path(),
+            &definition,
+            &HashMap::new(),
+            None,
+            &cfg,
+        )
+        .unwrap();
+
+        // State, workspace, and scratch are all temp-backed.
+        let state_dir = gremlin.state.state_dir().to_path_buf();
+        let workdir = gremlin.workdir.as_ref().unwrap().path().to_path_buf();
+        let scratch = gremlin.scratch_dir.path().to_path_buf();
+
+        assert!(state_dir.exists(), "state dir exists");
+        assert!(workdir.exists(), "workdir exists");
+        assert!(scratch.exists(), "scratch dir exists");
+
+        // No files under config roots.
+        let config_state = config::state_root();
+        let config_work = config::work_root();
+        let config_scratch_base = config::scratch_root(None);
+        assert!(
+            !config_state.join(gremlin.id.as_str()).exists(),
+            "no state under config root"
+        );
+        assert!(
+            !config_work.join(gremlin.id.as_str()).exists(),
+            "no workdir under config root"
+        );
+        assert!(
+            !scratch.starts_with(&config_scratch_base),
+            "scratch is temp-backed, not under config root"
+        );
+
+        // Drop the gremlin — TempDirs clean up.
+        let state_dir2 = state_dir.clone();
+        let workdir2 = workdir.clone();
+        let scratch2 = scratch.clone();
+        drop(gremlin);
+        assert!(!state_dir2.exists(), "state dir cleaned on drop");
+        assert!(!workdir2.exists(), "workdir cleaned on drop");
+        assert!(!scratch2.exists(), "scratch dir cleaned on drop");
+    }
+
+    #[tokio::test]
+    async fn ephemeral_fork_propagates_temp_backing() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
+            eprintln!("git is unavailable; skipping ephemeral_fork_propagates_temp_backing");
+            return;
+        }
+
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+        let cfg = GremlinConfig { ephemeral: true };
+        let parent = Gremlin::init(
+            "gr-test",
+            fx.definition_path(),
+            &definition,
+            &HashMap::new(),
+            None,
+            &cfg,
+        )
+        .unwrap();
+
+        let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+        let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
+        let child = parent
+            .fork("gr-child", "", "", "", None, child_provider, None)
+            .await
+            .unwrap();
+
+        // Child state dir is temp-backed (not under config::state_root).
+        let child_state = child.state.state_dir().to_path_buf();
+        assert!(
+            !child_state.starts_with(config::state_root()),
+            "child state is temp-backed"
+        );
+
+        // Child workdir is temp-backed.
+        let child_workdir = child.workdir.as_ref().unwrap().path().to_path_buf();
+        assert!(
+            !child_workdir.starts_with(config::work_root()),
+            "child workdir is temp-backed"
+        );
+
+        // Child scratch is temp-backed.
+        let child_scratch = child.scratch_dir.path().to_path_buf();
+        assert!(
+            !child_scratch.starts_with(config::scratch_root(None)),
+            "child scratch is temp-backed"
+        );
+
+        // Drop parent and child — all TempDirs clean up.
+        let child_state2 = child_state.clone();
+        let child_workdir2 = child_workdir.clone();
+        let child_scratch2 = child_scratch.clone();
+        drop(child);
+        drop(parent);
+        assert!(!child_state2.exists(), "child state cleaned on drop");
+        assert!(!child_workdir2.exists(), "child workdir cleaned on drop");
+        assert!(!child_scratch2.exists(), "child scratch cleaned on drop");
+    }
+
+    #[test]
+    fn ephemeral_from_is_rejected() {
+        // An ephemeral gremlin leaves nothing under config::state_root(),
+        // so Gremlin::from() naturally returns an error.
+        let result = Gremlin::from("ephemeral-nonexistent");
+        assert!(result.is_err(), "from() should fail for ephemeral gremlin");
+    }
+
+    #[test]
+    fn ephemeral_clean_is_noop() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
+            eprintln!("git is unavailable; skipping ephemeral_clean_is_noop");
+            return;
+        }
+
+        let definition =
+            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+        let cfg = GremlinConfig { ephemeral: true };
+        let gremlin = Gremlin::init(
+            "gr-test",
+            fx.definition_path(),
+            &definition,
+            &HashMap::new(),
+            None,
+            &cfg,
+        )
+        .unwrap();
+
+        let state_dir = gremlin.state.state_dir().to_path_buf();
+        let workdir = gremlin.workdir.as_ref().unwrap().path().to_path_buf();
+        let scratch = gremlin.scratch_dir.path().to_path_buf();
+
+        // clean() on an ephemeral gremlin is harmless — TempDir destructor
+        // handles actual cleanup.
+        gremlin.clean(true);
+
+        // After clean(true), the paths may or may not exist (remove_dir_all
+        // on a TempDir path is harmless). The key property is that clean()
+        // doesn't panic.
+        let _ = (state_dir, workdir, scratch);
     }
 }

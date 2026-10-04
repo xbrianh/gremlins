@@ -1361,50 +1361,9 @@ impl StateStore for ScopedFileSystemStateStore {
         &self,
         child_gremlin_id: &str,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
-        // Scoped stores are always temporary — create a temp-backed child.
-        validate_gremlin_id_component(child_gremlin_id)?;
-        let child_temp = tempfile::TempDir::new().map_err(StateError::Io)?;
-        let child_dir = child_temp.path().to_path_buf();
-        let child_artifact_dir = child_dir.join("artifacts");
-        std::fs::create_dir_all(&child_artifact_dir)?;
-
-        let parent_artifact_dir = self.inner.artifact_dir();
-        if parent_artifact_dir.is_dir() {
-            copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
-        }
-
-        let mut child_store = FileSystemStateStore {
-            root: StateRoot::Temp(child_temp),
-        };
-
-        // Copy registry from the scoped inner.
-        let parent_registry = self.inner.read_registry_json().await;
-        if !parent_registry.is_empty() {
-            let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
-            child_store
-                .locked_write(|data| {
-                    for (key, path) in &parent_registry {
-                        if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
-                            let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
-                            let rel = rel.trim_start_matches('/');
-                            data.insert(
-                                key.clone(),
-                                child_artifact_dir.join(rel).to_string_lossy().to_string(),
-                            );
-                        } else {
-                            data.insert(key.clone(), path.clone());
-                        }
-                    }
-                    Ok(())
-                })
-                .await?;
-        }
-
-        let mut initial = Map::new();
-        initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
-        child_store.write_state(&initial)?;
-
-        Ok(Box::new(child_store))
+        // Delegate to the inner store, which already handles both temp and
+        // persistent backing correctly.
+        self.inner.fork(child_gremlin_id).await
     }
 
     async fn checkout_registry(

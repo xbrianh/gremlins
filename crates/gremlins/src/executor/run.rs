@@ -1034,7 +1034,7 @@ mod tests {
             client: Client::parse(default_client).unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
-            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot("gr-test"),
+            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(),
             cancel_token: None,
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),

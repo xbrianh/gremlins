@@ -841,7 +841,7 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         "workdir": gremlin.workdir.as_ref().map(|w| w.path().to_string_lossy().to_string()).unwrap_or_default(),
         "state_dir": gremlin.state.state_dir().to_string_lossy(),
         "artifact_dir": gremlin.state.artifact_dir().to_string_lossy(),
-        "scratch_dir": config::scratch_root(Some(id)).to_string_lossy(),
+        "scratch_dir": gremlin.scratch_dir.path().to_string_lossy(),
         "log_file": gremlin.state.state_dir().join("log").to_string_lossy(),
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
