@@ -149,9 +149,19 @@ pub(crate) async fn run_parallel(
                 None,
                 child.clone_box(),
                 effective_client,
-                fork.as_ref().map(|f| f.cmds.as_slice()),
             )
             .await?;
+
+        // Populate the child workspace (fork commands run after fork()
+        // completes, so any failure here doesn't leave the child state
+        // in a half-constructed state).
+        gremlin.run_fork_cmds(
+            &child_id,
+            &child_name,
+            &parent_id,
+            &group_name_owned,
+            fork.as_ref().map(|f| f.cmds.as_slice()),
+        )?;
 
         log::debug!(
             "parallel group {group_name}: child {child_name} forked (state_dir={}, artifact_dir={})",
