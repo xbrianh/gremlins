@@ -26,7 +26,7 @@ use crate::definition::ErrorPolicy;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::stage_key;
-use crate::executor::state::{BlobMode, StateData, StateStore};
+use crate::executor::state::{BlobMode, StateStore};
 use crate::executor::supervisor::{self, LaunchResult, RunState};
 use crate::executor::RunError;
 
@@ -113,6 +113,7 @@ pub(crate) async fn run_parallel(
         child_name: String,
         child_id: String,
         state_rx: watch::Receiver<RunState>,
+        gremlin_rx: tokio::sync::oneshot::Receiver<Gremlin>,
     }
 
     let mut launched: Vec<LaunchedChild> = Vec::with_capacity(children.len());
@@ -165,6 +166,7 @@ pub(crate) async fn run_parallel(
                 &child_name,
                 &parent_id,
                 &group_name_owned,
+                child_gremlin.workdir.as_ref().unwrap().path(),
                 fork.as_ref().map(|f| f.cmds.as_slice()),
             )
             .await
@@ -182,12 +184,16 @@ pub(crate) async fn run_parallel(
 
         // Launch the child via the supervisor — it becomes a first-class
         // gremlin visible in `gremlins ls`.
-        let LaunchResult { state_rx } = supervisor::launch_child(child_gremlin);
+        let LaunchResult {
+            state_rx,
+            gremlin_rx,
+        } = supervisor::launch_child(child_gremlin);
 
         launched.push(LaunchedChild {
             child_name,
             child_id,
             state_rx,
+            gremlin_rx,
         });
 
         log::debug!("parallel group {group_name}: launched child via supervisor");
@@ -213,13 +219,14 @@ pub(crate) async fn run_parallel(
     // Spawn a future for each child that waits for its state_rx to change
     // to a terminal status, then reads the child's state.json to determine
     // the real outcome (exit code, error message).
-    type ChildResult = (usize, String, String, Result<(), RunError>);
+    type ChildResult = (usize, String, String, Result<(), RunError>, Option<Gremlin>);
     let mut futs: FuturesUnordered<tokio::task::JoinHandle<ChildResult>> = FuturesUnordered::new();
 
     for (idx, lc) in launched.into_iter().enumerate() {
         let child_name = lc.child_name.clone();
         let child_id = lc.child_id.clone();
         let mut state_rx = lc.state_rx;
+        let gremlin_rx = lc.gremlin_rx;
         let sem = semaphore.clone();
         let handle = tokio::spawn(async move {
             // Acquire semaphore permit inside the spawned task so the
@@ -234,10 +241,14 @@ pub(crate) async fn run_parallel(
                     Ok(()) => {
                         let state = state_rx.borrow().clone();
                         if state.status == "done" || state.status == "stopped" {
+                            // Receive the gremlin back from the child task so
+                            // we can use it for post-processing without
+                            // reopening via config::state_root().
+                            let gremlin = gremlin_rx.await.ok();
                             // Read the child's state.json to get the real outcome.
-                            let outcome = match StateData::open(&child_id) {
-                                Ok(child_state) => {
-                                    let raw = child_state.state_tree();
+                            let outcome = match &gremlin {
+                                Some(g) => {
+                                    let raw = g.state.state_tree();
                                     let exit_code =
                                         raw.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1);
                                     if exit_code == 0 {
@@ -256,11 +267,11 @@ pub(crate) async fn run_parallel(
                                         })
                                     }
                                 }
-                                Err(_) => Err(RunError::Message(format!(
+                                None => Err(RunError::Message(format!(
                                     "child {child_name} state file not found"
                                 ))),
                             };
-                            return (idx, child_name, child_id, outcome);
+                            return (idx, child_name, child_id, outcome, gremlin);
                         }
                     }
                     Err(_) => {
@@ -274,6 +285,7 @@ pub(crate) async fn run_parallel(
                             Err(RunError::Message(format!(
                                 "child {child_name} terminated without reporting status"
                             ))),
+                            None,
                         );
                     }
                 }
@@ -285,7 +297,7 @@ pub(crate) async fn run_parallel(
 
     while let Some(result) = futs.next().await {
         match result {
-            Ok((idx, child_name, child_id, outcome)) => {
+            Ok((idx, child_name, _child_id, outcome, gremlin)) => {
                 running.remove(&idx);
                 log::debug!(
                     "parallel group {group_name}: child {child_name} completed (outcome={})",
@@ -299,8 +311,8 @@ pub(crate) async fn run_parallel(
                     Ok(()) => {
                         child_results.push(ChildOutcome {
                             child_name,
-                            child_id,
                             outcome: Ok(()),
+                            gremlin,
                         });
                     }
                     Err(err) => {
@@ -318,14 +330,14 @@ pub(crate) async fn run_parallel(
                             }
                             child_results.push(ChildOutcome {
                                 child_name,
-                                child_id,
                                 outcome: Err(err),
+                                gremlin,
                             });
                         } else {
                             child_results.push(ChildOutcome {
                                 child_name,
-                                child_id,
                                 outcome: Err(err),
+                                gremlin,
                             });
                         }
                     }
@@ -404,19 +416,19 @@ pub(crate) async fn run_parallel(
             PathBuf::from(&parent_workdir)
         };
         let cmd_strings: Vec<String> = join_spec.cmds.clone();
-        for child_id in &child_ids {
-            let child_workdir = match StateData::open(child_id) {
-                Ok(s) => s.read_str("workdir"),
-                Err(_) => continue,
+        for outcome in &child_results {
+            let child_workdir = match &outcome.gremlin {
+                Some(g) => g
+                    .workdir
+                    .as_ref()
+                    .map(|w| w.path().to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                None => continue,
             };
             if child_workdir.is_empty() {
                 continue;
             }
-            let child_name = child_results
-                .iter()
-                .find(|o| &o.child_id == child_id)
-                .map(|o| o.child_name.as_str())
-                .unwrap_or(child_id.as_str());
+            let child_name = &outcome.child_name;
 
             let log_name = format!("join-{child_name}");
             let safe_name = sanitize_log_filename(child_name);
@@ -503,18 +515,14 @@ pub(crate) async fn run_parallel(
     // clean up workspaces that join didn't handle.
     log::debug!(
         "parallel group {group_name}: cleaning up {} children",
-        child_ids.len()
+        child_results.len()
     );
-    for child_id in &child_ids {
-        let child_name = child_results
-            .iter()
-            .find(|o| &o.child_id == child_id)
-            .map(|o| o.child_name.as_str())
-            .unwrap_or(child_id);
+    for outcome in child_results {
+        let child_name = &outcome.child_name;
         if group_error.is_none() {
-            cleanup_child_fully(child_name, child_id);
+            cleanup_child_fully(child_name, outcome.gremlin);
         } else {
-            cleanup_child_workspace(child_name, child_id);
+            cleanup_child_workspace(child_name, outcome.gremlin);
         }
     }
 
@@ -527,8 +535,8 @@ pub(crate) async fn run_parallel(
 /// The result of one child gremlin's run.
 struct ChildOutcome {
     child_name: String,
-    child_id: String,
     outcome: Result<(), RunError>,
+    gremlin: Option<Gremlin>,
 }
 
 /// Merge artifacts from a successful child into the parent registry.
@@ -538,12 +546,16 @@ async fn merge_child_artifacts(
 ) -> Result<(), RunError> {
     use crate::executor::state::Collision;
 
-    // Open the child's state.
-    let child_state = StateData::open(&outcome.child_id)?;
+    let child_gremlin = outcome.gremlin.as_ref().ok_or_else(|| {
+        RunError::Message(format!(
+            "child {} gremlin not available",
+            outcome.child_name
+        ))
+    })?;
     gremlin
         .state
         .join(
-            child_state.store_ref(),
+            child_gremlin.state.store_ref(),
             Collision::Ignore,
             Some(&outcome.child_name),
         )
@@ -555,11 +567,11 @@ async fn merge_child_artifacts(
 
 /// Aggregate token usage and subprocess cost from a child into the parent.
 fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
-    let child_state = match StateData::open(&outcome.child_id) {
-        Ok(s) => s,
-        Err(_) => return,
+    let child_gremlin = match &outcome.gremlin {
+        Some(g) => g,
+        None => return,
     };
-    let tree = child_state.state_tree();
+    let tree = child_gremlin.state.state_tree();
     if tree.is_empty() {
         return;
     }
@@ -584,21 +596,21 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
 }
 
 /// Remove everything a child owns (state, scratch, workspace).
-fn cleanup_child_fully(child_name: &str, child_id: &str) {
-    match Gremlin::from(child_id) {
-        Ok(child) => child.clean(true),
-        Err(error) => {
-            log::debug!("parallel group: child {child_name} left nothing to clean ({error})")
+fn cleanup_child_fully(child_name: &str, gremlin: Option<Gremlin>) {
+    match gremlin {
+        Some(child) => child.clean(true),
+        None => {
+            log::debug!("parallel group: child {child_name} left nothing to clean (no gremlin)")
         }
     }
 }
 
 /// Remove only the child's workspace, preserving state for forensics.
-fn cleanup_child_workspace(child_name: &str, child_id: &str) {
-    match Gremlin::from(child_id) {
-        Ok(child) => child.clean(false),
-        Err(error) => {
-            log::debug!("parallel group: child {child_name} left nothing to clean ({error})")
+fn cleanup_child_workspace(child_name: &str, gremlin: Option<Gremlin>) {
+    match gremlin {
+        Some(child) => child.clean(false),
+        None => {
+            log::debug!("parallel group: child {child_name} left nothing to clean (no gremlin)")
         }
     }
 }

@@ -884,9 +884,10 @@ impl Gremlin {
         child_key: &str,
         parent_id: &str,
         group_name: &str,
+        child_workdir: &Path,
         fork_cmds: Option<&[String]>,
     ) -> Result<(), RunError> {
-        let child_workdir = config::work_root().join(child_id);
+        let child_workdir = child_workdir.to_path_buf();
 
         match fork_cmds {
             None => {
