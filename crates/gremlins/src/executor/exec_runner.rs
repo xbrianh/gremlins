@@ -256,7 +256,6 @@ pub async fn run_shell(
         prepared.timeout,
         log_writer,
         &prepared.log_tx,
-        true,
     )
     .await;
 

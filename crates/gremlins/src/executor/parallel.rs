@@ -442,7 +442,6 @@ pub(crate) async fn run_parallel(
                 None,
                 log_writer,
                 &log_tx,
-                false,
             )
             .await;
 

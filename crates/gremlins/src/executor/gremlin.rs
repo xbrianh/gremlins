@@ -926,7 +926,6 @@ impl Gremlin {
                     None,
                     log_writer,
                     &log_tx,
-                    true,
                 )
                 .await;
 

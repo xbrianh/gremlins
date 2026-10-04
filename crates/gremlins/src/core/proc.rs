@@ -688,7 +688,6 @@ pub async fn run_logged_commands(
     timeout: Option<f64>,
     log_writer: Option<Box<dyn io::Write + Send>>,
     log_tx: &Option<UnboundedSender<String>>,
-    stop_on_error: bool,
 ) -> Result<ShellResult, ProcError> {
     if cmds.is_empty() {
         return Ok(ShellResult {
@@ -725,7 +724,7 @@ pub async fn run_logged_commands(
     }
 
     // Build instrumented script.
-    let script = build_instrumented_script(cmds, substitution_env, stop_on_error);
+    let script = build_instrumented_script(cmds, substitution_env);
 
     // Run the script — streaming output goes through the same handle.
     let result = run_shell_async(&script, Some(cwd), Some(env), timeout, shared.clone()).await;
@@ -906,21 +905,14 @@ fn resolve_cmd_for_log(s: &str, env: &HashMap<String, String>) -> String {
 /// executes the original `cmd` so `${GREMLINS_*}` vars are expanded by Bash
 /// from the environment rather than interpolated inline.
 ///
-/// When `stop_on_error` is true, the script stops on the first non-zero exit
-/// (mirroring `&&` semantics). When false, failures are tracked via
-/// `_any_failed` and the script exits with the last non-zero code (or 0 if
-/// all commands succeeded).
+/// The script stops on the first non-zero exit (mirroring `&&` semantics).
 fn build_instrumented_script(
     cmds: &[String],
     substitution_env: &HashMap<String, String>,
-    stop_on_error: bool,
 ) -> String {
     let total = cmds.len();
     let mut script = String::with_capacity(cmds.iter().map(|c| c.len() + 80).sum());
     script.push_str("set +e\n");
-    if !stop_on_error {
-        script.push_str("_any_failed=0\n");
-    }
     for (i, cmd) in cmds.iter().enumerate() {
         let resolved = resolve_cmd_for_log(cmd, substitution_env);
         let escaped = resolved.replace('\'', "'\\''");
@@ -934,14 +926,7 @@ fn build_instrumented_script(
             "_rc=$?\nprintf -- '--- cmd {i1}/{total} exit: %d ---\\n' \"$_rc\"\n",
             i1 = i + 1,
         ));
-        if stop_on_error {
-            script.push_str("if [ \"$_rc\" -ne 0 ]; then exit \"$_rc\"; fi\n");
-        } else {
-            script.push_str("if [ \"$_rc\" -ne 0 ]; then _any_failed=$_rc; fi\n");
-        }
-    }
-    if !stop_on_error {
-        script.push_str("exit \"$_any_failed\"\n");
+        script.push_str("if [ \"$_rc\" -ne 0 ]; then exit \"$_rc\"; fi\n");
     }
     script
 }
