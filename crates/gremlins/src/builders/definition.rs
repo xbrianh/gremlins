@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn exec_builder_rejects_framework_option_key() {
-        for key in ["name", "model", "cwd", "base_ref"] {
+        for key in ["name", "model", "cwd"] {
             let err = ExecBuilder::new("test")
                 .cmd("echo hi")
                 .option(key, "x")

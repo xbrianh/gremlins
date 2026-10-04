@@ -753,10 +753,15 @@ impl Gremlin {
                         &child_workdir,
                         &values,
                     );
+                    // Run fork hooks from the parent workdir so that relative
+                    // paths and `HEAD` describe the workspace being forked.
+                    // Fall back to the project root when there is no parent
+                    // workspace (e.g. a parallel stage that never created one).
+                    let fork_cwd = self.workdir.as_deref().unwrap_or(&self.project_root);
                     let status = std::process::Command::new("sh")
                         .arg("-c")
                         .arg(&substituted)
-                        .current_dir(&self.project_root)
+                        .current_dir(fork_cwd)
                         .env("GREMLIN_WORKDIR", &parent_workdir)
                         .env("GREMLIN_FORK_WORKDIR", &child_workdir_str)
                         .status()
