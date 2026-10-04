@@ -830,7 +830,11 @@ fn write_log_header(
         let mut keys: Vec<&String> = env.keys().collect();
         keys.sort();
         for k in keys {
-            let val = if is_sensitive_env_key(k) { "[redacted]" } else { env[k].as_str() };
+            let val = if is_sensitive_env_key(k) {
+                "[redacted]"
+            } else {
+                env[k].as_str()
+            };
             let _ = writeln!(f, "  {k}={}", val);
         }
     }
@@ -841,7 +845,11 @@ fn write_log_header(
         let mut keys: Vec<&String> = substitution_env.keys().collect();
         keys.sort();
         for k in keys {
-            let val = if is_sensitive_env_key(k) { "[redacted]" } else { substitution_env[k].as_str() };
+            let val = if is_sensitive_env_key(k) {
+                "[redacted]"
+            } else {
+                substitution_env[k].as_str()
+            };
             let _ = writeln!(f, "  {k}={}", val);
         }
     }

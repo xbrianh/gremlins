@@ -873,7 +873,10 @@ impl Gremlin {
 
                 let mut env: HashMap<String, String> = self.env.clone();
                 env.insert("GREMLIN_WORKDIR".to_string(), parent_workdir);
-                env.insert("GREMLIN_FORK_WORKDIR".to_string(), child_workdir_str.clone());
+                env.insert(
+                    "GREMLIN_FORK_WORKDIR".to_string(),
+                    child_workdir_str.clone(),
+                );
 
                 let mut substitution_env: HashMap<String, String> = HashMap::new();
                 for (key, value) in &fork_vars {
