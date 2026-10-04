@@ -45,8 +45,12 @@ pub(crate) fn split_interpolation_map(
     (content, filepath)
 }
 
-pub(crate) static CONTENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^content\("([^"]+)"(?:,\s*"([^"]+)")?\)\s*$"#).unwrap());
+pub(crate) static CONTENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"^content\("([^"]+)"(?:,\s*"([^"]+)"(?:,\s*raw=([Tt]rue))?|,\s*raw=([Tt]rue))?\)\s*$"#,
+    )
+    .unwrap()
+});
 
 #[derive(Error, Debug)]
 pub enum ResolveError {
@@ -67,20 +71,13 @@ pub async fn resolve_interpolation_map(
         let optional = trimmed.ends_with('?');
         let raw_clean = trimmed.trim_end_matches('?');
 
-        // Check for raw=True keyword before regex parsing
-        let content_raw = raw_clean.contains("raw=True") || raw_clean.contains("raw=true");
-        let raw_clean_stripped = raw_clean
-            .replace(", raw=True", "")
-            .replace(",raw=True", "")
-            .replace(", raw=true", "")
-            .replace(",raw=true", "");
-
-        if let Some(caps) = CONTENT_RE.captures(&raw_clean_stripped) {
+        if let Some(caps) = CONTENT_RE.captures(raw_clean) {
             let mut uri_str = caps.get(1).unwrap().as_str().to_string();
             if !loop_iter.is_empty() {
                 uri_str = uri_str.replace("{loop_iter}", loop_iter);
             }
             let json_path = caps.get(2).map(|m| m.as_str());
+            let content_raw = caps.get(3).is_some() || caps.get(4).is_some();
 
             // For optional content(), skip the lookup if the artifact isn't
             // registered — avoids relying on downcast for MissingArtifact,
