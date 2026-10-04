@@ -537,7 +537,7 @@ stages:
 - `git://range` — Special shorthand: the `exec` stage snapshots HEAD before running and binds the resulting range afterwards
 
 **Artifact binding semantics:**
-- `interpolation:` values are registry key lookups: a URI string (e.g., `file://session/report`), an optional `?default` fallback (e.g., `mykey?fallback`), or a `content("URI")` expression that reads and inlines file contents
+- `interpolation:` values are registry key lookups: a URI string (e.g., `file://session/report`), an optional `?default` fallback (e.g., `mykey?fallback`), or a `content("URI")` expression that reads and inlines file contents. To avoid bugs from shell-written files injecting stray newlines, `content()` trims leading and trailing whitespace by default. Pass `raw=True` to preserve the exact file content: `content("artifact://hash.txt", raw=True)`
 - `bind:` values are URI strings naming what the stage produces; the bind map key is a local variable name for `{var}` substitution within the same stage's templates (prompts, cmds)
 - After a stage completes, bound artifacts are registered under their URI strings; downstream stages reference those URI strings in their `interpolation:` maps
 - `interpolation:` can be declared in a stage definition and will be merged with call-site `interpolation:` values; `bind:` cannot appear inside a definition

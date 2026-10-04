@@ -45,8 +45,12 @@ pub(crate) fn split_interpolation_map(
     (content, filepath)
 }
 
-pub(crate) static CONTENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^content\("([^"]+)"(?:,\s*"([^"]+)")?\)\s*$"#).unwrap());
+pub(crate) static CONTENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"^content\("([^"]+)"(?:,\s*"([^"]+)"(?:,\s*raw=([Tt]rue))?|,\s*raw=([Tt]rue))?\)\s*$"#,
+    )
+    .unwrap()
+});
 
 #[derive(Error, Debug)]
 pub enum ResolveError {
@@ -73,6 +77,7 @@ pub async fn resolve_interpolation_map(
                 uri_str = uri_str.replace("{loop_iter}", loop_iter);
             }
             let json_path = caps.get(2).map(|m| m.as_str());
+            let content_raw = caps.get(3).is_some() || caps.get(4).is_some();
 
             // For optional content(), skip the lookup if the artifact isn't
             // registered — avoids relying on downcast for MissingArtifact,
@@ -87,11 +92,16 @@ pub async fn resolve_interpolation_map(
 
             match artifacts.content(&uri_str, json_path).await {
                 Ok(val) => {
+                    let trimmed = if content_raw {
+                        val
+                    } else {
+                        val.trim().to_string()
+                    };
                     log::debug!(
                         "resolve: {var:?} = content({uri_str:?}) -> {} bytes",
-                        val.len()
+                        trimmed.len()
                     );
-                    result.insert(var.clone(), val);
+                    result.insert(var.clone(), trimmed);
                 }
                 Err(_e) if optional => {
                     // Shouldn't happen (we already checked is_registered),
@@ -249,5 +259,93 @@ mod tests {
             r#"content("artifact://loop~1/ci_failure.txt")?"#.to_string(),
         );
         validate_interpolation_map(&map, "fix").unwrap();
+    }
+
+    // ── trimming behaviour ──
+
+    #[tokio::test]
+    async fn test_content_trims_trailing_newline() {
+        let (_tmp, reg) = setup_registry();
+        // Simulate `echo "hash" > file` — trailing newline
+        register_file(&reg, "hash.txt", "abc123\n").await;
+
+        let mut map = HashMap::new();
+        map.insert(
+            "sha".to_string(),
+            r#"content("artifact://hash.txt")"#.to_string(),
+        );
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
+        assert_eq!(result.get("sha").unwrap(), "abc123");
+    }
+
+    #[tokio::test]
+    async fn test_content_trims_leading_and_trailing_whitespace() {
+        let (_tmp, reg) = setup_registry();
+        register_file(&reg, "padded.txt", "  \n  hello world  \n  ").await;
+
+        let mut map = HashMap::new();
+        map.insert(
+            "msg".to_string(),
+            r#"content("artifact://padded.txt")"#.to_string(),
+        );
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
+        assert_eq!(result.get("msg").unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_content_raw_true_preserves_whitespace() {
+        let (_tmp, reg) = setup_registry();
+        register_file(&reg, "padded.txt", "  hello\n").await;
+
+        let mut map = HashMap::new();
+        map.insert(
+            "msg".to_string(),
+            r#"content("artifact://padded.txt", raw=True)"#.to_string(),
+        );
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
+        assert_eq!(result.get("msg").unwrap(), "  hello\n");
+    }
+
+    #[tokio::test]
+    async fn test_content_raw_true_lowercase() {
+        let (_tmp, reg) = setup_registry();
+        register_file(&reg, "padded.txt", "  hi\n").await;
+
+        let mut map = HashMap::new();
+        map.insert(
+            "msg".to_string(),
+            r#"content("artifact://padded.txt", raw=true)"#.to_string(),
+        );
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
+        assert_eq!(result.get("msg").unwrap(), "  hi\n");
+    }
+
+    #[tokio::test]
+    async fn test_content_raw_true_with_json_path() {
+        let (_tmp, reg) = setup_registry();
+        register_file(&reg, "data.json", "{\"x\":\"  yo  \"}").await;
+
+        let mut map = HashMap::new();
+        map.insert(
+            "val".to_string(),
+            r#"content("artifact://data.json", "x", raw=True)"#.to_string(),
+        );
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
+        // JSON path returns the value as-is (no extra newline from file I/O)
+        assert_eq!(result.get("val").unwrap(), "  yo  ");
+    }
+
+    #[tokio::test]
+    async fn test_content_without_raw_trims_json_path_value() {
+        let (_tmp, reg) = setup_registry();
+        register_file(&reg, "data.json", "{\"x\":\"  yo  \"}").await;
+
+        let mut map = HashMap::new();
+        map.insert(
+            "val".to_string(),
+            r#"content("artifact://data.json", "x")"#.to_string(),
+        );
+        let result = unwrap_result(resolve_interpolation_map(&reg, &map, "").await);
+        assert_eq!(result.get("val").unwrap(), "yo");
     }
 }
