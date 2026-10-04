@@ -712,7 +712,16 @@ pub async fn run_logged_commands(
     // Write header (best-effort) through the shared handle.
     if let Some(ref m) = shared {
         let mut g = m.lock().unwrap();
-        write_log_header(&mut *g, log_name, cmds, cwd, env, substitution_env, timeout, log_tx);
+        write_log_header(
+            &mut *g,
+            log_name,
+            cmds,
+            cwd,
+            env,
+            substitution_env,
+            timeout,
+            log_tx,
+        );
     }
 
     // Build instrumented script.
@@ -2602,14 +2611,16 @@ mod tests {
         // marker2.  This verifies that chunks are flushed to disk *during*
         // execution, not just buffered until the command completes.
         let cmd = "echo marker1 && sleep 2 && echo marker2";
-        let log_path_clone = log_path.clone();
+        let _log_path_clone = log_path.clone();
         let stream_writer = {
             let f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&log_path)
                 .unwrap();
-            Some(Arc::new(std::sync::Mutex::new(Box::new(f) as Box<dyn io::Write + Send>)))
+            Some(Arc::new(std::sync::Mutex::new(
+                Box::new(f) as Box<dyn io::Write + Send>
+            )))
         };
         let handle = tokio::spawn(async move {
             run_shell_async(cmd, None, None, None, stream_writer)

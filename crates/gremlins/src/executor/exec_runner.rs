@@ -7,8 +7,8 @@ use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_logged_commands, ProcError, ProcResult, ShellResult};
 use crate::definition::Exec;
-use crate::executor::state::{BlobMode, StateData};
 use crate::executor::state::StateStore;
+use crate::executor::state::{BlobMode, StateData};
 use crate::executor::vars;
 
 #[derive(Error, Debug)]

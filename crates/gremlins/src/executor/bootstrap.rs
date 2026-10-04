@@ -595,15 +595,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
         let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
-        let error = run_bootstrap(
-            &["exit 7".to_string()],
-            dir.path(),
-            &env,
-            &log_tx,
-            None,
-        )
-        .await
-        .unwrap_err();
+        let error = run_bootstrap(&["exit 7".to_string()], dir.path(), &env, &log_tx, None)
+            .await
+            .unwrap_err();
         assert!(matches!(
             error,
             RunError::BootstrapFailed { exit_code: 7, .. }
