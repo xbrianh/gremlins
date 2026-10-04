@@ -910,7 +910,6 @@ impl Gremlin {
                 let log_name = format!("fork-{child_key}");
                 let safe_name = sanitize_log_filename(child_key);
                 let blob_name = format!("command_logs/fork-{safe_name}.log");
-                let stream_path = self.state.state_dir().join(&blob_name);
                 let log_writer = self
                     .state
                     .open_blob(&blob_name, BlobMode::Append)
@@ -925,7 +924,6 @@ impl Gremlin {
                     &env,
                     &substitution_env,
                     None,
-                    Some(&stream_path),
                     log_writer,
                     &log_tx,
                     true,

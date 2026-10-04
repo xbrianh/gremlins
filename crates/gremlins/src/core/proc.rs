@@ -11,7 +11,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -455,7 +455,7 @@ pub async fn run_shell_async(
     cwd: Option<&Path>,
     env: Option<&HashMap<String, String>>,
     timeout: Option<f64>,
-    stream_path: Option<&Path>,
+    stream_writer: Option<Arc<std::sync::Mutex<Box<dyn io::Write + Send>>>>,
 ) -> Result<ProcResult, ProcError> {
     if shell_cmd.is_empty() {
         return Err(ProcError::EmptyCommand);
@@ -502,36 +502,21 @@ pub async fn run_shell_async(
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
 
-    let stream_path_stdout = stream_path.map(|p| p.to_path_buf());
-    let stream_path_stderr = stream_path.map(|p| p.to_path_buf());
+    let sw_stdout = stream_writer.clone();
+    let sw_stderr = stream_writer.clone();
 
     let stdout_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
-        let mut stream_file = stream_path_stdout.as_ref().and_then(|p| {
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-            {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    log::warn!(
-                        "run_shell_async: failed to open stream file {}: {e}",
-                        p.display()
-                    );
-                    None
-                }
-            }
-        });
         loop {
             match stdout.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
-                    if let Some(ref mut f) = stream_file {
-                        let _ = f.write_all(&chunk[..n]);
-                        let _ = f.flush();
+                    if let Some(ref w) = sw_stdout {
+                        let mut g = w.lock().unwrap();
+                        let _ = g.write_all(&chunk[..n]);
+                        let _ = g.flush();
                     }
                 }
                 Err(_) => break,
@@ -543,30 +528,15 @@ pub async fn run_shell_async(
     let stderr_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
-        let mut stream_file = stream_path_stderr.as_ref().and_then(|p| {
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-            {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    log::warn!(
-                        "run_shell_async: failed to open stream file {}: {e}",
-                        p.display()
-                    );
-                    None
-                }
-            }
-        });
         loop {
             match stderr.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
-                    if let Some(ref mut f) = stream_file {
-                        let _ = f.write_all(&chunk[..n]);
-                        let _ = f.flush();
+                    if let Some(ref w) = sw_stderr {
+                        let mut g = w.lock().unwrap();
+                        let _ = g.write_all(&chunk[..n]);
+                        let _ = g.flush();
                     }
                 }
                 Err(_) => break,
@@ -610,13 +580,12 @@ pub async fn run_shell_async(
                 #[cfg(unix)]
                 let ps_snapshot = {
                     let tree = capture_process_tree(pid);
-                    if let Some(sp) = stream_path {
+                    if let Some(ref w) = stream_writer {
                         let footer =
                             format!("\n--- process tree at timeout ({elapsed:.1}s) ---\n{tree}");
-                        let _ = std::fs::OpenOptions::new()
-                            .append(true)
-                            .open(sp)
-                            .and_then(|mut f| f.write_all(footer.as_bytes()));
+                        let mut g = w.lock().unwrap();
+                        let _ = g.write_all(footer.as_bytes());
+                        let _ = g.flush();
                     }
                     tree
                 };
@@ -717,7 +686,6 @@ pub async fn run_logged_commands(
     env: &HashMap<String, String>,
     substitution_env: &HashMap<String, String>,
     timeout: Option<f64>,
-    stream_path: Option<&Path>,
     log_writer: Option<Box<dyn io::Write + Send>>,
     log_tx: &Option<UnboundedSender<String>>,
     stop_on_error: bool,
@@ -737,17 +705,21 @@ pub async fn run_logged_commands(
 
     let t0 = Instant::now();
 
-    // Write header (best-effort) through caller-provided handle.
-    let mut writer = log_writer;
-    if let Some(ref mut w) = writer {
-        write_log_header(&mut **w, log_name, cmds, cwd, env, substitution_env, timeout, log_tx);
+    // Wrap in Arc<Mutex<…>> so the same handle is shared by header,
+    // both streaming tasks, and footer.
+    let shared = log_writer.map(|w| Arc::new(Mutex::new(w)));
+
+    // Write header (best-effort) through the shared handle.
+    if let Some(ref m) = shared {
+        let mut g = m.lock().unwrap();
+        write_log_header(&mut *g, log_name, cmds, cwd, env, substitution_env, timeout, log_tx);
     }
 
     // Build instrumented script.
     let script = build_instrumented_script(cmds, substitution_env, stop_on_error);
 
-    // Run the script.
-    let result = run_shell_async(&script, Some(cwd), Some(env), timeout, stream_path).await;
+    // Run the script — streaming output goes through the same handle.
+    let result = run_shell_async(&script, Some(cwd), Some(env), timeout, shared.clone()).await;
 
     let elapsed = t0.elapsed().as_secs_f64();
 
@@ -758,8 +730,9 @@ pub async fn run_logged_commands(
                 String::from_utf8_lossy(&r.stdout),
                 String::from_utf8_lossy(&r.stderr),
             );
-            if let Some(ref mut w) = writer {
-                write_log_footer(&mut **w, r.returncode, elapsed, log_tx);
+            if let Some(ref m) = shared {
+                let mut g = m.lock().unwrap();
+                write_log_footer(&mut *g, r.returncode, elapsed, log_tx);
             }
             Ok(ShellResult {
                 output: combined_output.trim().to_string(),
@@ -767,8 +740,9 @@ pub async fn run_logged_commands(
             })
         }
         Err(e) => {
-            if let Some(ref mut w) = writer {
-                write_log_footer(&mut **w, -1, elapsed, log_tx);
+            if let Some(ref m) = shared {
+                let mut g = m.lock().unwrap();
+                write_log_footer(&mut *g, -1, elapsed, log_tx);
             }
             Err(e)
         }
@@ -2629,8 +2603,16 @@ mod tests {
         // execution, not just buffered until the command completes.
         let cmd = "echo marker1 && sleep 2 && echo marker2";
         let log_path_clone = log_path.clone();
+        let stream_writer = {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .unwrap();
+            Some(Arc::new(std::sync::Mutex::new(Box::new(f) as Box<dyn io::Write + Send>)))
+        };
         let handle = tokio::spawn(async move {
-            run_shell_async(cmd, None, None, None, Some(&log_path_clone))
+            run_shell_async(cmd, None, None, None, stream_writer)
                 .await
                 .unwrap()
         });

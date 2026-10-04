@@ -421,7 +421,6 @@ pub(crate) async fn run_parallel(
             let log_name = format!("join-{child_name}");
             let safe_name = sanitize_log_filename(child_name);
             let blob_name = format!("command_logs/join-{safe_name}.log");
-            let stream_path = gremlin.state.state_dir().join(&blob_name);
             let log_writer = gremlin
                 .state
                 .open_blob(&blob_name, BlobMode::Append)
@@ -441,7 +440,6 @@ pub(crate) async fn run_parallel(
                 &env,
                 &empty_subs,
                 None,
-                Some(&stream_path),
                 log_writer,
                 &log_tx,
                 false,
