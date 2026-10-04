@@ -969,7 +969,7 @@ async fn rm(id: &str) -> Result<(), String> {
         }
     }
 
-    gremlin.clean(true);
+    gremlin.clean(true).await;
     println!("gremlin {id} removed");
     Ok(())
 }
@@ -1030,7 +1030,13 @@ async fn clean(id: &str, keep: bool) -> Result<(), String> {
         }
     }
 
-    gremlin.clean(!keep);
+    // Load the definition so clean_cmds are available.
+    let mut gremlin = gremlin;
+    if let Err(e) = gremlin.init_runtime(None).await {
+        log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
+    }
+
+    gremlin.clean(!keep).await;
     println!("gremlin {id} cleaned");
     Ok(())
 }

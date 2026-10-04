@@ -1019,6 +1019,7 @@ mod tests {
             bootstrap,
             stages,
             land,
+            vec![],
             serde_yaml::Value::Null,
         );
 

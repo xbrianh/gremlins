@@ -33,13 +33,13 @@ land:
   interpolation:
     inputs:
       pr_url: content("artifact://pr-url.txt")
-  options:
-    cmds:
-      - git worktree remove --force "$GREMLIN_WORKDIR" || true
-      - git worktree prune
-      - gh pr merge --squash --delete-branch "{pr_url}"
-      - git fetch origin
-      - git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main
+  land_cmds:
+    - gh pr merge --squash --delete-branch "{pr_url}"
+    - git fetch origin
+    - git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main
+  clean_cmds:
+    - git worktree remove --force "$GREMLIN_WORKDIR" || true
+    - git worktree prune
 
 stage-definitions:
   plan-gh: plan-gh

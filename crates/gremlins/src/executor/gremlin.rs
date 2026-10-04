@@ -605,7 +605,7 @@ impl Gremlin {
     /// handle a stub, and a retry — `resume` re-entering the run loop after a
     /// transient bootstrap failure — starts the whole sequence over instead of
     /// finding a half-built runtime it believes is finished.
-    pub(crate) async fn init_runtime(&mut self, resume_from: Option<&str>) -> Result<(), RunError> {
+    pub async fn init_runtime(&mut self, resume_from: Option<&str>) -> Result<(), RunError> {
         // Apply goto before checking is_stub — a resume must position the
         // cursor even when the definition is already loaded (e.g. test
         // helpers that pre-seed a real definition).
@@ -1021,6 +1021,10 @@ impl Gremlin {
     /// scratch directory, and — when `remove_state_dir` is set — its state
     /// directory.
     ///
+    /// Before removing anything, runs `clean_cmds` from the definition (if
+    /// loaded and non-empty). Clean commands are best-effort: a non-zero exit
+    /// logs a warning and teardown continues.
+    ///
     /// Best-effort and never-raising: a removal that fails is logged at `warn`
     /// and the rest of the cleanup proceeds. Consuming `self` is the point —
     /// the handle points at paths that no longer exist, so any use after a
@@ -1032,11 +1036,20 @@ impl Gremlin {
     /// is removed *last*, so a partial cleanup never strands a workspace or
     /// scratch directory that nothing can trace back to a gremlin: if
     /// `state.json` is gone, every other asset is already gone.
-    pub fn clean(self, remove_state_dir: bool) {
+    pub async fn clean(self, remove_state_dir: bool) {
         // Mark closed before touching anything: a run that vanished without a
         // marker reads as a crash, not an intentional cleanup.
         if let Err(error) = self.state.open_blob("closed", state::BlobMode::Write) {
             log::warn!("clean: could not touch closed marker: {error}");
+        }
+
+        // Run clean commands before removing workspace/scratch.
+        // Only when the definition is loaded (not a stub) and has commands.
+        if !self.definition.is_stub() {
+            let clean_cmds = self.definition.clean_cmds();
+            if !clean_cmds.is_empty() {
+                self.run_clean_cmds(clean_cmds).await;
+            }
         }
 
         self.clean_workspace();
@@ -1048,6 +1061,112 @@ impl Gremlin {
                     "clean: could not remove state dir {}: {error}",
                     self.state.state_dir().display()
                 );
+            }
+        }
+    }
+
+    /// Run clean commands with `{key}` interpolation against artifact contents.
+    /// Best-effort: failures are logged and teardown continues.
+    async fn run_clean_cmds(&self, cmds: &[String]) {
+        let cwd = self.cwd();
+
+        // Build substitution env: resolve {key} → artifact content.
+        let mut substitution_env: HashMap<String, String> = HashMap::new();
+        for cmd in cmds {
+            let mut rest = cmd.as_str();
+            while let Some(open) = rest.find('{') {
+                rest = &rest[open + 1..];
+                if let Some(close) = rest.find('}') {
+                    let key = &rest[..close];
+                    rest = &rest[close + 1..];
+                    // Skip ${VAR} — shell variables pass through unchanged.
+                    if open > 0 && cmd.as_bytes()[open - 1] == b'$' {
+                        continue;
+                    }
+                    if substitution_env.contains_key(key) {
+                        continue;
+                    }
+                    let uri_str = format!("artifact://{key}");
+                    match self.state.content(&uri_str, None).await {
+                        Ok(content) => {
+                            let trimmed = content.trim_end_matches('\n').to_string();
+                            substitution_env.insert(key.to_string(), trimmed);
+                        }
+                        Err(_) => {
+                            // Unknown key — leave as-is.
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Build env with system vars.
+        let system = system_env(
+            self.id.as_str(),
+            &self.project_root,
+            self.workdir.as_ref().map(|w| w.path()),
+            self.scratch_dir.path(),
+        );
+        let mut env: HashMap<String, String> = if self.env.is_empty() {
+            self.runtime_config.base_process_env.clone()
+        } else {
+            self.env.clone()
+        };
+        env.extend(system);
+        for (k, v) in &substitution_env {
+            env.insert(format!("GREMLINS_{}", k.to_uppercase()), v.clone());
+        }
+
+        // Substitute {key} → ${GREMLINS_KEY} in commands.
+        let substituted: Vec<String> = cmds
+            .iter()
+            .map(|cmd| {
+                let mut s = cmd.clone();
+                for key in substitution_env.keys() {
+                    let env_key = format!("GREMLINS_{}", key.to_uppercase());
+                    // Only replace bare {key}, not ${key}
+                    let pattern = format!("{{{key}}}");
+                    s = s.replace(&pattern, &format!("${{{env_key}}}"));
+                }
+                s
+            })
+            .collect();
+
+        let log_name = "clean";
+        let log_writer = self
+            .state
+            .open_blob("command_logs/clean.log", state::BlobMode::Append)
+            .ok()
+            .map(|b| b as Box<dyn std::io::Write + Send>);
+        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+
+        let result = run_logged_commands(
+            log_name,
+            &substituted,
+            &cwd,
+            &env,
+            &HashMap::new(),
+            None,
+            log_writer,
+            &log_tx,
+        )
+        .await;
+
+        match result {
+            Ok(r) if r.rc == 0 => {
+                log::info!("clean: commands completed successfully");
+            }
+            Ok(r) => {
+                log::warn!(
+                    "clean: commands exited with {} (continuing teardown): {}",
+                    r.rc,
+                    crate::executor::run::truncate(&r.output, 500),
+                );
+            }
+            Err(e) => {
+                log::warn!("clean: commands failed (continuing teardown): {e}");
             }
         }
     }
@@ -1298,7 +1417,7 @@ mod tests {
     use super::*;
 
     use crate::executor::state::FileSystemStateStore;
-    use crate::test_support::{with_sandbox, EnvGuard, GitSandbox};
+    use crate::test_support::{EnvGuard, GitSandbox};
 
     #[test]
     fn gremlin_is_send_sync() {
@@ -1575,8 +1694,8 @@ mod tests {
         assert_eq!(opened.env["GREMLINS_GREMLIN_ID"], id);
     }
 
-    #[test]
-    fn from_then_clean_needs_no_run() {
+    #[tokio::test]
+    async fn from_then_clean_needs_no_run() {
         let fx = GitSandbox::new();
         if fx.is_skipped() {
             eprintln!("git is unavailable; skipping from_then_clean_needs_no_run");
@@ -1606,7 +1725,7 @@ mod tests {
         // definition was never loaded, and `clean` must not need it.
         let handle = Gremlin::from(&id).unwrap();
         assert!(handle.definition.is_stub());
-        handle.clean(true);
+        handle.clean(true).await;
 
         assert!(!fx.join("state").join(&id).exists());
         assert!(!workdir.exists(), "workspace should be gone");
@@ -1825,111 +1944,112 @@ mod tests {
         }
     }
 
-    #[test]
-    fn clean_true_removes_everything() {
-        with_sandbox(None, |sandbox| {
-            let id = "gr-clean";
-            let state_dir = sandbox.join("state").join(id);
-            let scratch_dir = sandbox.join("scratch").join(id);
-            let artifact_dir = state_dir.join("artifacts");
-            let workdir = sandbox.join("workspace");
-            std::fs::create_dir_all(&artifact_dir).unwrap();
-            std::fs::create_dir_all(&state_dir).unwrap();
-            std::fs::write(state_dir.join("state.json"), "{}").unwrap();
-            std::fs::create_dir_all(&workdir).unwrap();
-            std::fs::write(workdir.join("file"), "data").unwrap();
+    #[tokio::test]
+    async fn clean_true_removes_everything() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let id = "gr-clean";
+        let state_dir = sandbox.path().join("state").join(id);
+        let scratch_dir = sandbox.path().join("scratch").join(id);
+        let artifact_dir = state_dir.join("artifacts");
+        let workdir = sandbox.path().join("workspace");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(workdir.join("file"), "data").unwrap();
 
-            test_gremlin(
-                id,
-                state_dir.clone(),
-                artifact_dir.clone(),
-                Some(workdir.clone()),
-                PathBuf::new(),
-            )
-            .clean(true);
+        test_gremlin(
+            id,
+            state_dir.clone(),
+            artifact_dir.clone(),
+            Some(workdir.clone()),
+            PathBuf::new(),
+        )
+        .clean(true)
+        .await;
 
-            assert!(!state_dir.exists(), "state dir should be gone");
-            assert!(!scratch_dir.exists(), "scratch dir should be gone");
-            assert!(!workdir.exists(), "workspace should be gone");
-        });
+        assert!(!state_dir.exists(), "state dir should be gone");
+        assert!(!scratch_dir.exists(), "scratch dir should be gone");
+        assert!(!workdir.exists(), "workspace should be gone");
     }
 
-    #[test]
-    fn clean_false_leaves_state_dir_with_closed_marker() {
-        with_sandbox(None, |sandbox| {
-            let id = "gr-clean-keep";
-            let state_dir = sandbox.join("state").join(id);
-            let scratch_dir = sandbox.join("scratch").join(id);
-            let artifact_dir = state_dir.join("artifacts");
-            let workdir = sandbox.join("workspace-keep");
-            std::fs::create_dir_all(&artifact_dir).unwrap();
-            std::fs::create_dir_all(&state_dir).unwrap();
-            std::fs::write(state_dir.join("state.json"), "{}").unwrap();
-            std::fs::create_dir_all(&workdir).unwrap();
+    #[tokio::test]
+    async fn clean_false_leaves_state_dir_with_closed_marker() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let id = "gr-clean-keep";
+        let state_dir = sandbox.path().join("state").join(id);
+        let scratch_dir = sandbox.path().join("scratch").join(id);
+        let artifact_dir = state_dir.join("artifacts");
+        let workdir = sandbox.path().join("workspace-keep");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
 
-            test_gremlin(
-                id,
-                state_dir.clone(),
-                artifact_dir.clone(),
-                Some(workdir.clone()),
-                PathBuf::new(),
-            )
-            .clean(false);
+        test_gremlin(
+            id,
+            state_dir.clone(),
+            artifact_dir.clone(),
+            Some(workdir.clone()),
+            PathBuf::new(),
+        )
+        .clean(false)
+        .await;
 
-            assert!(!workdir.exists(), "workspace should be gone");
-            assert!(!scratch_dir.exists(), "scratch dir should be gone");
-            assert!(state_dir.is_dir(), "state dir should remain");
-            assert!(
-                state_dir.join("closed").is_file(),
-                "closed marker should be present"
-            );
-        });
+        assert!(!workdir.exists(), "workspace should be gone");
+        assert!(!scratch_dir.exists(), "scratch dir should be gone");
+        assert!(state_dir.is_dir(), "state dir should remain");
+        assert!(
+            state_dir.join("closed").is_file(),
+            "closed marker should be present"
+        );
     }
 
-    #[test]
-    fn clean_succeeds_without_a_workspace() {
-        with_sandbox(None, |sandbox| {
-            let id = "gr-clean-nowt";
-            let state_dir = sandbox.join("state").join(id);
-            let artifact_dir = state_dir.join("artifacts");
-            std::fs::create_dir_all(&state_dir).unwrap();
-            std::fs::create_dir_all(&artifact_dir).unwrap();
+    #[tokio::test]
+    async fn clean_succeeds_without_a_workspace() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let id = "gr-clean-nowt";
+        let state_dir = sandbox.path().join("state").join(id);
+        let artifact_dir = state_dir.join("artifacts");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&artifact_dir).unwrap();
 
-            test_gremlin(id, state_dir.clone(), artifact_dir, None, PathBuf::new()).clean(true);
+        test_gremlin(id, state_dir.clone(), artifact_dir, None, PathBuf::new())
+            .clean(true)
+            .await;
 
-            assert!(!state_dir.exists());
-            assert!(!sandbox.join("scratch").join(id).exists());
-        });
+        assert!(!state_dir.exists());
+        assert!(!sandbox.path().join("scratch").join(id).exists());
     }
 
-    #[test]
-    fn clean_falls_back_to_rmtree_outside_a_git_repo() {
-        with_sandbox(None, |sandbox| {
-            let id = "gr-clean-nogit";
-            let state_dir = sandbox.join("state").join(id);
-            let artifact_dir = state_dir.join("artifacts");
-            std::fs::create_dir_all(&state_dir).unwrap();
-            std::fs::create_dir_all(&artifact_dir).unwrap();
+    #[tokio::test]
+    async fn clean_falls_back_to_rmtree_outside_a_git_repo() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let id = "gr-clean-nogit";
+        let state_dir = sandbox.path().join("state").join(id);
+        let artifact_dir = state_dir.join("artifacts");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&artifact_dir).unwrap();
 
-            // A workspace directory that is not a git repository: the
-            // rmtree fallback is what actually deletes the directory.
-            let workdir = sandbox.join("workspace-nogit");
-            std::fs::create_dir_all(&workdir).unwrap();
-            std::fs::write(workdir.join("file"), "data").unwrap();
-            let project_root = sandbox.join("not-a-repo");
-            std::fs::create_dir_all(&project_root).unwrap();
+        // A workspace directory that is not a git repository: the
+        // rmtree fallback is what actually deletes the directory.
+        let workdir = sandbox.path().join("workspace-nogit");
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(workdir.join("file"), "data").unwrap();
+        let project_root = sandbox.path().join("not-a-repo");
+        std::fs::create_dir_all(&project_root).unwrap();
 
-            test_gremlin(
-                id,
-                state_dir,
-                artifact_dir,
-                Some(workdir.clone()),
-                project_root,
-            )
-            .clean(true);
+        test_gremlin(
+            id,
+            state_dir,
+            artifact_dir,
+            Some(workdir.clone()),
+            project_root,
+        )
+        .clean(true)
+        .await;
 
-            assert!(!workdir.exists(), "rmtree fallback should remove it");
-        });
+        assert!(!workdir.exists(), "rmtree fallback should remove it");
     }
 
     // --- hermetic snapshot resume ---
@@ -2228,8 +2348,8 @@ stages:
         assert!(result.is_err(), "from() should fail for ephemeral gremlin");
     }
 
-    #[test]
-    fn ephemeral_clean_is_noop() {
+    #[tokio::test]
+    async fn ephemeral_clean_is_noop() {
         let fx = GitSandbox::new();
         if fx.is_skipped() {
             eprintln!("git is unavailable; skipping ephemeral_clean_is_noop");
@@ -2255,7 +2375,7 @@ stages:
 
         // clean() on an ephemeral gremlin is harmless — TempDir destructor
         // handles actual cleanup.
-        gremlin.clean(true);
+        gremlin.clean(true).await;
 
         // After clean(true), the paths may or may not exist (remove_dir_all
         // on a TempDir path is harmless). The key property is that clean()

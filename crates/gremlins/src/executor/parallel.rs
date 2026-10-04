@@ -172,7 +172,7 @@ pub(crate) async fn run_parallel(
             .await
         {
             child_gremlin.state.write_terminal_state(1);
-            child_gremlin.clean(false);
+            child_gremlin.clean(false).await;
             return Err(error);
         }
 
@@ -520,9 +520,9 @@ pub(crate) async fn run_parallel(
     for outcome in child_results {
         let child_name = &outcome.child_name;
         if group_error.is_none() {
-            cleanup_child_fully(child_name, outcome.gremlin);
+            cleanup_child_fully(child_name, outcome.gremlin).await;
         } else {
-            cleanup_child_workspace(child_name, outcome.gremlin);
+            cleanup_child_workspace(child_name, outcome.gremlin).await;
         }
     }
 
@@ -596,9 +596,9 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
 }
 
 /// Remove everything a child owns (state, scratch, workspace).
-fn cleanup_child_fully(child_name: &str, gremlin: Option<Gremlin>) {
+async fn cleanup_child_fully(child_name: &str, gremlin: Option<Gremlin>) {
     match gremlin {
-        Some(child) => child.clean(true),
+        Some(child) => child.clean(true).await,
         None => {
             log::debug!("parallel group: child {child_name} left nothing to clean (no gremlin)")
         }
@@ -606,9 +606,9 @@ fn cleanup_child_fully(child_name: &str, gremlin: Option<Gremlin>) {
 }
 
 /// Remove only the child's workspace, preserving state for forensics.
-fn cleanup_child_workspace(child_name: &str, gremlin: Option<Gremlin>) {
+async fn cleanup_child_workspace(child_name: &str, gremlin: Option<Gremlin>) {
     match gremlin {
-        Some(child) => child.clean(false),
+        Some(child) => child.clean(false).await,
         None => {
             log::debug!("parallel group: child {child_name} left nothing to clean (no gremlin)")
         }
@@ -638,6 +638,7 @@ mod tests {
             Bootstrap::default(),
             vec![],
             None,
+            vec![],
             serde_yaml::Value::Null,
         );
         def.convert_stage(stages[0].clone())
@@ -672,6 +673,7 @@ mod tests {
                 Bootstrap::default(),
                 stages.clone(),
                 None,
+                vec![],
                 serde_yaml::Value::Null,
             )),
             workdir: None,

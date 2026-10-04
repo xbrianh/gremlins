@@ -159,6 +159,12 @@ pub trait GremlinDefinition: Send + Sync {
     /// The optional `land` stage — always an exec stage named `land`.
     fn land(&self) -> Option<ExecutorStage>;
 
+    /// Clean commands to run during `gremlins clean`, before workspace/scratch
+    /// removal. Defaults to an empty slice.
+    fn clean_cmds(&self) -> &[String] {
+        &[]
+    }
+
     /// Whether the cursor is at position 0 (a fresh start, not a resume).
     fn is_at_start(&self) -> bool;
 
@@ -232,6 +238,10 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
 
     fn land(&self) -> Option<ExecutorStage> {
         self.as_ref().land()
+    }
+
+    fn clean_cmds(&self) -> &[String] {
+        self.as_ref().clean_cmds()
     }
 
     fn is_at_start(&self) -> bool {

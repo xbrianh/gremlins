@@ -134,6 +134,7 @@ impl Sandbox {
     }
 
     /// A path inside the sandbox, for asserting where a run put its files.
+    #[allow(dead_code)]
     pub(crate) fn join(&self, sub: impl AsRef<Path>) -> PathBuf {
         self.dir.path().join(sub)
     }

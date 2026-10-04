@@ -33,13 +33,13 @@ land:
   interpolation:
     inputs:
       message: artifact://commit_message.txt
-  options:
-    cmds:
-      - WORKTREE_HEAD=$(git -C "$GREMLIN_WORKDIR" rev-parse HEAD)
-      - git merge --squash "$WORKTREE_HEAD"
-      - 'git diff --cached --quiet || git commit -F "{message}"'
-      - git worktree remove --force "$GREMLIN_WORKDIR" || true
-      - git worktree prune
+  land_cmds:
+    - WORKTREE_HEAD=$(git -C "$GREMLIN_WORKDIR" rev-parse HEAD)
+    - git merge --squash "$WORKTREE_HEAD"
+    - 'git diff --cached --quiet || git commit -F "{message}"'
+  clean_cmds:
+    - git worktree remove --force "$GREMLIN_WORKDIR" || true
+    - git worktree prune
 
 stage-definitions:
   check-and-fix:
