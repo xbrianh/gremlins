@@ -4,7 +4,7 @@ stages:
     interpolation:
       inputs:
         prev_branch_path: "artifact://pr-branch.txt?"
-        base_ref: content("artifact://base_ref")
+        base_ref: content("artifact://base_ref")?
       outputs:
         base_ref_to_open_pr: "artifact://pr-base-ref.txt"
     options:
@@ -12,7 +12,12 @@ stages:
         - |
           prev_branch=""
           if [ -n "{prev_branch_path}" ] && [ -f "{prev_branch_path}" ]; then prev_branch=$(cat "{prev_branch_path}"); fi
-          printf '%s' "${prev_branch:-{base_ref}}" > "{base_ref_to_open_pr}"
+          base_ref="{base_ref}"
+          if [ -z "$base_ref" ]; then
+            base_ref=$(git -C "$GREMLINS_PROJECT_ROOT" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/origin/||')
+            [ -z "$base_ref" ] && base_ref="main"
+          fi
+          printf '%s' "${prev_branch:-$base_ref}" > "{base_ref_to_open_pr}"
 
   - name: diff-summary
     type: exec
