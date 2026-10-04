@@ -38,9 +38,10 @@ use crate::clients::agent_loop::CancelToken;
 use crate::clients::client::Client;
 use crate::clients::interactive::{InteractiveHandle, InteractiveSession};
 use crate::config;
+use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::core::{discovery, env_file};
 use crate::definition::{GremlinDefinition, StaticDefinition};
-use crate::executor::state::{self, StateData, StateStore};
+use crate::executor::state::{self, BlobMode, StateData, StateStore};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
 
@@ -808,7 +809,7 @@ impl Gremlin {
     ///   as bootstrap's `launch_cmds`), with additional vars `{child_key}`,
     ///   `{child_name}`, `{child_id}`, `{parent_id}`, `{group_name}`, and env
     ///   vars `GREMLIN_WORKDIR` (parent) and `GREMLIN_FORK_WORKDIR` (child).
-    pub fn run_fork_cmds(
+    pub async fn run_fork_cmds(
         &self,
         child_id: &str,
         child_key: &str,
@@ -853,37 +854,92 @@ impl Gremlin {
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let child_workdir_str = child_workdir.to_string_lossy().into_owned();
+                let fork_cwd = self
+                    .workdir
+                    .as_deref()
+                    .unwrap_or(&self.project_root)
+                    .to_path_buf();
 
-                let mut values: HashMap<String, String> = HashMap::new();
-                values.insert("child_key".to_string(), child_key.to_string());
-                values.insert("child_name".to_string(), child_key.to_string());
-                values.insert("child_id".to_string(), child_id.to_string());
-                values.insert("parent_id".to_string(), parent_id.to_string());
-                values.insert("group_name".to_string(), group_name.to_string());
+                // Build env and substitution_env with GREMLINS_<KEY> entries
+                // so {key} tokens resolve via ${} references in the child
+                // shell — the same pattern exec stages use.
+                let fork_vars: [(&str, &str); 5] = [
+                    ("child_key", child_key),
+                    ("child_name", child_key),
+                    ("child_id", child_id),
+                    ("parent_id", parent_id),
+                    ("group_name", group_name),
+                ];
 
-                for cmd in cmds {
-                    let substituted = crate::schemas::bootstrap::substitute_bootstrap_vars(
-                        cmd,
-                        &child_workdir,
-                        &values,
-                    );
-                    let fork_cwd = self.workdir.as_deref().unwrap_or(&self.project_root);
-                    let status = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&substituted)
-                        .current_dir(fork_cwd)
-                        .env("GREMLIN_WORKDIR", &parent_workdir)
-                        .env("GREMLIN_FORK_WORKDIR", &child_workdir_str)
-                        .status()
-                        .map_err(|e| {
-                            RunError::Message(format!("failed to run fork command: {e}"))
-                        })?;
-                    if !status.success() {
+                let mut env: HashMap<String, String> = self.env.clone();
+                env.insert("GREMLIN_WORKDIR".to_string(), parent_workdir);
+                env.insert(
+                    "GREMLIN_FORK_WORKDIR".to_string(),
+                    child_workdir_str.clone(),
+                );
+
+                let mut substitution_env: HashMap<String, String> = HashMap::new();
+                for (key, value) in &fork_vars {
+                    let env_key = format!("GREMLINS_{}", key.to_uppercase());
+                    env.insert(env_key.clone(), value.to_string());
+                    substitution_env.insert(env_key, value.to_string());
+                }
+
+                // {cwd} from the old substitute_bootstrap_vars — child workspace.
+                {
+                    let cwd_key = "GREMLINS_CWD".to_string();
+                    env.insert(cwd_key.clone(), child_workdir_str.clone());
+                    substitution_env.insert(cwd_key, child_workdir_str.clone());
+                }
+
+                // Replace {key} with ${GREMLINS_KEY} — values travel through
+                // the environment, never inline in the shell command.
+                let substituted_cmds: Vec<String> = cmds
+                    .iter()
+                    .map(|cmd| {
+                        let mut s = cmd.clone();
+                        for (key, _) in &fork_vars {
+                            let env_key = format!("GREMLINS_{}", key.to_uppercase());
+                            s = s.replace(&format!("{{{key}}}"), &format!("${{{env_key}}}"));
+                        }
+                        s = s.replace("{cwd}", "${GREMLINS_CWD}");
+                        s
+                    })
+                    .collect();
+
+                let log_name = format!("fork-{child_key}");
+                let safe_name = sanitize_log_filename(child_key);
+                let blob_name = format!("command_logs/fork-{safe_name}.log");
+                let log_writer = self
+                    .state
+                    .open_blob(&blob_name, BlobMode::Append)
+                    .ok()
+                    .map(|b| b as Box<dyn std::io::Write + Send>);
+                let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+
+                let result = run_logged_commands(
+                    &log_name,
+                    &substituted_cmds,
+                    &fork_cwd,
+                    &env,
+                    &substitution_env,
+                    None,
+                    log_writer,
+                    &log_tx,
+                )
+                .await;
+
+                match result {
+                    Ok(r) if r.rc == 0 => {}
+                    Ok(r) => {
                         return Err(RunError::Message(format!(
-                            "fork command '{}' failed with exit code {}",
-                            cmd,
-                            status.code().unwrap_or(-1)
+                            "fork command(s) failed with exit code {}: {}",
+                            r.rc,
+                            crate::executor::run::truncate(&r.output, 500),
                         )));
+                    }
+                    Err(e) => {
+                        return Err(RunError::Message(format!("fork command(s) failed: {e}",)));
                     }
                 }
             }

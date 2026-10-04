@@ -11,8 +11,10 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc::UnboundedSender;
 
 use tokio::io::AsyncReadExt;
 
@@ -453,7 +455,7 @@ pub async fn run_shell_async(
     cwd: Option<&Path>,
     env: Option<&HashMap<String, String>>,
     timeout: Option<f64>,
-    stream_path: Option<&Path>,
+    stream_writer: Option<Arc<std::sync::Mutex<Box<dyn io::Write + Send>>>>,
 ) -> Result<ProcResult, ProcError> {
     if shell_cmd.is_empty() {
         return Err(ProcError::EmptyCommand);
@@ -500,36 +502,21 @@ pub async fn run_shell_async(
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
 
-    let stream_path_stdout = stream_path.map(|p| p.to_path_buf());
-    let stream_path_stderr = stream_path.map(|p| p.to_path_buf());
+    let sw_stdout = stream_writer.clone();
+    let sw_stderr = stream_writer.clone();
 
     let stdout_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
-        let mut stream_file = stream_path_stdout.as_ref().and_then(|p| {
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-            {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    log::warn!(
-                        "run_shell_async: failed to open stream file {}: {e}",
-                        p.display()
-                    );
-                    None
-                }
-            }
-        });
         loop {
             match stdout.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
-                    if let Some(ref mut f) = stream_file {
-                        let _ = f.write_all(&chunk[..n]);
-                        let _ = f.flush();
+                    if let Some(ref w) = sw_stdout {
+                        let mut g = w.lock().unwrap();
+                        let _ = g.write_all(&chunk[..n]);
+                        let _ = g.flush();
                     }
                 }
                 Err(_) => break,
@@ -541,30 +528,15 @@ pub async fn run_shell_async(
     let stderr_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
-        let mut stream_file = stream_path_stderr.as_ref().and_then(|p| {
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-            {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    log::warn!(
-                        "run_shell_async: failed to open stream file {}: {e}",
-                        p.display()
-                    );
-                    None
-                }
-            }
-        });
         loop {
             match stderr.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
-                    if let Some(ref mut f) = stream_file {
-                        let _ = f.write_all(&chunk[..n]);
-                        let _ = f.flush();
+                    if let Some(ref w) = sw_stderr {
+                        let mut g = w.lock().unwrap();
+                        let _ = g.write_all(&chunk[..n]);
+                        let _ = g.flush();
                     }
                 }
                 Err(_) => break,
@@ -608,13 +580,12 @@ pub async fn run_shell_async(
                 #[cfg(unix)]
                 let ps_snapshot = {
                     let tree = capture_process_tree(pid);
-                    if let Some(sp) = stream_path {
+                    if let Some(ref w) = stream_writer {
                         let footer =
                             format!("\n--- process tree at timeout ({elapsed:.1}s) ---\n{tree}");
-                        let _ = std::fs::OpenOptions::new()
-                            .append(true)
-                            .open(sp)
-                            .and_then(|mut f| f.write_all(footer.as_bytes()));
+                        let mut g = w.lock().unwrap();
+                        let _ = g.write_all(footer.as_bytes());
+                        let _ = g.flush();
                     }
                     tree
                 };
@@ -688,6 +659,276 @@ pub async fn run_shell_async(
         stdout: stdout_buf,
         stderr: stderr_buf,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Central command execution: header + instrumented script + footer
+// ---------------------------------------------------------------------------
+
+/// Return type for `run_logged_commands`.
+#[derive(Debug)]
+pub struct ShellResult {
+    pub output: String,
+    pub rc: i32,
+}
+
+/// Run a set of shell commands as a single instrumented script, streaming
+/// stdout/stderr to `stream_path` with a header and footer.
+///
+/// Empty `cmds` is a no-op returning `ShellResult { output: "", rc: 0 }`.
+/// Header and footer writes are best-effort: a failed write logs a warning
+/// and the command still runs.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_logged_commands(
+    log_name: &str,
+    cmds: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    substitution_env: &HashMap<String, String>,
+    timeout: Option<f64>,
+    log_writer: Option<Box<dyn io::Write + Send>>,
+    log_tx: &Option<UnboundedSender<String>>,
+) -> Result<ShellResult, ProcError> {
+    if cmds.is_empty() {
+        return Ok(ShellResult {
+            output: String::new(),
+            rc: 0,
+        });
+    }
+
+    if let Some(t) = timeout {
+        if !t.is_finite() || t < 0.0 || t > Duration::MAX.as_secs_f64() {
+            return Err(ProcError::InvalidTimeout(t));
+        }
+    }
+
+    let t0 = Instant::now();
+
+    // Wrap in Arc<Mutex<…>> so the same handle is shared by header,
+    // both streaming tasks, and footer.
+    let shared = log_writer.map(|w| Arc::new(Mutex::new(w)));
+
+    // Write header (best-effort) through the shared handle.
+    if let Some(ref m) = shared {
+        let mut g = m.lock().unwrap();
+        write_log_header(
+            &mut *g,
+            log_name,
+            cmds,
+            cwd,
+            env,
+            substitution_env,
+            timeout,
+            log_tx,
+        );
+    }
+
+    // Build instrumented script.
+    let script = build_instrumented_script(cmds, substitution_env);
+
+    // Run the script — streaming output goes through the same handle.
+    let result = run_shell_async(&script, Some(cwd), Some(env), timeout, shared.clone()).await;
+
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    match result {
+        Ok(r) => {
+            let combined_output = format!(
+                "{}{}",
+                String::from_utf8_lossy(&r.stdout),
+                String::from_utf8_lossy(&r.stderr),
+            );
+            if let Some(ref m) = shared {
+                let mut g = m.lock().unwrap();
+                write_log_footer(&mut *g, r.returncode, elapsed, log_tx);
+            }
+            Ok(ShellResult {
+                output: combined_output.trim().to_string(),
+                rc: r.returncode,
+            })
+        }
+        Err(e) => {
+            if let Some(ref m) = shared {
+                let mut g = m.lock().unwrap();
+                write_log_footer(&mut *g, -1, elapsed, log_tx);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Write the log header: metadata, env vars, and command listing.
+#[allow(clippy::too_many_arguments)]
+fn write_log_header(
+    writer: &mut dyn io::Write,
+    log_name: &str,
+    cmds: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    substitution_env: &HashMap<String, String>,
+    timeout: Option<f64>,
+    log_tx: &Option<UnboundedSender<String>>,
+) {
+    let _ = writeln!(writer, "=== {log_name} ===");
+    let _ = writeln!(writer, "cwd: {}", cwd.display());
+    if let Some(t) = timeout {
+        let _ = writeln!(writer, "timeout: {t}s");
+    }
+    let _ = writeln!(writer, "cmds: {}", cmds.len());
+
+    // Environment (compact one-per-line).
+    if !env.is_empty() {
+        let _ = writeln!(writer, "env:");
+        let mut keys: Vec<&String> = env.keys().collect();
+        keys.sort();
+        for k in keys {
+            let val = if is_sensitive_env_key(k) {
+                "[redacted]"
+            } else {
+                env[k].as_str()
+            };
+            let _ = writeln!(writer, "  {k}={}", val);
+        }
+    }
+
+    // Substitution env.
+    if !substitution_env.is_empty() {
+        let _ = writeln!(writer, "substitution_env:");
+        let mut keys: Vec<&String> = substitution_env.keys().collect();
+        keys.sort();
+        for k in keys {
+            let val = if is_sensitive_env_key(k) {
+                "[redacted]"
+            } else {
+                substitution_env[k].as_str()
+            };
+            let _ = writeln!(writer, "  {k}={}", val);
+        }
+    }
+
+    // Commands: original + resolved.
+    let _ = writeln!(writer, "commands:");
+    for cmd in cmds {
+        let _ = writeln!(writer, "  original: {cmd}");
+        let resolved = resolve_cmd_for_log(cmd, substitution_env);
+        let _ = writeln!(writer, "  resolved: {resolved}");
+    }
+
+    let _ = writer.flush();
+
+    if let Some(ref tx) = log_tx {
+        let _ = tx.send(format!("{log_name}: streaming output started"));
+    }
+}
+
+/// Write the log footer with exit code and duration.
+fn write_log_footer(
+    writer: &mut dyn io::Write,
+    rc: i32,
+    elapsed: f64,
+    log_tx: &Option<UnboundedSender<String>>,
+) {
+    let _ = writeln!(writer, "--- exit: {rc} (duration: {elapsed:.1}s) ---");
+    let _ = writer.flush();
+
+    if let Some(ref tx) = log_tx {
+        let _ = tx.send(format!("done rc={rc} elapsed={elapsed:.1}s"));
+    }
+}
+
+/// Sanitize a name for use as a log filename component.
+///
+/// Replaces path separators, `..`, and other dangerous characters with `_`.
+/// The result is safe to embed in a file path without escaping the parent
+/// directory.
+pub(crate) fn sanitize_log_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' => '_',
+            _ if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' => c,
+            _ => '_',
+        })
+        .collect::<String>()
+        .replace("..", "__")
+}
+
+/// Returns true for environment variable names that commonly carry secrets.
+fn is_sensitive_env_key(key: &str) -> bool {
+    let upper = key.to_uppercase();
+    upper.contains("TOKEN")
+        || upper.contains("KEY")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("PASSWD")
+        || upper.contains("CREDENTIAL")
+        || upper.contains("AUTH")
+}
+
+/// Resolve `${VAR}` references in `s` using the substitution env.
+/// `${GREMLINS_FOO}` → the value of `GREMLINS_FOO` in the env map;
+/// unknown variables are left as-is.
+fn resolve_cmd_for_log(s: &str, env: &HashMap<String, String>) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(dollar) = rest.find("${") {
+        result.push_str(&rest[..dollar]);
+        rest = &rest[dollar + 2..];
+        let close = rest.find('}');
+        match close {
+            Some(end) => {
+                let var = &rest[..end];
+                if let Some(val) = env.get(var) {
+                    result.push_str(val);
+                } else {
+                    result.push_str("${");
+                    result.push_str(&rest[..end + 1]);
+                }
+                rest = &rest[end + 1..];
+            }
+            None => {
+                result.push_str("${");
+                break;
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+/// Build a single bash script that executes every command in `cmds` within one
+/// shell session, preserving shell state (variables, `cd`, functions, `umask`,
+/// etc.) across command boundaries. Each command is wrapped with `printf`
+/// header/footer markers so the stream log shows which command produced which
+/// output and which command failed or timed out.
+///
+/// Uses the resolved (substituted) form only in `printf` markers for logging;
+/// executes the original `cmd` so `${GREMLINS_*}` vars are expanded by Bash
+/// from the environment rather than interpolated inline.
+///
+/// The script stops on the first non-zero exit (mirroring `&&` semantics).
+fn build_instrumented_script(
+    cmds: &[String],
+    substitution_env: &HashMap<String, String>,
+) -> String {
+    let total = cmds.len();
+    let mut script = String::with_capacity(cmds.iter().map(|c| c.len() + 80).sum());
+    script.push_str("set +e\n");
+    for (i, cmd) in cmds.iter().enumerate() {
+        let resolved = resolve_cmd_for_log(cmd, substitution_env);
+        let escaped = resolved.replace('\'', "'\\''");
+        script.push_str(&format!(
+            "printf -- '\\n--- cmd {i1}/{total}: %s ---\\n' '{escaped}'\n",
+            i1 = i + 1,
+        ));
+        script.push_str(cmd);
+        script.push('\n');
+        script.push_str(&format!(
+            "_rc=$?\nprintf -- '--- cmd {i1}/{total} exit: %d ---\\n' \"$_rc\"\n",
+            i1 = i + 1,
+        ));
+        script.push_str("if [ \"$_rc\" -ne 0 ]; then exit \"$_rc\"; fi\n");
+    }
+    script
 }
 
 /// Capture a human-readable snapshot of the process tree rooted at `pid`
@@ -2355,9 +2596,19 @@ mod tests {
         // marker2.  This verifies that chunks are flushed to disk *during*
         // execution, not just buffered until the command completes.
         let cmd = "echo marker1 && sleep 2 && echo marker2";
-        let log_path_clone = log_path.clone();
+        let _log_path_clone = log_path.clone();
+        let stream_writer = {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .unwrap();
+            Some(Arc::new(std::sync::Mutex::new(
+                Box::new(f) as Box<dyn io::Write + Send>
+            )))
+        };
         let handle = tokio::spawn(async move {
-            run_shell_async(cmd, None, None, None, Some(&log_path_clone))
+            run_shell_async(cmd, None, None, None, stream_writer)
                 .await
                 .unwrap()
         });

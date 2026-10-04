@@ -26,9 +26,10 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::artifacts::uri::Uri;
-use crate::core::proc::run_shell_async;
+use crate::core::proc::{run_logged_commands, ProcError};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::truncate;
+use crate::executor::state::BlobMode;
 use crate::executor::RunError;
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
@@ -51,8 +52,10 @@ static GREMLINS_CMD_RE: LazyLock<Regex> =
 /// Run `cmds` in `cwd` under `env`. A non-zero exit is a
 /// [`RunError::BootstrapFailed`].
 ///
-/// Blank lines are dropped and the rest joined with `&&`, so a multi-line
-/// bootstrap block is one shell invocation that stops at the first failure.
+/// Each command runs in one instrumented bash session so shell state
+/// (variables, `cd`, etc.) is preserved across command boundaries, and the
+/// script stops at the first failure (mirroring the old `&&` semantics).
+///
 /// `GREMLINS_BOOTSTRAP_CWD` is injected alongside the gremlin's resolved
 /// environment, so bootstrap sees the same system variables as every stage —
 /// plus the one variable that tells it where it is.
@@ -61,11 +64,12 @@ pub async fn run_bootstrap(
     cwd: &Path,
     env: &HashMap<String, String>,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    log_writer: Option<Box<dyn std::io::Write + Send>>,
 ) -> Result<(), RunError> {
-    let cmds: Vec<&str> = cmds
+    let cmds: Vec<String> = cmds
         .iter()
         .filter(|cmd| !cmd.trim().is_empty())
-        .map(|cmd| cmd.trim_end())
+        .map(|cmd| cmd.trim().to_string())
         .collect();
     if cmds.is_empty() {
         return Ok(());
@@ -85,31 +89,53 @@ pub async fn run_bootstrap(
         cwd.to_string_lossy().into_owned(),
     );
 
-    let result = run_shell_async(&cmds.join(" && "), Some(&cwd), Some(&env), None, None)
-        .await
-        .map_err(|error| RunError::BootstrapFailed {
+    let empty_env = HashMap::new();
+    let result = run_logged_commands(
+        "bootstrap",
+        &cmds,
+        &cwd,
+        &env,
+        &empty_env,
+        None,
+        log_writer,
+        log_tx,
+    )
+    .await;
+
+    match result {
+        Ok(r) if r.rc == 0 => {
+            send_log(log_tx, "bootstrap ok");
+            log::info!("bootstrap ok");
+            Ok(())
+        }
+        Ok(r) => {
+            let msg = format!(
+                "bootstrap failed (exit {}): {}",
+                r.rc,
+                truncate(&r.output, 2000)
+            );
+            send_log(log_tx, &msg);
+            log::error!("{msg}");
+            Err(RunError::BootstrapFailed {
+                exit_code: r.rc,
+                stderr: truncate(&r.output, 500),
+            })
+        }
+        Err(ProcError::CalledProcessError(rc, stdout, stderr)) => {
+            let detail = failure_detail(&stdout, &stderr);
+            let msg = format!("bootstrap failed (exit {rc}): {}", truncate(&detail, 2000));
+            send_log(log_tx, &msg);
+            log::error!("{msg}");
+            Err(RunError::BootstrapFailed {
+                exit_code: rc,
+                stderr: truncate(&detail, 500),
+            })
+        }
+        Err(error) => Err(RunError::BootstrapFailed {
             exit_code: 1,
             stderr: error.to_string(),
-        })?;
-
-    if result.returncode != 0 {
-        let detail = failure_detail(&result.stdout, &result.stderr);
-        let msg = format!(
-            "bootstrap failed (exit {}): {}",
-            result.returncode,
-            truncate(&detail, 2000)
-        );
-        send_log(log_tx, &msg);
-        log::error!("{msg}");
-        return Err(RunError::BootstrapFailed {
-            exit_code: result.returncode,
-            stderr: truncate(&detail, 500),
-        });
+        }),
     }
-
-    send_log(log_tx, "bootstrap ok");
-    log::info!("bootstrap ok");
-    Ok(())
 }
 
 /// The failure text for a non-zero bootstrap exit.
@@ -349,12 +375,22 @@ pub async fn run_definition_bootstrap(
         }
 
         if !shell_cmds.is_empty() {
-            run_bootstrap(&shell_cmds, &cwd, &env, &log_tx).await?;
+            let log_writer = gremlin
+                .state
+                .open_blob("command_logs/bootstrap.log", BlobMode::Append)
+                .ok()
+                .map(|b| b as Box<dyn std::io::Write + Send>);
+            run_bootstrap(&shell_cmds, &cwd, &env, &log_tx, log_writer).await?;
         }
     }
 
     if !bootstrap.cmds.is_empty() {
-        run_bootstrap(&bootstrap.cmds, &cwd, &env, &log_tx).await?;
+        let log_writer = gremlin
+            .state
+            .open_blob("command_logs/bootstrap.log", BlobMode::Append)
+            .ok()
+            .map(|b| b as Box<dyn std::io::Write + Send>);
+        run_bootstrap(&bootstrap.cmds, &cwd, &env, &log_tx, log_writer).await?;
     }
 
     if !skip_launch && !bootstrap.cli_out.is_empty() {
@@ -543,9 +579,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
         let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
-        assert!(run_bootstrap(&[], dir.path(), &env, &log_tx).await.is_ok());
+        assert!(run_bootstrap(&[], dir.path(), &env, &log_tx, None)
+            .await
+            .is_ok());
         assert!(
-            run_bootstrap(&["   ".to_string()], dir.path(), &env, &log_tx)
+            run_bootstrap(&["   ".to_string()], dir.path(), &env, &log_tx, None)
                 .await
                 .is_ok()
         );
@@ -556,7 +594,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
         let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
-        let error = run_bootstrap(&["exit 7".to_string()], dir.path(), &env, &log_tx)
+        let error = run_bootstrap(&["exit 7".to_string()], dir.path(), &env, &log_tx, None)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -576,6 +614,7 @@ mod tests {
             dir.path(),
             &env,
             &log_tx,
+            None,
         )
         .await
         .unwrap_err();
@@ -592,6 +631,7 @@ mod tests {
             dir.path(),
             &env,
             &log_tx,
+            None,
         )
         .await
         .unwrap();
