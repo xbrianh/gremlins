@@ -230,7 +230,7 @@ pub async fn run_shell(
         env.insert(k.clone(), v.clone());
     }
 
-    let log_name = format!("exec-{}", &prepared.name);
+    let log_name = format!("exec-{}", prepared.name);
     let safe_name = crate::core::proc::sanitize_log_filename(&prepared.name);
     let blob_name = format!("command_logs/exec-{safe_name}.log");
     let log_writer = state
