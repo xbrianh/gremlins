@@ -26,7 +26,7 @@ use crate::definition::ErrorPolicy;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::stage_key;
-use crate::executor::state::{StateData, StateStore};
+use crate::executor::state::{BlobMode, StateData, StateStore};
 use crate::executor::supervisor::{self, LaunchResult, RunState};
 use crate::executor::RunError;
 
@@ -420,11 +420,13 @@ pub(crate) async fn run_parallel(
 
             let log_name = format!("join-{child_name}");
             let safe_name = sanitize_log_filename(child_name);
-            let stream_path = gremlin
+            let blob_name = format!("command_logs/join-{safe_name}.log");
+            let stream_path = gremlin.state.state_dir().join(&blob_name);
+            let log_writer = gremlin
                 .state
-                .state_dir()
-                .join("command_logs")
-                .join(format!("join-{safe_name}.log"));
+                .open_blob(&blob_name, BlobMode::Append)
+                .ok()
+                .map(|b| b as Box<dyn std::io::Write + Send>);
 
             let mut env: HashMap<String, String> = gremlin.env.clone();
             env.insert("GREMLIN_WORKDIR".to_string(), parent_workdir.clone());
@@ -440,6 +442,7 @@ pub(crate) async fn run_parallel(
                 &empty_subs,
                 None,
                 Some(&stream_path),
+                log_writer,
                 &log_tx,
                 false,
             )

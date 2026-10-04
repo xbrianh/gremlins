@@ -29,6 +29,7 @@ use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_logged_commands, ProcError};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::truncate;
+use crate::executor::state::BlobMode;
 use crate::executor::RunError;
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
@@ -64,6 +65,7 @@ pub async fn run_bootstrap(
     env: &HashMap<String, String>,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     state_dir: &Path,
+    log_writer: Option<Box<dyn std::io::Write + Send>>,
 ) -> Result<(), RunError> {
     let cmds: Vec<String> = cmds
         .iter()
@@ -99,6 +101,7 @@ pub async fn run_bootstrap(
         &empty_env,
         None,
         Some(&stream_path),
+        log_writer,
         log_tx,
         true,
     )
@@ -378,13 +381,23 @@ pub async fn run_definition_bootstrap(
 
         if !shell_cmds.is_empty() {
             let state_dir = gremlin.state.state_dir().to_path_buf();
-            run_bootstrap(&shell_cmds, &cwd, &env, &log_tx, &state_dir).await?;
+            let log_writer = gremlin
+                .state
+                .open_blob("command_logs/bootstrap.log", BlobMode::Append)
+                .ok()
+                .map(|b| b as Box<dyn std::io::Write + Send>);
+            run_bootstrap(&shell_cmds, &cwd, &env, &log_tx, &state_dir, log_writer).await?;
         }
     }
 
     if !bootstrap.cmds.is_empty() {
         let state_dir = gremlin.state.state_dir().to_path_buf();
-        run_bootstrap(&bootstrap.cmds, &cwd, &env, &log_tx, &state_dir).await?;
+        let log_writer = gremlin
+            .state
+            .open_blob("command_logs/bootstrap.log", BlobMode::Append)
+            .ok()
+            .map(|b| b as Box<dyn std::io::Write + Send>);
+        run_bootstrap(&bootstrap.cmds, &cwd, &env, &log_tx, &state_dir, log_writer).await?;
     }
 
     if !skip_launch && !bootstrap.cli_out.is_empty() {
@@ -575,11 +588,11 @@ mod tests {
         let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
         let state_dir = dir.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
-        assert!(run_bootstrap(&[], dir.path(), &env, &log_tx, &state_dir)
+        assert!(run_bootstrap(&[], dir.path(), &env, &log_tx, &state_dir, None)
             .await
             .is_ok());
         assert!(
-            run_bootstrap(&["   ".to_string()], dir.path(), &env, &log_tx, &state_dir)
+            run_bootstrap(&["   ".to_string()], dir.path(), &env, &log_tx, &state_dir, None)
                 .await
                 .is_ok()
         );
@@ -598,6 +611,7 @@ mod tests {
             &env,
             &log_tx,
             &state_dir,
+            None,
         )
         .await
         .unwrap_err();
@@ -621,6 +635,7 @@ mod tests {
             &env,
             &log_tx,
             &state_dir,
+            None,
         )
         .await
         .unwrap_err();
@@ -640,6 +655,7 @@ mod tests {
             &env,
             &log_tx,
             &state_dir,
+            None,
         )
         .await
         .unwrap();

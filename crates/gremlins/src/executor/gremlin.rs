@@ -41,7 +41,7 @@ use crate::config;
 use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::core::{discovery, env_file};
 use crate::definition::{GremlinDefinition, StaticDefinition};
-use crate::executor::state::{self, StateData, StateStore};
+use crate::executor::state::{self, BlobMode, StateData, StateStore};
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
 
@@ -909,11 +909,13 @@ impl Gremlin {
 
                 let log_name = format!("fork-{child_key}");
                 let safe_name = sanitize_log_filename(child_key);
-                let stream_path = self
+                let blob_name = format!("command_logs/fork-{safe_name}.log");
+                let stream_path = self.state.state_dir().join(&blob_name);
+                let log_writer = self
                     .state
-                    .state_dir()
-                    .join("command_logs")
-                    .join(format!("fork-{safe_name}.log"));
+                    .open_blob(&blob_name, BlobMode::Append)
+                    .ok()
+                    .map(|b| b as Box<dyn std::io::Write + Send>);
                 let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
 
                 let result = run_logged_commands(
@@ -924,6 +926,7 @@ impl Gremlin {
                     &substitution_env,
                     None,
                     Some(&stream_path),
+                    log_writer,
                     &log_tx,
                     true,
                 )

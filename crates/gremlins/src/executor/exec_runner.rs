@@ -7,7 +7,7 @@ use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_logged_commands, ProcError, ProcResult, ShellResult};
 use crate::definition::Exec;
-use crate::executor::state::StateData;
+use crate::executor::state::{BlobMode, StateData};
 use crate::executor::state::StateStore;
 use crate::executor::vars;
 
@@ -208,7 +208,7 @@ pub async fn prepare_exec(
 /// Phase 2: run the shell commands. Uses only the prepared data; no registry access.
 pub async fn run_shell(
     prepared: &ExecPrepared,
-    _state: &StateData,
+    state: &StateData,
 ) -> Result<ShellResult, ExecError> {
     if prepared.cmds.is_empty() {
         return Ok(ShellResult {
@@ -231,10 +231,13 @@ pub async fn run_shell(
     }
 
     let log_name = format!("exec-{}", &prepared.name);
-    let stream_path = prepared.state_dir.join("command_logs").join(format!(
-        "exec-{}.log",
-        crate::core::proc::sanitize_log_filename(&prepared.name)
-    ));
+    let safe_name = crate::core::proc::sanitize_log_filename(&prepared.name);
+    let blob_name = format!("command_logs/exec-{safe_name}.log");
+    let stream_path = prepared.state_dir.join(&blob_name);
+    let log_writer = state
+        .open_blob(&blob_name, BlobMode::Append)
+        .ok()
+        .map(|b| b as Box<dyn std::io::Write + Send>);
 
     if let Some(ref tx) = prepared.log_tx {
         let _ = tx.send(format!(
@@ -253,6 +256,7 @@ pub async fn run_shell(
         &prepared.substitution_env,
         prepared.timeout,
         Some(&stream_path),
+        log_writer,
         &prepared.log_tx,
         true,
     )

@@ -718,6 +718,7 @@ pub async fn run_logged_commands(
     substitution_env: &HashMap<String, String>,
     timeout: Option<f64>,
     stream_path: Option<&Path>,
+    log_writer: Option<Box<dyn io::Write + Send>>,
     log_tx: &Option<UnboundedSender<String>>,
     stop_on_error: bool,
 ) -> Result<ShellResult, ProcError> {
@@ -734,31 +735,13 @@ pub async fn run_logged_commands(
         }
     }
 
-    // Ensure parent directory exists.
-    if let Some(sp) = stream_path {
-        if let Some(parent) = sp.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                log::warn!(
-                    "run_logged_commands: failed to create log dir {}: {e}",
-                    parent.display()
-                );
-            }
-        }
-    }
-
     let t0 = Instant::now();
 
-    // Write header (best-effort).
-    write_log_header(
-        stream_path,
-        log_name,
-        cmds,
-        cwd,
-        env,
-        substitution_env,
-        timeout,
-        log_tx,
-    );
+    // Write header (best-effort) through caller-provided handle.
+    let mut writer = log_writer;
+    if let Some(ref mut w) = writer {
+        write_log_header(&mut **w, log_name, cmds, cwd, env, substitution_env, timeout, log_tx);
+    }
 
     // Build instrumented script.
     let script = build_instrumented_script(cmds, substitution_env, stop_on_error);
@@ -775,14 +758,18 @@ pub async fn run_logged_commands(
                 String::from_utf8_lossy(&r.stdout),
                 String::from_utf8_lossy(&r.stderr),
             );
-            write_log_footer(stream_path, r.returncode, elapsed, log_tx);
+            if let Some(ref mut w) = writer {
+                write_log_footer(&mut **w, r.returncode, elapsed, log_tx);
+            }
             Ok(ShellResult {
                 output: combined_output.trim().to_string(),
                 rc: r.returncode,
             })
         }
         Err(e) => {
-            write_log_footer(stream_path, -1, elapsed, log_tx);
+            if let Some(ref mut w) = writer {
+                write_log_footer(&mut **w, -1, elapsed, log_tx);
+            }
             Err(e)
         }
     }
@@ -791,7 +778,7 @@ pub async fn run_logged_commands(
 /// Write the log header: metadata, env vars, and command listing.
 #[allow(clippy::too_many_arguments)]
 fn write_log_header(
-    stream_path: Option<&Path>,
+    writer: &mut dyn io::Write,
     log_name: &str,
     cmds: &[String],
     cwd: &Path,
@@ -800,33 +787,16 @@ fn write_log_header(
     timeout: Option<f64>,
     log_tx: &Option<UnboundedSender<String>>,
 ) {
-    let Some(sp) = stream_path else {
-        return;
-    };
-    let mut f = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(sp)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            log::warn!(
-                "run_logged_commands: failed to open log {} for header: {e}",
-                sp.display()
-            );
-            return;
-        }
-    };
-    let _ = writeln!(f, "=== {log_name} ===");
-    let _ = writeln!(f, "cwd: {}", cwd.display());
+    let _ = writeln!(writer, "=== {log_name} ===");
+    let _ = writeln!(writer, "cwd: {}", cwd.display());
     if let Some(t) = timeout {
-        let _ = writeln!(f, "timeout: {t}s");
+        let _ = writeln!(writer, "timeout: {t}s");
     }
-    let _ = writeln!(f, "cmds: {}", cmds.len());
+    let _ = writeln!(writer, "cmds: {}", cmds.len());
 
     // Environment (compact one-per-line).
     if !env.is_empty() {
-        let _ = writeln!(f, "env:");
+        let _ = writeln!(writer, "env:");
         let mut keys: Vec<&String> = env.keys().collect();
         keys.sort();
         for k in keys {
@@ -835,13 +805,13 @@ fn write_log_header(
             } else {
                 env[k].as_str()
             };
-            let _ = writeln!(f, "  {k}={}", val);
+            let _ = writeln!(writer, "  {k}={}", val);
         }
     }
 
     // Substitution env.
     if !substitution_env.is_empty() {
-        let _ = writeln!(f, "substitution_env:");
+        let _ = writeln!(writer, "substitution_env:");
         let mut keys: Vec<&String> = substitution_env.keys().collect();
         keys.sort();
         for k in keys {
@@ -850,47 +820,34 @@ fn write_log_header(
             } else {
                 substitution_env[k].as_str()
             };
-            let _ = writeln!(f, "  {k}={}", val);
+            let _ = writeln!(writer, "  {k}={}", val);
         }
     }
 
     // Commands: original + resolved.
-    let _ = writeln!(f, "commands:");
+    let _ = writeln!(writer, "commands:");
     for cmd in cmds {
-        let _ = writeln!(f, "  original: {cmd}");
+        let _ = writeln!(writer, "  original: {cmd}");
         let resolved = resolve_cmd_for_log(cmd, substitution_env);
-        let _ = writeln!(f, "  resolved: {resolved}");
+        let _ = writeln!(writer, "  resolved: {resolved}");
     }
 
-    let _ = f.flush();
+    let _ = writer.flush();
 
     if let Some(ref tx) = log_tx {
-        let _ = tx.send(format!("{log_name}: streaming output to {}", sp.display()));
+        let _ = tx.send(format!("{log_name}: streaming output started"));
     }
 }
 
 /// Write the log footer with exit code and duration.
 fn write_log_footer(
-    stream_path: Option<&Path>,
+    writer: &mut dyn io::Write,
     rc: i32,
     elapsed: f64,
     log_tx: &Option<UnboundedSender<String>>,
 ) {
-    let Some(sp) = stream_path else {
-        return;
-    };
-    let mut f = match std::fs::OpenOptions::new().append(true).open(sp) {
-        Ok(f) => f,
-        Err(e) => {
-            log::warn!(
-                "run_logged_commands: failed to open log {} for footer: {e}",
-                sp.display()
-            );
-            return;
-        }
-    };
-    let _ = writeln!(f, "--- exit: {rc} (duration: {elapsed:.1}s) ---");
-    let _ = f.flush();
+    let _ = writeln!(writer, "--- exit: {rc} (duration: {elapsed:.1}s) ---");
+    let _ = writer.flush();
 
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("done rc={rc} elapsed={elapsed:.1}s"));
