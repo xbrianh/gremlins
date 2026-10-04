@@ -654,13 +654,9 @@ impl Gremlin {
     /// [`GremlinDefinition::with_client`] so `default_client()` reflects
     /// the override.
     ///
-    /// `fork_cmds` controls how the child workspace is populated:
-    /// - `None` (default): `cp -r` the parent's workspace into the child's.
-    /// - `Some([])`: do nothing — leave the child workspace empty.
-    /// - `Some(cmds)`: run each command with `{var}` substitution (same engine
-    ///   as bootstrap's `launch_cmds`), with additional vars `{child_key}`,
-    ///   `{child_name}`, `{child_id}`, `{parent_id}`, `{group_name}`, and env
-    ///   vars `GREMLIN_WORKDIR` (parent) and `GREMLIN_FORK_WORKDIR` (child).
+    /// Fork creates the child state directory, copies artifacts, seeds the
+    /// registry, and writes an initial state.json. It does **not** populate
+    /// the child workspace — call [`run_fork_cmds`] afterwards.
     #[allow(clippy::too_many_arguments)]
     pub async fn fork(
         &self,
@@ -671,7 +667,6 @@ impl Gremlin {
         child_definition_path: Option<&Path>,
         child_provider: Box<dyn GremlinDefinition>,
         effective_client: Option<&str>,
-        fork_cmds: Option<&[String]>,
     ) -> Result<Gremlin, RunError> {
         log::debug!(
             "fork: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}"
@@ -691,7 +686,9 @@ impl Gremlin {
             self.client.clone()
         };
 
-        // Create the child workspace directory.
+        // Create the child workspace directory so the child's state.json can
+        // record a `workdir`. The caller populates it afterwards via
+        // [`run_fork_cmds`].
         let child_workdir = config::work_root()
             .join(child_gremlin_id.as_str())
             .join("workspace");
@@ -701,83 +698,6 @@ impl Gremlin {
                 child_workdir.display()
             ))
         })?;
-
-        // Populate the child workspace.
-        match fork_cmds {
-            None => {
-                // Default: copy parent workspace contents.
-                let parent_workdir = self
-                    .workdir
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if !parent_workdir.is_empty() {
-                    let status = std::process::Command::new("cp")
-                        .arg("-r")
-                        .arg(format!("{}/.", parent_workdir))
-                        .arg(child_workdir.to_string_lossy().as_ref())
-                        .status()
-                        .map_err(|e| {
-                            RunError::Message(format!("failed to run cp for fork: {e}"))
-                        })?;
-                    if !status.success() {
-                        return Err(RunError::Message(format!(
-                            "cp failed with exit code {}",
-                            status.code().unwrap_or(-1)
-                        )));
-                    }
-                }
-            }
-            Some([]) => {
-                // Do nothing — leave the child workspace empty.
-            }
-            Some(cmds) => {
-                // Run fork commands with substitution.
-                let parent_workdir = self
-                    .workdir
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let child_workdir_str = child_workdir.to_string_lossy().into_owned();
-
-                let mut values: HashMap<String, String> = HashMap::new();
-                values.insert("child_key".to_string(), child_key.to_string());
-                values.insert("child_name".to_string(), child_key.to_string());
-                values.insert("child_id".to_string(), child_id.to_string());
-                values.insert("parent_id".to_string(), parent_id.to_string());
-                values.insert("group_name".to_string(), group_name.to_string());
-
-                for cmd in cmds {
-                    let substituted = crate::schemas::bootstrap::substitute_bootstrap_vars(
-                        cmd,
-                        &child_workdir,
-                        &values,
-                    );
-                    // Run fork hooks from the parent workdir so that relative
-                    // paths and `HEAD` describe the workspace being forked.
-                    // Fall back to the project root when there is no parent
-                    // workspace (e.g. a parallel stage that never created one).
-                    let fork_cwd = self.workdir.as_deref().unwrap_or(&self.project_root);
-                    let status = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&substituted)
-                        .current_dir(fork_cwd)
-                        .env("GREMLIN_WORKDIR", &parent_workdir)
-                        .env("GREMLIN_FORK_WORKDIR", &child_workdir_str)
-                        .status()
-                        .map_err(|e| {
-                            RunError::Message(format!("failed to run fork command: {e}"))
-                        })?;
-                    if !status.success() {
-                        return Err(RunError::Message(format!(
-                            "fork command '{}' failed with exit code {}",
-                            cmd,
-                            status.code().unwrap_or(-1)
-                        )));
-                    }
-                }
-            }
-        }
 
         // fork creates the child state directory, copies artifacts, seeds the
         // registry, and writes an initial state.json with the child id.
@@ -873,6 +793,102 @@ impl Gremlin {
             cancel_token: self.cancel_token.clone(),
             interactive_session: None,
         })
+    }
+
+    /// Run fork commands against a child workspace that was already created
+    /// (by [`fork`]) but not yet populated.
+    ///
+    /// The child workspace directory must already exist (empty); that is the
+    /// harness's responsibility.
+    ///
+    /// `fork_cmds` controls how the workspace is populated:
+    /// - `None` (default): `cp -r` the parent's workspace into the child's.
+    /// - `Some([])`: do nothing — leave the child workspace empty.
+    /// - `Some(cmds)`: run each command with `{var}` substitution (same engine
+    ///   as bootstrap's `launch_cmds`), with additional vars `{child_key}`,
+    ///   `{child_name}`, `{child_id}`, `{parent_id}`, `{group_name}`, and env
+    ///   vars `GREMLIN_WORKDIR` (parent) and `GREMLIN_FORK_WORKDIR` (child).
+    pub fn run_fork_cmds(
+        &self,
+        child_id: &str,
+        child_key: &str,
+        parent_id: &str,
+        group_name: &str,
+        fork_cmds: Option<&[String]>,
+    ) -> Result<(), RunError> {
+        let child_workdir = config::work_root().join(child_id).join("workspace");
+
+        match fork_cmds {
+            None => {
+                // Default: copy parent workspace contents.
+                let parent_workdir = self
+                    .workdir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !parent_workdir.is_empty() {
+                    let status = std::process::Command::new("cp")
+                        .arg("-r")
+                        .arg(format!("{}/.", parent_workdir))
+                        .arg(child_workdir.to_string_lossy().as_ref())
+                        .status()
+                        .map_err(|e| {
+                            RunError::Message(format!("failed to run cp for fork: {e}"))
+                        })?;
+                    if !status.success() {
+                        return Err(RunError::Message(format!(
+                            "cp failed with exit code {}",
+                            status.code().unwrap_or(-1)
+                        )));
+                    }
+                }
+            }
+            Some([]) => {
+                // Do nothing — leave the child workspace empty.
+            }
+            Some(cmds) => {
+                let parent_workdir = self
+                    .workdir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let child_workdir_str = child_workdir.to_string_lossy().into_owned();
+
+                let mut values: HashMap<String, String> = HashMap::new();
+                values.insert("child_key".to_string(), child_key.to_string());
+                values.insert("child_name".to_string(), child_key.to_string());
+                values.insert("child_id".to_string(), child_id.to_string());
+                values.insert("parent_id".to_string(), parent_id.to_string());
+                values.insert("group_name".to_string(), group_name.to_string());
+
+                for cmd in cmds {
+                    let substituted = crate::schemas::bootstrap::substitute_bootstrap_vars(
+                        cmd,
+                        &child_workdir,
+                        &values,
+                    );
+                    let fork_cwd = self.workdir.as_deref().unwrap_or(&self.project_root);
+                    let status = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&substituted)
+                        .current_dir(fork_cwd)
+                        .env("GREMLIN_WORKDIR", &parent_workdir)
+                        .env("GREMLIN_FORK_WORKDIR", &child_workdir_str)
+                        .status()
+                        .map_err(|e| {
+                            RunError::Message(format!("failed to run fork command: {e}"))
+                        })?;
+                    if !status.success() {
+                        return Err(RunError::Message(format!(
+                            "fork command '{}' failed with exit code {}",
+                            cmd,
+                            status.code().unwrap_or(-1)
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Remove every filesystem asset this gremlin owns: its workspace, its
@@ -1515,7 +1531,7 @@ mod tests {
         let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
         let child = parent
-            .fork("gr-child", "", "", "", None, child_provider, None, None)
+            .fork("gr-child", "", "", "", None, child_provider, None)
             .await
             .unwrap();
 
@@ -1570,7 +1586,7 @@ mod tests {
             StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let child_provider_a: Box<dyn GremlinDefinition> = Box::new(child_def_a);
         parent
-            .fork("gr-a", "", "", "", None, child_provider_a, None, None)
+            .fork("gr-a", "", "", "", None, child_provider_a, None)
             .await
             .unwrap();
         let child_def_b =
@@ -1584,7 +1600,6 @@ mod tests {
                 "key",
                 None,
                 child_provider_b,
-                None,
                 None,
             )
             .await
