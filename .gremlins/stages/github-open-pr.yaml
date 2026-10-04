@@ -4,6 +4,7 @@ stages:
     interpolation:
       inputs:
         prev_branch_path: "artifact://pr-branch.txt?"
+        base_ref: content("artifact://base_ref")
       outputs:
         base_ref_to_open_pr: "artifact://pr-base-ref.txt"
     options:

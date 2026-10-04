@@ -470,7 +470,7 @@ fn status_direct(id: &str) -> Result<(), String> {
     println!(
         "workdir:       {}",
         gremlin
-            .worktree
+            .workdir
             .as_deref()
             .map(|path| path.display().to_string())
             .unwrap_or_default()
@@ -544,7 +544,7 @@ fn info_direct(id: &str) -> Result<(), String> {
     let gremlin = Gremlin::from(id).map_err(|e| format!("gremlin {id}: {e}"))?;
 
     let workdir = gremlin
-        .worktree
+        .workdir
         .as_deref()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
@@ -567,8 +567,6 @@ fn info_direct(id: &str) -> Result<(), String> {
         "client": gremlin.state.read_str("client"),
         "attempt": gremlin.state.read_str("attempt"),
         "kind": gremlin.state.read_str("kind"),
-        "base_ref": gremlin.base_ref,
-        "worktree_base": gremlin.base_ref_sha,
         "bail_info": gremlin
             .state
             .stage_error()

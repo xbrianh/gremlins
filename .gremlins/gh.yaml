@@ -1,4 +1,3 @@
-base_ref: main
 prompt_dir: prompts
 
 bootstrap:
@@ -9,10 +8,17 @@ bootstrap:
     plan:
       type: [filepath, string]
       optional: true
+    base_ref:
+      type: string
+      optional: true
   launch_cmds:
     - '[ -n "{instructions}" ] || [ -n "{plan}" ] || { echo "ERROR: at least one of --instructions or --plan is required" >&2; exit 1; }'
     - gremlins:bind_artifact("artifact://plan.md", plan)
     - gremlins:bind_artifact("artifact://instructions.txt", instructions)
+    - gremlins:bind_artifact("artifact://base_ref", base_ref)
+    - 'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && echo "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"'
+  cli_out:
+    base_sha: "artifact://base_sha"
   env: |
     export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
     export CARGO_INCREMENTAL=0
@@ -29,6 +35,8 @@ land:
       pr_url: content("artifact://pr-url.txt")
   options:
     cmds:
+      - git worktree remove --force "$GREMLIN_WORKDIR" || true
+      - git worktree prune
       - gh pr merge --squash --delete-branch "{pr_url}"
       - git fetch origin
       - git branch -f main origin/main 2>/dev/null || git merge --ff-only origin/main
@@ -83,6 +91,9 @@ stages:
         - "git diff {base_sha}...HEAD > {diff}"
 
   - type: parallel
+    fork:
+      cmds:
+        - git worktree add --detach "$GREMLIN_FORK_WORKDIR" HEAD
     body:
       - name: review-one
         type: agent

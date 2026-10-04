@@ -379,7 +379,6 @@ impl Default for LandBuilder {
 #[derive(Debug, Clone)]
 pub struct DefinitionBuilder {
     pub(crate) name: String,
-    pub(crate) base_ref: String,
     pub(crate) default_client: String,
     pub(crate) prompt_dir: Option<PathBuf>,
     pub(crate) bootstrap: Bootstrap,
@@ -394,7 +393,6 @@ impl DefinitionBuilder {
     pub fn new(name: impl Into<String>, default_client: impl Into<String>) -> Self {
         DefinitionBuilder {
             name: name.into(),
-            base_ref: "current".to_string(),
             default_client: default_client.into(),
             prompt_dir: None,
             bootstrap: Bootstrap::default(),
@@ -406,12 +404,6 @@ impl DefinitionBuilder {
     /// Set the definition name.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
-        self
-    }
-
-    /// Set the base git ref.
-    pub fn base_ref(mut self, base_ref: impl Into<String>) -> Self {
-        self.base_ref = base_ref.into();
         self
     }
 
@@ -463,12 +455,6 @@ impl DefinitionBuilder {
                 msg: "'default_client' must not be blank".to_string(),
             });
         }
-        if self.base_ref.is_empty() {
-            return Err(SchemaError::Stage {
-                name: name.clone(),
-                msg: "'base_ref' must not be blank".to_string(),
-            });
-        }
 
         // Validate land stage: must be an exec stage named "land".
         if let Some(ref land) = self.land {
@@ -511,7 +497,6 @@ impl DefinitionBuilder {
             self.name,
             path,
             self.default_client,
-            self.base_ref,
             self.bootstrap,
             self.stages,
             self.land,
@@ -583,7 +568,6 @@ mod tests {
     #[test]
     fn definition_builder_basic() {
         let def = DefinitionBuilder::new("demo", "xai:grok-4")
-            .base_ref("main")
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write the plan to {plan}")
@@ -603,7 +587,6 @@ mod tests {
 
         assert_eq!(def.name, "demo");
         assert_eq!(def.default_client, "xai:grok-4");
-        assert_eq!(def.base_ref, "main");
         assert_eq!(def.stages.len(), 2);
         assert_eq!(def.stages[0].name(), "plan");
         assert_eq!(def.stages[0].stage_type(), "agent");
@@ -811,7 +794,7 @@ mod tests {
 
     #[test]
     fn exec_builder_rejects_framework_option_key() {
-        for key in ["name", "model", "cwd", "base_ref"] {
+        for key in ["name", "model", "cwd"] {
             let err = ExecBuilder::new("test")
                 .cmd("echo hi")
                 .option(key, "x")

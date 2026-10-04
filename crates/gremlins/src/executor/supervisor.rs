@@ -332,35 +332,12 @@ async fn handle_launch(
         .and_then(|s| s.to_str())
         .unwrap_or("gremlin");
 
-    let base_ref = gremlin_def.base_ref.clone();
-    let base_ref_sha = if base_ref.is_empty() || base_ref == "HEAD" {
-        String::new()
-    } else {
-        match crate::core::git::resolve_base_ref(&base_ref, Some(&project_root)) {
-            Ok((_name, sha)) => sha,
-            Err(e) => return error_response(&format!("failed to resolve base_ref: {e}")),
-        }
-    };
-    let base_ref_opt = if base_ref.is_empty() {
-        None
-    } else {
-        Some(base_ref.as_str())
-    };
-    let base_ref_sha_opt = if base_ref_sha.is_empty() {
-        None
-    } else {
-        Some(base_ref_sha.as_str())
-    };
-
     let mut gremlin = match Gremlin::init(
         definition_name,
         &definition_path,
         &gremlin_def,
         &stage_inputs,
         None,
-        None,
-        base_ref_opt,
-        base_ref_sha_opt,
     ) {
         Ok(g) => g,
         Err(e) => return error_response(&format!("failed to create gremlin: {e}")),
@@ -812,7 +789,7 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
         "stage": gremlin.state.read_str("stage"),
         "definition": definition_display_name(&gremlin),
         "project_root": gremlin.project_root.to_string_lossy(),
-        "workdir": gremlin.worktree.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        "workdir": gremlin.workdir.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
         "state_dir": gremlin.state.state_dir().to_string_lossy(),
         "artifact_dir": gremlin.state.artifact_dir().to_string_lossy(),
         "started_at": gremlin.state.read_str("started_at"),
@@ -860,7 +837,7 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         "stage": gremlin.state.read_str("stage"),
         "definition": definition_display_name(&gremlin),
         "project_root": gremlin.project_root.to_string_lossy(),
-        "workdir": gremlin.worktree.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        "workdir": gremlin.workdir.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
         "state_dir": gremlin.state.state_dir().to_string_lossy(),
         "artifact_dir": gremlin.state.artifact_dir().to_string_lossy(),
         "scratch_dir": config::scratch_root(Some(id)).to_string_lossy(),
@@ -872,8 +849,6 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         "client": gremlin.state.read_str("client"),
         "attempt": gremlin.state.read_str("attempt"),
         "kind": gremlin.state.read_str("kind"),
-        "base_ref": gremlin.base_ref,
-        "worktree_base": gremlin.base_ref_sha,
         "bail_info": gremlin.state.stage_error().map(Value::Object).unwrap_or(Value::Null),
     }))
 }

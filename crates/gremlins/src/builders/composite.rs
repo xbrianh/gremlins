@@ -4,7 +4,7 @@ use crate::definition::ClientSpec;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::composite::StageAttrs;
 use crate::stage_spec::node::StageSpec;
-use crate::stage_spec::parallel::{validate_child_names, ErrorPolicy};
+use crate::stage_spec::parallel::{validate_child_names, ErrorPolicy, ForkSpec, JoinSpec};
 
 // ---------------------------------------------------------------------------
 // SequenceBuilder
@@ -148,6 +148,8 @@ pub struct ParallelBuilder {
     error_policy: ErrorPolicy,
     skip_if_exists: String,
     client: Option<ClientSpec>,
+    fork: Option<ForkSpec>,
+    join: Option<JoinSpec>,
 }
 
 impl ParallelBuilder {
@@ -161,6 +163,8 @@ impl ParallelBuilder {
             error_policy: ErrorPolicy::Any,
             skip_if_exists: String::new(),
             client: None,
+            fork: None,
+            join: None,
         }
     }
 
@@ -212,6 +216,18 @@ impl ParallelBuilder {
         self
     }
 
+    /// Set fork commands to run when forking a child worktree.
+    pub fn fork(mut self, cmds: Vec<String>) -> Self {
+        self.fork = Some(ForkSpec::new(cmds));
+        self
+    }
+
+    /// Set join commands to run after a child completes.
+    pub fn join(mut self, cmds: Vec<String>) -> Self {
+        self.join = Some(JoinSpec::new(cmds));
+        self
+    }
+
     /// Consume the builder and produce a [`StageSpec::Parallel`].
     pub fn build(mut self) -> Result<StageSpec, SchemaError> {
         let name = self.name.clone();
@@ -256,6 +272,8 @@ impl ParallelBuilder {
             error_policy: self.error_policy,
             client: self.client,
             body: self.body,
+            fork: self.fork,
+            join: self.join,
         })
     }
 }

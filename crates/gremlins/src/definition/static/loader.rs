@@ -188,10 +188,6 @@ pub(crate) fn check_unresolved_consumers(
 ) -> Result<(), SchemaError> {
     let mut produced: HashSet<String> = HashSet::new();
 
-    // Implicit artifacts always bound at launch
-    produced.insert("artifact://base_sha".to_string());
-    produced.insert("artifact://base_ref".to_string());
-
     // Parse launch_cmds for gremlins:bind_artifact(...) — any argument
     // position, quoted or unquoted (2-arg and legacy 3-arg forms).
     let bind_call_re = regex::Regex::new(r#"gremlins:bind_artifact\(([^)]*)\)"#).unwrap();
@@ -722,7 +718,9 @@ mod tests {
     }
 
     #[test]
-    fn test_unresolved_base_sha_always_available() {
+    fn test_unresolved_base_sha_no_longer_implicit() {
+        // artifact://base_sha is no longer implicitly available — it must be
+        // explicitly produced via bootstrap or a stage.
         let stages = vec![stage_with_interp(
             "consumer",
             "exec",
@@ -731,7 +729,12 @@ mod tests {
                 r#"content("artifact://base_sha")"#.to_string(),
             )]),
         )];
-        check_unresolved_consumers(&stages, &[], &HashMap::new()).unwrap();
+        let err = check_unresolved_consumers(&stages, &[], &HashMap::new()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("artifact://base_sha"),
+            "expected error about artifact://base_sha, got: {msg}"
+        );
     }
 
     #[test]

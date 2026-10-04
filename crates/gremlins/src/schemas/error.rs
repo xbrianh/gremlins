@@ -41,7 +41,7 @@ pub enum SchemaError {
     #[error("stage {stage}: key {key:?} declared in both outputs: and inputs: — a stage cannot both produce and consume the same key")]
     DuplicateStageKey { stage: String, key: String },
 
-    #[error("stage {stage}: artifact {uri:?} is consumed via interpolation but never produced by any prior stage's outputs, bootstrap bind_artifact, cli_out, or implicit artifact (base_sha, base_ref)")]
+    #[error("stage {stage}: artifact {uri:?} is consumed via interpolation but never produced by any prior stage's outputs, bootstrap bind_artifact, or cli_out")]
     UnresolvedArtifactConsumer { stage: String, uri: String },
 
     #[error("gremlin definition is missing 'default_client' — every definition must declare one")]

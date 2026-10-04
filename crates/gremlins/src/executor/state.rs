@@ -121,9 +121,6 @@ pub trait StateStore: Send + Sync + Debug {
     /// The bail record for the current attempt, if any.
     fn stage_error(&self) -> Option<Map<String, Value>>;
 
-    /// Read `parallel_worktrees[group_name]` as `(base_head, {child_key: path})`.
-    fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>);
-
     // --- writes ---
 
     fn patch(&self, delete: &[String], fields: &Map<String, Value>);
@@ -135,13 +132,6 @@ pub trait StateStore: Send + Sync + Debug {
 
     /// Create the `finished` marker and patch terminal fields.
     fn write_terminal_state(&self, exit_code: i32);
-
-    fn patch_parallel_worktrees(
-        &self,
-        group_name: &str,
-        base_head: Option<&str>,
-        paths: Option<&HashMap<String, String>>,
-    );
 
     fn add_subprocess_cost(&self, amount: f64);
 
@@ -942,50 +932,6 @@ impl StateStore for FileSystemStateStore {
         serde_json::from_str(&std::fs::read_to_string(bail_path).ok()?).ok()
     }
 
-    fn patch_parallel_worktrees(
-        &self,
-        group_name: &str,
-        base_head: Option<&str>,
-        paths: Option<&HashMap<String, String>>,
-    ) {
-        if group_name.is_empty() {
-            return;
-        }
-        let sf = self.state_file();
-        if !sf.exists() {
-            return;
-        }
-        let group_name = group_name.to_string();
-        let base_head = base_head.map(String::from);
-        let paths = paths.cloned();
-        let _ = locked_update(&sf, move |data| {
-            let mut groups = data
-                .get("parallel_worktrees")
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
-            if base_head.is_none() && paths.is_none() {
-                groups.remove(&group_name);
-            } else {
-                let mut entry = Map::new();
-                entry.insert(
-                    "base_head".into(),
-                    Value::String(base_head.unwrap_or_default()),
-                );
-                let mut ps = Map::new();
-                for (k, v) in paths.unwrap_or_default() {
-                    ps.insert(k, Value::String(v));
-                }
-                entry.insert("paths".into(), Value::Object(ps));
-                groups.insert(group_name, Value::Object(entry));
-            }
-            if groups.is_empty() {
-                data.remove("parallel_worktrees");
-            } else {
-                data.insert("parallel_worktrees".into(), Value::Object(groups));
-            }
-        });
-    }
-
     fn add_subprocess_cost(&self, amount: f64) {
         if amount == 0.0 || !amount.is_finite() || amount < 0.0 {
             return;
@@ -1018,37 +964,6 @@ impl StateStore for FileSystemStateStore {
             pa.insert(child_key, Value::String(attempt));
             data.insert("parallel_attempts".into(), Value::Object(pa));
         });
-    }
-
-    fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>) {
-        let sf = self.state_file();
-        if !sf.exists() {
-            return (String::new(), HashMap::new());
-        }
-        let data = read_state_json(Some(&sf));
-        let Some(entry) = data
-            .get("parallel_worktrees")
-            .and_then(|v| v.as_object())
-            .and_then(|o| o.get(group_name))
-            .and_then(|v| v.as_object())
-        else {
-            return (String::new(), HashMap::new());
-        };
-        let base_head = entry
-            .get("base_head")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let paths = entry
-            .get("paths")
-            .and_then(|v| v.as_object())
-            .map(|o| {
-                o.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        (base_head, paths)
     }
 
     fn write_terminal_state(&self, exit_code: i32) {
@@ -1271,10 +1186,6 @@ impl StateStore for ScopedFileSystemStateStore {
         self.inner.stage_error()
     }
 
-    fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>) {
-        self.inner.parallel_worktrees(group_name)
-    }
-
     fn patch(&self, delete: &[String], fields: &Map<String, Value>) {
         self.inner.patch(delete, fields)
     }
@@ -1289,16 +1200,6 @@ impl StateStore for ScopedFileSystemStateStore {
 
     fn write_terminal_state(&self, exit_code: i32) {
         self.inner.write_terminal_state(exit_code)
-    }
-
-    fn patch_parallel_worktrees(
-        &self,
-        group_name: &str,
-        base_head: Option<&str>,
-        paths: Option<&HashMap<String, String>>,
-    ) {
-        self.inner
-            .patch_parallel_worktrees(group_name, base_head, paths)
     }
 
     fn add_subprocess_cost(&self, amount: f64) {
@@ -1442,10 +1343,6 @@ impl StateData {
         self.store.stage_error()
     }
 
-    pub fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>) {
-        self.store.parallel_worktrees(group_name)
-    }
-
     // --- delegating writes ---
 
     pub fn patch(&self, delete: &[String], fields: &Map<String, Value>) {
@@ -1482,19 +1379,6 @@ impl StateData {
 
     pub fn clear_stage_error(&self, attempt: &str) {
         self.store.clear_stage_error(attempt);
-    }
-
-    pub fn patch_parallel_worktrees(
-        &self,
-        group_name: &str,
-        base_head: Option<&str>,
-        paths: Option<&HashMap<String, String>>,
-    ) {
-        if self.gremlin_id.as_deref().unwrap_or("").is_empty() {
-            return;
-        }
-        self.store
-            .patch_parallel_worktrees(group_name, base_head, paths);
     }
 
     pub fn add_subprocess_cost(&self, amount: f64) {
@@ -1749,9 +1633,9 @@ pub fn now_iso() -> String {
 
 pub fn default_for(name: &str) -> Option<Value> {
     Some(match name {
-        "attempt" | "kind" | "project_root" | "workdir" | "setup_kind" | "worktree_base"
-        | "status" | "started_at" | "description" | "parent_id" | "client" | "definition_path"
-        | "stage" | "group_name" | "child_key" => Value::String(String::new()),
+        "attempt" | "kind" | "project_root" | "workdir" | "status" | "started_at"
+        | "description" | "parent_id" | "client" | "definition_path" | "stage" | "group_name"
+        | "child_key" => Value::String(String::new()),
         "definition_args" => Value::Array(Vec::new()),
         "stage_inputs" | "metadata" => Value::Object(Map::new()),
         "pid" | "exit_code" => Value::Null,
@@ -1759,14 +1643,12 @@ pub fn default_for(name: &str) -> Option<Value> {
     })
 }
 
-pub fn field_names() -> [&'static str; 20] {
+pub fn field_names() -> [&'static str; 18] {
     [
         "attempt",
         "kind",
         "project_root",
         "workdir",
-        "setup_kind",
-        "worktree_base",
         "status",
         "started_at",
         "description",
@@ -2258,26 +2140,6 @@ mod tests {
     }
 
     #[test]
-    fn parallel_worktrees_add_and_clear() {
-        with_sandbox(None, |sandbox| {
-            let sf = seed(sandbox, "gr-test");
-            let d = StateData::open("gr-test").unwrap();
-            d.patch_parallel_worktrees(
-                "reviews",
-                Some("abc123"),
-                Some(&HashMap::from([("a".to_string(), "/wt/a".to_string())])),
-            );
-            let raw = read_state_json(Some(&sf));
-            let entry = &raw.get("parallel_worktrees").unwrap()["reviews"];
-            assert_eq!(entry["base_head"], "abc123");
-            assert_eq!(entry["paths"]["a"], "/wt/a");
-
-            d.patch_parallel_worktrees("reviews", None, None);
-            assert!(!read_state_json(Some(&sf)).contains_key("parallel_worktrees"));
-        });
-    }
-
-    #[test]
     fn subprocess_cost_accumulates_and_validates() {
         with_sandbox(None, |sandbox| {
             let sf = seed(sandbox, "gr-test");
@@ -2413,21 +2275,6 @@ mod tests {
             d.patch_parallel_attempt("bail-child", "attempt-bail");
             let raw = read_state_json(Some(&sf));
             assert_eq!(raw["parallel_attempts"]["bail-child"], "attempt-bail");
-        });
-    }
-
-    #[test]
-    fn parallel_worktrees_reads_back() {
-        with_sandbox(None, |sandbox| {
-            let _sf = seed(sandbox, "gr-test");
-            let d = StateData::open("gr-test").unwrap();
-            let mut paths = HashMap::new();
-            paths.insert("a".to_string(), "/wt/a".to_string());
-            d.patch_parallel_worktrees("reviews", Some("abc123"), Some(&paths));
-            let (base, read_paths) = d.parallel_worktrees("reviews");
-            assert_eq!(base, "abc123");
-            assert_eq!(read_paths.get("a").map(String::as_str), Some("/wt/a"));
-            assert!(d.parallel_worktrees("missing").1.is_empty());
         });
     }
 
@@ -2903,9 +2750,6 @@ mod tests {
             fn stage_error(&self) -> Option<Map<String, Value>> {
                 unimplemented!()
             }
-            fn parallel_worktrees(&self, _group_name: &str) -> (String, HashMap<String, String>) {
-                unimplemented!()
-            }
             fn patch(&self, _delete: &[String], _fields: &Map<String, Value>) {
                 unimplemented!()
             }
@@ -2916,14 +2760,6 @@ mod tests {
                 unimplemented!()
             }
             fn write_terminal_state(&self, _exit_code: i32) {
-                unimplemented!()
-            }
-            fn patch_parallel_worktrees(
-                &self,
-                _group_name: &str,
-                _base_head: Option<&str>,
-                _paths: Option<&HashMap<String, String>>,
-            ) {
                 unimplemented!()
             }
             fn add_subprocess_cost(&self, _amount: f64) {

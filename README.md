@@ -124,7 +124,7 @@ These flags are accepted by every gremlin definition:
 | `--print-id` | Print the gremlin ID to stdout after launch |
 | `--print-id-only` | Print only the gremlin id on stdout; suppress the launch banner |
 | `--wait` | Block until the spawned gremlin exits; return its exit code |
-| `--base-ref <ref>` | Git ref to branch the worktree from; defaults to the definition's `base_ref` (which defaults to `"current"`) |
+| `--base-ref <ref>` | Git ref to branch the worktree from; defaults to `"HEAD"` (current branch). When the definition declares a `base_ref` bootstrap source, this flag overrides it. |
 | `--client <spec>` | `provider:model` string overriding the definition's `default_client` |
 | `--telemetry` / `-v` | Enable per-turn telemetry (TTFT, token counts, cache hit ratio) in the gremlin log |
 
@@ -166,8 +166,6 @@ gremlins launch gh      # bundled gh.yaml
 ```yaml
 default_client: xai:grok-4    # required; provider:model string
 
-base_ref: current             # optional; git ref to branch worktrees from (default "current")
-
 github_integration: true      # optional; enables gh CLI integration
 
 bootstrap:                    # optional; CLI contract and setup commands
@@ -204,7 +202,6 @@ stages:
 | Key | Description |
 |---|---|
 | `default_client` | **Required.** `provider:model` string used for stages without an explicit `client:` |
-| `base_ref` | Git ref to branch worktrees from. Defaults to `"current"`. |
 | `github_integration` | If true, fetches `origin/<branch>` before creating worktrees and enables `gh` CLI use. |
 | `bootstrap` | CLI source flags, launch-only commands, per-worktree commands, and `cli_out` artifact bindings. See [Bootstrap block](#bootstrap-block). |
 | `prompts` | Named prompt map. Each key maps to a prompt string or list; referenced by name in stage `prompt:` fields. |
@@ -382,7 +379,7 @@ land:
       - gh pr merge --squash --delete-branch "{PR_URL}"
 ```
 
-When a definition declares `land:`, `gremlins land` runs this stage instead of the built-in merge logic. The stage runs in the project root (not the worktree). Land commands receive the same `GREMLINS_*` runtime environment variables that stages and bootstrap commands get (`GREMLINS_WORKTREE_PATH`, `GREMLINS_GREMLIN_ID`, `GREMLINS_PROJECT_ROOT`, etc.).
+When a definition declares `land:`, `gremlins land` runs this stage instead of the built-in merge logic. The stage runs in the project root (not the worktree). Land commands receive the same `GREMLINS_*` runtime environment variables that stages and bootstrap commands get (`GREMLIN_WORKDIR`, `GREMLINS_GREMLIN_ID`, `GREMLINS_PROJECT_ROOT`, etc.).
 
 ### Parallel groups
 
@@ -694,9 +691,9 @@ These are set by the launcher or executor and should not be set manually:
 | Variable | Set by | Description |
 |---|---|---|
 | `GREMLINS_GREMLIN_ID` | Launcher | The current gremlin's unique ID. Stages and state bookkeeping no-op without it. |
-| `GREMLINS_WORKTREE_PATH` | Executor | Path to the gremlin's git worktree. |
-| `GREMLIN_WORKSPACE_DIR` | Executor | The working directory for the gremlin process. Equal to `GREMLINS_WORKTREE_PATH` when a worktree exists; falls back to the process cwd. Referenced in the agent stage's system prompt preamble. |
+| `GREMLIN_WORKDIR` | Executor | The gremlin's workspace directory. Always created by the harness before any stage runs. Referenced in the agent stage's system prompt preamble. |
 | `GREMLINS_SCRATCH_DIR` | Executor | The gremlin-wide scratch root. Read by `config::scratch_dir()` for tool scratch space. |
+| `GREMLINS_STATE_DIR` | Executor | The gremlin's state directory (contains `state.json`, artifacts, and the hermetic `definition.yaml` snapshot). |
 | `GREMLINS_BOOTSTRAP_CWD` | Launcher | The original cwd captured at launch time. |
 
 ## What can a gremlin do to my machine?

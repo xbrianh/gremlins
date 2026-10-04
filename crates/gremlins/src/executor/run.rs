@@ -795,7 +795,7 @@ impl Gremlin {
         let is_fork = !self.state.read_str("parent_id").is_empty();
         let has_bootstrap = !bootstrap.cmds.is_empty()
             || (!is_fork && (!bootstrap.launch_cmds.is_empty() || !bootstrap.cli_out.is_empty()));
-        let first_start = self.worktree.is_some() && resume_from.is_none();
+        let first_start = self.workdir.is_some() && resume_from.is_none();
         if first_start && has_bootstrap {
             if let Err(error) = run_definition_bootstrap(self, is_fork).await {
                 send_log(&self.runtime_config.log_tx, "bootstrap failed".to_string());
@@ -1014,7 +1014,6 @@ mod tests {
             "test".to_string(),
             PathBuf::from("test.yaml"),
             default_client.to_string(),
-            "main".to_string(),
             bootstrap,
             stages,
             land,
@@ -1026,11 +1025,8 @@ mod tests {
             definition_path: None,
             client_override: None,
             definition: Box::new(definition),
-            worktree: None,
-            worktree_parent: None,
+            workdir: None,
             project_root: sandbox.path().to_path_buf(),
-            base_ref_sha: String::new(),
-            base_ref: "main".to_string(),
             state: state_data,
             env: HashMap::new(),
             client: Client::parse(default_client).unwrap(),
@@ -1628,7 +1624,7 @@ mod tests {
         );
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
-        gremlin.worktree = Some(worktree.clone());
+        gremlin.workdir = Some(worktree.clone());
         let state_dir = sandbox.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
@@ -1666,7 +1662,7 @@ mod tests {
         );
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
-        gremlin.worktree = Some(worktree.clone());
+        gremlin.workdir = Some(worktree.clone());
 
         // The stage `cat`s a file only the bootstrap wrote: a non-zero exit
         // here would mean the ordering was wrong.
@@ -1691,7 +1687,7 @@ mod tests {
         );
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
-        gremlin.worktree = Some(worktree.clone());
+        gremlin.workdir = Some(worktree.clone());
 
         assert_eq!(gremlin.run(Some("only")).await.unwrap(), 0);
         assert!(!worktree.join("bootstrap.marker").exists());
@@ -1734,9 +1730,6 @@ mod tests {
             fx.definition_path(),
             &definition,
             &HashMap::new(),
-            None,
-            None,
-            None,
             None,
         )
         .unwrap();

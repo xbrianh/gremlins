@@ -316,13 +316,10 @@ pub async fn run_definition_bootstrap(
     let env = gremlin.env.clone();
     let log_tx = gremlin.runtime_config.log_tx.clone();
 
-    if !bootstrap.cmds.is_empty() {
-        run_bootstrap(&bootstrap.cmds, &cwd, &env, &log_tx).await?;
-    }
-
-    // A forked child inherits the parent's artifacts via copy_tree +
-    // fork_registry — its launch_cmds (bind_artifact, shell guards) and
-    // cli_out already ran in the parent and do not need to run again.
+    // For the initial launch (not a fork), run launch_cmds first so the
+    // workspace checkout exists before per-workspace cmds run against it.
+    // For a fork, launch_cmds already ran in the parent; only cmds need to
+    // execute here.
     if !skip_launch && !bootstrap.launch_cmds.is_empty() {
         let msg = format!("running {} launch command(s)", bootstrap.launch_cmds.len());
         send_log(&log_tx, &msg);
@@ -354,6 +351,10 @@ pub async fn run_definition_bootstrap(
         if !shell_cmds.is_empty() {
             run_bootstrap(&shell_cmds, &cwd, &env, &log_tx).await?;
         }
+    }
+
+    if !bootstrap.cmds.is_empty() {
+        run_bootstrap(&bootstrap.cmds, &cwd, &env, &log_tx).await?;
     }
 
     if !skip_launch && !bootstrap.cli_out.is_empty() {
@@ -628,17 +629,13 @@ mod tests {
                 "test".to_string(),
                 PathBuf::from("test.yaml"),
                 "cmd:true".to_string(),
-                "main".to_string(),
                 bootstrap,
                 Vec::new(),
                 None,
                 serde_yaml::Value::Null,
             )),
-            worktree: Some(worktree),
-            worktree_parent: None,
+            workdir: Some(worktree),
             project_root: sandbox.path().to_path_buf(),
-            base_ref_sha: String::new(),
-            base_ref: "main".to_string(),
             state: state_data,
             env: std::env::vars().collect(),
             client: Client::parse("cmd:true").unwrap(),

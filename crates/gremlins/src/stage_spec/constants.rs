@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 /// Variable names reserved for framework-substitution and excluded from
 /// stage interpolation maps.
 pub static FRAMEWORK_KEYS: LazyLock<BTreeSet<&'static str>> =
-    LazyLock::new(|| BTreeSet::from(["name", "model", "cwd", "base_ref"]));
+    LazyLock::new(|| BTreeSet::from(["name", "model", "cwd"]));
 
 #[cfg(test)]
 mod tests {
@@ -16,8 +16,7 @@ mod tests {
         assert!(keys.contains("name"));
         assert!(keys.contains("model"));
         assert!(keys.contains("cwd"));
-        assert!(keys.contains("base_ref"));
-        assert_eq!(keys.len(), 4);
+        assert_eq!(keys.len(), 3);
     }
 
     #[test]

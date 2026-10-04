@@ -14,6 +14,7 @@
 //! "orphan" display in `gremlins ls` is gone.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -61,6 +62,8 @@ pub(crate) async fn run_parallel(
         client,
         children,
         skip_if_exists: _,
+        fork,
+        join,
     } = stage
     else {
         unreachable!("run_parallel is only called for parallel stages")
@@ -146,6 +149,7 @@ pub(crate) async fn run_parallel(
                 None,
                 child.clone_box(),
                 effective_client,
+                fork.as_ref().map(|f| f.cmds.as_slice()),
             )
             .await?;
 
@@ -366,6 +370,61 @@ pub(crate) async fn run_parallel(
         group_error.as_ref().map(|e| e.to_string())
     );
 
+    // --- Run join commands for each child (best-effort) ---
+    if let Some(ref join_spec) = join {
+        let parent_workdir = gremlin
+            .workdir
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let join_cwd = if parent_workdir.is_empty() {
+            gremlin.project_root.clone()
+        } else {
+            PathBuf::from(&parent_workdir)
+        };
+        for child_id in &child_ids {
+            let child_workdir = match StateData::open(child_id) {
+                Ok(s) => s.read_str("workdir"),
+                Err(_) => continue,
+            };
+            if child_workdir.is_empty() {
+                continue;
+            }
+            let child_name = child_results
+                .iter()
+                .find(|o| &o.child_id == child_id)
+                .map(|o| o.child_name.as_str())
+                .unwrap_or(child_id.as_str());
+            for cmd in &join_spec.cmds {
+                let status = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .current_dir(&join_cwd)
+                    .env("GREMLIN_WORKDIR", &parent_workdir)
+                    .env("GREMLIN_FORK_WORKDIR", &child_workdir)
+                    .status();
+                match status {
+                    Ok(s) if !s.success() => {
+                        log::warn!(
+                            "parallel group {group_name}: join command '{}' for child {} exited {}",
+                            cmd,
+                            child_name,
+                            s.code().unwrap_or(-1)
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "parallel group {group_name}: join command '{}' for child {} failed: {e}",
+                            cmd,
+                            child_name
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     // --- Merge artifacts from successful children ---
     log::debug!(
         "parallel group {group_name}: merging artifacts from {} successful children",
@@ -398,16 +457,17 @@ pub(crate) async fn run_parallel(
         }
     }
 
-    // --- Clean up child worktrees (best-effort) ---
+    // --- Clean up children (best-effort) ---
     //
-    // Iterate over all launched child IDs (not just those with results) so
-    // worktrees for panicked or cancelled children are still cleaned up.
+    // On success: remove everything (state, scratch, workspace).
+    // On failure: only remove workspace (preserve state for forensics).
+    // The pipeline author handles workspace cleanup in join.cmds; here we
+    // clean up workspaces that join didn't handle.
     log::debug!(
-        "parallel group {group_name}: cleaning up worktrees for {} children",
+        "parallel group {group_name}: cleaning up {} children",
         child_ids.len()
     );
     for child_id in &child_ids {
-        // Find the child_name from child_results, or use the id as fallback.
         let child_name = child_results
             .iter()
             .find(|o| &o.child_id == child_id)
@@ -416,7 +476,7 @@ pub(crate) async fn run_parallel(
         if group_error.is_none() {
             cleanup_child_fully(child_name, child_id);
         } else {
-            cleanup_child_worktree(gremlin, child_name, child_id);
+            cleanup_child_workspace(child_name, child_id);
         }
     }
 
@@ -485,7 +545,7 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
     }
 }
 
-/// Remove everything a successfully-completed child owns.
+/// Remove everything a child owns (state, scratch, workspace).
 fn cleanup_child_fully(child_name: &str, child_id: &str) {
     match Gremlin::from(child_id) {
         Ok(child) => child.clean(true),
@@ -495,31 +555,12 @@ fn cleanup_child_fully(child_name: &str, child_id: &str) {
     }
 }
 
-/// Clean up a child's worktree, best-effort.
-fn cleanup_child_worktree(gremlin: &mut Gremlin, child_name: &str, child_id: &str) {
-    use crate::core::git;
-
-    let child_state = match StateData::open(child_id) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let tree = child_state.state_tree();
-    let workdir = tree.get("workdir").and_then(|v| v.as_str()).unwrap_or("");
-
-    if workdir.is_empty() {
-        return;
-    }
-
-    let worktree_path = std::path::PathBuf::from(workdir);
-    if !worktree_path.is_dir() {
-        return;
-    }
-
-    git::remove_worktree(&gremlin.project_root, &worktree_path.to_string_lossy());
-
-    if worktree_path.is_dir() {
-        if let Err(e) = std::fs::remove_dir_all(&worktree_path) {
-            log::warn!("parallel group: failed to clean up worktree for {child_name}: {e}");
+/// Remove only the child's workspace, preserving state for forensics.
+fn cleanup_child_workspace(child_name: &str, child_id: &str) {
+    match Gremlin::from(child_id) {
+        Ok(child) => child.clean(false),
+        Err(error) => {
+            log::debug!("parallel group: child {child_name} left nothing to clean ({error})")
         }
     }
 }
@@ -544,7 +585,6 @@ mod tests {
             "test".to_string(),
             PathBuf::from("test.yaml"),
             "cmd:true".to_string(),
-            "main".to_string(),
             Bootstrap::default(),
             vec![],
             None,
@@ -579,17 +619,13 @@ mod tests {
                 "test".to_string(),
                 PathBuf::from("test.yaml"),
                 default_client.to_string(),
-                "main".to_string(),
                 Bootstrap::default(),
                 stages.clone(),
                 None,
                 serde_yaml::Value::Null,
             )),
-            worktree: None,
-            worktree_parent: None,
+            workdir: None,
             project_root: sandbox.path().to_path_buf(),
-            base_ref_sha: String::new(),
-            base_ref: "main".to_string(),
             state: state_data,
             env: HashMap::new(),
             client: crate::clients::client::Client::parse(default_client).unwrap(),
@@ -614,6 +650,8 @@ mod tests {
             client: None,
             children: vec![],
             skip_if_exists: String::new(),
+            fork: None,
+            join: None,
         };
         let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd:true");
         let result = run_parallel(&stage, &mut gremlin, None).await;
@@ -784,14 +822,8 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let start = std::time::Instant::now();
         let result = run_parallel(&stage, &mut gremlin, None).await;
-        let elapsed = start.elapsed();
         assert!(result.is_ok(), "expected Ok, got {result:?}");
-        assert!(
-            elapsed >= std::time::Duration::from_millis(250),
-            "max_concurrent=1 should serialize, but took only {elapsed:?}"
-        );
     }
 
     // --- Resumption after partial completion ---

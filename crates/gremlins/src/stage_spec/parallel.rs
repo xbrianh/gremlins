@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::definition::ClientSpec;
@@ -37,6 +38,30 @@ impl ErrorPolicy {
     }
 }
 
+/// Commands to run when forking a child worktree in a parallel group.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForkSpec {
+    pub cmds: Vec<String>,
+}
+
+impl ForkSpec {
+    pub fn new(cmds: Vec<String>) -> Self {
+        Self { cmds }
+    }
+}
+
+/// Commands to run after a child completes in a parallel group (join phase).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JoinSpec {
+    pub cmds: Vec<String>,
+}
+
+impl JoinSpec {
+    pub fn new(cmds: Vec<String>) -> Self {
+        Self { cmds }
+    }
+}
+
 /// True when `name` is a legal parallel `child_id` component: ASCII letters,
 /// digits, `-` and `_`, at least one character.
 ///
@@ -56,6 +81,8 @@ pub struct ParallelGroup {
     pub error_policy: ErrorPolicy,
     pub body: Vec<Value>,
     pub client: Option<ClientSpec>,
+    pub fork: Option<ForkSpec>,
+    pub join: Option<JoinSpec>,
 }
 
 /// Validate the resolved child names of a parallel group: each must be a legal

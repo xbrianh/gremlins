@@ -15,7 +15,7 @@ use crate::schemas::error::SchemaError;
 use crate::stage_spec::agent::Agent;
 use crate::stage_spec::composite::StageAttrs;
 use crate::stage_spec::exec::Exec;
-use crate::stage_spec::parallel::ErrorPolicy;
+use crate::stage_spec::parallel::{ErrorPolicy, ForkSpec, JoinSpec};
 
 /// Why a stage failed to parse.
 #[derive(Error, Debug)]
@@ -69,6 +69,8 @@ pub enum StageSpec {
         error_policy: ErrorPolicy,
         client: Option<ClientSpec>,
         body: Vec<StageSpec>,
+        fork: Option<ForkSpec>,
+        join: Option<JoinSpec>,
     },
 }
 
@@ -166,6 +168,8 @@ impl StageSpec {
                 error_policy,
                 client,
                 body,
+                fork,
+                join,
             } => parallel_to_yaml(
                 attrs,
                 *max_concurrent,
@@ -173,6 +177,8 @@ impl StageSpec {
                 *error_policy,
                 client,
                 body,
+                fork,
+                join,
             ),
         }
     }
@@ -253,7 +259,7 @@ fn string_map_to_yaml(map: &HashMap<String, String>) -> Value {
 }
 
 /// Convert `serde_json::Value` options to a YAML mapping, filtering out
-/// framework-substituted keys (`cwd`, `base_ref`) that the runtime injects.
+/// framework-substituted keys (`cwd`) that the runtime injects.
 fn options_to_yaml(options: &HashMap<String, serde_json::Value>) -> Value {
     // Filter out keys that the runtime injects at execution time — they're
     // not part of the user-visible definition. We intentionally do NOT filter
@@ -261,10 +267,7 @@ fn options_to_yaml(options: &HashMap<String, serde_json::Value>) -> Value {
     // stages, and name is validated out by the builder.
     // Iterate directly to avoid an intermediate HashMap allocation.
     let mut out = Mapping::new();
-    for (k, v) in options
-        .iter()
-        .filter(|(k, _)| k.as_str() != "cwd" && k.as_str() != "base_ref")
-    {
+    for (k, v) in options.iter().filter(|(k, _)| k.as_str() != "cwd") {
         if let Ok(yaml_val) = serde_yaml::to_value(v) {
             out.insert(Value::String(k.clone()), yaml_val);
         }
@@ -391,6 +394,7 @@ fn sequence_to_yaml(
     Value::Mapping(m)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parallel_to_yaml(
     attrs: &StageAttrs,
     max_concurrent: Option<u32>,
@@ -398,6 +402,8 @@ fn parallel_to_yaml(
     error_policy: ErrorPolicy,
     client: &Option<ClientSpec>,
     body: &[StageSpec],
+    fork: &Option<ForkSpec>,
+    join: &Option<JoinSpec>,
 ) -> Value {
     let mut m = Mapping::new();
     m.insert(
@@ -430,6 +436,26 @@ fn parallel_to_yaml(
         m.insert(Value::String("client".to_string()), client_val);
     }
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
+    if let Some(ref fork_spec) = fork {
+        let cmds: Vec<Value> = fork_spec
+            .cmds
+            .iter()
+            .map(|c| Value::String(c.clone()))
+            .collect();
+        let mut fork_map = Mapping::new();
+        fork_map.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
+        m.insert(Value::String("fork".to_string()), Value::Mapping(fork_map));
+    }
+    if let Some(ref join_spec) = join {
+        let cmds: Vec<Value> = join_spec
+            .cmds
+            .iter()
+            .map(|c| Value::String(c.clone()))
+            .collect();
+        let mut join_map = Mapping::new();
+        join_map.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
+        m.insert(Value::String("join".to_string()), Value::Mapping(join_map));
+    }
     let children: Vec<Value> = body.iter().map(StageSpec::to_yaml).collect();
     m.insert(Value::String("body".to_string()), Value::Sequence(children));
     Value::Mapping(m)

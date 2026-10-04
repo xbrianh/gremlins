@@ -18,7 +18,7 @@ use crate::schemas::error::SchemaError;
 pub use crate::stage_spec::agent::Agent;
 pub use crate::stage_spec::exec::Exec;
 pub use crate::stage_spec::node::StageSpec;
-pub use crate::stage_spec::parallel::ErrorPolicy;
+pub use crate::stage_spec::parallel::{ErrorPolicy, ForkSpec, JoinSpec};
 
 /// Parsed client descriptor from a stage dict's `client` key.
 /// A plain String so gremlins-core stays free of PyO3.
@@ -84,6 +84,8 @@ pub enum ExecutorStage {
         client: Option<ClientSpec>,
         children: Vec<Box<dyn GremlinDefinition>>,
         skip_if_exists: String,
+        fork: Option<ForkSpec>,
+        join: Option<JoinSpec>,
     },
     /// No more stages — the gremlin is done.
     Done,
@@ -150,9 +152,6 @@ pub trait GremlinDefinition: Send + Sync {
 
     /// The client every stage uses unless it declares its own.
     fn default_client(&self) -> &str;
-
-    /// The git ref the worktree branches from.
-    fn base_ref(&self) -> &str;
 
     /// Bootstrap commands and input sources.
     fn bootstrap(&self) -> &Bootstrap;
@@ -225,10 +224,6 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
 
     fn default_client(&self) -> &str {
         self.as_ref().default_client()
-    }
-
-    fn base_ref(&self) -> &str {
-        self.as_ref().base_ref()
     }
 
     fn bootstrap(&self) -> &Bootstrap {
