@@ -11,6 +11,7 @@ stages:
         interpolation:
           inputs:
             instructions: "artifact://instructions.txt?"
+            base_ref: content("artifact://base_ref")
           outputs:
             plan: "artifact://plan.md"
         options:
