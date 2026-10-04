@@ -873,13 +873,20 @@ impl Gremlin {
 
                 let mut env: HashMap<String, String> = self.env.clone();
                 env.insert("GREMLIN_WORKDIR".to_string(), parent_workdir);
-                env.insert("GREMLIN_FORK_WORKDIR".to_string(), child_workdir_str);
+                env.insert("GREMLIN_FORK_WORKDIR".to_string(), child_workdir_str.clone());
 
                 let mut substitution_env: HashMap<String, String> = HashMap::new();
                 for (key, value) in &fork_vars {
                     let env_key = format!("GREMLINS_{}", key.to_uppercase());
                     env.insert(env_key.clone(), value.to_string());
                     substitution_env.insert(env_key, value.to_string());
+                }
+
+                // {cwd} from the old substitute_bootstrap_vars — child workspace.
+                {
+                    let cwd_key = "GREMLINS_CWD".to_string();
+                    env.insert(cwd_key.clone(), child_workdir_str.clone());
+                    substitution_env.insert(cwd_key, child_workdir_str.clone());
                 }
 
                 // Replace {key} with ${GREMLINS_KEY} — values travel through
@@ -892,6 +899,7 @@ impl Gremlin {
                             let env_key = format!("GREMLINS_{}", key.to_uppercase());
                             s = s.replace(&format!("{{{key}}}"), &format!("${{{env_key}}}"));
                         }
+                        s = s.replace("{cwd}", "${GREMLINS_CWD}");
                         s
                     })
                     .collect();
@@ -914,6 +922,7 @@ impl Gremlin {
                     None,
                     Some(&stream_path),
                     &log_tx,
+                    true,
                 )
                 .await;
 

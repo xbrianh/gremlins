@@ -441,6 +441,7 @@ pub(crate) async fn run_parallel(
                 None,
                 Some(&stream_path),
                 &log_tx,
+                false,
             )
             .await;
 

@@ -254,6 +254,7 @@ pub async fn run_shell(
         prepared.timeout,
         Some(&stream_path),
         &prepared.log_tx,
+        true,
     )
     .await;
 

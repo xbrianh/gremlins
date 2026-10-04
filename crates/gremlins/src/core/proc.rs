@@ -719,6 +719,7 @@ pub async fn run_logged_commands(
     timeout: Option<f64>,
     stream_path: Option<&Path>,
     log_tx: &Option<UnboundedSender<String>>,
+    stop_on_error: bool,
 ) -> Result<ShellResult, ProcError> {
     if cmds.is_empty() {
         return Ok(ShellResult {
@@ -760,7 +761,7 @@ pub async fn run_logged_commands(
     );
 
     // Build instrumented script.
-    let script = build_instrumented_script(cmds, substitution_env);
+    let script = build_instrumented_script(cmds, substitution_env, stop_on_error);
 
     // Run the script.
     let result = run_shell_async(&script, Some(cwd), Some(env), timeout, stream_path).await;
@@ -829,7 +830,8 @@ fn write_log_header(
         let mut keys: Vec<&String> = env.keys().collect();
         keys.sort();
         for k in keys {
-            let _ = writeln!(f, "  {k}={}", env[k]);
+            let val = if is_sensitive_env_key(k) { "[redacted]" } else { env[k].as_str() };
+            let _ = writeln!(f, "  {k}={}", val);
         }
     }
 
@@ -839,7 +841,8 @@ fn write_log_header(
         let mut keys: Vec<&String> = substitution_env.keys().collect();
         keys.sort();
         for k in keys {
-            let _ = writeln!(f, "  {k}={}", substitution_env[k]);
+            let val = if is_sensitive_env_key(k) { "[redacted]" } else { substitution_env[k].as_str() };
+            let _ = writeln!(f, "  {k}={}", val);
         }
     }
 
@@ -902,6 +905,18 @@ pub(crate) fn sanitize_log_filename(name: &str) -> String {
         .replace("..", "__")
 }
 
+/// Returns true for environment variable names that commonly carry secrets.
+fn is_sensitive_env_key(key: &str) -> bool {
+    let upper = key.to_uppercase();
+    upper.contains("TOKEN")
+        || upper.contains("KEY")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("PASSWD")
+        || upper.contains("CREDENTIAL")
+        || upper.contains("AUTH")
+}
+
 /// Resolve `${VAR}` references in `s` using the substitution env.
 /// `${GREMLINS_FOO}` → the value of `GREMLINS_FOO` in the env map;
 /// unknown variables are left as-is.
@@ -937,15 +952,27 @@ fn resolve_cmd_for_log(s: &str, env: &HashMap<String, String>) -> String {
 /// shell session, preserving shell state (variables, `cd`, functions, `umask`,
 /// etc.) across command boundaries. Each command is wrapped with `printf`
 /// header/footer markers so the stream log shows which command produced which
-/// output and which command failed or timed out. The script stops on the first
-/// non-zero exit (mirroring `&&` semantics).
+/// output and which command failed or timed out.
+///
+/// Uses the resolved (substituted) form only in `printf` markers for logging;
+/// executes the original `cmd` so `${GREMLINS_*}` vars are expanded by Bash
+/// from the environment rather than interpolated inline.
+///
+/// When `stop_on_error` is true, the script stops on the first non-zero exit
+/// (mirroring `&&` semantics). When false, failures are tracked via
+/// `_any_failed` and the script exits with the last non-zero code (or 0 if
+/// all commands succeeded).
 fn build_instrumented_script(
     cmds: &[String],
     substitution_env: &HashMap<String, String>,
+    stop_on_error: bool,
 ) -> String {
     let total = cmds.len();
     let mut script = String::with_capacity(cmds.iter().map(|c| c.len() + 80).sum());
     script.push_str("set +e\n");
+    if !stop_on_error {
+        script.push_str("_any_failed=0\n");
+    }
     for (i, cmd) in cmds.iter().enumerate() {
         let resolved = resolve_cmd_for_log(cmd, substitution_env);
         let escaped = resolved.replace('\'', "'\\''");
@@ -953,13 +980,20 @@ fn build_instrumented_script(
             "printf -- '\\n--- cmd {i1}/{total}: %s ---\\n' '{escaped}'\n",
             i1 = i + 1,
         ));
-        script.push_str(&resolved);
+        script.push_str(cmd);
         script.push('\n');
         script.push_str(&format!(
             "_rc=$?\nprintf -- '--- cmd {i1}/{total} exit: %d ---\\n' \"$_rc\"\n",
             i1 = i + 1,
         ));
-        script.push_str("if [ \"$_rc\" -ne 0 ]; then exit \"$_rc\"; fi\n");
+        if stop_on_error {
+            script.push_str("if [ \"$_rc\" -ne 0 ]; then exit \"$_rc\"; fi\n");
+        } else {
+            script.push_str("if [ \"$_rc\" -ne 0 ]; then _any_failed=$_rc; fi\n");
+        }
+    }
+    if !stop_on_error {
+        script.push_str("exit \"$_any_failed\"\n");
     }
     script
 }

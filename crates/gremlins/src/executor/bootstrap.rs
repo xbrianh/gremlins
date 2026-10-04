@@ -100,6 +100,7 @@ pub async fn run_bootstrap(
         None,
         Some(&stream_path),
         log_tx,
+        true,
     )
     .await;
 
