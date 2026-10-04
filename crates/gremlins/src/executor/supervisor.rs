@@ -21,7 +21,7 @@ use crate::clients::interactive::{
     InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle,
 };
 use crate::config;
-use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
+use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state;
 
@@ -338,6 +338,7 @@ async fn handle_launch(
         &gremlin_def,
         &stage_inputs,
         None,
+        &GremlinConfig::default(),
     ) {
         Ok(g) => g,
         Err(e) => return error_response(&format!("failed to create gremlin: {e}")),
@@ -789,7 +790,7 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
         "stage": gremlin.state.read_str("stage"),
         "definition": definition_display_name(&gremlin),
         "project_root": gremlin.project_root.to_string_lossy(),
-        "workdir": gremlin.workdir.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        "workdir": gremlin.workdir.as_ref().map(|w| w.path().to_string_lossy().to_string()).unwrap_or_default(),
         "state_dir": gremlin.state.state_dir().to_string_lossy(),
         "artifact_dir": gremlin.state.artifact_dir().to_string_lossy(),
         "started_at": gremlin.state.read_str("started_at"),
@@ -837,7 +838,7 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         "stage": gremlin.state.read_str("stage"),
         "definition": definition_display_name(&gremlin),
         "project_root": gremlin.project_root.to_string_lossy(),
-        "workdir": gremlin.workdir.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        "workdir": gremlin.workdir.as_ref().map(|w| w.path().to_string_lossy().to_string()).unwrap_or_default(),
         "state_dir": gremlin.state.state_dir().to_string_lossy(),
         "artifact_dir": gremlin.state.artifact_dir().to_string_lossy(),
         "scratch_dir": config::scratch_root(Some(id)).to_string_lossy(),

@@ -23,6 +23,8 @@ use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
 use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell, ExecError};
 use crate::executor::gremlin::Gremlin;
+#[cfg(test)]
+use crate::executor::gremlin::{GremlinConfig, ScratchDir, WorkDir};
 use crate::executor::parallel::run_parallel;
 use crate::executor::state;
 use crate::executor::state::{Collision, StateStore};
@@ -1035,6 +1037,7 @@ mod tests {
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot("gr-test"),
             cancel_token: None,
             interactive_session: None,
+            scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
         };
         (sandbox, gremlin)
     }
@@ -1624,7 +1627,7 @@ mod tests {
         );
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
-        gremlin.workdir = Some(worktree.clone());
+        gremlin.workdir = Some(WorkDir::Persistent(worktree.clone()));
         let state_dir = sandbox.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
@@ -1662,7 +1665,7 @@ mod tests {
         );
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
-        gremlin.workdir = Some(worktree.clone());
+        gremlin.workdir = Some(WorkDir::Persistent(worktree.clone()));
 
         // The stage `cat`s a file only the bootstrap wrote: a non-zero exit
         // here would mean the ordering was wrong.
@@ -1687,7 +1690,7 @@ mod tests {
         );
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
-        gremlin.workdir = Some(worktree.clone());
+        gremlin.workdir = Some(WorkDir::Persistent(worktree.clone()));
 
         assert_eq!(gremlin.run(Some("only")).await.unwrap(), 0);
         assert!(!worktree.join("bootstrap.marker").exists());
@@ -1731,6 +1734,7 @@ mod tests {
             &definition,
             &HashMap::new(),
             None,
+            &GremlinConfig::default(),
         )
         .unwrap();
         let code = gremlin.run(None).await.unwrap();

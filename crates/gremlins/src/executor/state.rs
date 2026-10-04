@@ -358,31 +358,78 @@ fn validate_gremlin_id_component(id: &str) -> Result<(), StateError> {
 }
 
 // ---------------------------------------------------------------------------
+// StateRoot — private enum for persistent vs temp-backed storage
+// ---------------------------------------------------------------------------
+
+enum StateRoot {
+    Path(PathBuf),
+    Temp(tempfile::TempDir),
+}
+
+impl StateRoot {
+    fn path(&self) -> &Path {
+        match self {
+            StateRoot::Path(p) => p.as_path(),
+            StateRoot::Temp(t) => t.path(),
+        }
+    }
+
+    fn is_temp(&self) -> bool {
+        matches!(self, StateRoot::Temp(_))
+    }
+}
+
+impl std::fmt::Debug for StateRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StateRoot::Path(p) => f.debug_tuple("Path").field(p).finish(),
+            StateRoot::Temp(t) => f.debug_tuple("Temp").field(&t.path()).finish(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FileSystemStateStore — filesystem-backed implementation
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct FileSystemStateStore {
-    state_dir: PathBuf,
+    root: StateRoot,
 }
 
 impl FileSystemStateStore {
     fn state_file(&self) -> PathBuf {
-        self.state_dir.join("state.json")
+        self.root.path().join("state.json")
     }
 
     fn registry_path(&self) -> PathBuf {
-        self.state_dir.join("registry.json")
+        self.root.path().join("registry.json")
     }
 
     /// Create a new state directory, write initial state.json, return a live store.
-    pub fn create(gremlin_id: &str, initial: &Map<String, Value>) -> Result<Self, StateError> {
+    pub fn create(
+        gremlin_id: &str,
+        initial: &Map<String, Value>,
+        ephemeral: bool,
+    ) -> Result<Self, StateError> {
         validate_gremlin_id_component(gremlin_id)?;
-        let state_dir = config::state_root().join(gremlin_id);
-        std::fs::create_dir_all(&state_dir)?;
-        std::fs::create_dir_all(state_dir.join("artifacts"))?;
-        write_state(&state_dir, initial)?;
-        Ok(FileSystemStateStore { state_dir })
+        if ephemeral {
+            let temp = tempfile::TempDir::new().map_err(StateError::Io)?;
+            let state_dir = temp.path().to_path_buf();
+            std::fs::create_dir_all(state_dir.join("artifacts"))?;
+            write_state(&state_dir, initial)?;
+            Ok(FileSystemStateStore {
+                root: StateRoot::Temp(temp),
+            })
+        } else {
+            let state_dir = config::state_root().join(gremlin_id);
+            std::fs::create_dir_all(&state_dir)?;
+            std::fs::create_dir_all(state_dir.join("artifacts"))?;
+            write_state(&state_dir, initial)?;
+            Ok(FileSystemStateStore {
+                root: StateRoot::Path(state_dir),
+            })
+        }
     }
 
     /// Open an existing state directory. Does NOT write anything.
@@ -395,20 +442,24 @@ impl FileSystemStateStore {
                 state_dir.display()
             )));
         }
-        Ok(FileSystemStateStore { state_dir })
+        Ok(FileSystemStateStore {
+            root: StateRoot::Path(state_dir),
+        })
     }
 
     /// Open a store from an explicit path (for callers that already have a
     /// state directory path, e.g. the CLI).
     pub fn from_path(state_dir: PathBuf) -> Self {
-        FileSystemStateStore { state_dir }
+        FileSystemStateStore {
+            root: StateRoot::Path(state_dir),
+        }
     }
 
     // --- registry helpers ---
 
     /// The artifact storage directory, derived from `state_dir`.
     fn artifact_dir(&self) -> PathBuf {
-        self.state_dir.join("artifacts")
+        self.root.path().join("artifacts")
     }
 
     /// Read and parse `registry.json`, returning an empty map when the file is
@@ -726,7 +777,7 @@ impl FileSystemStateStore {
         let artifact_dir = temp_dir.path().join("artifacts");
         tokio::fs::create_dir_all(&artifact_dir).await?;
         let new_store = FileSystemStateStore {
-            state_dir: temp_dir.path().to_path_buf(),
+            root: StateRoot::Path(temp_dir.path().to_path_buf()),
         };
         let mut allowed = HashSet::new();
 
@@ -788,7 +839,7 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
-        write_state(&self.state_dir, data)
+        write_state(self.root.path(), data)
     }
 
     fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
@@ -798,7 +849,7 @@ impl StateStore for FileSystemStateStore {
                 "invalid blob name {name:?}: traversal or absolute path rejected"
             )));
         }
-        let path = self.state_dir.join(name);
+        let path = self.root.path().join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -823,11 +874,11 @@ impl StateStore for FileSystemStateStore {
         if name.contains("..") || name.starts_with('/') || name.contains('\0') {
             return false;
         }
-        self.state_dir.join(name).exists()
+        self.root.path().join(name).exists()
     }
 
     fn clear_stage_error(&self, attempt: &str) {
-        let bail_path = self.state_dir.join(format!("bail_{attempt}.json"));
+        let bail_path = self.root.path().join(format!("bail_{attempt}.json"));
         let _ = std::fs::remove_file(&bail_path);
     }
 
@@ -888,13 +939,13 @@ impl StateStore for FileSystemStateStore {
         if attempt.is_empty() {
             return;
         }
-        let bail_path = self.state_dir.join(format!("bail_{attempt}.json"));
+        let bail_path = self.root.path().join(format!("bail_{attempt}.json"));
         let payload = serde_json::json!({
             "class": class,
             "detail": detail,
             "ts": now_iso(),
         });
-        write_bail_atomically(&self.state_dir, &bail_path, &attempt, &payload);
+        write_bail_atomically(self.root.path(), &bail_path, &attempt, &payload);
     }
 
     fn accumulate_token_usage(&self, usage: &HashMap<String, i64>) {
@@ -928,7 +979,7 @@ impl StateStore for FileSystemStateStore {
         if attempt.is_empty() {
             return None;
         }
-        let bail_path = self.state_dir.join(format!("bail_{attempt}.json"));
+        let bail_path = self.root.path().join(format!("bail_{attempt}.json"));
         serde_json::from_str(&std::fs::read_to_string(bail_path).ok()?).ok()
     }
 
@@ -967,7 +1018,7 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn write_terminal_state(&self, exit_code: i32) {
-        let _ = File::create(self.state_dir.join("finished"));
+        let _ = File::create(self.root.path().join("finished"));
         let mut fields = Map::new();
         fields.insert(
             "status".into(),
@@ -1038,54 +1089,101 @@ impl StateStore for FileSystemStateStore {
         child_gremlin_id: &str,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
         validate_gremlin_id_component(child_gremlin_id)?;
-        let child_dir = config::state_root().join(child_gremlin_id);
-        tokio::fs::create_dir_all(&child_dir).await?;
-        let child_artifact_dir = child_dir.join("artifacts");
-        tokio::fs::create_dir_all(&child_artifact_dir).await?;
 
-        let parent_artifact_dir = self.artifact_dir();
+        if self.root.is_temp() {
+            // Temp-backed parent: create a new TempDir for the child.
+            let child_temp = tempfile::TempDir::new().map_err(StateError::Io)?;
+            let child_dir = child_temp.path().to_path_buf();
+            let child_artifact_dir = child_dir.join("artifacts");
+            std::fs::create_dir_all(&child_artifact_dir)?;
 
-        // Copy parent artifact files.
-        if parent_artifact_dir.is_dir() {
-            copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
-        }
+            let parent_artifact_dir = self.artifact_dir();
+            if parent_artifact_dir.is_dir() {
+                copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
+            }
 
-        // Seed registry from parent, remapping file-backed bindings
-        // that point into the parent artifact directory to the
-        // corresponding child paths.
-        let mut child_store = FileSystemStateStore::open(child_gremlin_id)?;
-        let parent_registry = self.read_registry_json().await;
-        if !parent_registry.is_empty() {
-            let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
-            child_store
-                .locked_write(|data| {
-                    for (key, path) in &parent_registry {
-                        // If the binding points inside the parent artifact
-                        // directory, remap it to the child's artifact
-                        // directory. External / non-file URIs are kept
-                        // as-is.
-                        if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
-                            let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
-                            let rel = rel.trim_start_matches('/');
-                            data.insert(
-                                key.clone(),
-                                child_artifact_dir.join(rel).to_string_lossy().to_string(),
-                            );
-                        } else {
-                            data.insert(key.clone(), path.clone());
+            let mut child_store = FileSystemStateStore {
+                root: StateRoot::Temp(child_temp),
+            };
+
+            let parent_registry = self.read_registry_json().await;
+            if !parent_registry.is_empty() {
+                let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
+                child_store
+                    .locked_write(|data| {
+                        for (key, path) in &parent_registry {
+                            if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
+                                let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
+                                let rel = rel.trim_start_matches('/');
+                                data.insert(
+                                    key.clone(),
+                                    child_artifact_dir.join(rel).to_string_lossy().to_string(),
+                                );
+                            } else {
+                                data.insert(key.clone(), path.clone());
+                            }
                         }
-                    }
-                    Ok(())
-                })
-                .await?;
+                        Ok(())
+                    })
+                    .await?;
+            }
+
+            let mut initial = Map::new();
+            initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
+            child_store.write_state(&initial)?;
+
+            Ok(Box::new(child_store))
+        } else {
+            // Persistent parent: create child under config::state_root().
+            let child_dir = config::state_root().join(child_gremlin_id);
+            tokio::fs::create_dir_all(&child_dir).await?;
+            let child_artifact_dir = child_dir.join("artifacts");
+            tokio::fs::create_dir_all(&child_artifact_dir).await?;
+
+            let parent_artifact_dir = self.artifact_dir();
+
+            // Copy parent artifact files.
+            if parent_artifact_dir.is_dir() {
+                copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
+            }
+
+            // Seed registry from parent, remapping file-backed bindings
+            // that point into the parent artifact directory to the
+            // corresponding child paths.
+            let mut child_store = FileSystemStateStore::open(child_gremlin_id)?;
+            let parent_registry = self.read_registry_json().await;
+            if !parent_registry.is_empty() {
+                let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
+                child_store
+                    .locked_write(|data| {
+                        for (key, path) in &parent_registry {
+                            // If the binding points inside the parent artifact
+                            // directory, remap it to the child's artifact
+                            // directory. External / non-file URIs are kept
+                            // as-is.
+                            if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
+                                let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
+                                let rel = rel.trim_start_matches('/');
+                                data.insert(
+                                    key.clone(),
+                                    child_artifact_dir.join(rel).to_string_lossy().to_string(),
+                                );
+                            } else {
+                                data.insert(key.clone(), path.clone());
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await?;
+            }
+
+            // Write initial state.json with id stamped.
+            let mut initial = Map::new();
+            initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
+            child_store.write_state(&initial)?;
+
+            Ok(Box::new(child_store))
         }
-
-        // Write initial state.json with id stamped.
-        let mut initial = Map::new();
-        initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
-        child_store.write_state(&initial)?;
-
-        Ok(Box::new(child_store))
     }
 
     async fn checkout_registry(
@@ -1100,7 +1198,7 @@ impl StateStore for FileSystemStateStore {
     }
 
     fn state_dir(&self) -> &Path {
-        &self.state_dir
+        self.root.path()
     }
 
     fn artifact_dir(&self) -> PathBuf {
@@ -1263,7 +1361,50 @@ impl StateStore for ScopedFileSystemStateStore {
         &self,
         child_gremlin_id: &str,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
-        self.inner.fork(child_gremlin_id).await
+        // Scoped stores are always temporary — create a temp-backed child.
+        validate_gremlin_id_component(child_gremlin_id)?;
+        let child_temp = tempfile::TempDir::new().map_err(StateError::Io)?;
+        let child_dir = child_temp.path().to_path_buf();
+        let child_artifact_dir = child_dir.join("artifacts");
+        std::fs::create_dir_all(&child_artifact_dir)?;
+
+        let parent_artifact_dir = self.inner.artifact_dir();
+        if parent_artifact_dir.is_dir() {
+            copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
+        }
+
+        let mut child_store = FileSystemStateStore {
+            root: StateRoot::Temp(child_temp),
+        };
+
+        // Copy registry from the scoped inner.
+        let parent_registry = self.inner.read_registry_json().await;
+        if !parent_registry.is_empty() {
+            let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
+            child_store
+                .locked_write(|data| {
+                    for (key, path) in &parent_registry {
+                        if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
+                            let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
+                            let rel = rel.trim_start_matches('/');
+                            data.insert(
+                                key.clone(),
+                                child_artifact_dir.join(rel).to_string_lossy().to_string(),
+                            );
+                        } else {
+                            data.insert(key.clone(), path.clone());
+                        }
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
+
+        let mut initial = Map::new();
+        initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
+        child_store.write_state(&initial)?;
+
+        Ok(Box::new(child_store))
     }
 
     async fn checkout_registry(
@@ -1297,8 +1438,14 @@ pub struct StateData {
 
 impl StateData {
     /// Create a new state directory, write initial state.json, return a live handle.
-    pub fn new(gremlin_id: &str, initial: &Map<String, Value>) -> Result<Self, StateError> {
-        let store = Box::new(FileSystemStateStore::create(gremlin_id, initial)?);
+    pub fn new(
+        gremlin_id: &str,
+        initial: &Map<String, Value>,
+        ephemeral: bool,
+    ) -> Result<Self, StateError> {
+        let store = Box::new(FileSystemStateStore::create(
+            gremlin_id, initial, ephemeral,
+        )?);
         let gremlin_id = Some(gremlin_id.to_string());
         Ok(Self { gremlin_id, store })
     }
@@ -2179,7 +2326,7 @@ mod tests {
             let mut payload = Map::new();
             payload.insert("id".into(), Value::String("child".into()));
             payload.insert("definition_path".into(), Value::String("/p.yaml".into()));
-            let d = StateData::new("child", &payload).unwrap();
+            let d = StateData::new("child", &payload, false).unwrap();
             let raw = d.state_tree();
             assert_eq!(raw.get("id").unwrap(), "child");
             assert_eq!(raw.get("definition_path").unwrap(), "/p.yaml");

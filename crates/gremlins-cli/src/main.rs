@@ -471,8 +471,8 @@ fn status_direct(id: &str) -> Result<(), String> {
         "workdir:       {}",
         gremlin
             .workdir
-            .as_deref()
-            .map(|path| path.display().to_string())
+            .as_ref()
+            .map(|w| w.path().display().to_string())
             .unwrap_or_default()
     );
     println!("state_dir:     {}", gremlin.state.state_dir().display());
@@ -545,8 +545,8 @@ fn info_direct(id: &str) -> Result<(), String> {
 
     let workdir = gremlin
         .workdir
-        .as_deref()
-        .map(|path| path.display().to_string())
+        .as_ref()
+        .map(|w| w.path().display().to_string())
         .unwrap_or_default();
 
     let payload = serde_json::json!({

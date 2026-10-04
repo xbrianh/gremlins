@@ -396,7 +396,7 @@ pub(crate) async fn run_parallel(
         let parent_workdir = gremlin
             .workdir
             .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|w| w.path().to_string_lossy().into_owned())
             .unwrap_or_default();
         let join_cwd = if parent_workdir.is_empty() {
             gremlin.project_root.clone()
@@ -612,7 +612,7 @@ mod tests {
 
     use crate::definition::StageSpec;
     use crate::definition::{ExecutorStage, StaticDefinition};
-    use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig};
+    use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig, ScratchDir};
     use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;
@@ -672,6 +672,7 @@ mod tests {
             runtime_config: RuntimeConfig::snapshot("gr-test"),
             cancel_token: None,
             interactive_session: None,
+            scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
         };
         (sandbox, gremlin)
     }
