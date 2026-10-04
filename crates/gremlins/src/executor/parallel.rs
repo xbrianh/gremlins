@@ -14,6 +14,7 @@
 //! "orphan" display in `gremlins ls` is gone.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -376,18 +377,29 @@ pub(crate) async fn run_parallel(
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        for outcome in &child_results {
-            let child_workdir = match StateData::open(&outcome.child_id) {
+        let join_cwd = if parent_workdir.is_empty() {
+            gremlin.project_root.clone()
+        } else {
+            PathBuf::from(&parent_workdir)
+        };
+        for child_id in &child_ids {
+            let child_workdir = match StateData::open(child_id) {
                 Ok(s) => s.read_str("workdir"),
                 Err(_) => continue,
             };
             if child_workdir.is_empty() {
                 continue;
             }
+            let child_name = child_results
+                .iter()
+                .find(|o| &o.child_id == child_id)
+                .map(|o| o.child_name.as_str())
+                .unwrap_or(child_id.as_str());
             for cmd in &join_spec.cmds {
                 let status = std::process::Command::new("sh")
                     .arg("-c")
                     .arg(cmd)
+                    .current_dir(&join_cwd)
                     .env("GREMLIN_WORKDIR", &parent_workdir)
                     .env("GREMLIN_FORK_WORKDIR", &child_workdir)
                     .status();
@@ -396,7 +408,7 @@ pub(crate) async fn run_parallel(
                         log::warn!(
                             "parallel group {group_name}: join command '{}' for child {} exited {}",
                             cmd,
-                            outcome.child_name,
+                            child_name,
                             s.code().unwrap_or(-1)
                         );
                     }
@@ -404,7 +416,7 @@ pub(crate) async fn run_parallel(
                         log::warn!(
                             "parallel group {group_name}: join command '{}' for child {} failed: {e}",
                             cmd,
-                            outcome.child_name
+                            child_name
                         );
                     }
                     _ => {}
@@ -445,10 +457,12 @@ pub(crate) async fn run_parallel(
         }
     }
 
-    // --- Clean up all children (best-effort) ---
+    // --- Clean up children (best-effort) ---
     //
+    // On success: remove everything (state, scratch, workspace).
+    // On failure: only remove workspace (preserve state for forensics).
     // The pipeline author handles workspace cleanup in join.cmds; here we
-    // just remove state and scratch for every child, success or failure.
+    // clean up workspaces that join didn't handle.
     log::debug!(
         "parallel group {group_name}: cleaning up {} children",
         child_ids.len()
@@ -459,7 +473,11 @@ pub(crate) async fn run_parallel(
             .find(|o| &o.child_id == child_id)
             .map(|o| o.child_name.as_str())
             .unwrap_or(child_id);
-        cleanup_child_fully(child_name, child_id);
+        if group_error.is_none() {
+            cleanup_child_fully(child_name, child_id);
+        } else {
+            cleanup_child_workspace(child_name, child_id);
+        }
     }
 
     match group_error {
@@ -531,6 +549,16 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
 fn cleanup_child_fully(child_name: &str, child_id: &str) {
     match Gremlin::from(child_id) {
         Ok(child) => child.clean(true),
+        Err(error) => {
+            log::debug!("parallel group: child {child_name} left nothing to clean ({error})")
+        }
+    }
+}
+
+/// Remove only the child's workspace, preserving state for forensics.
+fn cleanup_child_workspace(child_name: &str, child_id: &str) {
+    match Gremlin::from(child_id) {
+        Ok(child) => child.clean(false),
         Err(error) => {
             log::debug!("parallel group: child {child_name} left nothing to clean ({error})")
         }

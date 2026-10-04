@@ -137,17 +137,6 @@ pub trait StateStore: Send + Sync + Debug {
 
     fn patch_parallel_attempt(&self, child_key: &str, attempt: &str);
 
-    /// Read parallel worktree paths for a group from state.json.
-    fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>);
-
-    /// Write parallel worktree paths for a group into state.json.
-    fn patch_parallel_worktrees(
-        &self,
-        group_name: &str,
-        base_head: Option<&str>,
-        paths: Option<&HashMap<String, String>>,
-    );
-
     // --- artifact registry ---
 
     /// Return the data URI (storage path or external URI) bound to `key`.
@@ -977,81 +966,6 @@ impl StateStore for FileSystemStateStore {
         });
     }
 
-    fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>) {
-        let sf = self.state_file();
-        if !sf.exists() {
-            return (String::new(), HashMap::new());
-        }
-        let data = read_state_json(Some(&sf));
-        let Some(entry) = data
-            .get("parallel_worktrees")
-            .and_then(|v| v.as_object())
-            .and_then(|o| o.get(group_name))
-            .and_then(|v| v.as_object())
-        else {
-            return (String::new(), HashMap::new());
-        };
-        let base_head = entry
-            .get("base_head")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let paths = entry
-            .get("paths")
-            .and_then(|v| v.as_object())
-            .map(|o| {
-                o.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        (base_head, paths)
-    }
-
-    fn patch_parallel_worktrees(
-        &self,
-        group_name: &str,
-        base_head: Option<&str>,
-        paths: Option<&HashMap<String, String>>,
-    ) {
-        let sf = self.state_file();
-        if !sf.exists() {
-            return;
-        }
-        let group_name = group_name.to_string();
-        let base_head = base_head.map(|s| s.to_string());
-        let paths = paths.cloned();
-        let _ = locked_update(&sf, move |data| {
-            let mut groups = data
-                .get("parallel_worktrees")
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
-            if base_head.is_none() && paths.is_none() {
-                groups.remove(&group_name);
-                if groups.is_empty() {
-                    data.remove("parallel_worktrees");
-                } else {
-                    data.insert("parallel_worktrees".into(), Value::Object(groups));
-                }
-            } else {
-                let mut entry = groups
-                    .get(&group_name)
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                if let Some(bh) = base_head {
-                    entry.insert("base_head".into(), Value::String(bh));
-                }
-                if let Some(p) = paths {
-                    let paths_map: Map<String, Value> =
-                        p.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
-                    entry.insert("paths".into(), Value::Object(paths_map));
-                }
-                groups.insert(group_name, Value::Object(entry));
-                data.insert("parallel_worktrees".into(), Value::Object(groups));
-            }
-        });
-    }
-
     fn write_terminal_state(&self, exit_code: i32) {
         let _ = File::create(self.state_dir.join("finished"));
         let mut fields = Map::new();
@@ -1296,20 +1210,6 @@ impl StateStore for ScopedFileSystemStateStore {
         self.inner.patch_parallel_attempt(child_key, attempt)
     }
 
-    fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>) {
-        self.inner.parallel_worktrees(group_name)
-    }
-
-    fn patch_parallel_worktrees(
-        &self,
-        group_name: &str,
-        base_head: Option<&str>,
-        paths: Option<&HashMap<String, String>>,
-    ) {
-        self.inner
-            .patch_parallel_worktrees(group_name, base_head, paths)
-    }
-
     // --- artifact methods: check key, then delegate ---
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
@@ -1487,23 +1387,6 @@ impl StateData {
 
     pub fn patch_parallel_attempt(&self, child_key: &str, attempt: &str) {
         self.store.patch_parallel_attempt(child_key, attempt);
-    }
-
-    pub fn parallel_worktrees(&self, group_name: &str) -> (String, HashMap<String, String>) {
-        self.store.parallel_worktrees(group_name)
-    }
-
-    pub fn patch_parallel_worktrees(
-        &self,
-        group_name: &str,
-        base_head: Option<&str>,
-        paths: Option<&HashMap<String, String>>,
-    ) {
-        if self.gremlin_id.as_deref().unwrap_or("").is_empty() {
-            return;
-        }
-        self.store
-            .patch_parallel_worktrees(group_name, base_head, paths);
     }
 
     // --- locality ---
@@ -2883,17 +2766,6 @@ mod tests {
                 unimplemented!()
             }
             fn patch_parallel_attempt(&self, _child_key: &str, _attempt: &str) {
-                unimplemented!()
-            }
-            fn parallel_worktrees(&self, _group_name: &str) -> (String, HashMap<String, String>) {
-                unimplemented!()
-            }
-            fn patch_parallel_worktrees(
-                &self,
-                _group_name: &str,
-                _base_head: Option<&str>,
-                _paths: Option<&HashMap<String, String>>,
-            ) {
                 unimplemented!()
             }
             async fn data_uri(&self, _key: &str) -> Result<String, MissingArtifact> {

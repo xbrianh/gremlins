@@ -440,28 +440,24 @@ fn parallel_to_yaml(
     }
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
     if let Some(ref fork_spec) = fork {
-        if !fork_spec.cmds.is_empty() {
-            let cmds: Vec<Value> = fork_spec
-                .cmds
-                .iter()
-                .map(|c| Value::String(c.clone()))
-                .collect();
-            let mut fork_map = Mapping::new();
-            fork_map.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
-            m.insert(Value::String("fork".to_string()), Value::Mapping(fork_map));
-        }
+        let cmds: Vec<Value> = fork_spec
+            .cmds
+            .iter()
+            .map(|c| Value::String(c.clone()))
+            .collect();
+        let mut fork_map = Mapping::new();
+        fork_map.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
+        m.insert(Value::String("fork".to_string()), Value::Mapping(fork_map));
     }
     if let Some(ref join_spec) = join {
-        if !join_spec.cmds.is_empty() {
-            let cmds: Vec<Value> = join_spec
-                .cmds
-                .iter()
-                .map(|c| Value::String(c.clone()))
-                .collect();
-            let mut join_map = Mapping::new();
-            join_map.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
-            m.insert(Value::String("join".to_string()), Value::Mapping(join_map));
-        }
+        let cmds: Vec<Value> = join_spec
+            .cmds
+            .iter()
+            .map(|c| Value::String(c.clone()))
+            .collect();
+        let mut join_map = Mapping::new();
+        join_map.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
+        m.insert(Value::String("join".to_string()), Value::Mapping(join_map));
     }
     let children: Vec<Value> = body.iter().map(StageSpec::to_yaml).collect();
     m.insert(Value::String("body".to_string()), Value::Sequence(children));

@@ -21,7 +21,7 @@ use crate::definition::ClientSpec;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::node::StageSpec;
-use crate::stage_spec::parallel::{ErrorPolicy, ForkSpec};
+use crate::stage_spec::parallel::ErrorPolicy;
 
 use super::StaticDefinition;
 
@@ -495,11 +495,11 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
     if let Some(c) = client {
         builder = builder.client(c.0);
     }
-    if let Some(fork_spec) = fork {
-        builder = builder.fork(fork_spec.cmds);
+    if let Some(fork_cmds) = fork {
+        builder = builder.fork(fork_cmds);
     }
-    if let Some(join_spec) = join {
-        builder = builder.join(join_spec.cmds);
+    if let Some(join_cmds) = join {
+        builder = builder.join(join_cmds);
     }
 
     builder.build()
@@ -507,7 +507,7 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
 
 /// Parse a `fork` or `join` key from a parallel stage mapping.
 /// Each is a mapping with a `cmds:` sequence of strings.
-fn yaml_fork_join(mapping: &Mapping, key: &str) -> Result<Option<ForkSpec>, SchemaError> {
+fn yaml_fork_join(mapping: &Mapping, key: &str) -> Result<Option<Vec<String>>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(None);
     };
@@ -515,7 +515,7 @@ fn yaml_fork_join(mapping: &Mapping, key: &str) -> Result<Option<ForkSpec>, Sche
         .as_mapping()
         .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a mapping")))?;
     let cmds = yaml_string_list(fmap, "cmds")?;
-    Ok(Some(ForkSpec::new(cmds)))
+    Ok(Some(cmds))
 }
 
 /// Parse children from a composite's `key` ("body") through

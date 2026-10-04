@@ -742,7 +742,7 @@ impl Gremlin {
 
                 let mut values: HashMap<String, String> = HashMap::new();
                 values.insert("child_key".to_string(), child_key.to_string());
-                values.insert("child_name".to_string(), child_id.to_string());
+                values.insert("child_name".to_string(), child_key.to_string());
                 values.insert("child_id".to_string(), child_id.to_string());
                 values.insert("parent_id".to_string(), parent_id.to_string());
                 values.insert("group_name".to_string(), group_name.to_string());
@@ -756,7 +756,7 @@ impl Gremlin {
                     let status = std::process::Command::new("sh")
                         .arg("-c")
                         .arg(&substituted)
-                        .current_dir(&child_workdir)
+                        .current_dir(&self.project_root)
                         .env("GREMLIN_WORKDIR", &parent_workdir)
                         .env("GREMLIN_FORK_WORKDIR", &child_workdir_str)
                         .status()
@@ -1073,7 +1073,7 @@ pub fn framework_subs(stage_name: &str, cwd: &str, model: &str) -> HashMap<Strin
     ])
 }
 
-/// The four harness-owned system variables, built from a gremlin's paths.
+/// The five harness-owned system variables, built from a gremlin's paths.
 ///
 /// These are both *seeded into* the base the bootstrap script is sourced
 /// against and *re-asserted* on top of the result, so the script can read
@@ -1088,6 +1088,7 @@ pub fn system_env(
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
     let scratch_dir = scratch_dir.to_path_buf();
+    let state_dir = config::state_root().join(gremlin_id);
 
     let mut vars = HashMap::new();
     vars.insert("GREMLINS_GREMLIN_ID".to_string(), gremlin_id.to_string());
@@ -1099,6 +1100,10 @@ pub fn system_env(
     vars.insert(
         "GREMLINS_SCRATCH_DIR".to_string(),
         scratch_dir.to_string_lossy().into_owned(),
+    );
+    vars.insert(
+        "GREMLINS_STATE_DIR".to_string(),
+        state_dir.to_string_lossy().into_owned(),
     );
     vars
 }

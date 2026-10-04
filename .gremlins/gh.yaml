@@ -15,9 +15,10 @@ bootstrap:
     - '[ -n "{instructions}" ] || [ -n "{plan}" ] || { echo "ERROR: at least one of --instructions or --plan is required" >&2; exit 1; }'
     - gremlins:bind_artifact("artifact://plan.md", plan)
     - gremlins:bind_artifact("artifact://instructions.txt", instructions)
-    - gremlins:bind_artifact("artifact://base_sha", base_ref)
     - gremlins:bind_artifact("artifact://base_ref", base_ref)
-    - 'REF="${base_ref:-HEAD}" && SHA=$(git rev-parse --verify "$REF") && git worktree add --detach "$GREMLIN_WORKDIR" "$SHA"'
+    - 'BASE_REF={base_ref} && SHA=$(git rev-parse --verify "${BASE_REF:-HEAD}") && git worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && echo "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"'
+  cli_out:
+    base_sha: "artifact://base_sha"
   env: |
     export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
     export CARGO_INCREMENTAL=0
