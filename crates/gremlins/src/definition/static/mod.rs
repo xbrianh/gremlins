@@ -39,8 +39,6 @@ pub struct StaticDefinition {
     pub path: PathBuf,
     /// Every stage runs with this client unless it declares its own.
     pub default_client: String,
-    /// The git ref the worktree branches from.
-    pub base_ref: String,
     /// Bootstrap commands and input sources.
     pub bootstrap: Bootstrap,
     /// The stage tree, in declaration order.
@@ -60,7 +58,6 @@ impl StaticDefinition {
         name: String,
         path: PathBuf,
         default_client: String,
-        base_ref: String,
         bootstrap: Bootstrap,
         stages: Vec<StageSpec>,
         land: Option<StageSpec>,
@@ -70,7 +67,6 @@ impl StaticDefinition {
             name,
             path,
             default_client,
-            base_ref,
             bootstrap,
             stages,
             land,
@@ -89,7 +85,6 @@ impl StaticDefinition {
             name: UNLOADED_NAME.to_string(),
             path: PathBuf::from("."),
             default_client: String::new(),
-            base_ref: String::new(),
             bootstrap: Bootstrap::default(),
             stages: Vec::new(),
             land: None,
@@ -144,14 +139,6 @@ impl StaticDefinition {
             Value::String("default_client".to_string()),
             Value::String(self.default_client.clone()),
         );
-
-        // base_ref — omit if "current".
-        if self.base_ref != "current" {
-            root.insert(
-                Value::String("base_ref".to_string()),
-                Value::String(self.base_ref.clone()),
-            );
-        }
 
         // bootstrap — omit entirely if all fields are default/empty.
         let bootstrap_yaml = bootstrap_to_yaml(&self.bootstrap);
@@ -227,6 +214,8 @@ impl StaticDefinition {
                 error_policy,
                 client,
                 body,
+                fork,
+                join,
             } => {
                 let children: Vec<Box<dyn GremlinDefinition>> = body
                     .into_iter()
@@ -242,6 +231,8 @@ impl StaticDefinition {
                     client,
                     children,
                     skip_if_exists: attrs.skip_if_exists,
+                    fork,
+                    join,
                 }
             }
         }
@@ -256,10 +247,6 @@ impl GremlinDefinition for StaticDefinition {
 
     fn default_client(&self) -> &str {
         &self.default_client
-    }
-
-    fn base_ref(&self) -> &str {
-        &self.base_ref
     }
 
     fn bootstrap(&self) -> &Bootstrap {
@@ -436,12 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn static_definition_delegates_base_ref() {
-        let def = stub_definition();
-        assert_eq!(def.base_ref(), "");
-    }
-
-    #[test]
     fn static_definition_delegates_bootstrap() {
         let def = stub_definition();
         let bs = def.bootstrap();
@@ -461,7 +442,6 @@ mod tests {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
             default_client: "openai:gpt-4".into(),
-            base_ref: "main".into(),
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: Some(parsed_exec("land")),
@@ -479,7 +459,6 @@ mod tests {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
             default_client: "openai:gpt-4".into(),
-            base_ref: "main".into(),
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: Some(parsed_exec("land")),
@@ -508,7 +487,6 @@ mod tests {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
             default_client: "openai:gpt-4".into(),
-            base_ref: "main".into(),
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: None,
@@ -517,7 +495,6 @@ mod tests {
         };
         assert_eq!(def.name(), "test-gremlin");
         assert_eq!(def.default_client(), "openai:gpt-4");
-        assert_eq!(def.base_ref(), "main");
         assert!(def.land().is_none());
     }
 
@@ -606,6 +583,8 @@ mod tests {
             client: None,
             children: vec![],
             skip_if_exists: "artifact://reviews".into(),
+            fork: None,
+            join: None,
         };
         assert_eq!(stage.name(), "reviews");
         assert_eq!(stage.stage_type(), "parallel");
@@ -697,7 +676,6 @@ mod tests {
             name: "test-def".into(),
             path: "/tmp/test.yaml".into(),
             default_client: "openai:gpt-4".into(),
-            base_ref: "main".into(),
             bootstrap: Bootstrap::default(),
             stages,
             land: None,
@@ -862,6 +840,8 @@ mod tests {
             error_policy: ErrorPolicy::All,
             client: Some(ClientSpec("openai:gpt-5".into())),
             body: vec![parsed_agent("rev-a"), parsed_agent("rev-b")],
+            fork: None,
+            join: None,
         };
         let def = definition_with(vec![par]);
         let mut sd = def;
@@ -883,11 +863,10 @@ mod tests {
                 assert_eq!(client, Some(ClientSpec("openai:gpt-5".into())));
                 assert_eq!(children.len(), 2);
                 // Each child is a StaticDefinition that inherits parent metadata
-                // (name, default_client, base_ref, bootstrap).
+                // (name, default_client, bootstrap).
                 for child in &children {
                     assert_eq!(child.name(), "test-def");
                     assert_eq!(child.default_client(), "openai:gpt-4");
-                    assert_eq!(child.base_ref(), "main");
                 }
             }
             _ => panic!("expected Parallel"),
@@ -903,6 +882,8 @@ mod tests {
             error_policy: ErrorPolicy::Any,
             client: None,
             body: vec![parsed_agent("sole-child")],
+            fork: None,
+            join: None,
         };
         let def = definition_with(vec![par]);
         let mut sd = def;
@@ -956,7 +937,6 @@ mod tests {
         let mut deserialized = StaticDefinition::deserialize(&bytes).unwrap();
         assert_eq!(deserialized.name(), "test-def");
         assert_eq!(deserialized.default_client(), "openai:gpt-4");
-        assert_eq!(deserialized.base_ref(), "main");
         // Stage traversal: all three stages must survive the round-trip.
         let mut stage_names: Vec<String> = Vec::new();
         loop {

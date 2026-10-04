@@ -15,9 +15,7 @@
 //! - *Fallible operations* return [`GitError`], raised on a non-zero exit
 //!   (when `check` semantics apply), a spawn failure, or a timeout.
 
-use std::fs::File;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::core::proc;
 
@@ -39,10 +37,9 @@ pub enum GitError {
 
 /// The output of a git invocation, carrying the exit code so callers can
 /// branch on it instead of guessing from an empty stdout.
-struct GitOutput {
+pub(crate) struct GitOutput {
     returncode: i32,
     stdout: Vec<u8>,
-    stderr: Vec<u8>,
 }
 
 fn git_argv(args: &[&str]) -> Vec<String> {
@@ -68,7 +65,7 @@ fn stdout_text(output: &GitOutput) -> String {
 }
 
 /// Run `git <args>`, raising on a non-zero exit only when `check` is set.
-fn run_git(
+pub(crate) fn run_git(
     args: &[&str],
     cwd: Option<&Path>,
     check: bool,
@@ -84,7 +81,6 @@ fn run_git(
     Ok(GitOutput {
         returncode: output.returncode,
         stdout: output.stdout,
-        stderr: output.stderr,
     })
 }
 
@@ -102,7 +98,6 @@ async fn run_git_async(
     Ok(GitOutput {
         returncode: output.returncode,
         stdout: output.stdout,
-        stderr: output.stderr,
     })
 }
 
@@ -237,47 +232,6 @@ pub fn try_fetch_all(remote: &str, cwd: Option<&Path>, timeout: Option<f64>) -> 
 // Fallible operations
 // ---------------------------------------------------------------------------
 
-/// Resolve a symbolic ref name to `(sym_name, sha)`.
-///
-/// `"current"` is the running branch (falling back to the SHA for a detached
-/// `HEAD`); anything else is tried as a local branch, a remote-tracking ref, a
-/// tag, and finally a raw object name.
-pub fn resolve_base_ref(name: &str, cwd: Option<&Path>) -> Result<(String, String), GitError> {
-    if name == "current" {
-        let sha = head_sha(cwd);
-        if sha.is_empty() {
-            return Err(GitError::Exit(
-                128,
-                "could not resolve HEAD: no commits".to_string(),
-            ));
-        }
-        let branch = current_branch(cwd);
-        let sym_name = if branch.is_empty() {
-            sha.clone()
-        } else {
-            branch
-        };
-        return Ok((sym_name, sha));
-    }
-
-    for refpath in [
-        format!("refs/heads/{name}"),
-        format!("refs/remotes/{name}"),
-        format!("refs/tags/{name}"),
-        name.to_string(), // raw SHA or other direct ref
-    ] {
-        let output = run_git(&["rev-parse", "--verify", &refpath], cwd, false, None)?;
-        if output.returncode == 0 {
-            return Ok((name.to_string(), stdout_text(&output)));
-        }
-    }
-
-    Err(GitError::Exit(
-        128,
-        format!("base_ref {name:?} does not resolve to a branch, tag, or commit"),
-    ))
-}
-
 /// The merge base of two refs.
 pub fn merge_base(ref_a: &str, ref_b: &str, cwd: Option<&Path>) -> Result<String, GitError> {
     let output = run_git(&["merge-base", ref_a, ref_b], cwd, true, None)?;
@@ -327,169 +281,6 @@ pub fn force_update_branch(branch: &str, target: &str, cwd: Option<&Path>) -> Re
 /// Remove untracked files and directories. Best-effort; never raises.
 pub fn clean_fd(cwd: Option<&Path>) {
     let _ = run_git(&["clean", "-fd"], cwd, false, None);
-}
-
-// ---------------------------------------------------------------------------
-// Worktrees
-// ---------------------------------------------------------------------------
-
-/// Add a detached worktree at `base_ref` and return its path.
-///
-/// The worktree lands in `worktree_parent`, or the process work root when none
-/// is given, under a unique `aibg-gremlin.<token>` name.
-pub fn setup_detached_worktree(
-    project_root: &Path,
-    base_ref: &str,
-    fetch: bool,
-    worktree_parent: Option<&Path>,
-) -> Result<String, GitError> {
-    let effective_ref = fetch_then_head(project_root, base_ref, fetch)?;
-    let workdir = new_worktree_path(worktree_parent)?;
-    let workdir_str = workdir.to_string_lossy().into_owned();
-    run_git(
-        &["worktree", "add", "--detach", &workdir_str, &effective_ref],
-        Some(project_root),
-        true,
-        None,
-    )?;
-    Ok(workdir_str)
-}
-
-/// The async counterpart of [`setup_detached_worktree`].
-pub async fn setup_detached_worktree_async(
-    project_root: &Path,
-    base_ref: &str,
-    fetch: bool,
-    worktree_parent: Option<&Path>,
-) -> Result<String, GitError> {
-    let effective_ref = if fetch {
-        let output = run_git_async(
-            &["fetch", "origin", "--", base_ref],
-            Some(project_root),
-            None,
-        )
-        .await?;
-        if output.returncode != 0 {
-            return Err(GitError::Exit(
-                output.returncode,
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            ));
-        }
-        "FETCH_HEAD"
-    } else {
-        base_ref
-    };
-    let workdir = new_worktree_path(worktree_parent)?;
-    let workdir_str = workdir.to_string_lossy().into_owned();
-    let output = run_git_async(
-        &["worktree", "add", "--detach", &workdir_str, effective_ref],
-        Some(project_root),
-        None,
-    )
-    .await?;
-    if output.returncode != 0 {
-        return Err(GitError::Exit(
-            output.returncode,
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    Ok(workdir_str)
-}
-
-/// Fetch `base_ref` from `origin`, returning the ref the worktree should use.
-fn fetch_then_head(root: &Path, base_ref: &str, fetch: bool) -> Result<String, GitError> {
-    if !fetch {
-        return Ok(base_ref.to_string());
-    }
-    run_git(&["fetch", "origin", "--", base_ref], Some(root), true, None)?;
-    Ok("FETCH_HEAD".to_string())
-}
-
-/// Create `worktree_parent` if needed and mint a unique worktree path inside it.
-fn new_worktree_path(worktree_parent: Option<&Path>) -> Result<PathBuf, GitError> {
-    let parent = worktree_parent
-        .map(Path::to_path_buf)
-        .unwrap_or_else(crate::config::work_root);
-    std::fs::create_dir_all(&parent).map_err(|e| GitError::Io(e.to_string()))?;
-    Ok(parent.join(format!("aibg-gremlin.{}", random_worktree_token(6))))
-}
-
-/// 6 bytes of entropy rendered as 12 hex characters, from `/dev/urandom` when
-/// it is available and a time/pid mix otherwise.
-fn random_worktree_token(nbytes: usize) -> String {
-    let mut buf = vec![0u8; nbytes];
-    let filled = File::open("/dev/urandom")
-        .and_then(|mut urandom| urandom.read_exact(&mut buf))
-        .is_ok();
-    if !filled {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        mix_token_bytes(&mut buf, nanos, std::process::id());
-    }
-    hex_encode(&buf)
-}
-
-/// Fill `buf` from a time/pid mix, the fallback when `/dev/urandom` is
-/// unavailable. The shift is taken modulo the width of `u128` so any `nbytes`
-/// is safe.
-fn mix_token_bytes(buf: &mut [u8], nanos: u128, pid: u32) {
-    for (i, byte) in buf.iter_mut().enumerate() {
-        let shift = ((i * 8) % 128) as u32;
-        *byte = ((nanos >> shift) as u8) ^ (pid as u8).wrapping_mul((i as u8).wrapping_add(1));
-    }
-}
-
-/// Lowercase hex, two characters per byte.
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut token = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = std::fmt::Write::write_fmt(&mut token, format_args!("{byte:02x}"));
-    }
-    token
-}
-
-/// Remove a worktree and prune stale entries. Best-effort; never raises.
-pub fn remove_worktree(project_root: &Path, workdir: &str) {
-    let cwd = Some(project_root);
-    let _ = run_git(
-        &["worktree", "remove", "--force", workdir],
-        cwd,
-        false,
-        None,
-    );
-    let _ = run_git(&["worktree", "prune"], cwd, false, None);
-}
-
-/// The async counterpart of [`remove_worktree`]. Best-effort; never raises.
-pub async fn remove_worktree_async(project_root: &Path, workdir: &str) {
-    let _ = run_git_async(
-        &["worktree", "remove", "--force", workdir],
-        Some(project_root),
-        None,
-    )
-    .await;
-}
-
-/// Prune stale worktree entries. No-op outside a repository; never raises.
-pub async fn prune_worktrees_async(project_root: &Path) {
-    if !in_git_repo_async(Some(project_root)).await {
-        return;
-    }
-    let _ = run_git_async(&["worktree", "prune"], Some(project_root), None).await;
-}
-
-/// Remove worktrees in bulk and prune stale entries. No-op outside a
-/// repository; never raises.
-pub async fn remove_worktrees_async(project_root: &Path, paths: &[String]) {
-    if !in_git_repo_async(Some(project_root)).await {
-        return;
-    }
-    for path in paths {
-        remove_worktree_async(project_root, path).await;
-    }
-    prune_worktrees_async(project_root).await;
 }
 
 #[cfg(test)]
@@ -548,47 +339,6 @@ mod tests {
                 "rev-parse".to_string(),
                 "HEAD".to_string()
             ]
-        );
-    }
-
-    #[test]
-    fn worktree_token_is_hex_of_twice_the_requested_bytes() {
-        let token = random_worktree_token(6);
-        assert_eq!(token.len(), 12, "token {token:?}");
-        assert!(
-            token.bytes().all(|b| b.is_ascii_hexdigit()),
-            "token {token:?}"
-        );
-    }
-
-    #[test]
-    fn worktree_tokens_do_not_repeat() {
-        let tokens: std::collections::HashSet<String> =
-            (0..64).map(|_| random_worktree_token(6)).collect();
-        assert_eq!(tokens.len(), 64);
-    }
-
-    #[test]
-    fn hex_encode_is_two_lowercase_chars_per_byte() {
-        assert_eq!(hex_encode(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
-        assert_eq!(hex_encode(&[]), "");
-    }
-
-    #[test]
-    fn mix_token_bytes_is_safe_for_wide_buffers() {
-        // `nbytes >= 16` would overflow a `u128` shift without the modulo bound.
-        let mut buf = vec![0u8; 32];
-        mix_token_bytes(&mut buf, u128::MAX, 4321);
-        assert_eq!(buf.len(), 32);
-    }
-
-    #[test]
-    fn mix_token_bytes_varies_with_position() {
-        let mut buf = vec![0u8; 6];
-        mix_token_bytes(&mut buf, 0x0102_0304_0506_0708, 99);
-        assert!(
-            buf.windows(2).any(|w| w[0] != w[1]),
-            "expected positional variation, got {buf:?}"
         );
     }
 }

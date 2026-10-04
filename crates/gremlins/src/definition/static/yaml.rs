@@ -21,7 +21,7 @@ use crate::definition::ClientSpec;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::node::StageSpec;
-use crate::stage_spec::parallel::ErrorPolicy;
+use crate::stage_spec::parallel::{ErrorPolicy, ForkSpec};
 
 use super::StaticDefinition;
 
@@ -136,7 +136,7 @@ fn from_expanded_value(
         .unwrap_or_default();
 
     let yaml_default_client = default_client_from_yaml(root)?;
-    let base_ref = base_ref_from_yaml(root)?;
+    base_ref_from_yaml(root)?;
 
     let raw_stages = stages_from_yaml(root)?;
 
@@ -173,7 +173,6 @@ fn from_expanded_value(
 
     let builder = DefinitionBuilder {
         name,
-        base_ref,
         default_client,
         prompt_dir: path.parent().map(Path::to_path_buf),
         bootstrap,
@@ -479,6 +478,10 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
 
     let body = yaml_children(mapping, "body")?;
 
+    // Parse fork and join specs
+    let fork = yaml_fork_join(mapping, "fork")?;
+    let join = yaml_fork_join(mapping, "join")?;
+
     let mut builder = ParallelBuilder::new(name)
         .stages(body)
         .cancel_on_error(cancel_on_error)
@@ -492,8 +495,27 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
     if let Some(c) = client {
         builder = builder.client(c.0);
     }
+    if let Some(fork_spec) = fork {
+        builder = builder.fork(fork_spec.cmds);
+    }
+    if let Some(join_spec) = join {
+        builder = builder.join(join_spec.cmds);
+    }
 
     builder.build()
+}
+
+/// Parse a `fork` or `join` key from a parallel stage mapping.
+/// Each is a mapping with a `cmds:` sequence of strings.
+fn yaml_fork_join(mapping: &Mapping, key: &str) -> Result<Option<ForkSpec>, SchemaError> {
+    let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let fmap = raw
+        .as_mapping()
+        .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a mapping")))?;
+    let cmds = yaml_string_list(fmap, "cmds")?;
+    Ok(Some(ForkSpec::new(cmds)))
 }
 
 /// Parse children from a composite's `key` ("body") through
@@ -580,21 +602,13 @@ fn default_client_from_yaml(root: &Mapping) -> Result<Option<String>, SchemaErro
     Ok(Some(client.to_string()))
 }
 
-fn base_ref_from_yaml(root: &Mapping) -> Result<String, SchemaError> {
-    let value = match root.get("base_ref") {
-        None | Some(Value::Null) => return Ok("current".to_string()),
-        Some(value) => value,
-    };
-    let base_ref = value
-        .as_str()
-        .ok_or_else(|| SchemaError::Generic("base_ref must be a string".to_string()))?;
-    let trimmed = base_ref.trim();
-    if trimmed.is_empty() {
+fn base_ref_from_yaml(root: &Mapping) -> Result<(), SchemaError> {
+    if root.contains_key("base_ref") {
         return Err(SchemaError::Generic(
-            "base_ref must be a non-empty string".to_string(),
+            "top-level 'base_ref:' is no longer supported. Use bootstrap.source to declare a base_ref input and set up the worktree in launch_cmds with: git worktree add --detach \"$GREMLIN_WORKDIR\" \"$SHA\"".to_string(),
         ));
     }
-    Ok(trimmed.to_string())
+    Ok(())
 }
 
 fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {

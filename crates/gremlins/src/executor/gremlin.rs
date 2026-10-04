@@ -1,4 +1,4 @@
-//! The gremlin handle: identity, environment, worktrees, and state.
+//! The gremlin handle: identity, environment, workspace, and state.
 //!
 //! A [`Gremlin`] is the runtime handle for one run — the thing the run loop
 //! drives a stage tree through. It owns the resolved [`GremlinDefinition`], the
@@ -6,11 +6,11 @@
 //! place where a gremlin's environment is assembled.
 //!
 //! Three constructors cover the lifecycles the Python executor had:
-//! [`Gremlin::init`] starts a fresh run in its own detached worktree,
+//! [`Gremlin::init`] starts a fresh run in its own workspace directory,
 //! [`Gremlin::from`] reconstructs a handle from a persisted state directory
 //! (for status checks, cleanup, and recovery), and [`Gremlin::fork`] spins off
 //! a child that inherits the parent's artifacts, environment, and — optionally
-//! — a fresh worktree at the parent's commit.
+//! — a fresh workspace.
 //!
 //! Construction is cheap on purpose. `create` and `from` populate only the
 //! path and identity fields; the definition YAML, the artifact registry, the
@@ -20,9 +20,9 @@
 //! `clean` — never pays for the runtime.
 //!
 //! The environment rules are the subtle part and live in [`resolve_env`]: the
-//! eight `GREMLIN*` system variables are seeded into the base environment
+//! five `GREMLIN*` system variables are seeded into the base environment
 //! *before* any `bootstrap.env` script is sourced (so the script can read
-//! them, e.g. to point `VIRTUAL_ENV` at the worktree's venv), then re-asserted
+//! them, e.g. to point `VIRTUAL_ENV` at the workspace), then re-asserted
 //! on top afterwards — a script can shape the environment but can never
 //! redirect the harness's own paths.
 
@@ -38,7 +38,7 @@ use crate::clients::agent_loop::CancelToken;
 use crate::clients::client::Client;
 use crate::clients::interactive::{InteractiveHandle, InteractiveSession};
 use crate::config;
-use crate::core::{discovery, env_file, git};
+use crate::core::{discovery, env_file};
 use crate::definition::{GremlinDefinition, StaticDefinition};
 use crate::executor::state::{self, StateData, StateStore};
 use crate::executor::RunError;
@@ -47,7 +47,7 @@ use crate::schemas::bootstrap::Bootstrap;
 /// State keys that describe *this* run's live execution and must never leak
 /// into a forked child, which starts its own from scratch.
 pub(crate) const FORK_TRANSIENT: [&str; 13] = [
-    "parallel_worktrees",
+    "workdir",
     "parallel_attempts",
     "active_children",
     "token_usage",
@@ -219,11 +219,8 @@ pub struct Gremlin {
     /// definition is finally loaded.
     pub client_override: Option<String>,
     pub definition: Box<dyn GremlinDefinition>,
-    pub worktree: Option<PathBuf>,
-    pub worktree_parent: Option<PathBuf>,
+    pub workdir: Option<PathBuf>,
     pub project_root: PathBuf,
-    pub base_ref_sha: String,
-    pub base_ref: String,
     pub state: StateData,
     pub env: HashMap<String, String>,
     pub client: Client,
@@ -244,7 +241,7 @@ pub struct Gremlin {
 
 impl Gremlin {
     /// Start a fresh run: generate an id, reserve the state directory, create
-    /// a detached worktree, write `state.json` and a hermetic `definition.yaml`,
+    /// a workspace directory, write `state.json` and a hermetic `definition.yaml`,
     /// and return a handle ready for [`Gremlin::run`].
     ///
     /// This is the single library-owned creation path — the CLI calls it and
@@ -255,19 +252,12 @@ impl Gremlin {
     /// it for arg validation); it is serialized into the hermetic snapshot but
     /// the handle itself carries only a stub — [`Gremlin::init_runtime`] loads
     /// the real definition when [`Gremlin::run`] is called.
-    ///
-    /// `base_ref_sha`, when non-empty, is the commit the worktree branches
-    /// from. Omitting it (or passing an empty string) falls back to `HEAD`.
-    #[allow(clippy::too_many_arguments)]
     pub fn init(
         definition_name: &str,
         definition_path: &Path,
         _definition: &StaticDefinition,
         stage_inputs: &HashMap<String, String>,
         client_override: Option<&str>,
-        worktree_parent: Option<&Path>,
-        base_ref: Option<&str>,
-        base_ref_sha: Option<&str>,
     ) -> Result<Gremlin, RunError> {
         // Validate definition_name as a safe gremlin-id component before
         // touching the filesystem. The hex suffix only adds alphanumeric
@@ -295,42 +285,19 @@ impl Gremlin {
 
         let project_root = project_root_for(&definition_path);
 
-        // 2. The project must be a git repository before we branch a worktree.
-        if !git::in_git_repo(Some(&project_root)) {
-            return Err(RunError::Git {
-                message: format!("{project_root:?} is not a git repository"),
-            });
-        }
+        // 2. Create the workspace directory.
+        let workdir = config::work_root()
+            .join(gremlin_id.as_str())
+            .join("workspace");
+        std::fs::create_dir_all(&workdir).map_err(|e| {
+            RunError::Message(format!(
+                "failed to create workspace dir {}: {e}",
+                workdir.display()
+            ))
+        })?;
 
-        // 3. Create the detached-HEAD worktree.
-        let mut worktree: Option<PathBuf> = None;
-        let mut created_worktree: Option<String> = None;
-        let branch_ref = base_ref_sha.filter(|sha| !sha.is_empty()).unwrap_or("HEAD");
-        if !project_root.as_os_str().is_empty() {
-            match git::setup_detached_worktree(&project_root, branch_ref, false, worktree_parent) {
-                Ok(path) => {
-                    created_worktree = Some(path.clone());
-                    worktree = Some(PathBuf::from(path));
-                }
-                Err(error) => {
-                    return Err(RunError::Git {
-                        message: error.to_string(),
-                    })
-                }
-            }
-        }
-
-        let base_ref_sha = worktree
-            .as_deref()
-            .map(|path| git::head_sha(Some(path)))
-            .unwrap_or_default();
-        let base_ref = base_ref.unwrap_or("");
-
-        // 4. Build initial state and create StateData (which writes state.json).
-        let workdir = worktree
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // 3. Build initial state and create StateData (which writes state.json).
+        let workdir_str = workdir.to_string_lossy().into_owned();
         let definition_path_str = definition_path.to_string_lossy().into_owned();
 
         let inputs: Map<String, Value> = stage_inputs
@@ -347,18 +314,7 @@ impl Gremlin {
             "project_root".to_string(),
             Value::String(project_root.to_string_lossy().into_owned()),
         );
-        initial.insert("workdir".to_string(), Value::String(workdir.clone()));
-        initial.insert(
-            "setup_kind".to_string(),
-            Value::String("worktree-detached".to_string()),
-        );
-        initial.insert(
-            "worktree_base".to_string(),
-            Value::String(base_ref_sha.clone()),
-        );
-        if !base_ref.is_empty() {
-            initial.insert("base_ref".to_string(), Value::String(base_ref.to_string()));
-        }
+        initial.insert("workdir".to_string(), Value::String(workdir_str.clone()));
         initial.insert("status".to_string(), Value::String("running".to_string()));
         if !initial.contains_key("started_at") {
             initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
@@ -394,50 +350,28 @@ impl Gremlin {
             initial.insert("metadata".to_string(), Value::Object(Map::new()));
         }
 
-        let cleanup_worktree = || {
-            if let Some(ref path) = created_worktree {
-                git::remove_worktree(&project_root, path);
-            }
-        };
-
         let state = match StateData::new(gremlin_id.as_str(), &initial) {
             Ok(s) => s,
             Err(error) => {
-                cleanup_worktree();
                 return Err(RunError::Message(format!(
                     "failed to create state: {error}"
                 )));
             }
         };
 
-        let mut patch = Map::new();
-        patch.insert("workdir".to_string(), Value::String(workdir));
-        patch.insert(
-            "worktree_base".to_string(),
-            Value::String(base_ref_sha.clone()),
-        );
-        patch.insert(
-            "setup_kind".to_string(),
-            Value::String("worktree-detached".to_string()),
-        );
-        state.patch(&[], &patch);
-
         // Write the hermetic definition.yaml snapshot now, before we
         // return the handle, so the spawned child always sees the
         // definition as it was at launch time — no TOCTTOU window.
         {
-            let yaml_bytes = _definition.serialize().map_err(|e| {
-                cleanup_worktree();
-                RunError::Message(format!("failed to serialize definition: {e}"))
-            })?;
+            let yaml_bytes = _definition
+                .serialize()
+                .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
             let mut blob = state
                 .open_blob("definition.yaml", state::BlobMode::Write)
                 .map_err(|e| {
-                    cleanup_worktree();
                     RunError::Message(format!("failed to write hermetic definition: {e}"))
                 })?;
             blob.write_all(&yaml_bytes).map_err(|e| {
-                cleanup_worktree();
                 RunError::Message(format!("failed to write hermetic definition: {e}"))
             })?;
         }
@@ -458,11 +392,8 @@ impl Gremlin {
             definition_path: Some(hermetic),
             client_override: client_override.map(String::from),
             definition: stub,
-            worktree,
-            worktree_parent: worktree_parent.map(Path::to_path_buf),
+            workdir: Some(workdir),
             project_root: project_root.to_path_buf(),
-            base_ref_sha,
-            base_ref: base_ref.to_string(),
             state,
             env: HashMap::new(),
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
@@ -473,14 +404,11 @@ impl Gremlin {
             interactive_session: None,
         };
 
-        // 5. Create an empty log file.
+        // 4. Create an empty log file.
         gremlin
             .state
             .open_blob("log", state::BlobMode::Write)
-            .map_err(|e| {
-                cleanup_worktree();
-                RunError::Message(format!("failed to create log: {e}"))
-            })?;
+            .map_err(|e| RunError::Message(format!("failed to create log: {e}")))?;
 
         Ok(gremlin)
     }
@@ -489,7 +417,7 @@ impl Gremlin {
     /// the definition, the client, or the environment.
     ///
     /// This is the cheap read: it resolves the paths a caller needs to inspect
-    /// a run — its worktree, its project, its definition — and nothing more. A
+    /// a run — its workspace, its project, its definition — and nothing more. A
     /// caller that only wants to read metadata, or to `clean` the run up,
     /// never pays for a YAML parse, a client build, or a bootstrap `source`.
     ///
@@ -544,9 +472,7 @@ impl Gremlin {
 
         let state_data = StateData::open(gremlin_id.as_str())?;
 
-        let worktree = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
-        let base_ref_sha = state_data.read_str("worktree_base");
-        let base_ref = state_data.read_str("base_ref");
+        let workdir = (!workdir.is_empty()).then(|| PathBuf::from(&workdir));
 
         // A hermetic `definition.yaml` next to the state pins the definition the
         // run actually used; otherwise fall back to resolving the kind. Either
@@ -594,11 +520,8 @@ impl Gremlin {
             definition_path,
             client_override: None,
             definition,
-            worktree,
-            worktree_parent: None,
+            workdir,
             project_root,
-            base_ref_sha,
-            base_ref,
             state: state_data,
             env: HashMap::new(),
             client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
@@ -672,7 +595,7 @@ impl Gremlin {
         }
 
         // An unusable client must not abort a run: the state directory, the
-        // worktree and the artifacts all have to exist before any stage can
+        // workspace and the artifacts all have to exist before any stage can
         // run, and failing here would leave the operator with no run at all to
         // debug. `cmd:true` is the harness's own no-op client, so a bad spec
         // degrades to a run that does nothing rather than one that never starts,
@@ -682,21 +605,10 @@ impl Gremlin {
             Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec")
         });
 
-        let base_ref = if self.base_ref.is_empty() {
-            definition.base_ref.clone()
-        } else {
-            self.base_ref.clone()
-        };
-
         register_stage_inputs(
             self.state.store_ref(),
             &definition.bootstrap,
             &self.stage_inputs,
-        )
-        .await;
-        register_base_sha(
-            self.state.store_ref(),
-            self.worktree.as_deref().unwrap_or(&self.project_root),
         )
         .await;
 
@@ -704,7 +616,7 @@ impl Gremlin {
             bootstrap_script(&definition.bootstrap),
             self.id.as_str(),
             &self.project_root,
-            self.worktree.as_deref(),
+            self.workdir.as_deref(),
             &self.runtime_config.scratch_dir,
             &self.runtime_config.base_process_env,
         )?;
@@ -716,12 +628,11 @@ impl Gremlin {
         }
         self.definition = Box::new(definition);
         self.client = client;
-        self.base_ref = base_ref;
 
-        // The Python launcher sources bootstrap.env before the worktree
-        // exists, so GREMLINS_WORKTREE_PATH (and any variable the script
+        // The Python launcher sources bootstrap.env before the workspace
+        // exists, so GREMLIN_WORKDIR (and any variable the script
         // derives from it) is absent. resolve_env produces the correct map now
-        // that the worktree is real.
+        // that the workspace is real.
         self.env = env;
 
         // The client label is only knowable once the definition is loaded; the
@@ -733,8 +644,8 @@ impl Gremlin {
         Ok(())
     }
 
-    /// Fork a child gremlin: copy artifacts, branch a worktree at the parent's
-    /// HEAD, and seed a fresh `state.json` carrying the child's identity.
+    /// Fork a child gremlin: copy artifacts, create a workspace, and seed a
+    /// fresh `state.json` carrying the child's identity.
     ///
     /// `child_definition_path` is the branch's hermetic `definition.yaml`; pass
     /// `None` to inherit the parent's persisted `definition_path`.
@@ -742,6 +653,14 @@ impl Gremlin {
     /// When `effective_client` is `Some`, the child's provider is mutated via
     /// [`GremlinDefinition::with_client`] so `default_client()` reflects
     /// the override.
+    ///
+    /// `fork_cmds` controls how the child workspace is populated:
+    /// - `None` (default): `cp -r` the parent's workspace into the child's.
+    /// - `Some([])`: do nothing — leave the child workspace empty.
+    /// - `Some(cmds)`: run each command with `{var}` substitution (same engine
+    ///   as bootstrap's `launch_cmds`), with additional vars `{child_key}`,
+    ///   `{child_name}`, `{child_id}`, `{parent_id}`, `{group_name}`, and env
+    ///   vars `GREMLIN_WORKDIR` (parent) and `GREMLIN_FORK_WORKDIR` (child).
     #[allow(clippy::too_many_arguments)]
     pub async fn fork(
         &self,
@@ -752,6 +671,7 @@ impl Gremlin {
         child_definition_path: Option<&Path>,
         child_provider: Box<dyn GremlinDefinition>,
         effective_client: Option<&str>,
+        fork_cmds: Option<&[String]>,
     ) -> Result<Gremlin, RunError> {
         log::debug!(
             "fork: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}"
@@ -771,36 +691,87 @@ impl Gremlin {
             self.client.clone()
         };
 
-        // A child of a run that has no worktree has none either: there is no
-        // commit for it to branch from. When it does branch one, the commit it
-        // landed on is the child's own base.
-        let mut child_worktree: Option<PathBuf> = None;
-        let mut child_worktree_base = String::new();
-        if let Some(parent_worktree) = &self.worktree {
-            let sha = git::head_sha(Some(parent_worktree));
-            if sha.is_empty() {
-                return Err(RunError::Message(format!(
-                    "could not resolve HEAD in {}",
-                    parent_worktree.display()
-                )));
+        // Create the child workspace directory.
+        let child_workdir = config::work_root()
+            .join(child_gremlin_id.as_str())
+            .join("workspace");
+        std::fs::create_dir_all(&child_workdir).map_err(|e| {
+            RunError::Message(format!(
+                "failed to create child workspace dir {}: {e}",
+                child_workdir.display()
+            ))
+        })?;
+
+        // Populate the child workspace.
+        match fork_cmds {
+            None => {
+                // Default: copy parent workspace contents.
+                let parent_workdir = self
+                    .workdir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !parent_workdir.is_empty() {
+                    let status = std::process::Command::new("cp")
+                        .arg("-r")
+                        .arg(format!("{}/.", parent_workdir))
+                        .arg(child_workdir.to_string_lossy().as_ref())
+                        .status()
+                        .map_err(|e| {
+                            RunError::Message(format!("failed to run cp for fork: {e}"))
+                        })?;
+                    if !status.success() {
+                        return Err(RunError::Message(format!(
+                            "cp failed with exit code {}",
+                            status.code().unwrap_or(-1)
+                        )));
+                    }
+                }
             }
-            let path = git::setup_detached_worktree(
-                &self.project_root,
-                &sha,
-                false,
-                self.worktree_parent.as_deref(),
-            )
-            .map_err(|error| RunError::Git {
-                message: error.to_string(),
-            })?;
-            child_worktree = Some(PathBuf::from(path));
-            child_worktree_base = sha;
-            log::debug!(
-                "fork: created worktree for child at {}",
-                child_worktree.as_ref().unwrap().display()
-            );
-        } else {
-            log::debug!("fork: no parent worktree — child inherits no worktree");
+            Some([]) => {
+                // Do nothing — leave the child workspace empty.
+            }
+            Some(cmds) => {
+                // Run fork commands with substitution.
+                let parent_workdir = self
+                    .workdir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let child_workdir_str = child_workdir.to_string_lossy().into_owned();
+
+                let mut values: HashMap<String, String> = HashMap::new();
+                values.insert("child_key".to_string(), child_key.to_string());
+                values.insert("child_name".to_string(), child_id.to_string());
+                values.insert("child_id".to_string(), child_id.to_string());
+                values.insert("parent_id".to_string(), parent_id.to_string());
+                values.insert("group_name".to_string(), group_name.to_string());
+
+                for cmd in cmds {
+                    let substituted = crate::schemas::bootstrap::substitute_bootstrap_vars(
+                        cmd,
+                        &child_workdir,
+                        &values,
+                    );
+                    let status = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&substituted)
+                        .current_dir(&child_workdir)
+                        .env("GREMLIN_WORKDIR", &parent_workdir)
+                        .env("GREMLIN_FORK_WORKDIR", &child_workdir_str)
+                        .status()
+                        .map_err(|e| {
+                            RunError::Message(format!("failed to run fork command: {e}"))
+                        })?;
+                    if !status.success() {
+                        return Err(RunError::Message(format!(
+                            "fork command '{}' failed with exit code {}",
+                            cmd,
+                            status.code().unwrap_or(-1)
+                        )));
+                    }
+                }
+            }
         }
 
         // fork creates the child state directory, copies artifacts, seeds the
@@ -847,19 +818,11 @@ impl Gremlin {
                 None => str_field(&parent, "definition_path"),
             }),
         );
-        // A child that branched its own worktree must say so: leaving the
-        // parent's `workdir` on record would point its commands, and any
-        // `gremlins rm` cleanup, at the parent's checkout.
-        if let Some(path) = &child_worktree {
-            child.insert(
-                "workdir".to_string(),
-                Value::String(path.to_string_lossy().into_owned()),
-            );
-            child.insert(
-                "worktree_base".to_string(),
-                Value::String(child_worktree_base.clone()),
-            );
-        }
+        // Always write the child's own workspace path.
+        child.insert(
+            "workdir".to_string(),
+            Value::String(child_workdir.to_string_lossy().into_owned()),
+        );
 
         child.insert("status".to_string(), Value::String("running".to_string()));
         child.insert("pid".to_string(), Value::Null);
@@ -888,11 +851,8 @@ impl Gremlin {
                 .or_else(|| self.definition_path.clone()),
             client_override: self.client_override.clone(),
             definition: child_provider,
-            worktree: child_worktree,
-            worktree_parent: self.worktree_parent.clone(),
+            workdir: Some(child_workdir),
             project_root: self.project_root.clone(),
-            base_ref_sha: child_worktree_base,
-            base_ref: self.base_ref.clone(),
             state: child_state,
             env: self.env.clone(),
             client,
@@ -910,7 +870,7 @@ impl Gremlin {
         })
     }
 
-    /// Remove every filesystem asset this gremlin owns: its worktree, its
+    /// Remove every filesystem asset this gremlin owns: its workspace, its
     /// scratch directory, and — when `remove_state_dir` is set — its state
     /// directory.
     ///
@@ -922,7 +882,7 @@ impl Gremlin {
     /// Two ordering rules carry the meaning. The `closed` marker is touched
     /// *first*, so fleet viewers (`liveness_of_state_file`) see the gremlin as
     /// closed even if filesystem removal fails part-way. The state directory
-    /// is removed *last*, so a partial cleanup never strands a worktree or
+    /// is removed *last*, so a partial cleanup never strands a workspace or
     /// scratch directory that nothing can trace back to a gremlin: if
     /// `state.json` is gone, every other asset is already gone.
     pub fn clean(self, remove_state_dir: bool) {
@@ -932,7 +892,7 @@ impl Gremlin {
             log::warn!("clean: could not touch closed marker: {error}");
         }
 
-        self.clean_worktree();
+        self.clean_workspace();
         self.clean_scratch();
 
         if remove_state_dir {
@@ -945,27 +905,16 @@ impl Gremlin {
         }
     }
 
-    /// Remove the worktree, best-effort.
-    ///
-    /// `git worktree remove` is the clean path — it drops the administrative
-    /// record under `.git/worktrees` as well as the checkout. It is run
-    /// whenever a `project_root` is available, *even if the checkout is already
-    /// gone*: the administrative record outlives the directory, and skipping
-    /// git would leave stale metadata behind forever. When the directory is
-    /// still present afterwards (or there is no `project_root` to run against)
-    /// an `rmtree` fallback finishes the job.
-    fn clean_worktree(&self) {
-        let Some(worktree) = &self.worktree else {
+    /// Remove the workspace, best-effort.
+    fn clean_workspace(&self) {
+        let Some(workdir) = &self.workdir else {
             return;
         };
-        if !self.project_root.as_os_str().is_empty() {
-            git::remove_worktree(&self.project_root, &worktree.to_string_lossy());
-        }
-        if worktree.exists() {
-            if let Err(error) = std::fs::remove_dir_all(worktree) {
+        if workdir.exists() {
+            if let Err(error) = std::fs::remove_dir_all(workdir) {
                 log::warn!(
-                    "clean: could not remove worktree {}: {error}",
-                    worktree.display()
+                    "clean: could not remove workspace {}: {error}",
+                    workdir.display()
                 );
             }
         }
@@ -985,11 +934,11 @@ impl Gremlin {
         }
     }
 
-    /// The directory commands run in: the worktree, else the project root, else
+    /// The directory commands run in: the workspace, else the project root, else
     /// the CWD.
     pub fn cwd(&self) -> PathBuf {
-        if let Some(worktree) = &self.worktree {
-            return worktree.clone();
+        if let Some(workdir) = &self.workdir {
+            return workdir.clone();
         }
         if !self.project_root.as_os_str().is_empty() {
             return self.project_root.clone();
@@ -1003,7 +952,6 @@ impl Gremlin {
             stage_name,
             &self.cwd().to_string_lossy(),
             self.client.model(),
-            &self.base_ref,
         )
     }
 }
@@ -1074,22 +1022,6 @@ async fn register_stage_inputs(
     }
 }
 
-/// Record the commit the run started from, once, as `artifact://base_sha`.
-async fn register_base_sha(state: &dyn StateStore, cwd: &Path) {
-    if state.is_registered("artifact://base_sha").await {
-        return;
-    }
-    let sha = git::head_sha(Some(cwd));
-    if sha.is_empty() {
-        return;
-    }
-    if let Ok(uri) = Uri::parse("artifact://base_sha") {
-        if let Err(error) = state.write_into_registry(&uri, &sha).await {
-            log::warn!("launch: could not register artifact://base_sha: {error}");
-        }
-    }
-}
-
 /// Resolve a definition kind against `project_root`, ignoring the process-wide
 /// overlay override.
 ///
@@ -1133,21 +1065,15 @@ fn bootstrap_script(bootstrap: &Bootstrap) -> Option<&str> {
 }
 
 /// Runtime-owned substitution vars. Stages must not assemble these themselves.
-pub fn framework_subs(
-    stage_name: &str,
-    cwd: &str,
-    model: &str,
-    base_ref: &str,
-) -> HashMap<String, String> {
+pub fn framework_subs(stage_name: &str, cwd: &str, model: &str) -> HashMap<String, String> {
     HashMap::from([
         ("name".to_string(), stage_name.to_string()),
         ("model".to_string(), model.to_string()),
         ("cwd".to_string(), cwd.to_string()),
-        ("base_ref".to_string(), base_ref.to_string()),
     ])
 }
 
-/// The five harness-owned system variables, built from a gremlin's paths.
+/// The four harness-owned system variables, built from a gremlin's paths.
 ///
 /// These are both *seeded into* the base the bootstrap script is sourced
 /// against and *re-asserted* on top of the result, so the script can read
@@ -1155,21 +1081,12 @@ pub fn framework_subs(
 pub fn system_env(
     gremlin_id: &str,
     project_root: &Path,
-    worktree: Option<&Path>,
+    workdir: Option<&Path>,
     scratch_dir: &Path,
 ) -> HashMap<String, String> {
-    let worktree_path = worktree
+    let workdir_path = workdir
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // Without a worktree there is no workspace, so the process CWD stands in.
-    let workspace_dir = if worktree_path.is_empty() {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        worktree_path.clone()
-    };
     let scratch_dir = scratch_dir.to_path_buf();
 
     let mut vars = HashMap::new();
@@ -1178,8 +1095,7 @@ pub fn system_env(
         "GREMLINS_PROJECT_ROOT".to_string(),
         project_root.to_string_lossy().into_owned(),
     );
-    vars.insert("GREMLINS_WORKTREE_PATH".to_string(), worktree_path);
-    vars.insert("GREMLIN_WORKSPACE_DIR".to_string(), workspace_dir);
+    vars.insert("GREMLIN_WORKDIR".to_string(), workdir_path);
     vars.insert(
         "GREMLINS_SCRATCH_DIR".to_string(),
         scratch_dir.to_string_lossy().into_owned(),
@@ -1191,18 +1107,18 @@ pub fn system_env(
 ///
 /// The system variables are seeded into the base *before* the bootstrap script
 /// is sourced, so the script can read them (e.g. to point `VIRTUAL_ENV` at the
-/// worktree's venv), then re-asserted on top afterwards. The script can shape
+/// workspace), then re-asserted on top afterwards. The script can shape
 /// the environment but can never redirect the harness's paths.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_env(
     bootstrap_env: Option<&str>,
     gremlin_id: &str,
     project_root: &Path,
-    worktree: Option<&Path>,
+    workdir: Option<&Path>,
     scratch_dir: &Path,
     base_env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, RunError> {
-    let system = system_env(gremlin_id, project_root, worktree, scratch_dir);
+    let system = system_env(gremlin_id, project_root, workdir, scratch_dir);
 
     let mut base: HashMap<String, String> = base_env.clone();
     base.extend(system.clone());
@@ -1288,11 +1204,7 @@ mod tests {
 
         assert_eq!(env["GREMLINS_GREMLIN_ID"], "gr-test");
         assert_eq!(env["GREMLINS_PROJECT_ROOT"], project_root.to_string_lossy());
-        assert_eq!(env["GREMLINS_WORKTREE_PATH"], "");
-        assert_eq!(
-            env["GREMLIN_WORKSPACE_DIR"],
-            std::env::current_dir().unwrap().to_string_lossy()
-        );
+        assert_eq!(env["GREMLIN_WORKDIR"], "");
         assert_eq!(env["GREMLINS_SCRATCH_DIR"], scratch_dir.to_string_lossy());
     }
 
@@ -1340,11 +1252,7 @@ mod tests {
         assert_eq!(env["PATH"], "/custom");
         assert_eq!(env["GREMLINS_GREMLIN_ID"], "gr-test");
         assert_eq!(env["GREMLINS_PROJECT_ROOT"], project_root.to_string_lossy());
-        assert_eq!(env["GREMLINS_WORKTREE_PATH"], "");
-        assert_eq!(
-            env["GREMLIN_WORKSPACE_DIR"],
-            std::env::current_dir().unwrap().to_string_lossy()
-        );
+        assert_eq!(env["GREMLIN_WORKDIR"], "");
         assert_eq!(env["GREMLINS_SCRATCH_DIR"], scratch_dir.to_string_lossy());
     }
 
@@ -1353,28 +1261,28 @@ mod tests {
         let _guard = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         let project_root = dir.path().join("project");
-        let worktree = dir.path().join("wt");
+        let workdir = dir.path().join("wd");
         std::fs::create_dir_all(&project_root).unwrap();
 
-        // The script derives VIRTUAL_ENV from the worktree path — the shape the
+        // The script derives VIRTUAL_ENV from the workspace path — the shape the
         // bundled definitions use — then tries to redirect a system variable.
-        let script = "export VIRTUAL_ENV=\"${GREMLINS_WORKTREE_PATH}/.venv\"\n\
-                       export GREMLINS_WORKTREE_PATH=/hijacked\n";
+        let script = "export VIRTUAL_ENV=\"${GREMLIN_WORKDIR}/.venv\"\n\
+                       export GREMLIN_WORKDIR=/hijacked\n";
         let scratch_dir = config::scratch_root(Some("gr-test"));
         let base_env: HashMap<String, String> = std::env::vars().collect();
         let env = resolve_env(
             Some(script),
             "gr-test",
             &project_root,
-            Some(&worktree),
+            Some(&workdir),
             &scratch_dir,
             &base_env,
         )
         .unwrap();
 
-        assert_eq!(env["VIRTUAL_ENV"], format!("{}/.venv", worktree.display()));
+        assert_eq!(env["VIRTUAL_ENV"], format!("{}/.venv", workdir.display()));
         // The script can read the system variables but cannot override them.
-        assert_eq!(env["GREMLINS_WORKTREE_PATH"], worktree.to_string_lossy());
+        assert_eq!(env["GREMLIN_WORKDIR"], workdir.to_string_lossy());
     }
 
     #[test]
@@ -1401,16 +1309,15 @@ mod tests {
     // --- framework substitutions ---
 
     #[test]
-    fn framework_subs_carries_the_four_vars() {
-        let subs = framework_subs("plan", "/w", "xai:grok-4", "main");
-        assert_eq!(subs.len(), 4);
+    fn framework_subs_carries_the_three_vars() {
+        let subs = framework_subs("plan", "/w", "xai:grok-4");
+        assert_eq!(subs.len(), 3);
         assert_eq!(subs["name"], "plan");
         assert_eq!(subs["cwd"], "/w");
         assert_eq!(subs["model"], "xai:grok-4");
-        assert_eq!(subs["base_ref"], "main");
     }
 
-    // --- git-backed lifecycle ---
+    // --- lifecycle ---
 
     fn read_state(path: &Path) -> Value {
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
@@ -1418,10 +1325,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_creates_state_and_worktree() {
+    async fn create_creates_state_and_workspace() {
         let fx = GitSandbox::new();
         if fx.is_skipped() {
-            eprintln!("git is unavailable; skipping create_creates_state_and_worktree");
+            eprintln!("git is unavailable; skipping create_creates_state_and_workspace");
             return;
         }
 
@@ -1433,14 +1340,11 @@ mod tests {
             &definition,
             &HashMap::new(),
             None,
-            None,
-            None,
-            None,
         )
         .unwrap();
 
-        let worktree = gremlin.worktree.clone().expect("a worktree");
-        assert!(worktree.is_dir(), "{worktree:?}");
+        let workdir = gremlin.workdir.clone().expect("a workspace");
+        assert!(workdir.is_dir(), "{workdir:?}");
 
         let state_file = gremlin.state.state_dir().join("state.json");
         assert!(state_file.is_file(), "{state_file:?}");
@@ -1458,12 +1362,9 @@ mod tests {
         assert!(gremlin.definition.is_stub());
         assert!(gremlin.env.is_empty());
 
-        // The checkout and the commit it was branched from are on record,
-        // and the returned handle agrees with what was persisted.
-        assert_eq!(raw["workdir"].as_str().unwrap(), worktree.to_string_lossy());
-        let base = raw["worktree_base"].as_str().unwrap();
-        assert_eq!(base.len(), 40, "worktree_base should be a SHA: {base:?}");
-        assert_eq!(base, gremlin.base_ref_sha);
+        // The workspace is on record, and the returned handle agrees with
+        // what was persisted.
+        assert_eq!(raw["workdir"].as_str().unwrap(), workdir.to_string_lossy());
 
         // Lazy init is what fills in the runtime fields.
         gremlin.init_runtime(None).await.unwrap();
@@ -1495,9 +1396,6 @@ mod tests {
             &definition,
             &HashMap::new(),
             None,
-            None,
-            None,
-            None,
         )
         .unwrap();
         let id = launched.id.to_string();
@@ -1506,7 +1404,7 @@ mod tests {
         assert_eq!(opened.id, launched.id);
         assert_eq!(opened.state.state_dir(), launched.state.state_dir());
         assert_eq!(opened.project_root, launched.project_root);
-        assert_eq!(opened.worktree, launched.worktree);
+        assert_eq!(opened.workdir, launched.workdir);
         assert_eq!(opened.definition_path, launched.definition_path);
 
         launched.init_runtime(None).await.unwrap();
@@ -1531,13 +1429,10 @@ mod tests {
             &definition,
             &HashMap::new(),
             None,
-            None,
-            None,
-            None,
         )
         .unwrap();
         let id = created.id.to_string();
-        let worktree = created.worktree.clone().unwrap();
+        let workdir = created.workdir.clone().unwrap();
         drop(created);
 
         // A handle reconstructed purely for cleanup: no `run`, so the
@@ -1547,7 +1442,7 @@ mod tests {
         handle.clean(true);
 
         assert!(!fx.join("state").join(&id).exists());
-        assert!(!worktree.exists(), "worktree should be gone");
+        assert!(!workdir.exists(), "workspace should be gone");
         assert!(!fx.join("scratch").join(&id).exists());
     }
 
@@ -1570,9 +1465,6 @@ mod tests {
             fx.definition_path(),
             &definition,
             &HashMap::new(),
-            None,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1604,9 +1496,6 @@ mod tests {
             &definition,
             &HashMap::new(),
             None,
-            None,
-            None,
-            None,
         )
         .unwrap();
 
@@ -1616,7 +1505,7 @@ mod tests {
         let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
         let child = parent
-            .fork("gr-child", "", "", "", None, child_provider, None)
+            .fork("gr-child", "", "", "", None, child_provider, None, None)
             .await
             .unwrap();
 
@@ -1631,19 +1520,16 @@ mod tests {
         assert!(raw["pid"].is_null());
         assert!(raw.get("token_usage").is_none());
 
-        let parent_worktree = parent.worktree.clone().unwrap();
-        let child_worktree = child.worktree.clone().expect("child worktree");
-        assert_ne!(child_worktree, parent_worktree);
-        assert!(child_worktree.is_dir(), "{child_worktree:?}");
+        let parent_workdir = parent.workdir.clone().unwrap();
+        let child_workdir = child.workdir.clone().expect("child workspace");
+        assert_ne!(child_workdir, parent_workdir);
+        assert!(child_workdir.is_dir(), "{child_workdir:?}");
 
-        // The child's own checkout is on record, never the parent's.
+        // The child's own workspace is on record, never the parent's.
         assert_eq!(
             raw["workdir"].as_str().unwrap(),
-            child_worktree.to_string_lossy()
+            child_workdir.to_string_lossy()
         );
-        let base = raw["worktree_base"].as_str().unwrap();
-        assert_eq!(base.len(), 40, "worktree_base should be a SHA: {base:?}");
-        assert_eq!(base, child.base_ref_sha);
 
         assert_eq!(child.env, parent.env);
     }
@@ -1664,9 +1550,6 @@ mod tests {
             &definition,
             &HashMap::new(),
             None,
-            None,
-            None,
-            None,
         )
         .unwrap();
 
@@ -1677,7 +1560,7 @@ mod tests {
             StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let child_provider_a: Box<dyn GremlinDefinition> = Box::new(child_def_a);
         parent
-            .fork("gr-a", "", "", "", None, child_provider_a, None)
+            .fork("gr-a", "", "", "", None, child_provider_a, None, None)
             .await
             .unwrap();
         let child_def_b =
@@ -1691,6 +1574,7 @@ mod tests {
                 "key",
                 None,
                 child_provider_b,
+                None,
                 None,
             )
             .await
@@ -1732,14 +1616,14 @@ mod tests {
 
     /// A hand-built gremlin whose paths point wherever the test wants.
     ///
-    /// `clean` only reads `id`, `state_dir`, `worktree` and
+    /// `clean` only reads `id`, `state_dir`, `workdir` and
     /// `project_root`, so a full `launch` would just be git fixture noise for
     /// the cases that are not about launch at all.
     fn test_gremlin(
         id: &str,
         state_dir: PathBuf,
         _artifact_dir: PathBuf,
-        worktree: Option<PathBuf>,
+        workdir: Option<PathBuf>,
         project_root: PathBuf,
     ) -> Gremlin {
         Gremlin {
@@ -1747,11 +1631,8 @@ mod tests {
             definition_path: None,
             client_override: None,
             definition: Box::new(StaticDefinition::stub()),
-            worktree,
-            worktree_parent: None,
+            workdir,
             project_root,
-            base_ref_sha: String::new(),
-            base_ref: String::new(),
             state: StateData::from_store(
                 Some(id.to_string()),
                 Box::new(FileSystemStateStore::from_path(state_dir)),
@@ -1776,25 +1657,25 @@ mod tests {
             let state_dir = sandbox.join("state").join(id);
             let scratch_dir = sandbox.join("scratch").join(id);
             let artifact_dir = state_dir.join("artifacts");
-            let worktree = sandbox.join("worktree");
+            let workdir = sandbox.join("workspace");
             std::fs::create_dir_all(&artifact_dir).unwrap();
             std::fs::create_dir_all(&state_dir).unwrap();
             std::fs::write(state_dir.join("state.json"), "{}").unwrap();
-            std::fs::create_dir_all(&worktree).unwrap();
-            std::fs::write(worktree.join("file"), "data").unwrap();
+            std::fs::create_dir_all(&workdir).unwrap();
+            std::fs::write(workdir.join("file"), "data").unwrap();
 
             test_gremlin(
                 id,
                 state_dir.clone(),
                 artifact_dir.clone(),
-                Some(worktree.clone()),
+                Some(workdir.clone()),
                 PathBuf::new(),
             )
             .clean(true);
 
             assert!(!state_dir.exists(), "state dir should be gone");
             assert!(!scratch_dir.exists(), "scratch dir should be gone");
-            assert!(!worktree.exists(), "worktree should be gone");
+            assert!(!workdir.exists(), "workspace should be gone");
         });
     }
 
@@ -1805,22 +1686,22 @@ mod tests {
             let state_dir = sandbox.join("state").join(id);
             let scratch_dir = sandbox.join("scratch").join(id);
             let artifact_dir = state_dir.join("artifacts");
-            let worktree = sandbox.join("worktree-keep");
+            let workdir = sandbox.join("workspace-keep");
             std::fs::create_dir_all(&artifact_dir).unwrap();
             std::fs::create_dir_all(&state_dir).unwrap();
             std::fs::write(state_dir.join("state.json"), "{}").unwrap();
-            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::create_dir_all(&workdir).unwrap();
 
             test_gremlin(
                 id,
                 state_dir.clone(),
                 artifact_dir.clone(),
-                Some(worktree.clone()),
+                Some(workdir.clone()),
                 PathBuf::new(),
             )
             .clean(false);
 
-            assert!(!worktree.exists(), "worktree should be gone");
+            assert!(!workdir.exists(), "workspace should be gone");
             assert!(!scratch_dir.exists(), "scratch dir should be gone");
             assert!(state_dir.is_dir(), "state dir should remain");
             assert!(
@@ -1831,7 +1712,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_succeeds_without_a_worktree() {
+    fn clean_succeeds_without_a_workspace() {
         with_sandbox(None, |sandbox| {
             let id = "gr-clean-nowt";
             let state_dir = sandbox.join("state").join(id);
@@ -1855,12 +1736,11 @@ mod tests {
             std::fs::create_dir_all(&state_dir).unwrap();
             std::fs::create_dir_all(&artifact_dir).unwrap();
 
-            // A worktree with a `project_root` that is not a repository: the
-            // `git worktree remove` fails silently and the rmtree fallback is
-            // what actually deletes the checkout.
-            let worktree = sandbox.join("worktree-nogit");
-            std::fs::create_dir_all(&worktree).unwrap();
-            std::fs::write(worktree.join("file"), "data").unwrap();
+            // A workspace directory that is not a git repository: the
+            // rmtree fallback is what actually deletes the directory.
+            let workdir = sandbox.join("workspace-nogit");
+            std::fs::create_dir_all(&workdir).unwrap();
+            std::fs::write(workdir.join("file"), "data").unwrap();
             let project_root = sandbox.join("not-a-repo");
             std::fs::create_dir_all(&project_root).unwrap();
 
@@ -1868,76 +1748,13 @@ mod tests {
                 id,
                 state_dir,
                 artifact_dir,
-                Some(worktree.clone()),
+                Some(workdir.clone()),
                 project_root,
             )
             .clean(true);
 
-            assert!(!worktree.exists(), "rmtree fallback should remove it");
+            assert!(!workdir.exists(), "rmtree fallback should remove it");
         });
-    }
-
-    /// How many administrative worktree records git keeps under
-    /// `.git/worktrees` — counted rather than path-matched, because git
-    /// resolves a tempdir to its `/private` form and the test's own path does
-    /// not.
-    fn admin_worktree_entries(root: &Path) -> usize {
-        std::fs::read_dir(root.join(".git").join("worktrees"))
-            .map(|entries| entries.count())
-            .unwrap_or(0)
-    }
-
-    #[test]
-    fn clean_prunes_metadata_for_a_vanished_worktree() {
-        let fx = GitSandbox::new();
-        if fx.is_skipped() {
-            eprintln!("git is unavailable; skipping clean_prunes_metadata_for_a_vanished_worktree");
-            return;
-        }
-        let id = "gr-clean-stale";
-        let state_dir = fx.join("state").join(id);
-        let artifact_dir = state_dir.join("artifacts");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::create_dir_all(&artifact_dir).unwrap();
-
-        // A registered worktree whose checkout is deleted out from under
-        // git: the directory is gone, the admin record is not. The `clean`
-        // path has to reach git *despite* the missing directory, or the
-        // record outlives every gremlin that could explain it.
-        let worktree = fx.repo_path().join("stale-worktree");
-        let worktree_str = worktree.to_string_lossy().into_owned();
-        assert!(
-            crate::test_support::git(
-                fx.repo_path(),
-                &["worktree", "add", "--detach", &worktree_str]
-            )
-            .status
-            .success(),
-            "worktree add should succeed"
-        );
-        assert_eq!(admin_worktree_entries(fx.repo_path()), 1);
-        std::fs::remove_dir_all(&worktree).unwrap();
-        assert!(!worktree.exists(), "checkout should be gone");
-        assert_eq!(
-            admin_worktree_entries(fx.repo_path()),
-            1,
-            "git should still hold the stale record"
-        );
-
-        test_gremlin(
-            id,
-            state_dir,
-            artifact_dir,
-            Some(worktree.clone()),
-            fx.repo_path().to_path_buf(),
-        )
-        .clean(true);
-
-        assert_eq!(
-            admin_worktree_entries(fx.repo_path()),
-            0,
-            "clean should prune git's administrative record"
-        );
     }
 
     // --- hermetic snapshot resume ---
@@ -1947,7 +1764,6 @@ mod tests {
     const HERMETIC_DEFINITION: &str = r#"
 __gremlins_expanded__: true
 default_client: 'cmd:true'
-base_ref: main
 stages:
   - name: run
     type: exec
@@ -1960,7 +1776,6 @@ stages:
     /// tolerate its absence.
     const HERMETIC_DEFINITION_NO_SENTINEL: &str = r#"
 default_client: 'cmd:true'
-base_ref: main
 stages:
   - name: run
     type: exec
@@ -2022,7 +1837,6 @@ stages:
 
         assert_eq!(gremlin.definition.name(), "definition");
         assert_eq!(gremlin.definition.default_client(), "cmd:true");
-        assert_eq!(gremlin.definition.base_ref(), "main");
         // project_root came from state.json, not from a walk.
         assert_eq!(gremlin.project_root, project_root);
 
