@@ -36,6 +36,9 @@ enum Cmds {
         /// Free-form --key value pairs passed to bootstrap sources.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+        /// Run with temp-backed storage — no footprint on disk after completion.
+        #[arg(long)]
+        ephemeral: bool,
     },
     /// List gremlins from the state root as a plain-column table.
     Ls {
@@ -105,7 +108,11 @@ async fn main() {
 
     let cli = Cli::parse();
     let result = match cli.command {
-        Some(Cmds::Launch { definition, args }) => launch(&definition, &args).await,
+        Some(Cmds::Launch {
+            definition,
+            args,
+            ephemeral,
+        }) => launch(&definition, &args, ephemeral).await,
         Some(Cmds::Ls { here }) => ls(here).await,
         Some(Cmds::Info { id }) => info(&id).await,
         Some(Cmds::Stop { id }) => stop(&id).await,
@@ -471,8 +478,8 @@ fn status_direct(id: &str) -> Result<(), String> {
         "workdir:       {}",
         gremlin
             .workdir
-            .as_deref()
-            .map(|path| path.display().to_string())
+            .as_ref()
+            .map(|w| w.path().display().to_string())
             .unwrap_or_default()
     );
     println!("state_dir:     {}", gremlin.state.state_dir().display());
@@ -545,8 +552,8 @@ fn info_direct(id: &str) -> Result<(), String> {
 
     let workdir = gremlin
         .workdir
-        .as_deref()
-        .map(|path| path.display().to_string())
+        .as_ref()
+        .map(|w| w.path().display().to_string())
         .unwrap_or_default();
 
     let payload = serde_json::json!({
@@ -1240,7 +1247,7 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 // launch
 // ---------------------------------------------------------------------------
 
-async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
+async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Result<(), String> {
     // Parse --key value pairs from the trailing free-form arguments.
     let stage_inputs = parse_stage_inputs(raw_args)?;
 
@@ -1289,6 +1296,7 @@ async fn launch(definition: &str, raw_args: &[String]) -> Result<(), String> {
         "definition": definition,
         "args": raw_args,
         "project_root": project_root.to_string_lossy(),
+        "ephemeral": ephemeral,
     }))
     .await?;
 

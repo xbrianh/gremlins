@@ -455,7 +455,7 @@ mod tests {
     use crate::clients::client::Client;
 
     use crate::definition::StaticDefinition;
-    use crate::executor::gremlin::validate_gremlin_id;
+    use crate::executor::gremlin::{validate_gremlin_id, ScratchDir, WorkDir};
     use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;
@@ -674,16 +674,17 @@ mod tests {
                 None,
                 serde_yaml::Value::Null,
             )),
-            workdir: Some(worktree),
+            workdir: Some(WorkDir::Persistent(worktree)),
             project_root: sandbox.path().to_path_buf(),
             state: state_data,
             env: std::env::vars().collect(),
             client: Client::parse("cmd:true").unwrap(),
             stage_inputs,
             loop_iter: "1".to_string(),
-            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot("gr-test"),
+            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(),
             cancel_token: None,
             interactive_session: None,
+            scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
         };
         (sandbox, gremlin)
     }
