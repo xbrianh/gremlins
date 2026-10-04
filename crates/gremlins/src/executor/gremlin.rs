@@ -286,13 +286,11 @@ impl Gremlin {
 
         let project_root = project_root_for(&definition_path);
 
-        // 2. Create the workspace directory.
-        let workdir = config::work_root()
-            .join(gremlin_id.as_str())
-            .join("workspace");
+        // 2. Create the workdir.
+        let workdir = config::work_root().join(gremlin_id.as_str());
         std::fs::create_dir_all(&workdir).map_err(|e| {
             RunError::Message(format!(
-                "failed to create workspace dir {}: {e}",
+                "failed to create workdir {}: {e}",
                 workdir.display()
             ))
         })?;
@@ -687,15 +685,13 @@ impl Gremlin {
             self.client.clone()
         };
 
-        // Create the child workspace directory so the child's state.json can
+        // Create the child workdir so the child's state.json can
         // record a `workdir`. The caller populates it afterwards via
         // [`run_fork_cmds`].
-        let child_workdir = config::work_root()
-            .join(child_gremlin_id.as_str())
-            .join("workspace");
+        let child_workdir = config::work_root().join(child_gremlin_id.as_str());
         std::fs::create_dir_all(&child_workdir).map_err(|e| {
             RunError::Message(format!(
-                "failed to create child workspace dir {}: {e}",
+                "failed to create child workdir {}: {e}",
                 child_workdir.display()
             ))
         })?;
@@ -817,7 +813,7 @@ impl Gremlin {
         group_name: &str,
         fork_cmds: Option<&[String]>,
     ) -> Result<(), RunError> {
-        let child_workdir = config::work_root().join(child_id).join("workspace");
+        let child_workdir = config::work_root().join(child_id);
 
         match fork_cmds {
             None => {
