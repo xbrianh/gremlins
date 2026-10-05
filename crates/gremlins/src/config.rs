@@ -130,7 +130,80 @@ struct AzureConfigFile {
     token: Option<StrictString>,
     #[serde(rename = "api-key")]
     api_key: Option<StrictString>,
-    auth: Option<StrictString>,
+    #[serde(default, deserialize_with = "deserialize_azure_auth")]
+    auth: Option<String>,
+}
+
+/// Custom deserializer for `azure.auth`: rejects non-string values and
+/// unknown auth-method names at parse time.
+fn deserialize_azure_auth<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct AuthVisitor;
+    impl<'de> serde::de::Visitor<'de> for AuthVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str(
+                "a string: \"client-secret\", \"cli\", \"managed-identity\", or \"default\"",
+            )
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            match v.trim() {
+                "client-secret" | "cli" | "managed-identity" | "default" => {
+                    Ok(Some(v.trim().to_owned()))
+                }
+                other => Err(serde::de::Error::invalid_value(
+                    serde::de::Unexpected::Str(other),
+                    &self,
+                )),
+            }
+        }
+
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+            self.visit_str(&v)
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Bool(v),
+                &self,
+            ))
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Signed(v),
+                &self,
+            ))
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Unsigned(v),
+                &self,
+            ))
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Err(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Float(v),
+                &self,
+            ))
+        }
+    }
+
+    deserializer.deserialize_any(AuthVisitor)
 }
 
 /// Azure backend configuration from settings.yaml.
@@ -140,7 +213,7 @@ pub struct AzureConfig {
     pub(crate) api_version: Option<StrictString>,
     pub(crate) token: Option<StrictString>,
     pub(crate) api_key: Option<StrictString>,
-    pub(crate) auth: Option<StrictString>,
+    pub(crate) auth: Option<String>,
 }
 
 /// Resolved Azure authentication method.
@@ -165,10 +238,8 @@ pub(crate) fn resolve_azure_auth_method() -> Result<AzureAuthMethod, String> {
     if let Some(cfg) = get_global() {
         if let Some(azure) = cfg.azure() {
             if let Some(ref auth) = azure.auth {
-                let v = auth.0.trim();
-                if !v.is_empty() {
-                    return parse_auth_method(v);
-                }
+                let v = auth.trim();
+                return parse_auth_method(v);
             }
         }
     }
@@ -176,9 +247,7 @@ pub(crate) fn resolve_azure_auth_method() -> Result<AzureAuthMethod, String> {
     // 2. GREMLINS_AZURE_AUTH env var
     if let Ok(env_val) = std::env::var("GREMLINS_AZURE_AUTH") {
         let v = env_val.trim();
-        if !v.is_empty() {
-            return parse_auth_method(v);
-        }
+        return parse_auth_method(v);
     }
 
     // 3. Fall back to static credentials: token → api-key

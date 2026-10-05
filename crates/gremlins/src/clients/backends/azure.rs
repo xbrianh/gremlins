@@ -16,6 +16,7 @@ use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use crate::clients::token_provider::{self, TokenProvider};
 use crate::config::AzureAuthMethod;
+use rig_core::http_client::ReqwestClient;
 
 // ── AzureClientState ─────────────────────────────────────────────────────
 
@@ -27,6 +28,7 @@ enum AzureClientState {
         token_provider: Box<dyn TokenProvider>,
         endpoint: String,
         api_version: String,
+        http_client: ReqwestClient,
     },
 }
 
@@ -130,36 +132,44 @@ impl AzureRunState {
                 token_provider,
                 endpoint,
                 api_version,
+                http_client,
             } => {
-                let token = token_provider
-                    .get_token(token_provider::AZURE_SCOPE)
+                // Capture errors into a local so execution always flows
+                // through the cancellation-map cleanup below.
+                let dyn_result = async {
+                    let token = token_provider
+                        .get_token(token_provider::AZURE_SCOPE)
+                        .await
+                        .map_err(|e| ClientError::Runtime {
+                            message: format!("Azure token acquisition failed: {e}"),
+                        })?;
+                    let client = azure::Client::builder()
+                        .api_key(AzureOpenAIAuth::Token(token))
+                        .api_version(api_version)
+                        .azure_endpoint(endpoint.clone())
+                        .http_client(http_client.clone())
+                        .build()
+                        .map_err(|e| ClientError::Runtime {
+                            message: format!("failed to build Azure client: {e}"),
+                        })?;
+                    let model = client.completion_model(&model_name);
+                    run_agent_loop(
+                        &model,
+                        prompt,
+                        ctx,
+                        cancel,
+                        LoopOpts {
+                            extra: self.extra_params(),
+                            tool_filter: self.tool_filter.as_deref(),
+                            classify_error: Some(default_classify as ErrorClassifier),
+                        },
+                        None,
+                        interactive,
+                    )
                     .await
-                    .map_err(|e| ClientError::Runtime {
-                        message: format!("Azure token acquisition failed: {e}"),
-                    })?;
-                let client = azure::Client::builder()
-                    .api_key(AzureOpenAIAuth::Token(token))
-                    .api_version(api_version)
-                    .azure_endpoint(endpoint.clone())
-                    .build()
-                    .map_err(|e| ClientError::Runtime {
-                        message: format!("failed to build Azure client: {e}"),
-                    })?;
-                let model = client.completion_model(&model_name);
-                run_agent_loop(
-                    &model,
-                    prompt,
-                    ctx,
-                    cancel,
-                    LoopOpts {
-                        extra: self.extra_params(),
-                        tool_filter: self.tool_filter.as_deref(),
-                        classify_error: Some(default_classify as ErrorClassifier),
-                    },
-                    None,
-                    interactive,
-                )
-                .await
+                }
+                .await;
+                dyn_result
             }
         };
 
@@ -221,6 +231,10 @@ impl AzureBackend {
         let tool_filter = openai_protocol::tool_filter(native_block);
         let client_params = openai_protocol::string_map(extra_params);
 
+        let http_client = ReqwestClient::builder()
+            .build()
+            .map_err(|e| format!("failed to create HTTP client: {e}"))?;
+
         let client_state = match auth_method {
             AzureAuthMethod::ApiKey(key) => {
                 let client = azure::Client::builder()
@@ -240,21 +254,21 @@ impl AzureBackend {
                     .map_err(|e| format!("failed to build Azure client: {e}"))?;
                 AzureClientState::Static(client)
             }
-            AzureAuthMethod::ClientSecret => {
-                let provider = crate::clients::token_provider::ClientSecretProvider::from_env()
-                    .map_err(|e| e.to_string())?;
-                AzureClientState::Dynamic {
-                    token_provider: Box::new(provider),
-                    endpoint,
-                    api_version,
-                }
-            }
+            AzureAuthMethod::ClientSecret => AzureClientState::Dynamic {
+                token_provider: Box::new(
+                    crate::clients::token_provider::ClientSecretProvider::new(),
+                ),
+                endpoint,
+                api_version,
+                http_client: http_client.clone(),
+            },
             AzureAuthMethod::Cli => AzureClientState::Dynamic {
                 token_provider: Box::new(
                     crate::clients::token_provider::AzureCliProvider::new(),
                 ),
                 endpoint,
                 api_version,
+                http_client: http_client.clone(),
             },
             AzureAuthMethod::ManagedIdentity => AzureClientState::Dynamic {
                 token_provider: Box::new(
@@ -262,6 +276,7 @@ impl AzureBackend {
                 ),
                 endpoint,
                 api_version,
+                http_client: http_client.clone(),
             },
             AzureAuthMethod::DefaultAzure => AzureClientState::Dynamic {
                 token_provider: Box::new(
@@ -269,6 +284,7 @@ impl AzureBackend {
                 ),
                 endpoint,
                 api_version,
+                http_client: http_client.clone(),
             },
         };
 
@@ -391,6 +407,9 @@ mod tests {
         guard.remove("GREMLINS_AZURE_ENDPOINT");
         guard.remove("GREMLINS_AZURE_API_VERSION");
         guard.remove("GREMLINS_AZURE_AUTH");
+        guard.remove("AZURE_CLIENT_ID");
+        guard.remove("AZURE_CLIENT_SECRET");
+        guard.remove("AZURE_TENANT_ID");
     }
 
     fn isolated_env() -> EnvGuard {
@@ -614,13 +633,14 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
         guard.set("GREMLINS_AZURE_AUTH", "client-secret");
-        // Missing AZURE_CLIENT_ID etc. → build fails at provider construction
+        // ClientSecretProvider::new() defers env-var validation to first
+        // get_token() call, so build() succeeds even without env vars.
         let result = AzureBackend::build(
             "gpt-4o",
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         );
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
