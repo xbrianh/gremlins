@@ -14,13 +14,28 @@ use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
+use crate::clients::token_provider::{self, TokenProvider};
+use crate::config::AzureAuthMethod;
+use rig_core::http_client::ReqwestClient;
 
-const PROVIDER_NAME: &str = "azure";
+// ── AzureClientState ─────────────────────────────────────────────────────
+
+/// Either a statically-built client (for ApiKey / Token auth) or the
+/// ingredients to build one dynamically per attempt (for identity-based auth).
+enum AzureClientState {
+    Static(azure::Client),
+    Dynamic {
+        token_provider: Box<dyn TokenProvider>,
+        endpoint: String,
+        api_version: String,
+        http_client: ReqwestClient,
+    },
+}
 
 // ── AzureRunState ────────────────────────────────────────────────────────
 
 struct AzureRunState {
-    client: azure::Client,
+    client_state: AzureClientState,
     model: String,
     tool_filter: Option<Vec<String>>,
     client_params: HashMap<String, String>,
@@ -92,21 +107,71 @@ impl AzureRunState {
         }
 
         let model_name = self.effective_model(ctx.params.model.as_deref());
-        let model = self.client.completion_model(&model_name);
-        let result = run_agent_loop(
-            &model,
-            prompt,
-            ctx,
-            cancel,
-            LoopOpts {
-                extra: self.extra_params(),
-                tool_filter: self.tool_filter.as_deref(),
-                classify_error: Some(default_classify as ErrorClassifier),
-            },
-            None, // task_model_selector deferred
-            interactive,
-        )
-        .await;
+
+        // For static auth we use the pre-built client; for dynamic auth
+        // we acquire a fresh token and build a client per attempt.
+        let result = match &self.client_state {
+            AzureClientState::Static(client) => {
+                let model = client.completion_model(&model_name);
+                run_agent_loop(
+                    &model,
+                    prompt,
+                    ctx,
+                    cancel,
+                    LoopOpts {
+                        extra: self.extra_params(),
+                        tool_filter: self.tool_filter.as_deref(),
+                        classify_error: Some(default_classify as ErrorClassifier),
+                    },
+                    None,
+                    interactive,
+                )
+                .await
+            }
+            AzureClientState::Dynamic {
+                token_provider,
+                endpoint,
+                api_version,
+                http_client,
+            } => {
+                // Capture errors into a local so execution always flows
+                // through the cancellation-map cleanup below.
+                let dyn_result = async {
+                    let token = token_provider
+                        .get_token(token_provider::AZURE_SCOPE)
+                        .await
+                        .map_err(|e| ClientError::Runtime {
+                            message: format!("Azure token acquisition failed: {e}"),
+                        })?;
+                    let client = azure::Client::builder()
+                        .api_key(AzureOpenAIAuth::Token(token))
+                        .api_version(api_version)
+                        .azure_endpoint(endpoint.clone())
+                        .http_client(http_client.clone())
+                        .build()
+                        .map_err(|e| ClientError::Runtime {
+                            message: format!("failed to build Azure client: {e}"),
+                        })?;
+                    let model = client.completion_model(&model_name);
+                    run_agent_loop(
+                        &model,
+                        prompt,
+                        ctx,
+                        cancel,
+                        LoopOpts {
+                            extra: self.extra_params(),
+                            tool_filter: self.tool_filter.as_deref(),
+                            classify_error: Some(default_classify as ErrorClassifier),
+                        },
+                        None,
+                        interactive,
+                    )
+                    .await
+                }
+                .await;
+                dyn_result
+            }
+        };
 
         if let Ok(mut guard) = self.cancels.lock() {
             if let Some(inner) = guard.get_mut(&gremlin_id) {
@@ -129,9 +194,18 @@ pub struct AzureBackend {
 impl AzureBackend {
     /// Build an Azure backend.
     ///
-    /// Auth precedence:
-    /// 1. settings.yaml `azure.token` or `GREMLINS_AZURE_TOKEN` env var → `AzureOpenAIAuth::Token`
-    /// 2. settings.yaml `azure.api-key` or `GREMLINS_AZURE_API_KEY` env var → `AzureOpenAIAuth::ApiKey`
+    /// Auth is resolved via [`crate::config::resolve_azure_auth_method`]:
+    ///
+    /// | `azure.auth` / `GREMLINS_AZURE_AUTH` | Behaviour |
+    /// |---|---|
+    /// | (unset) | Static fallback: `azure.token` → `azure.api-key` |
+    /// | `"client-secret"` | Service principal via `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` |
+    /// | `"cli"` | `az account get-access-token` |
+    /// | `"managed-identity"` | Azure IMDS endpoint |
+    /// | `"default"` | Chains client-secret → CLI → managed identity |
+    ///
+    /// For dynamic methods the client is built per attempt (token acquisition
+    /// is async).  Configuration errors (bad env vars) surface at first use.
     ///
     /// `GREMLINS_AZURE_ENDPOINT` (or settings.yaml `azure.endpoint`) is required.
     /// `GREMLINS_AZURE_API_VERSION` (or settings.yaml `azure.api-version`) defaults to `"2024-10-21"`.
@@ -146,14 +220,7 @@ impl AzureBackend {
 
         let api_version = crate::config::azure_api_version();
 
-        let auth = resolve_auth()?;
-
-        let client = azure::Client::builder()
-            .api_key(auth)
-            .api_version(&api_version)
-            .azure_endpoint(endpoint)
-            .build()
-            .map_err(|e| format!("failed to build Azure client: {e}"))?;
+        let auth_method = crate::config::resolve_azure_auth_method()?;
 
         let model = if model.is_empty() {
             return Err("azure backend requires a deployment name (e.g. azure:gpt-4o)".into());
@@ -164,9 +231,66 @@ impl AzureBackend {
         let tool_filter = openai_protocol::tool_filter(native_block);
         let client_params = openai_protocol::string_map(extra_params);
 
+        let http_client = ReqwestClient::builder()
+            .build()
+            .map_err(|e| format!("failed to create HTTP client: {e}"))?;
+
+        let client_state = match auth_method {
+            AzureAuthMethod::ApiKey(key) => {
+                let client = azure::Client::builder()
+                    .api_key(AzureOpenAIAuth::ApiKey(key))
+                    .api_version(&api_version)
+                    .azure_endpoint(endpoint)
+                    .build()
+                    .map_err(|e| format!("failed to build Azure client: {e}"))?;
+                AzureClientState::Static(client)
+            }
+            AzureAuthMethod::Token(token) => {
+                let client = azure::Client::builder()
+                    .api_key(AzureOpenAIAuth::Token(token))
+                    .api_version(&api_version)
+                    .azure_endpoint(endpoint)
+                    .build()
+                    .map_err(|e| format!("failed to build Azure client: {e}"))?;
+                AzureClientState::Static(client)
+            }
+            AzureAuthMethod::ClientSecret => AzureClientState::Dynamic {
+                token_provider: Box::new(
+                    crate::clients::token_provider::ClientSecretProvider::new(),
+                ),
+                endpoint,
+                api_version,
+                http_client: http_client.clone(),
+            },
+            AzureAuthMethod::Cli => AzureClientState::Dynamic {
+                token_provider: Box::new(
+                    crate::clients::token_provider::AzureCliProvider::new(),
+                ),
+                endpoint,
+                api_version,
+                http_client: http_client.clone(),
+            },
+            AzureAuthMethod::ManagedIdentity => AzureClientState::Dynamic {
+                token_provider: Box::new(
+                    crate::clients::token_provider::ManagedIdentityProvider::new(),
+                ),
+                endpoint,
+                api_version,
+                http_client: http_client.clone(),
+            },
+            AzureAuthMethod::DefaultAzure => AzureClientState::Dynamic {
+                token_provider: Box::new(
+                    crate::clients::token_provider::DefaultAzureProvider::new(),
+                ),
+                endpoint,
+                api_version,
+                http_client: http_client.clone(),
+            },
+        };
+
         Ok(Arc::new(Self {
             state: AzureRunState {
-                client,
+                client_state,
                 model,
                 tool_filter,
                 client_params,
@@ -177,24 +301,6 @@ impl AzureBackend {
             },
         }))
     }
-}
-
-/// Resolve Azure auth credentials.
-fn resolve_auth() -> Result<AzureOpenAIAuth, String> {
-    // 1. settings.yaml azure.token or GREMLINS_AZURE_TOKEN → bearer token
-    if let Some(token) = crate::config::azure_auth_token() {
-        return Ok(AzureOpenAIAuth::Token(token));
-    }
-
-    // 2. settings.yaml azure.api-key or GREMLINS_AZURE_API_KEY → api-key header
-    if let Some(key) = crate::config::azure_api_key() {
-        return Ok(AzureOpenAIAuth::ApiKey(key));
-    }
-
-    Err(format!(
-        "no credentials for provider '{PROVIDER_NAME}': set GREMLINS_AZURE_TOKEN, \
-         GREMLINS_AZURE_API_KEY, or add azure.token / azure.api-key in settings.yaml",
-    ))
 }
 
 #[async_trait]
@@ -300,6 +406,10 @@ mod tests {
         guard.remove("GREMLINS_AZURE_API_KEY");
         guard.remove("GREMLINS_AZURE_ENDPOINT");
         guard.remove("GREMLINS_AZURE_API_VERSION");
+        guard.remove("GREMLINS_AZURE_AUTH");
+        guard.remove("AZURE_CLIENT_ID");
+        guard.remove("AZURE_CLIENT_SECRET");
+        guard.remove("AZURE_TENANT_ID");
     }
 
     fn isolated_env() -> EnvGuard {
@@ -309,11 +419,6 @@ mod tests {
         guard.set("GREMLINS_SANDBOX_ROOT", &tmp);
         guard.set("HOME", &tmp);
         guard
-    }
-
-    #[test]
-    fn provider_constants() {
-        assert_eq!(PROVIDER_NAME, "azure");
     }
 
     #[test]
@@ -375,9 +480,9 @@ mod tests {
         guard.set("GREMLINS_AZURE_TOKEN", "bearer-token-123");
         guard.set("GREMLINS_AZURE_API_KEY", "api-key-456");
 
-        let auth = resolve_auth().unwrap();
+        let method = crate::config::resolve_azure_auth_method().unwrap();
         assert!(
-            matches!(auth, AzureOpenAIAuth::Token(t) if t == "bearer-token-123"),
+            matches!(method, AzureAuthMethod::Token(t) if t == "bearer-token-123"),
             "GREMLINS_AZURE_TOKEN should win over GREMLINS_AZURE_API_KEY"
         );
     }
@@ -398,9 +503,9 @@ mod tests {
         .unwrap();
         crate::config::init_global().unwrap();
 
-        let auth = resolve_auth().unwrap();
+        let method = crate::config::resolve_azure_auth_method().unwrap();
         assert!(
-            matches!(auth, AzureOpenAIAuth::ApiKey(k) if k == "settings-yaml-key"),
+            matches!(method, AzureAuthMethod::ApiKey(k) if k == "settings-yaml-key"),
             "settings.yaml azure.api-key should win over GREMLINS_AZURE_API_KEY"
         );
     }
@@ -427,12 +532,14 @@ mod tests {
 
         let client_params = openai_protocol::string_map(&extra);
         let state = AzureRunState {
-            client: azure::Client::builder()
-                .api_key(AzureOpenAIAuth::ApiKey("fake-key".into()))
-                .api_version("2024-10-21")
-                .azure_endpoint("https://example.openai.azure.com".to_string())
-                .build()
-                .unwrap(),
+            client_state: AzureClientState::Static(
+                azure::Client::builder()
+                    .api_key(AzureOpenAIAuth::ApiKey("fake-key".into()))
+                    .api_version("2024-10-21")
+                    .azure_endpoint("https://example.openai.azure.com".to_string())
+                    .build()
+                    .unwrap(),
+            ),
             model: "gpt-4o".into(),
             tool_filter: None,
             client_params,
@@ -462,7 +569,7 @@ mod tests {
 
         let backend = AzureBackend {
             state: AzureRunState {
-                client,
+                client_state: AzureClientState::Static(client),
                 model: "gpt-4o".into(),
                 tool_filter: None,
                 client_params: HashMap::new(),
@@ -517,5 +624,129 @@ mod tests {
             .unwrap()
             .get("gr-sibling")
             .is_some());
+    }
+
+    // ── auth method tests ─────────────────────────────────────────────
+
+    #[test]
+    fn auth_method_client_secret_parses() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_AUTH", "client-secret");
+        // ClientSecretProvider::new() defers env-var validation to first
+        // get_token() call, so build() succeeds even without env vars.
+        let result = AzureBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn auth_method_cli_parses() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_AUTH", "cli");
+        // CLI provider doesn't validate at build time → succeeds
+        let result = AzureBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn auth_method_managed_identity_parses() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_AUTH", "managed-identity");
+        let result = AzureBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn auth_method_default_parses() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_AUTH", "default");
+        let result = AzureBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn auth_method_unknown_rejected() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_AUTH", "bogus");
+        let result = AzureBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        let err = result.err().expect("should be an error");
+        assert!(
+            err.contains("unknown azure.auth value"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn auth_method_settings_yaml_over_env() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_AUTH", "cli");
+
+        let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
+        let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"azure": {"auth": "managed-identity"}}"#,
+        )
+        .unwrap();
+        crate::config::init_global().unwrap();
+
+        let method = crate::config::resolve_azure_auth_method().unwrap();
+        assert!(
+            matches!(method, AzureAuthMethod::ManagedIdentity),
+            "settings.yaml azure.auth should win over GREMLINS_AZURE_AUTH"
+        );
+    }
+
+    #[test]
+    fn auth_method_absent_with_api_key_falls_back() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_API_KEY", "my-key");
+        // No auth field set → falls back to api-key
+        let result = AzureBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn auth_method_absent_with_token_falls_back() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_TOKEN", "my-token");
+        let result = AzureBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok());
     }
 }
