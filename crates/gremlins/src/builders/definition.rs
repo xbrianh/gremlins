@@ -303,9 +303,13 @@ impl LandBuilder {
 
         // --- Unused-key check ---
         {
-            // Collect all text from land_cmds
+            // Collect all text from land_cmds and clean_cmds
             let mut text = String::new();
             for cmd in &self.land_cmds {
+                text.push_str(cmd);
+                text.push('\n');
+            }
+            for cmd in &self.clean_cmds {
                 text.push_str(cmd);
                 text.push('\n');
             }
@@ -1053,6 +1057,90 @@ mod tests {
             )
             .build()
             .unwrap();
+    }
+
+    // --- LandBuilder clean_cmd / clean_cmds ---
+
+    #[test]
+    fn land_builder_clean_cmd() {
+        let (stage, clean_cmds) = LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmd("git worktree remove --force \"$GREMLIN_WORKDIR\" || true")
+            .build()
+            .unwrap();
+        assert_eq!(stage.name(), "land");
+        assert_eq!(clean_cmds.len(), 1);
+        assert!(clean_cmds[0].contains("git worktree remove"));
+    }
+
+    #[test]
+    fn land_builder_clean_cmds() {
+        let (stage, clean_cmds) = LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmds(vec![
+                "git worktree remove --force \"$GREMLIN_WORKDIR\" || true".to_string(),
+                "git worktree prune".to_string(),
+            ])
+            .build()
+            .unwrap();
+        assert_eq!(stage.name(), "land");
+        assert_eq!(clean_cmds.len(), 2);
+    }
+
+    #[test]
+    fn land_builder_clean_cmd_only_no_land_cmds() {
+        // clean_cmds without land_cmds is valid — the land stage has no
+        // commands but clean_cmds are still returned.
+        let (stage, clean_cmds) = LandBuilder::new()
+            .clean_cmd("git worktree prune")
+            .build()
+            .unwrap();
+        assert_eq!(stage.name(), "land");
+        assert_eq!(clean_cmds.len(), 1);
+    }
+
+    #[test]
+    fn land_builder_unused_key_in_clean_cmds_is_ok() {
+        // Keys referenced only in clean_cmds must not be reported as unused.
+        LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmd("cat {clean_input}")
+            .interpolate(
+                "clean_input",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://clean.txt\")",
+                ),
+            )
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn land_builder_unused_output_in_clean_cmds_is_ok() {
+        // Output keys referenced only in clean_cmds must not be reported as unused.
+        LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmd("cat {clean_out}")
+            .output("clean_out", output("artifact://clean-out.txt"))
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn land_builder_truly_unused_key_still_errors() {
+        // A key that is in neither land_cmds nor clean_cmds must still error.
+        let err = LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmd("echo bye")
+            .interpolate(
+                "unused",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://unused.txt\")",
+                ),
+            )
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("unused"), "{err}");
     }
 
     #[test]

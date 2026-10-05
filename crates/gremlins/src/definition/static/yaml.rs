@@ -545,6 +545,14 @@ fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<StageSpec>, SchemaE
 fn land_from_yaml_builder(mapping: &Mapping) -> Result<(StageSpec, Vec<String>), SchemaError> {
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
+    // Reject legacy options.cmds — land_cmds / clean_cmds are the only
+    // supported command keys in the land mapping.
+    if options.contains_key("cmds") {
+        return Err(SchemaError::Generic(
+            "land: options.cmds is no longer supported — use land_cmds and clean_cmds instead"
+                .to_string(),
+        ));
+    }
     let client = yaml_client(mapping);
 
     let land_cmds = yaml_string_list(mapping, "land_cmds")?;

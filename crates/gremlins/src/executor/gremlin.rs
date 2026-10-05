@@ -1070,37 +1070,83 @@ impl Gremlin {
     async fn run_clean_cmds(&self, cmds: &[String]) {
         let cwd = self.cwd();
 
-        // Build substitution env: resolve {key} → artifact content.
-        let mut substitution_env: HashMap<String, String> = HashMap::new();
+        // Resolve {key} → artifact content for each bare placeholder found.
+        let mut substitutions: HashMap<String, String> = HashMap::new();
         for cmd in cmds {
-            let mut rest = cmd.as_str();
-            while let Some(open) = rest.find('{') {
-                rest = &rest[open + 1..];
-                if let Some(close) = rest.find('}') {
-                    let key = &rest[..close];
-                    rest = &rest[close + 1..];
-                    // Skip ${VAR} — shell variables pass through unchanged.
-                    if open > 0 && cmd.as_bytes()[open - 1] == b'$' {
-                        continue;
+            let bytes = cmd.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] != b'{' {
+                    i += 1;
+                    continue;
+                }
+                // Skip ${...} — shell variables pass through unchanged.
+                if i > 0 && bytes[i - 1] == b'$' {
+                    i += 1;
+                    continue;
+                }
+                let start = i;
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'}' {
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    break; // unclosed brace — stop scanning this command
+                }
+                let key = &cmd[start + 1..i];
+                i += 1; // skip '}'
+                if substitutions.contains_key(key) {
+                    continue;
+                }
+                let uri_str = format!("artifact://{key}");
+                match self.state.content(&uri_str, None).await {
+                    Ok(content) => {
+                        let trimmed = content.trim_end_matches('\n').to_string();
+                        substitutions.insert(key.to_string(), trimmed);
                     }
-                    if substitution_env.contains_key(key) {
-                        continue;
+                    Err(_) => {
+                        // Unknown key — leave as-is.
                     }
-                    let uri_str = format!("artifact://{key}");
-                    match self.state.content(&uri_str, None).await {
-                        Ok(content) => {
-                            let trimmed = content.trim_end_matches('\n').to_string();
-                            substitution_env.insert(key.to_string(), trimmed);
-                        }
-                        Err(_) => {
-                            // Unknown key — leave as-is.
-                        }
-                    }
-                } else {
-                    break;
                 }
             }
         }
+
+        // Substitute bare {key} → artifact content directly in commands.
+        // Only replace {key} not preceded by '$'.
+        let substituted: Vec<String> = cmds
+            .iter()
+            .map(|cmd| {
+                let mut result = String::with_capacity(cmd.len());
+                let bytes = cmd.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    if bytes[i] == b'{' && (i == 0 || bytes[i - 1] != b'$') {
+                        let start = i;
+                        i += 1;
+                        while i < bytes.len() && bytes[i] != b'}' {
+                            i += 1;
+                        }
+                        if i >= bytes.len() {
+                            // Unclosed brace — copy the rest verbatim.
+                            result.push_str(&cmd[start..]);
+                            break;
+                        }
+                        let key = &cmd[start + 1..i];
+                        i += 1; // skip '}'
+                        if let Some(val) = substitutions.get(key) {
+                            result.push_str(val);
+                        } else {
+                            // Unknown key — leave {key} as-is.
+                            result.push_str(&cmd[start..i]);
+                        }
+                    } else {
+                        result.push(bytes[i] as char);
+                        i += 1;
+                    }
+                }
+                result
+            })
+            .collect();
 
         // Build env with system vars.
         let system = system_env(
@@ -1115,24 +1161,6 @@ impl Gremlin {
             self.env.clone()
         };
         env.extend(system);
-        for (k, v) in &substitution_env {
-            env.insert(format!("GREMLINS_{}", k.to_uppercase()), v.clone());
-        }
-
-        // Substitute {key} → ${GREMLINS_KEY} in commands.
-        let substituted: Vec<String> = cmds
-            .iter()
-            .map(|cmd| {
-                let mut s = cmd.clone();
-                for key in substitution_env.keys() {
-                    let env_key = format!("GREMLINS_{}", key.to_uppercase());
-                    // Only replace bare {key}, not ${key}
-                    let pattern = format!("{{{key}}}");
-                    s = s.replace(&pattern, &format!("${{{env_key}}}"));
-                }
-                s
-            })
-            .collect();
 
         let log_name = "clean";
         let log_writer = self
@@ -2219,6 +2247,112 @@ stages:
             gremlin.definition.next_stage().await.unwrap(),
             crate::definition::ExecutorStage::Done
         ));
+    }
+
+    // --- clean_cmds execution ---
+
+    #[tokio::test]
+    // The env guard holds a plain mutex across the run's awaits; safe because
+    // `#[tokio::test]` drives a current-thread runtime, so no other task can be
+    // scheduled on this thread while the lock is held.
+    #[allow(clippy::await_holding_lock)]
+    async fn clean_runs_clean_cmds_before_teardown() {
+        let mut env = EnvGuard::lock();
+        let sandbox = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
+        let id = "gr-clean-cmds";
+        let state_dir = sandbox.path().join("state").join(id);
+        let artifact_dir = state_dir.join("artifacts");
+        let workdir = sandbox.path().join("workspace");
+        let project_root = sandbox.path().join("project");
+
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        // A marker file that the clean command will create.
+        let marker = sandbox.path().join("clean-ran");
+
+        // Write a hermetic definition with clean_cmds.
+        let definition_yaml = format!(
+            r#"
+__gremlins_expanded__: true
+default_client: 'cmd:true'
+stages: []
+land:
+  land_cmds:
+    - "echo land"
+  clean_cmds:
+    - "touch {marker_path}"
+"#,
+            marker_path = marker.display(),
+        );
+        let definition_path = state_dir.join("definition.yaml");
+        std::fs::write(&definition_path, &definition_yaml).unwrap();
+
+        let state_json = serde_json::json!({
+            "id": id,
+            "kind": "demo",
+            "project_root": project_root.to_string_lossy(),
+            "definition_path": definition_path.to_string_lossy(),
+            "workdir": workdir.to_string_lossy(),
+            "status": "finished",
+            "pid": null,
+            "exit_code": 0,
+            "client": "",
+            "attempt": "0001",
+        });
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::to_string_pretty(&state_json).unwrap(),
+        )
+        .unwrap();
+
+        let mut gremlin = Gremlin::from(id).unwrap();
+        assert!(gremlin.definition.is_stub());
+        gremlin.init_runtime(None).await.unwrap();
+        assert!(!gremlin.definition.is_stub());
+        assert_eq!(gremlin.definition.clean_cmds().len(), 1);
+
+        gremlin.clean(true).await;
+
+        // The clean command must have run before teardown.
+        assert!(
+            marker.exists(),
+            "clean_cmds should have run and created the marker"
+        );
+        assert!(
+            !state_dir.exists(),
+            "state dir should be gone after clean(true)"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_skips_cmds_for_stub_definition() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let id = "gr-clean-stub";
+        let state_dir = sandbox.path().join("state").join(id);
+        let artifact_dir = state_dir.join("artifacts");
+        let workdir = sandbox.path().join("workspace");
+
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+
+        // A stub definition — clean_cmds must be skipped silently.
+        let gremlin = test_gremlin(
+            id,
+            state_dir.clone(),
+            artifact_dir.clone(),
+            Some(workdir.clone()),
+            PathBuf::new(),
+        );
+        assert!(gremlin.definition.is_stub());
+        gremlin.clean(true).await;
+
+        assert!(!state_dir.exists(), "state dir should be gone");
     }
 
     // --- ephemeral mode ---
