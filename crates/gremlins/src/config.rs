@@ -1565,4 +1565,71 @@ mod tests {
         init_global().unwrap();
         assert_eq!(azure_auth_token().as_deref(), Some("env-token"));
     }
+
+    // ── legacy AZURE_OPENAI_* namespace is ignored ──────────────────
+
+    #[test]
+    fn test_legacy_azure_openai_endpoint_ignored() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("AZURE_OPENAI_ENDPOINT", "https://legacy.openai.azure.com");
+        init_global().unwrap();
+        assert!(
+            azure_endpoint().is_none(),
+            "legacy AZURE_OPENAI_ENDPOINT must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_legacy_azure_openai_api_key_ignored() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("AZURE_OPENAI_API_KEY", "legacy-key");
+        init_global().unwrap();
+        assert!(
+            azure_api_key().is_none(),
+            "legacy AZURE_OPENAI_API_KEY must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_legacy_azure_openai_token_ignored() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("AZURE_OPENAI_TOKEN", "legacy-bearer");
+        init_global().unwrap();
+        assert!(
+            azure_auth_token().is_none(),
+            "legacy AZURE_OPENAI_TOKEN must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_legacy_azure_openai_api_version_ignored() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("AZURE_OPENAI_API_VERSION", "2025-06-01");
+        init_global().unwrap();
+        assert_eq!(
+            azure_api_version(),
+            "2024-10-21",
+            "legacy AZURE_OPENAI_API_VERSION must be ignored; default should prevail"
+        );
+    }
 }
