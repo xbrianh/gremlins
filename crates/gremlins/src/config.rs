@@ -130,80 +130,26 @@ struct AzureConfigFile {
     token: Option<StrictString>,
     #[serde(rename = "api-key")]
     api_key: Option<StrictString>,
-    #[serde(default, deserialize_with = "deserialize_azure_auth")]
-    auth: Option<String>,
+    #[serde(default)]
+    auth: Option<StrictString>,
 }
 
-/// Custom deserializer for `azure.auth`: rejects non-string values and
-/// unknown auth-method names at parse time.
-fn deserialize_azure_auth<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct AuthVisitor;
-    impl<'de> serde::de::Visitor<'de> for AuthVisitor {
-        type Value = Option<String>;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str(
-                "a string: \"client-secret\", \"cli\", \"managed-identity\", or \"default\"",
-            )
-        }
-
-        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            match v.trim() {
+/// Validate an `azure.auth` value against the known set of auth-method names.
+fn validate_azure_auth(raw: Option<StrictString>) -> Result<Option<String>, String> {
+    match raw {
+        Some(s) => {
+            let v = s.0.trim();
+            match v {
                 "client-secret" | "cli" | "managed-identity" | "default" => {
-                    Ok(Some(v.trim().to_owned()))
+                    Ok(Some(v.to_owned()))
                 }
-                other => Err(serde::de::Error::invalid_value(
-                    serde::de::Unexpected::Str(other),
-                    &self,
+                other => Err(format!(
+                    "unknown azure.auth value {other:?}: expected \"client-secret\", \"cli\", \"managed-identity\", or \"default\"",
                 )),
             }
         }
-
-        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
-            self.visit_str(&v)
-        }
-
-        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
-            Err(serde::de::Error::invalid_type(
-                serde::de::Unexpected::Bool(v),
-                &self,
-            ))
-        }
-
-        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
-            Err(serde::de::Error::invalid_type(
-                serde::de::Unexpected::Signed(v),
-                &self,
-            ))
-        }
-
-        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
-            Err(serde::de::Error::invalid_type(
-                serde::de::Unexpected::Unsigned(v),
-                &self,
-            ))
-        }
-
-        fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
-            Err(serde::de::Error::invalid_type(
-                serde::de::Unexpected::Float(v),
-                &self,
-            ))
-        }
+        None => Ok(None),
     }
-
-    deserializer.deserialize_any(AuthVisitor)
 }
 
 /// Azure backend configuration from settings.yaml.
@@ -321,12 +267,21 @@ impl Config {
             })
             .unwrap_or_default();
 
-        let azure = cfg_file.azure.map(|a| AzureConfig {
-            endpoint: a.endpoint,
-            api_version: a.api_version,
-            token: a.token,
-            api_key: a.api_key,
-            auth: a.auth,
+        let azure = cfg_file.azure.map(|a| {
+            let auth = match validate_azure_auth(a.auth) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("invalid azure.auth in settings.yaml: {e}");
+                    None
+                }
+            };
+            AzureConfig {
+                endpoint: a.endpoint,
+                api_version: a.api_version,
+                token: a.token,
+                api_key: a.api_key,
+                auth,
+            }
         });
 
         Ok(Config {

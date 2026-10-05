@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use azure_core::credentials::{Secret, TokenCredential};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// The Azure resource scope for cognitive services.
 pub(crate) const AZURE_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
@@ -35,11 +35,17 @@ pub(crate) trait TokenProvider: Send + Sync {
 ///
 /// Environment-variable validation is deferred to [`get_token`] so that
 /// configuration errors surface at first use rather than at startup.
-pub(crate) struct ClientSecretProvider;
+/// The credential is lazily initialised and cached so the Azure SDK's
+/// internal token cache is reused across calls.
+pub(crate) struct ClientSecretProvider {
+    credential: Mutex<Option<Arc<azure_identity::ClientSecretCredential>>>,
+}
 
 impl ClientSecretProvider {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            credential: Mutex::new(None),
+        }
     }
 
     fn build_credential(
@@ -59,12 +65,24 @@ impl ClientSecretProvider {
         )
         .map_err(|e| TokenProviderError::Credential(e.to_string()))
     }
+
+    fn get_or_init_credential(
+        &self,
+    ) -> Result<Arc<azure_identity::ClientSecretCredential>, TokenProviderError> {
+        let mut guard = self.credential.lock().unwrap();
+        if let Some(ref cred) = *guard {
+            return Ok(Arc::clone(cred));
+        }
+        let cred = self.build_credential()?;
+        *guard = Some(Arc::clone(&cred));
+        Ok(cred)
+    }
 }
 
 #[async_trait]
 impl TokenProvider for ClientSecretProvider {
     async fn get_token(&self, scope: &str) -> Result<String, TokenProviderError> {
-        let credential = self.build_credential()?;
+        let credential = self.get_or_init_credential()?;
         let token_response = credential
             .get_token(&[scope], None)
             .await
@@ -76,19 +94,38 @@ impl TokenProvider for ClientSecretProvider {
 // ── AzureCliProvider ──────────────────────────────────────────────────────
 
 /// Auth via the Azure CLI (`az account get-access-token`).
-pub(crate) struct AzureCliProvider;
+///
+/// The credential is lazily initialised and cached so the Azure SDK's
+/// internal token cache is reused across calls.
+pub(crate) struct AzureCliProvider {
+    credential: Mutex<Option<Arc<azure_identity::AzureCliCredential>>>,
+}
 
 impl AzureCliProvider {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            credential: Mutex::new(None),
+        }
+    }
+
+    fn get_or_init_credential(
+        &self,
+    ) -> Result<Arc<azure_identity::AzureCliCredential>, TokenProviderError> {
+        let mut guard = self.credential.lock().unwrap();
+        if let Some(ref cred) = *guard {
+            return Ok(Arc::clone(cred));
+        }
+        let cred = azure_identity::AzureCliCredential::new(None)
+            .map_err(|e| TokenProviderError::Credential(e.to_string()))?;
+        *guard = Some(Arc::clone(&cred));
+        Ok(cred)
     }
 }
 
 #[async_trait]
 impl TokenProvider for AzureCliProvider {
     async fn get_token(&self, scope: &str) -> Result<String, TokenProviderError> {
-        let credential = azure_identity::AzureCliCredential::new(None)
-            .map_err(|e| TokenProviderError::Credential(e.to_string()))?;
+        let credential = self.get_or_init_credential()?;
         let token_response = credential
             .get_token(&[scope], None)
             .await
@@ -100,19 +137,38 @@ impl TokenProvider for AzureCliProvider {
 // ── ManagedIdentityProvider ───────────────────────────────────────────────
 
 /// Auth via Azure managed identity (IMDS endpoint).
-pub(crate) struct ManagedIdentityProvider;
+///
+/// The credential is lazily initialised and cached so the Azure SDK's
+/// internal token cache is reused across calls.
+pub(crate) struct ManagedIdentityProvider {
+    credential: Mutex<Option<Arc<azure_identity::ManagedIdentityCredential>>>,
+}
 
 impl ManagedIdentityProvider {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            credential: Mutex::new(None),
+        }
+    }
+
+    fn get_or_init_credential(
+        &self,
+    ) -> Result<Arc<azure_identity::ManagedIdentityCredential>, TokenProviderError> {
+        let mut guard = self.credential.lock().unwrap();
+        if let Some(ref cred) = *guard {
+            return Ok(Arc::clone(cred));
+        }
+        let cred = azure_identity::ManagedIdentityCredential::new(None)
+            .map_err(|e| TokenProviderError::Credential(e.to_string()))?;
+        *guard = Some(Arc::clone(&cred));
+        Ok(cred)
     }
 }
 
 #[async_trait]
 impl TokenProvider for ManagedIdentityProvider {
     async fn get_token(&self, scope: &str) -> Result<String, TokenProviderError> {
-        let credential = azure_identity::ManagedIdentityCredential::new(None)
-            .map_err(|e| TokenProviderError::Credential(e.to_string()))?;
+        let credential = self.get_or_init_credential()?;
         let token_response = credential
             .get_token(&[scope], None)
             .await
@@ -128,24 +184,37 @@ impl TokenProvider for ManagedIdentityProvider {
 ///
 /// Stops at the first successful token.  Does **not** fall back to static
 /// credentials — if all three identity providers fail it returns an error.
-pub(crate) struct DefaultAzureProvider;
+///
+/// The provider list is injectable via [`DefaultAzureProvider::with_providers`]
+/// so tests can exercise the real chaining logic with mock providers.
+pub(crate) struct DefaultAzureProvider {
+    providers: Vec<Box<dyn TokenProvider>>,
+}
 
 impl DefaultAzureProvider {
+    /// Create with the standard Azure SDK precedence order.
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            providers: vec![
+                Box::new(ClientSecretProvider::new()),
+                Box::new(AzureCliProvider::new()),
+                Box::new(ManagedIdentityProvider::new()),
+            ],
+        }
+    }
+
+    /// Create with an explicit ordered provider list (for testing).
+    #[allow(dead_code)]
+    pub(crate) fn with_providers(providers: Vec<Box<dyn TokenProvider>>) -> Self {
+        Self { providers }
     }
 }
 
 #[async_trait]
 impl TokenProvider for DefaultAzureProvider {
     async fn get_token(&self, scope: &str) -> Result<String, TokenProviderError> {
-        let providers: [Box<dyn TokenProvider>; 3] = [
-            Box::new(ClientSecretProvider::new()),
-            Box::new(AzureCliProvider::new()),
-            Box::new(ManagedIdentityProvider::new()),
-        ];
         let mut last_err: Option<TokenProviderError> = None;
-        for provider in &providers {
+        for provider in &self.providers {
             match provider.get_token(scope).await {
                 Ok(token) => return Ok(token),
                 Err(e) => {
@@ -202,31 +271,30 @@ mod tests {
 
     #[tokio::test]
     async fn default_azure_stops_at_first_success() {
-        // Test the chaining logic directly via a helper that takes explicit providers.
-        let providers: Vec<Box<dyn TokenProvider>> = vec![
+        let provider = DefaultAzureProvider::with_providers(vec![
             Box::new(MockProvider::new("first", vec![Ok("token-1".into())])),
             Box::new(MockProvider::new("second", vec![Ok("token-2".into())])),
-        ];
-        let token = chain_providers(&providers, "test-scope").await.unwrap();
+        ]);
+        let token = provider.get_token("test-scope").await.unwrap();
         assert_eq!(token, "token-1");
     }
 
     #[tokio::test]
     async fn default_azure_falls_through_on_error() {
-        let providers: Vec<Box<dyn TokenProvider>> = vec![
+        let provider = DefaultAzureProvider::with_providers(vec![
             Box::new(MockProvider::new(
                 "first",
                 vec![Err(TokenProviderError::Credential("fail".into()))],
             )),
             Box::new(MockProvider::new("second", vec![Ok("token-2".into())])),
-        ];
-        let token = chain_providers(&providers, "test-scope").await.unwrap();
+        ]);
+        let token = provider.get_token("test-scope").await.unwrap();
         assert_eq!(token, "token-2");
     }
 
     #[tokio::test]
     async fn default_azure_errors_when_all_fail() {
-        let providers: Vec<Box<dyn TokenProvider>> = vec![
+        let provider = DefaultAzureProvider::with_providers(vec![
             Box::new(MockProvider::new(
                 "first",
                 vec![Err(TokenProviderError::Credential("fail-1".into()))],
@@ -235,8 +303,8 @@ mod tests {
                 "second",
                 vec![Err(TokenProviderError::Credential("fail-2".into()))],
             )),
-        ];
-        let err = chain_providers(&providers, "test-scope").await.unwrap_err();
+        ]);
+        let err = provider.get_token("test-scope").await.unwrap_err();
         assert!(
             matches!(err, TokenProviderError::Credential(_)),
             "should return last error"
@@ -245,43 +313,22 @@ mod tests {
 
     #[tokio::test]
     async fn default_azure_empty_providers_is_error() {
-        let providers: Vec<Box<dyn TokenProvider>> = Vec::new();
-        let err = chain_providers(&providers, "test-scope").await.unwrap_err();
+        let provider = DefaultAzureProvider::with_providers(vec![]);
+        let err = provider.get_token("test-scope").await.unwrap_err();
         assert!(
             matches!(err, TokenProviderError::Other(_)),
             "empty providers should be an error"
         );
     }
 
-    /// Helper that mirrors [`DefaultAzureProvider::get_token`] chaining logic
-    /// but takes an explicit provider list for testability.
-    async fn chain_providers(
-        providers: &[Box<dyn TokenProvider>],
-        scope: &str,
-    ) -> Result<String, TokenProviderError> {
-        let mut last_err: Option<TokenProviderError> = None;
-        for provider in providers {
-            match provider.get_token(scope).await {
-                Ok(token) => return Ok(token),
-                Err(e) => {
-                    last_err = Some(e);
-                    continue;
-                }
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            TokenProviderError::Other("no identity providers configured".into())
-        }))
-    }
-
     // ── ClientSecretProvider env-var checks ───────────────────────────
 
     #[tokio::test]
     async fn client_secret_missing_env_vars() {
-        let _guard = EnvGuard::lock();
-        std::env::remove_var("AZURE_TENANT_ID");
-        std::env::remove_var("AZURE_CLIENT_ID");
-        std::env::remove_var("AZURE_CLIENT_SECRET");
+        let mut guard = EnvGuard::lock();
+        guard.remove("AZURE_TENANT_ID");
+        guard.remove("AZURE_CLIENT_ID");
+        guard.remove("AZURE_CLIENT_SECRET");
         let provider = ClientSecretProvider::new();
         let result = provider.get_token("test-scope").await;
         assert!(result.is_err());
