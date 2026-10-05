@@ -47,12 +47,13 @@ pub struct Config {
     exact_task_clients: HashMap<String, String>,
     prefix_task_clients: HashMap<String, String>,
     path_overrides: PathOverrides,
+    azure: Option<AzureConfig>,
 }
 
 /// A string newtype that rejects non-string YAML scalars (numbers,
 /// booleans, etc.) instead of silently coercing them via `serde_yaml`.
 #[derive(Debug, Clone)]
-struct StrictString(String);
+pub(crate) struct StrictString(pub(crate) String);
 
 impl<'de> Deserialize<'de> for StrictString {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -117,6 +118,27 @@ struct ConfigFile {
     #[serde(rename = "task-clients")]
     task_clients: Option<IndexMap<String, StrictString>>,
     paths: Option<HashMap<String, StrictString>>,
+    azure: Option<AzureConfigFile>,
+}
+
+/// Deserialization helper for the `azure` section of settings.yaml.
+#[derive(Debug, Deserialize)]
+struct AzureConfigFile {
+    endpoint: Option<StrictString>,
+    #[serde(rename = "api-version")]
+    api_version: Option<StrictString>,
+    token: Option<StrictString>,
+    #[serde(rename = "api-key")]
+    api_key: Option<StrictString>,
+}
+
+/// Azure backend configuration from settings.yaml.
+#[derive(Debug, Clone, Default)]
+pub struct AzureConfig {
+    pub(crate) endpoint: Option<StrictString>,
+    pub(crate) api_version: Option<StrictString>,
+    pub(crate) token: Option<StrictString>,
+    pub(crate) api_key: Option<StrictString>,
 }
 
 impl Config {
@@ -162,6 +184,13 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let azure = cfg_file.azure.map(|a| AzureConfig {
+            endpoint: a.endpoint,
+            api_version: a.api_version,
+            token: a.token,
+            api_key: a.api_key,
+        });
+
         Ok(Config {
             default_client,
             exact_stage_clients,
@@ -169,6 +198,7 @@ impl Config {
             exact_task_clients,
             prefix_task_clients,
             path_overrides,
+            azure,
         })
     }
 
@@ -193,6 +223,10 @@ impl Config {
 
     pub fn path_overrides(&self) -> &PathOverrides {
         &self.path_overrides
+    }
+
+    pub fn azure(&self) -> Option<&AzureConfig> {
+        self.azure.as_ref()
     }
 
     pub fn overlay_dirname(&self) -> &'static str {
@@ -390,24 +424,70 @@ pub(crate) fn reasoning_effort() -> Option<String> {
     std::env::var("GREMLINS_REASONING_EFFORT").ok()
 }
 
-/// AZURE_OPENAI_ENDPOINT — required for the Azure backend.
+/// GREMLINS_AZURE_ENDPOINT or settings.yaml `azure.endpoint`.
+/// Required for the Azure backend.
 pub(crate) fn azure_endpoint() -> Option<String> {
-    std::env::var("AZURE_OPENAI_ENDPOINT")
+    if let Some(cfg) = get_global() {
+        if let Some(azure) = cfg.azure() {
+            if let Some(ref ep) = azure.endpoint {
+                if !ep.0.trim().is_empty() {
+                    return Some(ep.0.clone());
+                }
+            }
+        }
+    }
+    std::env::var("GREMLINS_AZURE_ENDPOINT")
         .ok()
         .filter(|v| !v.trim().is_empty())
 }
 
-/// AZURE_OPENAI_API_VERSION — defaults to "2024-10-21".
+/// GREMLINS_AZURE_API_VERSION or settings.yaml `azure.api-version`.
+/// Defaults to "2024-10-21".
 pub(crate) fn azure_api_version() -> String {
-    std::env::var("AZURE_OPENAI_API_VERSION")
+    if let Some(cfg) = get_global() {
+        if let Some(azure) = cfg.azure() {
+            if let Some(ref ver) = azure.api_version {
+                if !ver.0.trim().is_empty() {
+                    return ver.0.clone();
+                }
+            }
+        }
+    }
+    std::env::var("GREMLINS_AZURE_API_VERSION")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "2024-10-21".into())
 }
 
-/// AZURE_OPENAI_TOKEN — Entra ID bearer token for Azure auth.
+/// GREMLINS_AZURE_TOKEN or settings.yaml `azure.token`.
+/// Entra ID bearer token for Azure auth.
 pub(crate) fn azure_auth_token() -> Option<String> {
-    std::env::var("AZURE_OPENAI_TOKEN")
+    if let Some(cfg) = get_global() {
+        if let Some(azure) = cfg.azure() {
+            if let Some(ref token) = azure.token {
+                if !token.0.trim().is_empty() {
+                    return Some(token.0.clone());
+                }
+            }
+        }
+    }
+    std::env::var("GREMLINS_AZURE_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// GREMLINS_AZURE_API_KEY or settings.yaml `azure.api-key`.
+pub(crate) fn azure_api_key() -> Option<String> {
+    if let Some(cfg) = get_global() {
+        if let Some(azure) = cfg.azure() {
+            if let Some(ref key) = azure.api_key {
+                if !key.0.trim().is_empty() {
+                    return Some(key.0.clone());
+                }
+            }
+        }
+    }
+    std::env::var("GREMLINS_AZURE_API_KEY")
         .ok()
         .filter(|v| !v.trim().is_empty())
 }
@@ -1312,5 +1392,244 @@ mod tests {
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_COMPLETION_NUDGE_BUDGET", "7");
         assert_eq!(completion_nudge_budget(), 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // Azure config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_azure_config_deserialization_all_fields() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"{"azure": {"endpoint": "https://example.openai.azure.com", "api-version": "2025-01-01", "token": "bearer-token", "api-key": "sk-azure-key"}}"#,
+        ));
+        let cfg = Config::load().unwrap();
+        let azure = cfg.azure().expect("azure section should be present");
+        assert_eq!(
+            azure.endpoint.as_ref().map(|s| s.0.as_str()),
+            Some("https://example.openai.azure.com")
+        );
+        assert_eq!(
+            azure.api_version.as_ref().map(|s| s.0.as_str()),
+            Some("2025-01-01")
+        );
+        assert_eq!(
+            azure.token.as_ref().map(|s| s.0.as_str()),
+            Some("bearer-token")
+        );
+        assert_eq!(
+            azure.api_key.as_ref().map(|s| s.0.as_str()),
+            Some("sk-azure-key")
+        );
+    }
+
+    #[test]
+    fn test_azure_config_fields_default_to_none() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"azure": {}}"#));
+        let cfg = Config::load().unwrap();
+        let azure = cfg.azure().expect("azure section should be present");
+        assert!(azure.endpoint.is_none());
+        assert!(azure.api_version.is_none());
+        assert!(azure.token.is_none());
+        assert!(azure.api_key.is_none());
+    }
+
+    #[test]
+    fn test_azure_config_absent_section() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "a:b"}"#));
+        let cfg = Config::load().unwrap();
+        assert!(cfg.azure().is_none());
+    }
+
+    #[test]
+    fn test_azure_endpoint_settings_yaml_wins_over_env() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"azure": {"endpoint": "https://yaml.openai.azure.com"}}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_ENDPOINT", "https://env.openai.azure.com");
+        init_global().unwrap();
+        assert_eq!(
+            azure_endpoint().as_deref(),
+            Some("https://yaml.openai.azure.com")
+        );
+    }
+
+    #[test]
+    fn test_azure_endpoint_env_var_fallback() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_ENDPOINT", "https://env.openai.azure.com");
+        init_global().unwrap();
+        assert_eq!(
+            azure_endpoint().as_deref(),
+            Some("https://env.openai.azure.com")
+        );
+    }
+
+    #[test]
+    fn test_azure_api_key_settings_yaml_wins_over_env() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"azure": {"api-key": "yaml-key"}}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_API_KEY", "env-key");
+        init_global().unwrap();
+        assert_eq!(azure_api_key().as_deref(), Some("yaml-key"));
+    }
+
+    #[test]
+    fn test_azure_api_key_env_var_fallback() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_API_KEY", "env-key");
+        init_global().unwrap();
+        assert_eq!(azure_api_key().as_deref(), Some("env-key"));
+    }
+
+    #[test]
+    fn test_azure_api_version_default_fallback() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        init_global().unwrap();
+        assert_eq!(azure_api_version(), "2024-10-21");
+    }
+
+    #[test]
+    fn test_azure_api_version_settings_yaml_wins_over_env() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"azure": {"api-version": "2025-01-01"}}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_API_VERSION", "2025-06-01");
+        init_global().unwrap();
+        assert_eq!(azure_api_version(), "2025-01-01");
+    }
+
+    #[test]
+    fn test_azure_token_settings_yaml_wins_over_env() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"azure": {"token": "yaml-token"}}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_TOKEN", "env-token");
+        init_global().unwrap();
+        assert_eq!(azure_auth_token().as_deref(), Some("yaml-token"));
+    }
+
+    #[test]
+    fn test_azure_token_env_var_fallback() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_TOKEN", "env-token");
+        init_global().unwrap();
+        assert_eq!(azure_auth_token().as_deref(), Some("env-token"));
+    }
+
+    // ── legacy AZURE_OPENAI_* namespace is ignored ──────────────────
+
+    #[test]
+    fn test_legacy_azure_openai_endpoint_ignored() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("AZURE_OPENAI_ENDPOINT", "https://legacy.openai.azure.com");
+        init_global().unwrap();
+        assert!(
+            azure_endpoint().is_none(),
+            "legacy AZURE_OPENAI_ENDPOINT must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_legacy_azure_openai_api_key_ignored() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("AZURE_OPENAI_API_KEY", "legacy-key");
+        init_global().unwrap();
+        assert!(
+            azure_api_key().is_none(),
+            "legacy AZURE_OPENAI_API_KEY must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_legacy_azure_openai_token_ignored() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("AZURE_OPENAI_TOKEN", "legacy-bearer");
+        init_global().unwrap();
+        assert!(
+            azure_auth_token().is_none(),
+            "legacy AZURE_OPENAI_TOKEN must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_legacy_azure_openai_api_version_ignored() {
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("AZURE_OPENAI_API_VERSION", "2025-06-01");
+        init_global().unwrap();
+        assert_eq!(
+            azure_api_version(),
+            "2024-10-21",
+            "legacy AZURE_OPENAI_API_VERSION must be ignored; default should prevail"
+        );
     }
 }
