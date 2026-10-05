@@ -42,6 +42,7 @@ use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::core::{discovery, env_file};
 use crate::definition::{GremlinDefinition, StaticDefinition};
 use crate::executor::state::{self, BlobMode, StateData, StateStore};
+use crate::executor::vars;
 use crate::executor::RunError;
 use crate::schemas::bootstrap::Bootstrap;
 
@@ -1068,10 +1069,8 @@ impl Gremlin {
     /// Run clean commands with `{key}` interpolation against artifact contents.
     /// Best-effort: failures are logged and teardown continues.
     async fn run_clean_cmds(&self, cmds: &[String]) {
-        let cwd = self.cwd();
-
         // Resolve {key} → artifact content for each bare placeholder found.
-        let mut substitutions: HashMap<String, String> = HashMap::new();
+        let mut subst_vars: HashMap<String, String> = HashMap::new();
         for cmd in cmds {
             let bytes = cmd.as_bytes();
             let mut i = 0;
@@ -1095,14 +1094,14 @@ impl Gremlin {
                 }
                 let key = &cmd[start + 1..i];
                 i += 1; // skip '}'
-                if substitutions.contains_key(key) {
+                if subst_vars.contains_key(key) {
                     continue;
                 }
                 let uri_str = format!("artifact://{key}");
                 match self.state.content(&uri_str, None).await {
                     Ok(content) => {
                         let trimmed = content.trim_end_matches('\n').to_string();
-                        substitutions.insert(key.to_string(), trimmed);
+                        subst_vars.insert(key.to_string(), trimmed);
                     }
                     Err(_) => {
                         // Unknown key — leave as-is.
@@ -1111,40 +1110,25 @@ impl Gremlin {
             }
         }
 
-        // Substitute bare {key} → artifact content directly in commands.
-        // Only replace {key} not preceded by '$'.
+        // Convert {key} → ${GREMLINS_KEY} using env-backed substitution.
+        // Values travel through the environment, never inline in the shell
+        // command, so injection payloads like $(...) are not executed.
+        let mut substitution_env: HashMap<String, String> = HashMap::new();
+        let mut key_to_env: HashMap<String, String> = HashMap::new();
+        let mut used_names: HashMap<String, u32> = HashMap::new();
+        let empty_subs = HashMap::new();
         let substituted: Vec<String> = cmds
             .iter()
             .map(|cmd| {
-                let mut result = String::with_capacity(cmd.len());
-                let bytes = cmd.as_bytes();
-                let mut i = 0;
-                while i < bytes.len() {
-                    if bytes[i] == b'{' && (i == 0 || bytes[i - 1] != b'$') {
-                        let start = i;
-                        i += 1;
-                        while i < bytes.len() && bytes[i] != b'}' {
-                            i += 1;
-                        }
-                        if i >= bytes.len() {
-                            // Unclosed brace — copy the rest verbatim.
-                            result.push_str(&cmd[start..]);
-                            break;
-                        }
-                        let key = &cmd[start + 1..i];
-                        i += 1; // skip '}'
-                        if let Some(val) = substitutions.get(key) {
-                            result.push_str(val);
-                        } else {
-                            // Unknown key — leave {key} as-is.
-                            result.push_str(&cmd[start..i]);
-                        }
-                    } else {
-                        result.push(bytes[i] as char);
-                        i += 1;
-                    }
-                }
-                result
+                vars::substitute_vars_to_env(
+                    cmd,
+                    &empty_subs,
+                    &subst_vars,
+                    &empty_subs,
+                    &mut substitution_env,
+                    &mut key_to_env,
+                    &mut used_names,
+                )
             })
             .collect();
 
@@ -1173,9 +1157,9 @@ impl Gremlin {
         let result = run_logged_commands(
             log_name,
             &substituted,
-            &cwd,
+            &self.project_root,
             &env,
-            &HashMap::new(),
+            &substitution_env,
             None,
             log_writer,
             &log_tx,
@@ -1949,6 +1933,7 @@ mod tests {
         _artifact_dir: PathBuf,
         workdir: Option<PathBuf>,
         project_root: PathBuf,
+        scratch_dir: PathBuf,
     ) -> Gremlin {
         Gremlin {
             id: validate_gremlin_id(id).unwrap(),
@@ -1968,7 +1953,7 @@ mod tests {
             runtime_config: RuntimeConfig::default(),
             cancel_token: None,
             interactive_session: None,
-            scratch_dir: ScratchDir::Persistent(config::scratch_root(Some(id))),
+            scratch_dir: ScratchDir::Persistent(scratch_dir),
         }
     }
 
@@ -1992,6 +1977,7 @@ mod tests {
             artifact_dir.clone(),
             Some(workdir.clone()),
             PathBuf::new(),
+            scratch_dir.clone(),
         )
         .clean(true)
         .await;
@@ -2020,6 +2006,7 @@ mod tests {
             artifact_dir.clone(),
             Some(workdir.clone()),
             PathBuf::new(),
+            scratch_dir.clone(),
         )
         .clean(false)
         .await;
@@ -2039,15 +2026,23 @@ mod tests {
         let id = "gr-clean-nowt";
         let state_dir = sandbox.path().join("state").join(id);
         let artifact_dir = state_dir.join("artifacts");
+        let scratch_dir = sandbox.path().join("scratch").join(id);
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&artifact_dir).unwrap();
 
-        test_gremlin(id, state_dir.clone(), artifact_dir, None, PathBuf::new())
-            .clean(true)
-            .await;
+        test_gremlin(
+            id,
+            state_dir.clone(),
+            artifact_dir,
+            None,
+            PathBuf::new(),
+            scratch_dir.clone(),
+        )
+        .clean(true)
+        .await;
 
         assert!(!state_dir.exists());
-        assert!(!sandbox.path().join("scratch").join(id).exists());
+        assert!(!scratch_dir.exists());
     }
 
     #[tokio::test]
@@ -2058,6 +2053,8 @@ mod tests {
         let artifact_dir = state_dir.join("artifacts");
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&artifact_dir).unwrap();
+
+        let scratch_dir = sandbox.path().join("scratch").join(id);
 
         // A workspace directory that is not a git repository: the
         // rmtree fallback is what actually deletes the directory.
@@ -2073,6 +2070,7 @@ mod tests {
             artifact_dir,
             Some(workdir.clone()),
             project_root,
+            scratch_dir,
         )
         .clean(true)
         .await;
@@ -2336,6 +2334,8 @@ land:
         let artifact_dir = state_dir.join("artifacts");
         let workdir = sandbox.path().join("workspace");
 
+        let scratch_dir = sandbox.path().join("scratch").join(id);
+
         std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(state_dir.join("state.json"), "{}").unwrap();
@@ -2348,6 +2348,7 @@ land:
             artifact_dir.clone(),
             Some(workdir.clone()),
             PathBuf::new(),
+            scratch_dir.clone(),
         );
         assert!(gremlin.definition.is_stub());
         gremlin.clean(true).await;

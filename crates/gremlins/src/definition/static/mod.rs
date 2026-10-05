@@ -103,6 +103,29 @@ impl StaticDefinition {
         self.name.is_empty() || self.name == UNLOADED_NAME
     }
 
+    /// Create a minimal definition that carries only clean commands.
+    ///
+    /// Used by the CLI `clean` / `rm` commands so teardown commands run even
+    /// when [`Gremlin::init_runtime`] would fail (e.g. because
+    /// `bootstrap.env` cannot be sourced). The returned definition reports
+    /// `is_stub() == false` so [`Gremlin::clean`] sees the commands.
+    ///
+    /// [`Gremlin::init_runtime`]: crate::executor::gremlin::Gremlin::init_runtime
+    /// [`Gremlin::clean`]: crate::executor::gremlin::Gremlin::clean
+    pub fn with_clean_cmds(path: PathBuf, clean_cmds: Vec<String>) -> Self {
+        StaticDefinition {
+            name: "clean-loaded".to_string(),
+            path,
+            default_client: String::new(),
+            bootstrap: Bootstrap::default(),
+            stages: Vec::new(),
+            land: None,
+            clean_cmds,
+            expanded_yaml: Value::Null,
+            cursor: 0,
+        }
+    }
+
     /// The clean commands to run during `gremlins clean`.
     pub fn clean_cmds(&self) -> &[String] {
         &self.clean_cmds
@@ -200,6 +223,19 @@ impl StaticDefinition {
                 }
             }
             root.insert(Value::String("land".to_string()), land_val);
+        } else if !self.clean_cmds.is_empty() {
+            // Emit a clean-only land mapping when clean_cmds exist without a land stage.
+            let mut land_map = Mapping::new();
+            let clean: Vec<Value> = self
+                .clean_cmds
+                .iter()
+                .map(|c| Value::String(c.clone()))
+                .collect();
+            land_map.insert(
+                Value::String("clean_cmds".to_string()),
+                Value::Sequence(clean),
+            );
+            root.insert(Value::String("land".to_string()), Value::Mapping(land_map));
         }
 
         // stages
