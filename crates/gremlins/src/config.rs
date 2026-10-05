@@ -130,6 +130,7 @@ struct AzureConfigFile {
     token: Option<StrictString>,
     #[serde(rename = "api-key")]
     api_key: Option<StrictString>,
+    auth: Option<StrictString>,
 }
 
 /// Azure backend configuration from settings.yaml.
@@ -139,6 +140,73 @@ pub struct AzureConfig {
     pub(crate) api_version: Option<StrictString>,
     pub(crate) token: Option<StrictString>,
     pub(crate) api_key: Option<StrictString>,
+    pub(crate) auth: Option<StrictString>,
+}
+
+/// Resolved Azure authentication method.
+#[derive(Debug, Clone)]
+pub(crate) enum AzureAuthMethod {
+    ApiKey(String),
+    Token(String),
+    ClientSecret,
+    Cli,
+    ManagedIdentity,
+    DefaultAzure,
+}
+
+/// Resolve the effective [`AzureAuthMethod`] from config and env vars.
+///
+/// Precedence:
+/// 1. `settings.yaml` `azure.auth` field
+/// 2. `GREMLINS_AZURE_AUTH` env var
+/// 3. If neither is set, fall back to static credentials: `azure.token` → `azure.api-key`
+pub(crate) fn resolve_azure_auth_method() -> Result<AzureAuthMethod, String> {
+    // 1. settings.yaml azure.auth
+    if let Some(cfg) = get_global() {
+        if let Some(azure) = cfg.azure() {
+            if let Some(ref auth) = azure.auth {
+                let v = auth.0.trim();
+                if !v.is_empty() {
+                    return parse_auth_method(v);
+                }
+            }
+        }
+    }
+
+    // 2. GREMLINS_AZURE_AUTH env var
+    if let Ok(env_val) = std::env::var("GREMLINS_AZURE_AUTH") {
+        let v = env_val.trim();
+        if !v.is_empty() {
+            return parse_auth_method(v);
+        }
+    }
+
+    // 3. Fall back to static credentials: token → api-key
+    if let Some(token) = azure_auth_token() {
+        return Ok(AzureAuthMethod::Token(token));
+    }
+    if let Some(key) = azure_api_key() {
+        return Ok(AzureAuthMethod::ApiKey(key));
+    }
+
+    Err(
+        "no credentials for provider 'azure': set GREMLINS_AZURE_AUTH, \
+         GREMLINS_AZURE_TOKEN, GREMLINS_AZURE_API_KEY, \
+         or add azure.auth / azure.token / azure.api-key in settings.yaml"
+            .to_string(),
+    )
+}
+
+fn parse_auth_method(v: &str) -> Result<AzureAuthMethod, String> {
+    match v {
+        "client-secret" => Ok(AzureAuthMethod::ClientSecret),
+        "cli" => Ok(AzureAuthMethod::Cli),
+        "managed-identity" => Ok(AzureAuthMethod::ManagedIdentity),
+        "default" => Ok(AzureAuthMethod::DefaultAzure),
+        other => Err(format!(
+            "unknown azure.auth value {other:?}: expected \"client-secret\", \"cli\", \"managed-identity\", or \"default\"",
+        )),
+    }
 }
 
 impl Config {
@@ -189,6 +257,7 @@ impl Config {
             api_version: a.api_version,
             token: a.token,
             api_key: a.api_key,
+            auth: a.auth,
         });
 
         Ok(Config {
