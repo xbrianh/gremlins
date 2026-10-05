@@ -383,24 +383,25 @@ mod tests {
     }
 
     #[test]
-    fn auth_precedence_api_key_over_providers_json() {
+    fn auth_precedence_settings_yaml_over_env() {
         let mut guard = isolated_env();
         guard.set("GREMLINS_AZURE_API_KEY", "env-api-key");
 
-        // Write a providers.yaml so we can prove the env var wins.
+        // Write a settings.yaml so we can prove it wins over the env var.
         let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
         let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
-            config_dir.join("providers.yaml"),
-            r#"{"azure": {"api-key": "providers-json-key"}}"#,
+            config_dir.join("settings.yaml"),
+            r#"{"azure": {"api-key": "settings-yaml-key"}}"#,
         )
         .unwrap();
+        crate::config::init_global().unwrap();
 
         let auth = resolve_auth().unwrap();
         assert!(
-            matches!(auth, AzureOpenAIAuth::ApiKey(k) if k == "env-api-key"),
-            "GREMLINS_AZURE_API_KEY should win over providers.yaml"
+            matches!(auth, AzureOpenAIAuth::ApiKey(k) if k == "settings-yaml-key"),
+            "settings.yaml azure.api-key should win over GREMLINS_AZURE_API_KEY"
         );
     }
 

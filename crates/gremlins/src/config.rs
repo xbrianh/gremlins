@@ -53,7 +53,7 @@ pub struct Config {
 /// A string newtype that rejects non-string YAML scalars (numbers,
 /// booleans, etc.) instead of silently coercing them via `serde_yaml`.
 #[derive(Debug, Clone)]
-struct StrictString(String);
+pub(crate) struct StrictString(pub(crate) String);
 
 impl<'de> Deserialize<'de> for StrictString {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -135,10 +135,10 @@ struct AzureConfigFile {
 /// Azure backend configuration from settings.yaml.
 #[derive(Debug, Clone, Default)]
 pub struct AzureConfig {
-    pub endpoint: Option<String>,
-    pub api_version: Option<String>,
-    pub token: Option<String>,
-    pub api_key: Option<String>,
+    pub(crate) endpoint: Option<StrictString>,
+    pub(crate) api_version: Option<StrictString>,
+    pub(crate) token: Option<StrictString>,
+    pub(crate) api_key: Option<StrictString>,
 }
 
 impl Config {
@@ -185,10 +185,10 @@ impl Config {
             .unwrap_or_default();
 
         let azure = cfg_file.azure.map(|a| AzureConfig {
-            endpoint: a.endpoint.map(|s| s.0),
-            api_version: a.api_version.map(|s| s.0),
-            token: a.token.map(|s| s.0),
-            api_key: a.api_key.map(|s| s.0),
+            endpoint: a.endpoint,
+            api_version: a.api_version,
+            token: a.token,
+            api_key: a.api_key,
         });
 
         Ok(Config {
@@ -430,8 +430,8 @@ pub(crate) fn azure_endpoint() -> Option<String> {
     if let Some(cfg) = get_global() {
         if let Some(azure) = cfg.azure() {
             if let Some(ref ep) = azure.endpoint {
-                if !ep.trim().is_empty() {
-                    return Some(ep.clone());
+                if !ep.0.trim().is_empty() {
+                    return Some(ep.0.clone());
                 }
             }
         }
@@ -447,8 +447,8 @@ pub(crate) fn azure_api_version() -> String {
     if let Some(cfg) = get_global() {
         if let Some(azure) = cfg.azure() {
             if let Some(ref ver) = azure.api_version {
-                if !ver.trim().is_empty() {
-                    return ver.clone();
+                if !ver.0.trim().is_empty() {
+                    return ver.0.clone();
                 }
             }
         }
@@ -465,8 +465,8 @@ pub(crate) fn azure_auth_token() -> Option<String> {
     if let Some(cfg) = get_global() {
         if let Some(azure) = cfg.azure() {
             if let Some(ref token) = azure.token {
-                if !token.trim().is_empty() {
-                    return Some(token.clone());
+                if !token.0.trim().is_empty() {
+                    return Some(token.0.clone());
                 }
             }
         }
@@ -481,8 +481,8 @@ pub(crate) fn azure_api_key() -> Option<String> {
     if let Some(cfg) = get_global() {
         if let Some(azure) = cfg.azure() {
             if let Some(ref key) = azure.api_key {
-                if !key.trim().is_empty() {
-                    return Some(key.clone());
+                if !key.0.trim().is_empty() {
+                    return Some(key.0.clone());
                 }
             }
         }
@@ -1406,12 +1406,21 @@ mod tests {
         let cfg = Config::load().unwrap();
         let azure = cfg.azure().expect("azure section should be present");
         assert_eq!(
-            azure.endpoint.as_deref(),
+            azure.endpoint.as_ref().map(|s| s.0.as_str()),
             Some("https://example.openai.azure.com")
         );
-        assert_eq!(azure.api_version.as_deref(), Some("2025-01-01"));
-        assert_eq!(azure.token.as_deref(), Some("bearer-token"));
-        assert_eq!(azure.api_key.as_deref(), Some("sk-azure-key"));
+        assert_eq!(
+            azure.api_version.as_ref().map(|s| s.0.as_str()),
+            Some("2025-01-01")
+        );
+        assert_eq!(
+            azure.token.as_ref().map(|s| s.0.as_str()),
+            Some("bearer-token")
+        );
+        assert_eq!(
+            azure.api_key.as_ref().map(|s| s.0.as_str()),
+            Some("sk-azure-key")
+        );
     }
 
     #[test]
@@ -1434,88 +1443,126 @@ mod tests {
 
     #[test]
     fn test_azure_endpoint_settings_yaml_wins_over_env() {
-        let _sandbox = Sandbox::with_config(Some(
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
             r#"{"azure": {"endpoint": "https://yaml.openai.azure.com"}}"#,
-        ));
-        std::env::set_var("GREMLINS_AZURE_ENDPOINT", "https://env.openai.azure.com");
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_ENDPOINT", "https://env.openai.azure.com");
         init_global().unwrap();
         assert_eq!(
             azure_endpoint().as_deref(),
             Some("https://yaml.openai.azure.com")
         );
-        clear_global();
-        std::env::remove_var("GREMLINS_AZURE_ENDPOINT");
     }
 
     #[test]
     fn test_azure_endpoint_env_var_fallback() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"azure": {}}"#));
-        std::env::set_var("GREMLINS_AZURE_ENDPOINT", "https://env.openai.azure.com");
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_ENDPOINT", "https://env.openai.azure.com");
         init_global().unwrap();
         assert_eq!(
             azure_endpoint().as_deref(),
             Some("https://env.openai.azure.com")
         );
-        clear_global();
-        std::env::remove_var("GREMLINS_AZURE_ENDPOINT");
     }
 
     #[test]
     fn test_azure_api_key_settings_yaml_wins_over_env() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"azure": {"api-key": "yaml-key"}}"#));
-        std::env::set_var("GREMLINS_AZURE_API_KEY", "env-key");
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"azure": {"api-key": "yaml-key"}}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_API_KEY", "env-key");
         init_global().unwrap();
         assert_eq!(azure_api_key().as_deref(), Some("yaml-key"));
-        clear_global();
-        std::env::remove_var("GREMLINS_AZURE_API_KEY");
     }
 
     #[test]
     fn test_azure_api_key_env_var_fallback() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"azure": {}}"#));
-        std::env::set_var("GREMLINS_AZURE_API_KEY", "env-key");
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_API_KEY", "env-key");
         init_global().unwrap();
         assert_eq!(azure_api_key().as_deref(), Some("env-key"));
-        clear_global();
-        std::env::remove_var("GREMLINS_AZURE_API_KEY");
     }
 
     #[test]
     fn test_azure_api_version_default_fallback() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"azure": {}}"#));
-        std::env::remove_var("GREMLINS_AZURE_API_VERSION");
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
         init_global().unwrap();
         assert_eq!(azure_api_version(), "2024-10-21");
-        clear_global();
     }
 
     #[test]
     fn test_azure_api_version_settings_yaml_wins_over_env() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"azure": {"api-version": "2025-01-01"}}"#));
-        std::env::set_var("GREMLINS_AZURE_API_VERSION", "2025-06-01");
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"azure": {"api-version": "2025-01-01"}}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_API_VERSION", "2025-06-01");
         init_global().unwrap();
         assert_eq!(azure_api_version(), "2025-01-01");
-        clear_global();
-        std::env::remove_var("GREMLINS_AZURE_API_VERSION");
     }
 
     #[test]
     fn test_azure_token_settings_yaml_wins_over_env() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"azure": {"token": "yaml-token"}}"#));
-        std::env::set_var("GREMLINS_AZURE_TOKEN", "env-token");
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"azure": {"token": "yaml-token"}}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_TOKEN", "env-token");
         init_global().unwrap();
         assert_eq!(azure_auth_token().as_deref(), Some("yaml-token"));
-        clear_global();
-        std::env::remove_var("GREMLINS_AZURE_TOKEN");
     }
 
     #[test]
     fn test_azure_token_env_var_fallback() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"azure": {}}"#));
-        std::env::set_var("GREMLINS_AZURE_TOKEN", "env-token");
+        let mut env = EnvGuard::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        env.set("GREMLINS_AZURE_TOKEN", "env-token");
         init_global().unwrap();
         assert_eq!(azure_auth_token().as_deref(), Some("env-token"));
-        clear_global();
-        std::env::remove_var("GREMLINS_AZURE_TOKEN");
     }
 }
