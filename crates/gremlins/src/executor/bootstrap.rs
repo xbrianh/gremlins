@@ -672,6 +672,7 @@ mod tests {
                 bootstrap,
                 Vec::new(),
                 None,
+                vec![],
                 serde_yaml::Value::Null,
             )),
             workdir: Some(WorkDir::Persistent(worktree)),

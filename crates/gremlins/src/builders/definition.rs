@@ -143,13 +143,17 @@ impl From<BootstrapBuilder> for Bootstrap {
 /// ```ignore
 /// use gremlins::builders::*;
 ///
-/// let land = LandBuilder::new()
-///     .cmd("gh pr merge --squash --delete-branch \"{pr_url}\"")
+/// let (land, clean_cmds) = LandBuilder::new()
+///     .land_cmd("gh pr merge --squash --delete-branch \"{pr_url}\"")
+///     .clean_cmd("git worktree remove --force \"$GREMLIN_WORKDIR\" || true")
 ///     .interpolate("pr_url", content("artifact://pr-url.txt"))
-///     .build();
+///     .build()
+///     .unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct LandBuilder {
+    land_cmds: Vec<String>,
+    clean_cmds: Vec<String>,
     options: HashMap<String, serde_json::Value>,
     interpolation_map: HashMap<String, String>,
     outputs_map: HashMap<String, String>,
@@ -160,6 +164,8 @@ impl LandBuilder {
     /// Start building a land stage.
     pub fn new() -> Self {
         LandBuilder {
+            land_cmds: Vec::new(),
+            clean_cmds: Vec::new(),
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
@@ -167,29 +173,27 @@ impl LandBuilder {
         }
     }
 
-    /// Append a command.
-    pub fn cmd(mut self, cmd: impl Into<String>) -> Self {
-        let cmds = self
-            .options
-            .entry("cmds".to_string())
-            .or_insert_with(|| serde_json::json!([]));
-        if let Some(arr) = cmds.as_array_mut() {
-            arr.push(serde_json::Value::String(cmd.into()));
-        }
+    /// Append a land command.
+    pub fn land_cmd(mut self, cmd: impl Into<String>) -> Self {
+        self.land_cmds.push(cmd.into());
         self
     }
 
-    /// Append many commands.
-    pub fn cmds(mut self, cmds: Vec<String>) -> Self {
-        let arr = self
-            .options
-            .entry("cmds".to_string())
-            .or_insert_with(|| serde_json::json!([]));
-        if let Some(existing) = arr.as_array_mut() {
-            for c in cmds {
-                existing.push(serde_json::Value::String(c));
-            }
-        }
+    /// Append many land commands.
+    pub fn land_cmds(mut self, cmds: Vec<String>) -> Self {
+        self.land_cmds.extend(cmds);
+        self
+    }
+
+    /// Append a clean command.
+    pub fn clean_cmd(mut self, cmd: impl Into<String>) -> Self {
+        self.clean_cmds.push(cmd.into());
+        self
+    }
+
+    /// Append many clean commands.
+    pub fn clean_cmds(mut self, cmds: Vec<String>) -> Self {
+        self.clean_cmds.extend(cmds);
         self
     }
 
@@ -241,8 +245,9 @@ impl LandBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`StageSpec::Exec`] named `land`.
-    pub fn build(self) -> Result<StageSpec, SchemaError> {
+    /// Consume the builder and produce a [`StageSpec::Exec`] named `land`,
+    /// plus the `clean_cmds` vec for storage on [`StaticDefinition`].
+    pub fn build(self) -> Result<(StageSpec, Vec<String>), SchemaError> {
         let name = "land".to_string();
 
         crate::artifacts::resolve::validate_interpolation_map(&self.interpolation_map, &name)
@@ -251,7 +256,18 @@ impl LandBuilder {
                 msg,
             })?;
 
-        for key in self.options.keys() {
+        // Populate options["cmds"] from land_cmds so prepare_exec works.
+        let mut options = self.options;
+        if !self.land_cmds.is_empty() {
+            let cmds: Vec<serde_json::Value> = self
+                .land_cmds
+                .iter()
+                .map(|c| serde_json::Value::String(c.clone()))
+                .collect();
+            options.insert("cmds".to_string(), serde_json::json!(cmds));
+        }
+
+        for key in options.keys() {
             if FRAMEWORK_KEYS.contains(key.as_str()) {
                 return Err(SchemaError::Stage {
                     name: name.clone(),
@@ -287,15 +303,15 @@ impl LandBuilder {
 
         // --- Unused-key check ---
         {
-            // Collect all text from cmds
+            // Collect all text from land_cmds and clean_cmds
             let mut text = String::new();
-            if let Some(cmds) = self.options.get("cmds").and_then(|v| v.as_array()) {
-                for cmd in cmds {
-                    if let Some(s) = cmd.as_str() {
-                        text.push_str(s);
-                        text.push('\n');
-                    }
-                }
+            for cmd in &self.land_cmds {
+                text.push_str(cmd);
+                text.push('\n');
+            }
+            for cmd in &self.clean_cmds {
+                text.push_str(cmd);
+                text.push('\n');
             }
 
             // Check interpolation keys
@@ -331,16 +347,21 @@ impl LandBuilder {
             }
         }
 
+        let clean_cmds = self.clean_cmds;
+
         let stage = crate::stage_spec::exec::Exec {
             name,
-            options: self.options,
+            options,
             interpolation_map: self.interpolation_map,
             outputs_map: self.outputs_map,
         };
-        Ok(StageSpec::Exec {
-            stage,
-            client: self.client,
-        })
+        Ok((
+            StageSpec::Exec {
+                stage,
+                client: self.client,
+            },
+            clean_cmds,
+        ))
     }
 }
 
@@ -384,6 +405,7 @@ pub struct DefinitionBuilder {
     pub(crate) bootstrap: Bootstrap,
     pub(crate) stages: Vec<StageSpec>,
     pub(crate) land: Option<StageSpec>,
+    pub(crate) clean_cmds: Vec<String>,
 }
 
 impl DefinitionBuilder {
@@ -398,6 +420,7 @@ impl DefinitionBuilder {
             bootstrap: Bootstrap::default(),
             stages: Vec::new(),
             land: None,
+            clean_cmds: Vec::new(),
         }
     }
 
@@ -440,6 +463,12 @@ impl DefinitionBuilder {
     /// Set the land stage.
     pub fn land(mut self, land: StageSpec) -> Self {
         self.land = Some(land);
+        self
+    }
+
+    /// Set the clean commands.
+    pub fn clean_cmds(mut self, cmds: Vec<String>) -> Self {
+        self.clean_cmds = cmds;
         self
     }
 
@@ -500,6 +529,7 @@ impl DefinitionBuilder {
             self.bootstrap,
             self.stages,
             self.land,
+            self.clean_cmds,
             serde_yaml::Value::Null,
         );
 
@@ -653,10 +683,11 @@ mod tests {
             )
             .land(
                 LandBuilder::new()
-                    .cmd("gh pr merge --squash \"{pr_url}\"")
+                    .land_cmd("gh pr merge --squash \"{pr_url}\"")
                     .interpolate("pr_url", content("artifact://pr-url.txt"))
                     .build()
-                    .unwrap(),
+                    .unwrap()
+                    .0,
             )
             .build()
             .unwrap();
@@ -887,7 +918,7 @@ mod tests {
     #[test]
     fn land_builder_rejects_framework_option_key() {
         let err = LandBuilder::new()
-            .cmd("echo hi")
+            .land_cmd("echo hi")
             .option("cwd", "/tmp")
             .build()
             .unwrap_err();
@@ -901,7 +932,7 @@ mod tests {
     #[test]
     fn land_builder_rejects_content_question_before_paren() {
         let err = LandBuilder::new()
-            .cmd("echo hi")
+            .land_cmd("echo hi")
             .interpolate(
                 "out",
                 crate::builders::artifacts::InterpolationValue::from(
@@ -918,7 +949,7 @@ mod tests {
     #[test]
     fn land_builder_all_keys_referenced_ok() {
         LandBuilder::new()
-            .cmd("cat {foo} {bar}")
+            .land_cmd("cat {foo} {bar}")
             .output("foo", output("artifact://foo.txt"))
             .interpolate(
                 "bar",
@@ -933,7 +964,7 @@ mod tests {
     #[test]
     fn land_builder_unused_output_key_error() {
         let err = LandBuilder::new()
-            .cmd("cat {foo}")
+            .land_cmd("cat {foo}")
             .output("foo", output("artifact://foo.txt"))
             .output("unused", output("artifact://unused.txt"))
             .build()
@@ -945,7 +976,7 @@ mod tests {
     #[test]
     fn land_builder_unused_interpolation_key_error() {
         let err = LandBuilder::new()
-            .cmd("cat {foo}")
+            .land_cmd("cat {foo}")
             .interpolate(
                 "foo",
                 crate::builders::artifacts::InterpolationValue::from(
@@ -967,7 +998,7 @@ mod tests {
     #[test]
     fn land_builder_output_interp_collision_error() {
         let err = LandBuilder::new()
-            .cmd("cat {shared}")
+            .land_cmd("cat {shared}")
             .output("shared", output("artifact://shared.txt"))
             .interpolate(
                 "shared",
@@ -983,7 +1014,7 @@ mod tests {
     #[test]
     fn land_builder_optional_output_collides_with_interp() {
         let err = LandBuilder::new()
-            .cmd("cat {shared}")
+            .land_cmd("cat {shared}")
             .output("shared?", output("artifact://shared.txt"))
             .interpolate(
                 "shared",
@@ -999,7 +1030,7 @@ mod tests {
     #[test]
     fn land_builder_optional_output_referenced_ok() {
         LandBuilder::new()
-            .cmd("cat {foo}")
+            .land_cmd("cat {foo}")
             .output("foo?", output("artifact://foo.txt"))
             .build()
             .unwrap();
@@ -1008,7 +1039,7 @@ mod tests {
     #[test]
     fn land_builder_hyphen_underscore_normalization_ok() {
         LandBuilder::new()
-            .cmd("cat {child-plan}")
+            .land_cmd("cat {child-plan}")
             .output("child_plan", output("artifact://plan.txt"))
             .build()
             .unwrap();
@@ -1017,7 +1048,7 @@ mod tests {
     #[test]
     fn land_builder_framework_template_key_skipped() {
         LandBuilder::new()
-            .cmd("echo {model}")
+            .land_cmd("echo {model}")
             .interpolate(
                 "{name}",
                 crate::builders::artifacts::InterpolationValue::from(
@@ -1026,6 +1057,90 @@ mod tests {
             )
             .build()
             .unwrap();
+    }
+
+    // --- LandBuilder clean_cmd / clean_cmds ---
+
+    #[test]
+    fn land_builder_clean_cmd() {
+        let (stage, clean_cmds) = LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmd("git worktree remove --force \"$GREMLIN_WORKDIR\" || true")
+            .build()
+            .unwrap();
+        assert_eq!(stage.name(), "land");
+        assert_eq!(clean_cmds.len(), 1);
+        assert!(clean_cmds[0].contains("git worktree remove"));
+    }
+
+    #[test]
+    fn land_builder_clean_cmds() {
+        let (stage, clean_cmds) = LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmds(vec![
+                "git worktree remove --force \"$GREMLIN_WORKDIR\" || true".to_string(),
+                "git worktree prune".to_string(),
+            ])
+            .build()
+            .unwrap();
+        assert_eq!(stage.name(), "land");
+        assert_eq!(clean_cmds.len(), 2);
+    }
+
+    #[test]
+    fn land_builder_clean_cmd_only_no_land_cmds() {
+        // clean_cmds without land_cmds is valid — the land stage has no
+        // commands but clean_cmds are still returned.
+        let (stage, clean_cmds) = LandBuilder::new()
+            .clean_cmd("git worktree prune")
+            .build()
+            .unwrap();
+        assert_eq!(stage.name(), "land");
+        assert_eq!(clean_cmds.len(), 1);
+    }
+
+    #[test]
+    fn land_builder_unused_key_in_clean_cmds_is_ok() {
+        // Keys referenced only in clean_cmds must not be reported as unused.
+        LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmd("cat {clean_input}")
+            .interpolate(
+                "clean_input",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://clean.txt\")",
+                ),
+            )
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn land_builder_unused_output_in_clean_cmds_is_ok() {
+        // Output keys referenced only in clean_cmds must not be reported as unused.
+        LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmd("cat {clean_out}")
+            .output("clean_out", output("artifact://clean-out.txt"))
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn land_builder_truly_unused_key_still_errors() {
+        // A key that is in neither land_cmds nor clean_cmds must still error.
+        let err = LandBuilder::new()
+            .land_cmd("echo hi")
+            .clean_cmd("echo bye")
+            .interpolate(
+                "unused",
+                crate::builders::artifacts::InterpolationValue::from(
+                    "content(\"artifact://unused.txt\")",
+                ),
+            )
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("unused"), "{err}");
     }
 
     #[test]

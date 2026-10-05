@@ -156,13 +156,14 @@ fn from_expanded_value(
     };
 
     // Land.
-    let land = if let Some(land_val) = root.get("land").filter(|v| !v.is_null()) {
+    let (land, clean_cmds) = if let Some(land_val) = root.get("land").filter(|v| !v.is_null()) {
         let land_mapping = land_val
             .as_mapping()
             .ok_or_else(|| SchemaError::Generic("'land' must be a mapping".to_string()))?;
-        Some(land_from_yaml_builder(land_mapping)?)
+        let (land_stage, clean) = land_from_yaml_builder(land_mapping)?;
+        (Some(land_stage), clean)
     } else {
-        None
+        (None, Vec::new())
     };
 
     let default_client = resolve_default_client(
@@ -178,6 +179,7 @@ fn from_expanded_value(
         bootstrap,
         stages,
         land,
+        clean_cmds,
     };
 
     builder.build()
@@ -539,11 +541,22 @@ fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<StageSpec>, SchemaE
 }
 
 /// Build the land stage from its YAML mapping, forcing name=land and
-/// type=exec through [`LandBuilder`].
-fn land_from_yaml_builder(mapping: &Mapping) -> Result<StageSpec, SchemaError> {
+/// type=exec through [`LandBuilder`]. Returns the land stage and clean_cmds.
+fn land_from_yaml_builder(mapping: &Mapping) -> Result<(StageSpec, Vec<String>), SchemaError> {
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
+    // Reject legacy options.cmds — land_cmds / clean_cmds are the only
+    // supported command keys in the land mapping.
+    if options.contains_key("cmds") {
+        return Err(SchemaError::Generic(
+            "land: options.cmds is no longer supported — use land_cmds and clean_cmds instead"
+                .to_string(),
+        ));
+    }
     let client = yaml_client(mapping);
+
+    let land_cmds = yaml_string_list(mapping, "land_cmds")?;
+    let clean_cmds = yaml_string_list(mapping, "clean_cmds")?;
 
     let mut builder = LandBuilder::new();
     for (k, v) in interpolation_map {
@@ -557,6 +570,12 @@ fn land_from_yaml_builder(mapping: &Mapping) -> Result<StageSpec, SchemaError> {
     }
     if let Some(c) = client {
         builder = builder.client(c.0);
+    }
+    if !land_cmds.is_empty() {
+        builder = builder.land_cmds(land_cmds);
+    }
+    if !clean_cmds.is_empty() {
+        builder = builder.clean_cmds(clean_cmds.clone());
     }
 
     builder.build()

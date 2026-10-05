@@ -45,6 +45,8 @@ pub struct StaticDefinition {
     pub(crate) stages: Vec<StageSpec>,
     /// The optional `land` stage — always an exec stage named `land`.
     pub(crate) land: Option<StageSpec>,
+    /// Commands to run during `gremlins clean`, before workspace/scratch removal.
+    pub(crate) clean_cmds: Vec<String>,
     /// The fully expanded YAML tree, kept for round-tripping via
     /// [`to_expanded_yaml`](StaticDefinition::to_expanded_yaml).
     pub(crate) expanded_yaml: Value,
@@ -61,6 +63,7 @@ impl StaticDefinition {
         bootstrap: Bootstrap,
         stages: Vec<StageSpec>,
         land: Option<StageSpec>,
+        clean_cmds: Vec<String>,
         expanded_yaml: Value,
     ) -> Self {
         StaticDefinition {
@@ -70,6 +73,7 @@ impl StaticDefinition {
             bootstrap,
             stages,
             land,
+            clean_cmds,
             expanded_yaml,
             cursor: 0,
         }
@@ -88,6 +92,7 @@ impl StaticDefinition {
             bootstrap: Bootstrap::default(),
             stages: Vec::new(),
             land: None,
+            clean_cmds: Vec::new(),
             expanded_yaml: Value::Null,
             cursor: 0,
         }
@@ -96,6 +101,34 @@ impl StaticDefinition {
     /// Whether this definition is the [`StaticDefinition::stub`] rather than a loaded one.
     pub fn is_stub(&self) -> bool {
         self.name.is_empty() || self.name == UNLOADED_NAME
+    }
+
+    /// Create a minimal definition that carries only clean commands.
+    ///
+    /// Used by the CLI `clean` / `rm` commands so teardown commands run even
+    /// when [`Gremlin::init_runtime`] would fail (e.g. because
+    /// `bootstrap.env` cannot be sourced). The returned definition reports
+    /// `is_stub() == false` so [`Gremlin::clean`] sees the commands.
+    ///
+    /// [`Gremlin::init_runtime`]: crate::executor::gremlin::Gremlin::init_runtime
+    /// [`Gremlin::clean`]: crate::executor::gremlin::Gremlin::clean
+    pub fn with_clean_cmds(path: PathBuf, clean_cmds: Vec<String>) -> Self {
+        StaticDefinition {
+            name: "clean-loaded".to_string(),
+            path,
+            default_client: String::new(),
+            bootstrap: Bootstrap::default(),
+            stages: Vec::new(),
+            land: None,
+            clean_cmds,
+            expanded_yaml: Value::Null,
+            cursor: 0,
+        }
+    }
+
+    /// The clean commands to run during `gremlins clean`.
+    pub fn clean_cmds(&self) -> &[String] {
+        &self.clean_cmds
     }
 
     /// Clone this definition, replacing its stage list with `stages`.
@@ -110,6 +143,7 @@ impl StaticDefinition {
             stages,
             cursor: 0,
             land: None,
+            clean_cmds: Vec::new(),
             ..self.clone()
         }
     }
@@ -160,8 +194,48 @@ impl StaticDefinition {
                     Value::String("type".to_string()),
                     Value::String("exec".to_string()),
                 );
+                // Move cmds from options into land_cmds
+                if let Some(Value::Mapping(opts)) = land_map.remove("options") {
+                    if let Some(cmds_val) = opts.get("cmds") {
+                        land_map.insert(Value::String("land_cmds".to_string()), cmds_val.clone());
+                    }
+                    // Re-insert remaining options (like timeout) without cmds
+                    let mut remaining = opts.clone();
+                    remaining.remove("cmds");
+                    if !remaining.is_empty() {
+                        land_map.insert(
+                            Value::String("options".to_string()),
+                            Value::Mapping(remaining),
+                        );
+                    }
+                }
+                // Serialize clean_cmds
+                if !self.clean_cmds.is_empty() {
+                    let clean: Vec<Value> = self
+                        .clean_cmds
+                        .iter()
+                        .map(|c| Value::String(c.clone()))
+                        .collect();
+                    land_map.insert(
+                        Value::String("clean_cmds".to_string()),
+                        Value::Sequence(clean),
+                    );
+                }
             }
             root.insert(Value::String("land".to_string()), land_val);
+        } else if !self.clean_cmds.is_empty() {
+            // Emit a clean-only land mapping when clean_cmds exist without a land stage.
+            let mut land_map = Mapping::new();
+            let clean: Vec<Value> = self
+                .clean_cmds
+                .iter()
+                .map(|c| Value::String(c.clone()))
+                .collect();
+            land_map.insert(
+                Value::String("clean_cmds".to_string()),
+                Value::Sequence(clean),
+            );
+            root.insert(Value::String("land".to_string()), Value::Mapping(land_map));
         }
 
         // stages
@@ -255,6 +329,10 @@ impl GremlinDefinition for StaticDefinition {
 
     fn land(&self) -> Option<ExecutorStage> {
         self.land.clone().map(|stage| self.convert_stage(stage))
+    }
+
+    fn clean_cmds(&self) -> &[String] {
+        &self.clean_cmds
     }
 
     fn is_at_start(&self) -> bool {
@@ -445,6 +523,7 @@ mod tests {
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: Some(parsed_exec("land")),
+            clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
             cursor: 0,
         };
@@ -462,6 +541,7 @@ mod tests {
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: Some(parsed_exec("land")),
+            clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
             cursor: 0,
         };
@@ -490,6 +570,7 @@ mod tests {
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: None,
+            clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
             cursor: 0,
         };
@@ -679,6 +760,7 @@ mod tests {
             bootstrap: Bootstrap::default(),
             stages,
             land: None,
+            clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
             cursor: 0,
         }
