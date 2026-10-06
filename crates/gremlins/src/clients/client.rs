@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn known_providers_are_the_six_backends() {
+    fn known_providers_are_the_seven_backends() {
         for p in [
             "copilot",
             "openai",

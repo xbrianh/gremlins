@@ -116,7 +116,8 @@ impl OpenRouterBackend {
                         .display(),
                 )
             })?;
-        let client = openai_protocol::build_openai_client(&key, BASE_URL)?;
+        let base_url = crate::config::base_url("OPENROUTER_BASE_URL", PROVIDER_NAME, BASE_URL);
+        let client = openai_protocol::build_openai_client(&key, &base_url)?;
         let model = if model.is_empty() {
             "gpt-4o".to_string()
         } else {

@@ -218,14 +218,7 @@ impl AnthropicBackend {
             "https://api.anthropic.com",
         );
 
-        let auth_method = crate::config::auth_method("ANTHROPIC_AUTH", "anthropic", "ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY");
-
-        // If the auth method was explicitly set to an unknown value, propagate
-        // the error rather than falling through to the api_key fallback.
-        let auth_method = match auth_method {
-            Err(ref e) if e.starts_with("unknown auth value") => return Err(e.clone()),
-            other => other,
-        };
+        let auth_method = crate::config::auth_method("ANTHROPIC_AUTH", "anthropic", "ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")?;
 
         let model = if model.is_empty() {
             "claude-sonnet-4-6".to_string()
@@ -240,7 +233,7 @@ impl AnthropicBackend {
             .map_err(|e| format!("failed to create HTTP client: {e}"))?;
 
         let client_state = match auth_method {
-            Ok(ProviderAuth::ApiKey(key)) => {
+            ProviderAuth::ApiKey(key) => {
                 let client = anthropic::Client::builder()
                     .api_key(anthropic::client::AnthropicKey::from(key))
                     .base_url(&base_url)
@@ -249,7 +242,7 @@ impl AnthropicBackend {
                     .map_err(|e| format!("failed to build Anthropic client: {e}"))?;
                 AnthropicClientState::Static(client)
             }
-            Ok(ProviderAuth::Token(token)) => {
+            ProviderAuth::Token(token) => {
                 let client = anthropic::Client::builder()
                     .api_key(anthropic::client::AnthropicKey::from(token))
                     .base_url(&base_url)
@@ -258,40 +251,26 @@ impl AnthropicBackend {
                     .map_err(|e| format!("failed to build Anthropic client: {e}"))?;
                 AnthropicClientState::Static(client)
             }
-            Ok(ProviderAuth::ClientSecret) => AnthropicClientState::Dynamic {
+            ProviderAuth::ClientSecret => AnthropicClientState::Dynamic {
                 token_provider: Box::new(token_provider::ClientSecretProvider::new()),
                 base_url,
                 http_client: http_client.clone(),
             },
-            Ok(ProviderAuth::Cli) => AnthropicClientState::Dynamic {
+            ProviderAuth::Cli => AnthropicClientState::Dynamic {
                 token_provider: Box::new(token_provider::AzureCliProvider::new()),
                 base_url,
                 http_client: http_client.clone(),
             },
-            Ok(ProviderAuth::ManagedIdentity) => AnthropicClientState::Dynamic {
+            ProviderAuth::ManagedIdentity => AnthropicClientState::Dynamic {
                 token_provider: Box::new(token_provider::ManagedIdentityProvider::new()),
                 base_url,
                 http_client: http_client.clone(),
             },
-            Ok(ProviderAuth::DefaultAzure) => AnthropicClientState::Dynamic {
+            ProviderAuth::DefaultAzure => AnthropicClientState::Dynamic {
                 token_provider: Box::new(token_provider::DefaultAzureProvider::new()),
                 base_url,
                 http_client: http_client.clone(),
             },
-            Err(_) => {
-                // No auth method configured — try api_key directly
-                let key = crate::config::api_key("ANTHROPIC_API_KEY", "anthropic")
-                    .ok_or_else(|| {
-                        "no credentials for provider 'anthropic': set ANTHROPIC_API_KEY, ANTHROPIC_AUTH, or add an entry in providers.yaml".to_string()
-                    })?;
-                let client = anthropic::Client::builder()
-                    .api_key(anthropic::client::AnthropicKey::from(key))
-                    .base_url(&base_url)
-                    .http_client(http_client.clone())
-                    .build()
-                    .map_err(|e| format!("failed to build Anthropic client: {e}"))?;
-                AnthropicClientState::Static(client)
-            }
         };
 
         Ok(Arc::new(Self {
@@ -436,7 +415,7 @@ mod tests {
         );
         let err = result.err().expect("should be an error");
         assert!(
-            err.contains("no credentials for provider 'anthropic'"),
+            err.contains("no credentials for provider"),
             "got: {err}"
         );
     }

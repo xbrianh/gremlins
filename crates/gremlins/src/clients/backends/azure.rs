@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_method_settings_yaml_over_env() {
+    fn auth_method_env_over_providers_yaml() {
         let mut guard = isolated_env();
         guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
         guard.set("GREMLINS_AZURE_AUTH", "cli");
@@ -720,8 +720,8 @@ mod tests {
 
         let method = crate::config::auth_method("GREMLINS_AZURE_AUTH", "azure-foundry", "GREMLINS_AZURE_TOKEN", "GREMLINS_AZURE_API_KEY").unwrap();
         assert!(
-            matches!(method, ProviderAuth::ManagedIdentity),
-            "providers.yaml azure-foundry.auth should win over GREMLINS_AZURE_AUTH"
+            matches!(method, ProviderAuth::Cli),
+            "GREMLINS_AZURE_AUTH env var should win over providers.yaml"
         );
     }
 

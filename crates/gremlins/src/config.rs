@@ -743,25 +743,7 @@ impl Providers {
     pub(crate) fn load() -> Self {
         let path = user_config_root().join("providers.yaml");
         match parse_api_keys(&path) {
-            Ok((
-                api_keys,
-                pats,
-                base_urls,
-                endpoints,
-                api_versions,
-                tokens,
-                auth_methods,
-                auth_scopes,
-            )) => Providers {
-                api_keys,
-                pats,
-                base_urls,
-                endpoints,
-                api_versions,
-                tokens,
-                auth_methods,
-                auth_scopes,
-            },
+            Ok(providers) => providers,
             Err(e) => {
                 if !matches!(&e, ProvidersError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound)
                 {
@@ -837,18 +819,7 @@ impl Providers {
     }
 }
 
-type ParsedProviders = (
-    HashMap<String, String>,
-    HashMap<String, String>,
-    HashMap<String, String>,
-    HashMap<String, String>,
-    HashMap<String, String>,
-    HashMap<String, String>,
-    HashMap<String, String>,
-    HashMap<String, String>,
-);
-
-fn parse_api_keys(path: &Path) -> Result<ParsedProviders, ProvidersError> {
+fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
     let content = std::fs::read_to_string(path)?;
     let providers_file: ProvidersFile = serde_yaml::from_str(&content)?;
     let mut api_keys = HashMap::new();
@@ -896,7 +867,7 @@ fn parse_api_keys(path: &Path) -> Result<ParsedProviders, ProvidersError> {
             warn!("providers.yaml entry {k:?} has no non-empty fields — skipping");
         }
     }
-    Ok((
+    Ok(Providers {
         api_keys,
         pats,
         base_urls,
@@ -905,7 +876,7 @@ fn parse_api_keys(path: &Path) -> Result<ParsedProviders, ProvidersError> {
         tokens,
         auth_methods,
         auth_scopes,
-    ))
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -997,7 +968,7 @@ pub fn auth_scope(env_var_name: &str, provider_name: &str, default: &str) -> Str
 }
 
 /// Resolve the auth method for a provider.
-/// Precedence: providers.yaml auth → env var → fallback to token → api-key
+/// Precedence: env var → providers.yaml auth → fallback to token → api-key
 ///
 /// `token_env_var_name` and `api_key_env_var_name` are used for the
 /// static-credential fallback (step 3).
@@ -1007,15 +978,17 @@ pub fn auth_method(
     token_env_var_name: &str,
     api_key_env_var_name: &str,
 ) -> Result<ProviderAuth, String> {
-    // 1. providers.yaml provider.auth
-    if let Some(auth) = Providers::load().auth_method(provider_name) {
-        let v = auth.trim();
-        return parse_provider_auth(v);
-    }
-
-    // 2. env var
+    // 1. env var
     if let Ok(env_val) = std::env::var(env_var_name) {
         let v = env_val.trim();
+        if !v.is_empty() {
+            return parse_provider_auth(v);
+        }
+    }
+
+    // 2. providers.yaml provider.auth
+    if let Some(auth) = Providers::load().auth_method(provider_name) {
+        let v = auth.trim();
         return parse_provider_auth(v);
     }
 
