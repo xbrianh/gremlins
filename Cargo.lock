@@ -840,6 +840,7 @@ dependencies = [
  "async-trait",
  "azure_core",
  "azure_identity",
+ "bytes",
  "dirs",
  "futures",
  "glob",

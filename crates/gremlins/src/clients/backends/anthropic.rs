@@ -16,6 +16,7 @@ use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use crate::clients::token_provider::{self, TokenProvider};
 use crate::clients::config::ProviderAuth;
+use crate::clients::anthropic_bearer_http::BearerHttpClient;
 use rig_core::http_client::ReqwestClient;
 
 // ── AnthropicClientState ─────────────────────────────────────────────────
@@ -148,10 +149,11 @@ impl AnthropicRunState {
                         .map_err(|e| ClientError::Runtime {
                             message: format!("Anthropic token acquisition failed: {e}"),
                         })?;
+                    let wrapped = BearerHttpClient::new(http_client.clone(), token);
                     let client = anthropic::Client::builder()
-                        .api_key(anthropic::client::AnthropicKey::from(token))
+                        .api_key(anthropic::client::AnthropicKey::from("unused"))
                         .base_url(base_url)
-                        .http_client(http_client.clone())
+                        .http_client(wrapped)
                         .build()
                         .map_err(|e| ClientError::Runtime {
                             message: format!("failed to build Anthropic client: {e}"),
