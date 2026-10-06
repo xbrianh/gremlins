@@ -340,16 +340,18 @@ fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
 /// The fallback arm for `gremlins <id>`: an unknown subcommand is exactly the
 /// single-id status command, provided it was given exactly one token.
 async fn status_external(args: &[OsString]) -> Result<(), String> {
-    if args.len() != 1 {
-        // Multi-arg case: check if the first arg looks like a mistyped subcommand.
-        if let Some(first) = args.first() {
-            let first = first.to_string_lossy();
-            if let Some(closest) = closest_subcommand(&first) {
-                return Err(format!(
-                    "unknown subcommand \"{first}\" — did you mean \"{closest}\"?"
-                ));
-            }
+    // Check if the first arg looks like a mistyped subcommand — do this
+    // before the arity check so single-token typos (e.g. `gremlins lnch`)
+    // get a suggestion instead of being treated as a gremlin ID.
+    if let Some(first) = args.first() {
+        let first = first.to_string_lossy();
+        if let Some(closest) = closest_subcommand(&first) {
+            return Err(format!(
+                "unknown subcommand \"{first}\" — did you mean \"{closest}\"?"
+            ));
         }
+    }
+    if args.len() != 1 {
         return Err("expected exactly one gremlin id".to_string());
     }
     let id = args[0].to_string_lossy();
