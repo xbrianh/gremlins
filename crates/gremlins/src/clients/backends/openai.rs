@@ -55,7 +55,8 @@ impl OpenAiBackend {
                         .display(),
                 )
             })?;
-        let client = openai_protocol::build_openai_client(&key, BASE_URL)?;
+        let base_url = crate::config::base_url("OPENAI_BASE_URL", PROVIDER_NAME, BASE_URL);
+        let client = openai_protocol::build_openai_client(&key, &base_url)?;
         Ok(Arc::new(Self::new(
             client,
             model.to_string(),

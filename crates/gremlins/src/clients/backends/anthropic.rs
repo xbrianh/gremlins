@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rig_core::client::CompletionClient;
-use rig_core::providers::azure::{self, AzureOpenAIAuth};
+use rig_core::providers::anthropic;
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
@@ -14,28 +14,27 @@ use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
-use crate::clients::token_provider::TokenProvider;
+use crate::clients::token_provider::{self, TokenProvider};
 use crate::config::ProviderAuth;
 use rig_core::http_client::ReqwestClient;
 
-// ── AzureClientState ─────────────────────────────────────────────────────
+// ── AnthropicClientState ─────────────────────────────────────────────────
 
 /// Either a statically-built client (for ApiKey / Token auth) or the
 /// ingredients to build one dynamically per attempt (for identity-based auth).
-enum AzureClientState {
-    Static(azure::Client),
+enum AnthropicClientState {
+    Static(anthropic::Client),
     Dynamic {
         token_provider: Box<dyn TokenProvider>,
-        endpoint: String,
-        api_version: String,
+        base_url: String,
         http_client: ReqwestClient,
     },
 }
 
-// ── AzureRunState ────────────────────────────────────────────────────────
+// ── AnthropicRunState ────────────────────────────────────────────────────
 
-struct AzureRunState {
-    client_state: AzureClientState,
+struct AnthropicRunState {
+    client_state: AnthropicClientState,
     model: String,
     tool_filter: Option<Vec<String>>,
     client_params: HashMap<String, String>,
@@ -45,9 +44,9 @@ struct AzureRunState {
     log_label: String,
 }
 
-impl AzureRunState {
+impl AnthropicRunState {
     fn extra_params(&self) -> Option<serde_json::Value> {
-        openai_protocol::build_extra_params(&self.client_params)
+        build_anthropic_extra_params(&self.client_params)
     }
 
     fn effective_model(&self, override_model: Option<&str>) -> String {
@@ -111,7 +110,7 @@ impl AzureRunState {
         // For static auth we use the pre-built client; for dynamic auth
         // we acquire a fresh token and build a client per attempt.
         let result = match &self.client_state {
-            AzureClientState::Static(client) => {
+            AnthropicClientState::Static(client) => {
                 let model = client.completion_model(&model_name);
                 run_agent_loop(
                     &model,
@@ -128,30 +127,32 @@ impl AzureRunState {
                 )
                 .await
             }
-            AzureClientState::Dynamic {
+            AnthropicClientState::Dynamic {
                 token_provider,
-                endpoint,
-                api_version,
+                base_url,
                 http_client,
             } => {
                 // Capture errors into a local so execution always flows
                 // through the cancellation-map cleanup below.
                 let dyn_result = async {
-                    let scope = crate::config::auth_scope("GREMLINS_AZURE_AUTH_SCOPE", "azure-foundry", "https://cognitiveservices.azure.com/.default");
+                    let scope = crate::config::auth_scope(
+                        "ANTHROPIC_AUTH_SCOPE",
+                        "anthropic",
+                        "https://cognitiveservices.azure.com/.default",
+                    );
                     let token = token_provider
                         .get_token(&scope)
                         .await
                         .map_err(|e| ClientError::Runtime {
-                            message: format!("Azure token acquisition failed: {e}"),
+                            message: format!("Anthropic token acquisition failed: {e}"),
                         })?;
-                    let client = azure::Client::builder()
-                        .api_key(AzureOpenAIAuth::Token(token))
-                        .api_version(api_version)
-                        .azure_endpoint(endpoint.clone())
+                    let client = anthropic::Client::builder()
+                        .api_key(anthropic::client::AnthropicKey::from(token))
+                        .base_url(base_url)
                         .http_client(http_client.clone())
                         .build()
                         .map_err(|e| ClientError::Runtime {
-                            message: format!("failed to build Azure client: {e}"),
+                            message: format!("failed to build Anthropic client: {e}"),
                         })?;
                     let model = client.completion_model(&model_name);
                     run_agent_loop(
@@ -186,20 +187,20 @@ impl AzureRunState {
     }
 }
 
-// ── AzureBackend ─────────────────────────────────────────────────────────
+// ── AnthropicBackend ─────────────────────────────────────────────────────
 
-pub struct AzureBackend {
-    state: AzureRunState,
+pub struct AnthropicBackend {
+    state: AnthropicRunState,
 }
 
-impl AzureBackend {
-    /// Build an Azure backend.
+impl AnthropicBackend {
+    /// Build an Anthropic backend.
     ///
     /// Auth is resolved via [`crate::config::auth_method`]:
     ///
-    /// | `azure-foundry.auth` / `GREMLINS_AZURE_AUTH` | Behaviour |
+    /// | `anthropic.auth` / `ANTHROPIC_AUTH` | Behaviour |
     /// |---|---|
-    /// | (unset) | Static fallback: `azure-foundry.token` → `azure-foundry.api-key` |
+    /// | (unset) | Static fallback: `anthropic.token` → `anthropic.api-key` |
     /// | `"client-secret"` | Service principal via `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` |
     /// | `"cli"` | `az account get-access-token` |
     /// | `"managed-identity"` | Azure IMDS endpoint |
@@ -207,24 +208,21 @@ impl AzureBackend {
     ///
     /// For dynamic methods the client is built per attempt (token acquisition
     /// is async).  Configuration errors (bad env vars) surface at first use.
-    ///
-    /// `GREMLINS_AZURE_ENDPOINT` (or `providers.yaml` `azure-foundry.endpoint`) is required.
-    /// `GREMLINS_AZURE_API_VERSION` (or `providers.yaml` `azure-foundry.api-version`) defaults to `"2024-10-21"`.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        let endpoint = crate::config::endpoint("GREMLINS_AZURE_ENDPOINT", "azure-foundry").ok_or_else(|| {
-            "GREMLINS_AZURE_ENDPOINT (or providers.yaml azure-foundry.endpoint) is required for the Azure backend".to_string()
-        })?;
+        let base_url = crate::config::base_url(
+            "ANTHROPIC_BASE_URL",
+            "anthropic",
+            "https://api.anthropic.com",
+        );
 
-        let api_version = crate::config::api_version("GREMLINS_AZURE_API_VERSION", "azure-foundry", "2024-10-21");
-
-        let auth_method = crate::config::auth_method("GREMLINS_AZURE_AUTH", "azure-foundry", "GREMLINS_AZURE_TOKEN", "GREMLINS_AZURE_API_KEY")?;
+        let auth_method = crate::config::auth_method("ANTHROPIC_AUTH", "anthropic", "ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")?;
 
         let model = if model.is_empty() {
-            return Err("azure backend requires a deployment name (e.g. azure:gpt-4o)".into());
+            "claude-sonnet-4-6".to_string()
         } else {
             model.to_string()
         };
@@ -238,59 +236,47 @@ impl AzureBackend {
 
         let client_state = match auth_method {
             ProviderAuth::ApiKey(key) => {
-                let client = azure::Client::builder()
-                    .api_key(AzureOpenAIAuth::ApiKey(key))
-                    .api_version(&api_version)
-                    .azure_endpoint(endpoint)
+                let client = anthropic::Client::builder()
+                    .api_key(anthropic::client::AnthropicKey::from(key))
+                    .base_url(&base_url)
+                    .http_client(http_client.clone())
                     .build()
-                    .map_err(|e| format!("failed to build Azure client: {e}"))?;
-                AzureClientState::Static(client)
+                    .map_err(|e| format!("failed to build Anthropic client: {e}"))?;
+                AnthropicClientState::Static(client)
             }
             ProviderAuth::Token(token) => {
-                let client = azure::Client::builder()
-                    .api_key(AzureOpenAIAuth::Token(token))
-                    .api_version(&api_version)
-                    .azure_endpoint(endpoint)
+                let client = anthropic::Client::builder()
+                    .api_key(anthropic::client::AnthropicKey::from(token))
+                    .base_url(&base_url)
+                    .http_client(http_client.clone())
                     .build()
-                    .map_err(|e| format!("failed to build Azure client: {e}"))?;
-                AzureClientState::Static(client)
+                    .map_err(|e| format!("failed to build Anthropic client: {e}"))?;
+                AnthropicClientState::Static(client)
             }
-            ProviderAuth::ClientSecret => AzureClientState::Dynamic {
-                token_provider: Box::new(
-                    crate::clients::token_provider::ClientSecretProvider::new(),
-                ),
-                endpoint,
-                api_version,
+            ProviderAuth::ClientSecret => AnthropicClientState::Dynamic {
+                token_provider: Box::new(token_provider::ClientSecretProvider::new()),
+                base_url,
                 http_client: http_client.clone(),
             },
-            ProviderAuth::Cli => AzureClientState::Dynamic {
-                token_provider: Box::new(
-                    crate::clients::token_provider::AzureCliProvider::new(),
-                ),
-                endpoint,
-                api_version,
+            ProviderAuth::Cli => AnthropicClientState::Dynamic {
+                token_provider: Box::new(token_provider::AzureCliProvider::new()),
+                base_url,
                 http_client: http_client.clone(),
             },
-            ProviderAuth::ManagedIdentity => AzureClientState::Dynamic {
-                token_provider: Box::new(
-                    crate::clients::token_provider::ManagedIdentityProvider::new(),
-                ),
-                endpoint,
-                api_version,
+            ProviderAuth::ManagedIdentity => AnthropicClientState::Dynamic {
+                token_provider: Box::new(token_provider::ManagedIdentityProvider::new()),
+                base_url,
                 http_client: http_client.clone(),
             },
-            ProviderAuth::DefaultAzure => AzureClientState::Dynamic {
-                token_provider: Box::new(
-                    crate::clients::token_provider::DefaultAzureProvider::new(),
-                ),
-                endpoint,
-                api_version,
+            ProviderAuth::DefaultAzure => AnthropicClientState::Dynamic {
+                token_provider: Box::new(token_provider::DefaultAzureProvider::new()),
+                base_url,
                 http_client: http_client.clone(),
             },
         };
 
         Ok(Arc::new(Self {
-            state: AzureRunState {
+            state: AnthropicRunState {
                 client_state,
                 model,
                 tool_filter,
@@ -298,14 +284,14 @@ impl AzureBackend {
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
-                log_label: "AzureBackend".to_string(),
+                log_label: "AnthropicBackend".to_string(),
             },
         }))
     }
 }
 
 #[async_trait]
-impl Backend for AzureBackend {
+impl Backend for AnthropicBackend {
     async fn run(
         &self,
         params: RunParams,
@@ -394,6 +380,34 @@ impl Backend for AzureBackend {
     }
 }
 
+// ── Anthropic-specific extra params ────────────────────────────────────
+
+/// Build the `extra` JSON blob for Anthropic requests.
+///
+/// Unlike the OpenAI-protocol helper, this does **not** inject
+/// `parallel_tool_calls` (Anthropic controls parallelism via
+/// `tool_choice.disable_parallel_tool_use`) or the OpenAI `reasoning`
+/// object.  Only passthrough client params are forwarded.
+fn build_anthropic_extra_params(
+    client_params: &HashMap<String, String>,
+) -> Option<serde_json::Value> {
+    let mut params = serde_json::Map::new();
+
+    for (k, v) in client_params {
+        let val = match serde_json::from_str::<serde_json::Value>(v) {
+            Ok(parsed) => parsed,
+            Err(_) => serde_json::Value::String(v.clone()),
+        };
+        params.insert(k.clone(), val);
+    }
+
+    if params.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(params))
+    }
+}
+
 // ── tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -402,13 +416,11 @@ mod tests {
     use super::*;
     use crate::test_support::EnvGuard;
 
-    fn scrub_azure_env(guard: &mut EnvGuard) {
-        guard.remove("GREMLINS_AZURE_TOKEN");
-        guard.remove("GREMLINS_AZURE_API_KEY");
-        guard.remove("GREMLINS_AZURE_ENDPOINT");
-        guard.remove("GREMLINS_AZURE_API_VERSION");
-        guard.remove("GREMLINS_AZURE_AUTH");
-        guard.remove("GREMLINS_AZURE_AUTH_SCOPE");
+    fn scrub_anthropic_env(guard: &mut EnvGuard) {
+        guard.remove("ANTHROPIC_API_KEY");
+        guard.remove("ANTHROPIC_BASE_URL");
+        guard.remove("ANTHROPIC_AUTH");
+        guard.remove("ANTHROPIC_AUTH_SCOPE");
         guard.remove("AZURE_CLIENT_ID");
         guard.remove("AZURE_CLIENT_SECRET");
         guard.remove("AZURE_TENANT_ID");
@@ -416,7 +428,7 @@ mod tests {
 
     fn isolated_env() -> EnvGuard {
         let mut guard = EnvGuard::lock();
-        scrub_azure_env(&mut guard);
+        scrub_anthropic_env(&mut guard);
         let tmp = tempfile::tempdir().unwrap().keep();
         guard.set("GREMLINS_SANDBOX_ROOT", &tmp);
         guard.set("HOME", &tmp);
@@ -424,155 +436,133 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_missing_endpoint() {
+    fn build_rejects_missing_credentials() {
         let _guard = isolated_env();
 
-        let result = AzureBackend::build(
-            "gpt-4o",
+        let result = AnthropicBackend::build(
+            "claude-sonnet-4-6",
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         );
         let err = result.err().expect("should be an error");
         assert!(
-            err.contains("GREMLINS_AZURE_ENDPOINT"),
+            err.contains("no credentials for provider"),
             "got: {err}"
         );
     }
 
     #[test]
-    fn build_rejects_empty_model() {
+    fn build_with_api_key() {
         let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_API_KEY", "fake-key");
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
 
-        let result = AzureBackend::build(
+        let result = AnthropicBackend::build(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok(), "build should succeed with API key");
+    }
+
+    #[test]
+    fn build_with_custom_base_url() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
+        guard.set("ANTHROPIC_BASE_URL", "https://anthropic-proxy.example.com");
+
+        let result = AnthropicBackend::build(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok(), "build should succeed with custom base URL");
+    }
+
+    #[test]
+    fn build_default_model() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
+
+        let backend = AnthropicBackend::build(
             "",
             &HashMap::new(),
             &indexmap::IndexMap::new(),
-        );
-        let err = result.err().expect("should be an error");
-        assert!(
-            err.contains("deployment name"),
-            "got: {err}"
-        );
+        )
+        .unwrap();
+        // We can't inspect the model directly through the trait, but we can
+        // verify the build succeeded with an empty model string.
+        drop(backend);
     }
 
     #[test]
-    fn build_rejects_missing_credentials() {
+    fn build_with_auth_client_secret() {
         let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("ANTHROPIC_AUTH", "client-secret");
+        // ClientSecretProvider::new() defers env-var validation to first
+        // get_token() call, so build() succeeds even without env vars.
+        let result = AnthropicBackend::build(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok());
+    }
 
-        let result = AzureBackend::build(
-            "gpt-4o",
+    #[test]
+    fn build_with_auth_cli() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_AUTH", "cli");
+        // CLI provider doesn't validate at build time → succeeds
+        let result = AnthropicBackend::build(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_with_auth_default() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_AUTH", "default");
+        let result = AnthropicBackend::build(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_with_auth_unknown_rejected() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_AUTH", "bogus");
+        let result = AnthropicBackend::build(
+            "claude-sonnet-4-6",
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         );
         let err = result.err().expect("should be an error");
         assert!(
-            err.contains("no credentials for provider \"azure-foundry\""),
+            err.contains("unknown auth value"),
             "got: {err}"
         );
-    }
-
-    // ── auth precedence tests ─────────────────────────────────────────
-
-    #[test]
-    fn auth_precedence_token_over_api_key() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_TOKEN", "bearer-token-123");
-        guard.set("GREMLINS_AZURE_API_KEY", "api-key-456");
-
-        let method = crate::config::auth_method("GREMLINS_AZURE_AUTH", "azure-foundry", "GREMLINS_AZURE_TOKEN", "GREMLINS_AZURE_API_KEY").unwrap();
-        assert!(
-            matches!(method, ProviderAuth::Token(t) if t == "bearer-token-123"),
-            "GREMLINS_AZURE_TOKEN should win over GREMLINS_AZURE_API_KEY"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_env_over_providers_yaml() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_API_KEY", "env-api-key");
-
-        // Write a providers.yaml — env var should win over it.
-        let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
-        let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("providers.yaml"),
-            r#"{"azure-foundry": {"api-key": "providers-yaml-key"}}"#,
-        )
-        .unwrap();
-        crate::config::init_global().unwrap();
-
-        let method = crate::config::auth_method("GREMLINS_AZURE_AUTH", "azure-foundry", "GREMLINS_AZURE_TOKEN", "GREMLINS_AZURE_API_KEY").unwrap();
-        assert!(
-            matches!(method, ProviderAuth::ApiKey(k) if k == "env-api-key"),
-            "GREMLINS_AZURE_API_KEY env var should win over providers.yaml"
-        );
-    }
-
-    #[test]
-    fn api_version_defaults() {
-        let mut guard = isolated_env();
-        guard.remove("GREMLINS_AZURE_API_VERSION");
-        assert_eq!(crate::config::api_version("GREMLINS_AZURE_API_VERSION", "azure-foundry", "2024-10-21"), "2024-10-21");
-    }
-
-    #[test]
-    fn api_version_from_env() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_API_VERSION", "2025-01-01");
-        assert_eq!(crate::config::api_version("GREMLINS_AZURE_API_VERSION", "azure-foundry", "2024-10-21"), "2025-01-01");
-    }
-
-    #[test]
-    fn extra_params_passthrough() {
-        let mut extra = indexmap::IndexMap::new();
-        extra.insert("max_tokens".into(), "1024".into());
-        extra.insert("temperature".into(), "0.7".into());
-
-        let client_params = openai_protocol::string_map(&extra);
-        let state = AzureRunState {
-            client_state: AzureClientState::Static(
-                azure::Client::builder()
-                    .api_key(AzureOpenAIAuth::ApiKey("fake-key".into()))
-                    .api_version("2024-10-21")
-                    .azure_endpoint("https://example.openai.azure.com".to_string())
-                    .build()
-                    .unwrap(),
-            ),
-            model: "gpt-4o".into(),
-            tool_filter: None,
-            client_params,
-            last_ctx: Mutex::new(None),
-            cancels: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
-            log_label: "test".into(),
-        };
-
-        let obj = state.extra_params().expect("extra_params should be Some");
-        assert_eq!(obj["max_tokens"], 1024);
-        assert_eq!(obj["temperature"], 0.7);
     }
 
     #[test]
     fn reap_all_cancels_only_own_tokens() {
         let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_API_KEY", "fake-key");
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
 
-        let client = azure::Client::builder()
-            .api_key(AzureOpenAIAuth::ApiKey("fake-key".into()))
-            .api_version("2024-10-21")
-            .azure_endpoint("https://example.openai.azure.com".to_string())
+        let client = anthropic::Client::builder()
+            .api_key(anthropic::client::AnthropicKey::from("sk-ant-test"))
             .build()
             .unwrap();
 
-        let backend = AzureBackend {
-            state: AzureRunState {
-                client_state: AzureClientState::Static(client),
-                model: "gpt-4o".into(),
+        let backend = AnthropicBackend {
+            state: AnthropicRunState {
+                client_state: AnthropicClientState::Static(client),
+                model: "claude-sonnet-4-6".into(),
                 tool_filter: None,
                 client_params: HashMap::new(),
                 last_ctx: Mutex::new(None),
@@ -628,127 +618,26 @@ mod tests {
             .is_some());
     }
 
-    // ── auth method tests ─────────────────────────────────────────────
-
     #[test]
-    fn auth_method_client_secret_parses() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_AUTH", "client-secret");
-        // ClientSecretProvider::new() defers env-var validation to first
-        // get_token() call, so build() succeeds even without env vars.
-        let result = AzureBackend::build(
-            "gpt-4o",
-            &HashMap::new(),
-            &indexmap::IndexMap::new(),
+    fn auth_scope_default() {
+        let _guard = isolated_env();
+        let scope = crate::config::auth_scope(
+            "ANTHROPIC_AUTH_SCOPE",
+            "anthropic",
+            "https://cognitiveservices.azure.com/.default",
         );
-        assert!(result.is_ok());
+        assert_eq!(scope, "https://cognitiveservices.azure.com/.default");
     }
 
     #[test]
-    fn auth_method_cli_parses() {
+    fn auth_scope_custom() {
         let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_AUTH", "cli");
-        // CLI provider doesn't validate at build time → succeeds
-        let result = AzureBackend::build(
-            "gpt-4o",
-            &HashMap::new(),
-            &indexmap::IndexMap::new(),
+        guard.set("ANTHROPIC_AUTH_SCOPE", "https://custom-scope.example.com");
+        let scope = crate::config::auth_scope(
+            "ANTHROPIC_AUTH_SCOPE",
+            "anthropic",
+            "https://cognitiveservices.azure.com/.default",
         );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn auth_method_managed_identity_parses() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_AUTH", "managed-identity");
-        let result = AzureBackend::build(
-            "gpt-4o",
-            &HashMap::new(),
-            &indexmap::IndexMap::new(),
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn auth_method_default_parses() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_AUTH", "default");
-        let result = AzureBackend::build(
-            "gpt-4o",
-            &HashMap::new(),
-            &indexmap::IndexMap::new(),
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn auth_method_unknown_rejected() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_AUTH", "bogus");
-        let result = AzureBackend::build(
-            "gpt-4o",
-            &HashMap::new(),
-            &indexmap::IndexMap::new(),
-        );
-        let err = result.err().expect("should be an error");
-        assert!(
-            err.contains("unknown auth value"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn auth_method_env_over_providers_yaml() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_AUTH", "cli");
-
-        let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
-        let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("providers.yaml"),
-            r#"{"azure-foundry": {"auth": "managed-identity"}}"#,
-        )
-        .unwrap();
-        crate::config::init_global().unwrap();
-
-        let method = crate::config::auth_method("GREMLINS_AZURE_AUTH", "azure-foundry", "GREMLINS_AZURE_TOKEN", "GREMLINS_AZURE_API_KEY").unwrap();
-        assert!(
-            matches!(method, ProviderAuth::Cli),
-            "GREMLINS_AZURE_AUTH env var should win over providers.yaml"
-        );
-    }
-
-    #[test]
-    fn auth_method_absent_with_api_key_falls_back() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_API_KEY", "my-key");
-        // No auth field set → falls back to api-key
-        let result = AzureBackend::build(
-            "gpt-4o",
-            &HashMap::new(),
-            &indexmap::IndexMap::new(),
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn auth_method_absent_with_token_falls_back() {
-        let mut guard = isolated_env();
-        guard.set("GREMLINS_AZURE_ENDPOINT", "https://example.openai.azure.com");
-        guard.set("GREMLINS_AZURE_TOKEN", "my-token");
-        let result = AzureBackend::build(
-            "gpt-4o",
-            &HashMap::new(),
-            &indexmap::IndexMap::new(),
-        );
-        assert!(result.is_ok());
+        assert_eq!(scope, "https://custom-scope.example.com");
     }
 }
