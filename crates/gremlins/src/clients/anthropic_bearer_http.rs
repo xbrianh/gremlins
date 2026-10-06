@@ -44,8 +44,9 @@ impl BearerHttpClient {
     /// Returns an error if `token` contains characters that are invalid in
     /// an HTTP header value (e.g. non-ASCII bytes, newlines).
     pub(crate) fn new(inner: ReqwestClient, token: String) -> std::result::Result<Self, String> {
-        let bearer = HeaderValue::from_str(&format!("Bearer {}", token.trim()))
+        let mut bearer = HeaderValue::from_str(&format!("Bearer {}", token.trim()))
             .map_err(|e| format!("invalid bearer token: {e}"))?;
+        bearer.set_sensitive(true);
         Ok(Self { inner, bearer })
     }
 
@@ -197,62 +198,158 @@ mod tests {
         );
     }
 
-    // ── trait delegation smoke tests ─────────────────────────────────
+    // ── trait delegation tests ───────────────────────────────────
     //
-    // These call through the HttpClientExt methods with a real
-    // ReqwestClient inner.  The requests will fail to connect (no
-    // server), but they prove the wrapper delegates without panicking
-    // and that the error propagates correctly.
+    // Exercise send / send_streaming against a local TCP listener so we
+    // can assert the outgoing request has Authorization and no x-api-key.
 
-    #[test]
-    fn send_delegates_to_inner() {
-        let inner = ReqwestClient::new();
-        let wrapper = BearerHttpClient::new(inner, "tok".into()).unwrap();
-
-        let req = Request::builder()
-            .uri("https://127.0.0.1:1/v1/messages")
-            .header("x-api-key", "old")
-            .body("{}")
-            .unwrap();
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(wrapper.send::<_, Bytes>(req));
-        // Should fail to connect, not panic.
-        assert!(result.is_err());
+    /// Spawn a tiny HTTP listener on localhost, return its port.
+    fn bind_ephemeral() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
     }
 
     #[test]
-    fn send_streaming_delegates_to_inner() {
+    fn send_rewrites_headers_on_wire() {
+        let (listener, port) = bind_ephemeral();
         let inner = ReqwestClient::new();
         let wrapper = BearerHttpClient::new(inner, "tok".into()).unwrap();
 
         let req = Request::builder()
-            .uri("https://127.0.0.1:1/v1/messages")
+            .uri(format!("http://127.0.0.1:{port}/v1/messages"))
             .header("x-api-key", "old")
             .body("{}")
             .unwrap();
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(wrapper.send_streaming(req));
-        // Should fail to connect, not panic.
-        assert!(result.is_err());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .enable_io()
+            .build()
+            .unwrap();
+
+        let jh = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).unwrap();
+                if n == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+                lines.push(line.trim_end().to_string());
+            }
+            lines
+        });
+
+        // Fire and forget — we only care about what the listener sees.
+        let _ = rt.block_on(wrapper.send::<_, bytes::Bytes>(req));
+
+        let headers = jh.join().unwrap();
+        let has_auth = headers
+            .iter()
+            .any(|h| h.to_lowercase().starts_with("authorization:"));
+        let has_x_api_key = headers
+            .iter()
+            .any(|h| h.to_lowercase().starts_with("x-api-key:"));
+        assert!(has_auth, "Authorization header missing: {headers:?}");
+        assert!(!has_x_api_key, "x-api-key must be stripped: {headers:?}");
+    }
+
+    #[test]
+    fn send_streaming_rewrites_headers_on_wire() {
+        let (listener, port) = bind_ephemeral();
+        let inner = ReqwestClient::new();
+        let wrapper = BearerHttpClient::new(inner, "tok".into()).unwrap();
+
+        let req = Request::builder()
+            .uri(format!("http://127.0.0.1:{port}/v1/messages"))
+            .header("x-api-key", "old")
+            .body("{}")
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .enable_io()
+            .build()
+            .unwrap();
+
+        let jh = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).unwrap();
+                if n == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+                lines.push(line.trim_end().to_string());
+            }
+            lines
+        });
+
+        let _ = rt.block_on(wrapper.send_streaming(req));
+
+        let headers = jh.join().unwrap();
+        let has_auth = headers
+            .iter()
+            .any(|h| h.to_lowercase().starts_with("authorization:"));
+        let has_x_api_key = headers
+            .iter()
+            .any(|h| h.to_lowercase().starts_with("x-api-key:"));
+        assert!(has_auth, "Authorization header missing: {headers:?}");
+        assert!(!has_x_api_key, "x-api-key must be stripped: {headers:?}");
     }
 
     #[test]
     fn send_multipart_is_passthrough() {
+        let (listener, port) = bind_ephemeral();
         let inner = ReqwestClient::new();
         let wrapper = BearerHttpClient::new(inner, "tok".into()).unwrap();
 
         let form = MultipartForm::new();
         let req = Request::builder()
-            .uri("https://127.0.0.1:1/upload")
+            .uri(format!("http://127.0.0.1:{port}/upload"))
             .body(form)
             .unwrap();
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(wrapper.send_multipart::<Bytes>(req));
-        // Should fail to connect, not panic.
-        assert!(result.is_err());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .enable_io()
+            .build()
+            .unwrap();
+
+        let jh = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).unwrap();
+                if n == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+                lines.push(line.trim_end().to_string());
+            }
+            lines
+        });
+
+        let _ = rt.block_on(wrapper.send_multipart::<bytes::Bytes>(req));
+
+        let headers = jh.join().unwrap();
+        // Multipart is pass-through: no rewriting.
+        let has_auth = headers
+            .iter()
+            .any(|h| h.to_lowercase().starts_with("authorization:"));
+        assert!(
+            !has_auth,
+            "multipart must not inject Authorization: {headers:?}"
+        );
     }
 
     // ── clone ────────────────────────────────────────────────────────

@@ -221,6 +221,17 @@ impl AnthropicBackend {
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
+        Self::build_inner(model, native_block, extra_params)
+            .map(|b| Arc::new(b) as Arc<dyn Backend>)
+    }
+
+    /// Shared construction — returns the concrete type so both `build`
+    /// and test helpers can call it.
+    fn build_inner(
+        model: &str,
+        native_block: &HashMap<String, Vec<String>>,
+        extra_params: &indexmap::IndexMap<String, String>,
+    ) -> Result<Self, String> {
         let base_url = crate::clients::config::base_url(
             "ANTHROPIC_BASE_URL",
             "anthropic",
@@ -297,7 +308,7 @@ impl AnthropicBackend {
             },
         };
 
-        Ok(Arc::new(Self {
+        Ok(Self {
             state: AnthropicRunState {
                 client_state,
                 model,
@@ -309,7 +320,7 @@ impl AnthropicBackend {
                 next_id: AtomicU64::new(1),
                 log_label: "AnthropicBackend".to_string(),
             },
-        }))
+        })
     }
 }
 
@@ -438,6 +449,33 @@ fn build_anthropic_extra_params(
 // ── tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[derive(Debug, PartialEq)]
+pub(crate) enum ClientStateVariant {
+    Static,
+    Dynamic,
+}
+
+#[cfg(test)]
+impl AnthropicBackend {
+    pub(crate) fn client_state_variant(&self) -> ClientStateVariant {
+        match &self.state.client_state {
+            AnthropicClientState::Static(_) => ClientStateVariant::Static,
+            AnthropicClientState::Dynamic { .. } => ClientStateVariant::Dynamic,
+        }
+    }
+
+    /// Test-only build that returns the concrete type so tests can inspect
+    /// internal state before it is erased to `Arc<dyn Backend>`.
+    pub(crate) fn build_concrete(
+        model: &str,
+        native_block: &HashMap<String, Vec<String>>,
+        extra_params: &indexmap::IndexMap<String, String>,
+    ) -> Result<Self, String> {
+        Self::build_inner(model, native_block, extra_params)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::super::agent_loop::CancelToken;
     use super::*;
@@ -552,29 +590,33 @@ mod tests {
     fn identity_auth_produces_dynamic_state() {
         let mut guard = isolated_env();
         guard.set("ANTHROPIC_AUTH", "cli");
-        let backend = AnthropicBackend::build(
+        let backend = AnthropicBackend::build_concrete(
             "claude-sonnet-4-6",
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        // The backend trait doesn't expose client_state, but we can verify
-        // the build succeeded and the backend is usable (reap_all is a no-op
-        // on an empty cancel map).
-        backend.reap_all("nonexistent");
+        // Verify the concrete variant before it's erased to Arc<dyn Backend>.
+        assert!(
+            matches!(backend.client_state_variant(), ClientStateVariant::Dynamic),
+            "CLI auth must produce Dynamic state"
+        );
     }
 
     #[test]
     fn api_key_auth_produces_static_state() {
         let mut guard = isolated_env();
         guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
-        let backend = AnthropicBackend::build(
+        let backend = AnthropicBackend::build_concrete(
             "claude-sonnet-4-6",
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        backend.reap_all("nonexistent");
+        assert!(
+            matches!(backend.client_state_variant(), ClientStateVariant::Static),
+            "API key auth must produce Static state"
+        );
     }
 
     #[test]
