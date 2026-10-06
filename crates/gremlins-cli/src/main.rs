@@ -342,22 +342,17 @@ fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
 async fn status_external(args: &[OsString]) -> Result<(), String> {
     if args.len() != 1 {
         // Multi-arg case: check if the first arg looks like a mistyped subcommand.
-        let first = args[0].to_string_lossy();
-        if let Some(closest) = closest_subcommand(&first) {
-            return Err(format!(
-                "unknown subcommand \"{first}\" — did you mean \"{closest}\"?"
-            ));
+        if let Some(first) = args.first() {
+            let first = first.to_string_lossy();
+            if let Some(closest) = closest_subcommand(&first) {
+                return Err(format!(
+                    "unknown subcommand \"{first}\" — did you mean \"{closest}\"?"
+                ));
+            }
         }
         return Err("expected exactly one gremlin id".to_string());
     }
     let id = args[0].to_string_lossy();
-    // Single-arg case: if it looks like a mistyped subcommand (no '/', short,
-    // only letters), suggest the closest match instead of treating it as an id.
-    if let Some(closest) = closest_subcommand(&id) {
-        return Err(format!(
-            "unknown subcommand \"{id}\" — did you mean \"{closest}\"?"
-        ));
-    }
     status(&id).await
 }
 
