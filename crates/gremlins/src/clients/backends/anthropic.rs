@@ -15,7 +15,7 @@ use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use crate::clients::token_provider::{self, TokenProvider};
-use crate::config::ProviderAuth;
+use crate::clients::config::ProviderAuth;
 use rig_core::http_client::ReqwestClient;
 
 // ── AnthropicClientState ─────────────────────────────────────────────────
@@ -135,7 +135,7 @@ impl AnthropicRunState {
                 // Capture errors into a local so execution always flows
                 // through the cancellation-map cleanup below.
                 let dyn_result = async {
-                    let scope = crate::config::auth_scope(
+                    let scope = crate::clients::config::azure_auth_scope(
                         "ANTHROPIC_AUTH_SCOPE",
                         "anthropic",
                         "https://cognitiveservices.azure.com/.default",
@@ -196,7 +196,7 @@ pub struct AnthropicBackend {
 impl AnthropicBackend {
     /// Build an Anthropic backend.
     ///
-    /// Auth is resolved via [`crate::config::auth_method`]:
+    /// Auth is resolved via [`crate::clients::config::azure_auth_method`]:
     ///
     /// | `anthropic.auth` / `ANTHROPIC_AUTH` | Behaviour |
     /// |---|---|
@@ -213,13 +213,13 @@ impl AnthropicBackend {
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        let base_url = crate::config::base_url(
+        let base_url = crate::clients::config::base_url(
             "ANTHROPIC_BASE_URL",
             "anthropic",
             "https://api.anthropic.com",
         );
 
-        let auth_method = crate::config::auth_method("ANTHROPIC_AUTH", "anthropic", "ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")?;
+        let auth_method = crate::clients::config::azure_auth_method("ANTHROPIC_AUTH", "anthropic", "ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")?;
 
         let model = if model.is_empty() {
             "claude-sonnet-4-6".to_string()
@@ -621,7 +621,7 @@ mod tests {
     #[test]
     fn auth_scope_default() {
         let _guard = isolated_env();
-        let scope = crate::config::auth_scope(
+        let scope = crate::clients::config::azure_auth_scope(
             "ANTHROPIC_AUTH_SCOPE",
             "anthropic",
             "https://cognitiveservices.azure.com/.default",
@@ -633,7 +633,7 @@ mod tests {
     fn auth_scope_custom() {
         let mut guard = isolated_env();
         guard.set("ANTHROPIC_AUTH_SCOPE", "https://custom-scope.example.com");
-        let scope = crate::config::auth_scope(
+        let scope = crate::clients::config::azure_auth_scope(
             "ANTHROPIC_AUTH_SCOPE",
             "anthropic",
             "https://cognitiveservices.azure.com/.default",

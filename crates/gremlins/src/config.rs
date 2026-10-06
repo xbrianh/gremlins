@@ -38,6 +38,23 @@ fn parse_path_overrides(paths: &HashMap<String, String>) -> PathOverrides {
 // Config
 // ---------------------------------------------------------------------------
 
+/// Settings for the Azure OpenAI backend, read from settings.yaml.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct AzureOpenAiSettings {
+    #[serde(default)]
+    pub auth: Option<StrictString>,
+    #[serde(rename = "auth-scope", default)]
+    pub auth_scope: Option<StrictString>,
+    #[serde(default)]
+    pub endpoint: Option<StrictString>,
+    #[serde(rename = "api-version", default)]
+    pub api_version: Option<StrictString>,
+    #[serde(default)]
+    pub token: Option<StrictString>,
+    #[serde(rename = "api-key", default)]
+    pub api_key: Option<StrictString>,
+}
+
 /// Parsed content of settings.yaml.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
@@ -47,6 +64,7 @@ pub struct Config {
     exact_task_clients: HashMap<String, String>,
     prefix_task_clients: HashMap<String, String>,
     path_overrides: PathOverrides,
+    azure_openai: Option<AzureOpenAiSettings>,
 }
 
 /// A string newtype that rejects non-string YAML scalars (numbers,
@@ -117,29 +135,8 @@ struct ConfigFile {
     #[serde(rename = "task-clients")]
     task_clients: Option<IndexMap<String, StrictString>>,
     paths: Option<HashMap<String, StrictString>>,
-}
-
-/// Resolved provider authentication method.
-#[derive(Debug, Clone)]
-pub enum ProviderAuth {
-    ApiKey(String),
-    Token(String),
-    ClientSecret,
-    Cli,
-    ManagedIdentity,
-    DefaultAzure,
-}
-
-fn parse_provider_auth(v: &str) -> Result<ProviderAuth, String> {
-    match v {
-        "client-secret" => Ok(ProviderAuth::ClientSecret),
-        "cli" => Ok(ProviderAuth::Cli),
-        "managed-identity" => Ok(ProviderAuth::ManagedIdentity),
-        "default" => Ok(ProviderAuth::DefaultAzure),
-        other => Err(format!(
-            "unknown auth value {other:?}: expected \"client-secret\", \"cli\", \"managed-identity\", or \"default\"",
-        )),
-    }
+    #[serde(rename = "azure-openai", default)]
+    azure_openai: Option<AzureOpenAiSettings>,
 }
 
 impl Config {
@@ -192,6 +189,7 @@ impl Config {
             exact_task_clients,
             prefix_task_clients,
             path_overrides,
+            azure_openai: cfg_file.azure_openai,
         })
     }
 
@@ -216,6 +214,10 @@ impl Config {
 
     pub fn path_overrides(&self) -> &PathOverrides {
         &self.path_overrides
+    }
+
+    pub(crate) fn azure_openai(&self) -> Option<&AzureOpenAiSettings> {
+        self.azure_openai.as_ref()
     }
 
     pub fn overlay_dirname(&self) -> &'static str {
@@ -693,320 +695,6 @@ pub fn scratch_root(gremlin_id: Option<&str>) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Providers — loaded from providers.yaml, not part of Config
-// ---------------------------------------------------------------------------
-
-/// Parsed content of providers.yaml.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Providers {
-    api_keys: HashMap<String, String>,
-    pats: HashMap<String, String>,
-    base_urls: HashMap<String, String>,
-    endpoints: HashMap<String, String>,
-    api_versions: HashMap<String, String>,
-    tokens: HashMap<String, String>,
-    auth_methods: HashMap<String, String>,
-    auth_scopes: HashMap<String, String>,
-}
-
-/// Typed structure for providers.yaml — a newtype over the provider map.
-///
-/// Uses `StrictString` for credential fields so non-string values (e.g.
-/// integers) are rejected at the deserialization layer rather than silently
-/// coerced by serde_yaml.
-#[derive(Debug, Deserialize)]
-struct ProvidersFile(HashMap<String, ProviderEntry>);
-
-/// Typed structure for a single provider entry in providers.yaml.
-#[derive(Debug, Deserialize)]
-struct ProviderEntry {
-    #[serde(rename = "api-key", default)]
-    api_key: Option<StrictString>,
-    #[serde(default)]
-    pat: Option<StrictString>,
-    #[serde(rename = "base-url", default)]
-    base_url: Option<StrictString>,
-    #[serde(default)]
-    endpoint: Option<StrictString>,
-    #[serde(rename = "api-version", default)]
-    api_version: Option<StrictString>,
-    #[serde(default)]
-    token: Option<StrictString>,
-    #[serde(default)]
-    auth: Option<StrictString>,
-    #[serde(rename = "auth-scope", default)]
-    auth_scope: Option<StrictString>,
-}
-
-impl Providers {
-    /// Load from `user_config_root() / "providers.yaml"`.
-    pub(crate) fn load() -> Self {
-        let path = user_config_root().join("providers.yaml");
-        match parse_api_keys(&path) {
-            Ok(providers) => providers,
-            Err(e) => {
-                if !matches!(&e, ProvidersError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound)
-                {
-                    warn!("failed to load {}: {e}", path.display());
-                }
-                Providers::default()
-            }
-        }
-    }
-
-    /// Get the API key for a provider name (e.g. "openai", "xai").
-    pub(crate) fn get(&self, provider: &str) -> Option<&str> {
-        self.api_keys
-            .get(provider)
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    /// Get the PAT (personal access token) for a provider name.
-    pub(crate) fn pat(&self, provider: &str) -> Option<&str> {
-        self.pats
-            .get(provider)
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    /// Get the base_url for a provider name.
-    pub(crate) fn base_url(&self, provider: &str) -> Option<&str> {
-        self.base_urls
-            .get(provider)
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    /// Get the endpoint for a provider name.
-    pub(crate) fn endpoint(&self, provider: &str) -> Option<&str> {
-        self.endpoints
-            .get(provider)
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    /// Get the api_version for a provider name.
-    pub(crate) fn api_version(&self, provider: &str) -> Option<&str> {
-        self.api_versions
-            .get(provider)
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    /// Get the auth token for a provider name.
-    pub(crate) fn token(&self, provider: &str) -> Option<&str> {
-        self.tokens
-            .get(provider)
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    /// Get the auth method for a provider name.
-    pub(crate) fn auth_method(&self, provider: &str) -> Option<&str> {
-        self.auth_methods
-            .get(provider)
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    /// Get the auth scope for a provider name.
-    pub(crate) fn auth_scope(&self, provider: &str) -> Option<&str> {
-        self.auth_scopes
-            .get(provider)
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-}
-
-fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
-    let content = std::fs::read_to_string(path)?;
-    let providers_file: ProvidersFile = serde_yaml::from_str(&content)?;
-    let mut api_keys = HashMap::new();
-    let mut pats = HashMap::new();
-    let mut base_urls = HashMap::new();
-    let mut endpoints = HashMap::new();
-    let mut api_versions = HashMap::new();
-    let mut tokens = HashMap::new();
-    let mut auth_methods = HashMap::new();
-    let mut auth_scopes = HashMap::new();
-    for (k, v) in providers_file.0 {
-        if let Some(api_key) = v.api_key.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
-            api_keys.insert(k.clone(), api_key);
-        }
-        if let Some(pat) = v.pat.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
-            pats.insert(k.clone(), pat);
-        }
-        if let Some(base_url) = v.base_url.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
-            base_urls.insert(k.clone(), base_url);
-        }
-        if let Some(endpoint) = v.endpoint.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
-            endpoints.insert(k.clone(), endpoint);
-        }
-        if let Some(api_version) = v.api_version.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
-            api_versions.insert(k.clone(), api_version);
-        }
-        if let Some(token) = v.token.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
-            tokens.insert(k.clone(), token);
-        }
-        if let Some(auth) = v.auth.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
-            auth_methods.insert(k.clone(), auth);
-        }
-        if let Some(auth_scope) = v.auth_scope.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
-            auth_scopes.insert(k.clone(), auth_scope);
-        }
-        if !api_keys.contains_key(&k)
-            && !pats.contains_key(&k)
-            && !base_urls.contains_key(&k)
-            && !endpoints.contains_key(&k)
-            && !api_versions.contains_key(&k)
-            && !tokens.contains_key(&k)
-            && !auth_methods.contains_key(&k)
-            && !auth_scopes.contains_key(&k)
-        {
-            warn!("providers.yaml entry {k:?} has no non-empty fields — skipping");
-        }
-    }
-    Ok(Providers {
-        api_keys,
-        pats,
-        base_urls,
-        endpoints,
-        api_versions,
-        tokens,
-        auth_methods,
-        auth_scopes,
-    })
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ProvidersError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Yaml(#[from] serde_yaml::Error),
-}
-
-/// Resolve an API key for `provider`. Checks the named env var first,
-/// then falls back to `providers.yaml`. Returns None if neither is set.
-pub fn api_key(env_var_name: &str, provider_name: &str) -> Option<String> {
-    if let Ok(key) = std::env::var(env_var_name) {
-        if !key.trim().is_empty() {
-            return Some(key);
-        }
-    }
-    Providers::load().get(provider_name).map(|s| s.to_string())
-}
-
-/// Resolve a PAT (personal access token) for `provider` from
-/// `providers.yaml`. Returns None if not set.
-pub(crate) fn pat(provider_name: &str) -> Option<String> {
-    Providers::load().pat(provider_name).map(|s| s.to_string())
-}
-
-/// Resolve base_url for a provider. Checks env var first, then providers.yaml, then default.
-pub fn base_url(env_var_name: &str, provider_name: &str, default: &str) -> String {
-    if let Ok(val) = std::env::var(env_var_name) {
-        if !val.trim().is_empty() {
-            return val;
-        }
-    }
-    Providers::load()
-        .base_url(provider_name)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| default.to_string())
-}
-
-/// Resolve endpoint for a provider. Checks env var first, then providers.yaml.
-pub fn endpoint(env_var_name: &str, provider_name: &str) -> Option<String> {
-    if let Ok(val) = std::env::var(env_var_name) {
-        if !val.trim().is_empty() {
-            return Some(val);
-        }
-    }
-    Providers::load()
-        .endpoint(provider_name)
-        .map(|s| s.to_string())
-}
-
-/// Resolve api_version for a provider. Checks env var first, then providers.yaml, then default.
-pub fn api_version(env_var_name: &str, provider_name: &str, default: &str) -> String {
-    if let Ok(val) = std::env::var(env_var_name) {
-        if !val.trim().is_empty() {
-            return val;
-        }
-    }
-    Providers::load()
-        .api_version(provider_name)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| default.to_string())
-}
-
-/// Resolve auth token for a provider. Checks env var first, then providers.yaml.
-pub fn auth_token(env_var_name: &str, provider_name: &str) -> Option<String> {
-    if let Ok(val) = std::env::var(env_var_name) {
-        if !val.trim().is_empty() {
-            return Some(val);
-        }
-    }
-    Providers::load()
-        .token(provider_name)
-        .map(|s| s.to_string())
-}
-
-/// Resolve auth scope for a provider. Checks env var first, then providers.yaml, then default.
-pub fn auth_scope(env_var_name: &str, provider_name: &str, default: &str) -> String {
-    if let Ok(val) = std::env::var(env_var_name) {
-        if !val.trim().is_empty() {
-            return val;
-        }
-    }
-    Providers::load()
-        .auth_scope(provider_name)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| default.to_string())
-}
-
-/// Resolve the auth method for a provider.
-/// Precedence: env var → providers.yaml auth → fallback to token → api-key
-///
-/// `token_env_var_name` and `api_key_env_var_name` are used for the
-/// static-credential fallback (step 3).
-pub fn auth_method(
-    env_var_name: &str,
-    provider_name: &str,
-    token_env_var_name: &str,
-    api_key_env_var_name: &str,
-) -> Result<ProviderAuth, String> {
-    // 1. env var
-    if let Ok(env_val) = std::env::var(env_var_name) {
-        let v = env_val.trim();
-        if !v.is_empty() {
-            return parse_provider_auth(v);
-        }
-    }
-
-    // 2. providers.yaml provider.auth
-    if let Some(auth) = Providers::load().auth_method(provider_name) {
-        let v = auth.trim();
-        return parse_provider_auth(v);
-    }
-
-    // 3. Fall back to token → api-key
-    if let Some(token) = auth_token(token_env_var_name, provider_name) {
-        return Ok(ProviderAuth::Token(token));
-    }
-    if let Some(key) = api_key(api_key_env_var_name, provider_name) {
-        return Ok(ProviderAuth::ApiKey(key));
-    }
-
-    Err(format!(
-        "no credentials for provider {provider_name:?}: set {env_var_name}, \
-         or add {provider_name}.auth / {provider_name}.token / {provider_name}.api-key in providers.yaml"
-    ))
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1369,125 +1057,6 @@ mod tests {
         clear_global();
         let cfg3 = global_config().unwrap();
         assert!(!Arc::ptr_eq(&cfg1, &cfg3));
-    }
-
-    // -----------------------------------------------------------------------
-    // Providers tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_providers_load_missing() {
-        let _sandbox = Sandbox::new();
-        let keys = Providers::load();
-        assert!(keys.get("openai").is_none());
-    }
-
-    #[test]
-    fn test_providers_load_valid() {
-        let sandbox = Sandbox::new();
-        let config_dir = sandbox.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("providers.yaml"),
-            r#"{"openai": {"api-key": "sk-test"}, "xai": {"api-key": "xai-test"}}"#,
-        )
-        .unwrap();
-        let keys = Providers::load();
-        assert_eq!(keys.get("openai"), Some("sk-test"));
-        assert_eq!(keys.get("xai"), Some("xai-test"));
-    }
-
-    #[test]
-    fn test_providers_object_empty_api_key_ignored() {
-        let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": ""}}"#);
-        let keys = Providers::load();
-        assert!(keys.get("openai").is_none());
-    }
-
-    #[test]
-    fn test_providers_object_whitespace_api_key_ignored() {
-        let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": "   "}}"#);
-        let keys = Providers::load();
-        assert!(keys.get("openai").is_none());
-    }
-
-    #[test]
-    fn test_providers_object_integer_api_key_rejected() {
-        // Non-string api-key values (e.g. integers) must be rejected —
-        // YAML type coercion would otherwise turn 42 into "42".
-        let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": 42}}"#);
-        let keys = Providers::load();
-        assert!(
-            keys.get("openai").is_none(),
-            "integer api-key must be rejected"
-        );
-    }
-
-    #[test]
-    fn test_providers_malformed_yaml() {
-        let _sandbox = Sandbox::with_providers("{bad");
-        let keys = Providers::load();
-        assert!(keys.get("openai").is_none());
-    }
-
-    #[test]
-    fn test_providers_not_an_object() {
-        let _sandbox = Sandbox::with_providers("[1, 2, 3]");
-        let keys = Providers::load();
-        assert!(keys.get("openai").is_none());
-    }
-
-    #[test]
-    fn test_providers_string_value_ignored() {
-        // YAML will reject a string value where a mapping is expected.
-        let _sandbox = Sandbox::with_providers(r#"{"openai": "sk-test"}"#);
-        let keys = Providers::load();
-        assert!(keys.get("openai").is_none());
-    }
-
-    #[test]
-    fn test_providers_object_missing_api_key() {
-        let _sandbox = Sandbox::with_providers(r#"{"openai": {}}"#);
-        let keys = Providers::load();
-        assert!(keys.get("openai").is_none());
-    }
-
-    #[test]
-    fn test_providers_unknown_provider() {
-        let _sandbox = Sandbox::with_providers(r#"{"foo": "bar"}"#);
-        let keys = Providers::load();
-        assert!(keys.get("openai").is_none());
-    }
-
-    #[test]
-    fn test_providers_pat_field() {
-        let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": "ghp_test_token"}}"#);
-        let keys = Providers::load();
-        assert!(keys.get("copilot").is_none());
-        assert_eq!(keys.pat("copilot"), Some("ghp_test_token"));
-    }
-
-    #[test]
-    fn test_providers_pat_empty_ignored() {
-        let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": ""}}"#);
-        let keys = Providers::load();
-        assert!(keys.pat("copilot").is_none());
-    }
-
-    #[test]
-    fn test_providers_pat_whitespace_ignored() {
-        let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": "   "}}"#);
-        let keys = Providers::load();
-        assert!(keys.pat("copilot").is_none());
-    }
-
-    #[test]
-    fn test_providers_both_api_key_and_pat() {
-        let _sandbox =
-            Sandbox::with_providers(r#"{"copilot": {"api-key": "sk-fake", "pat": "ghp_fake"}}"#);
-        let keys = Providers::load();
-        assert_eq!(keys.get("copilot"), Some("sk-fake"));
-        assert_eq!(keys.pat("copilot"), Some("ghp_fake"));
     }
 
     // -----------------------------------------------------------------------
