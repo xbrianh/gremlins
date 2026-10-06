@@ -38,6 +38,7 @@ struct AnthropicRunState {
     model: String,
     tool_filter: Option<Vec<String>>,
     client_params: HashMap<String, String>,
+    max_tokens: u64,
     last_ctx: Mutex<Option<RunContext>>,
     cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
     next_id: AtomicU64,
@@ -121,6 +122,7 @@ impl AnthropicRunState {
                         extra: self.extra_params(),
                         tool_filter: self.tool_filter.as_deref(),
                         classify_error: Some(default_classify as ErrorClassifier),
+                        max_tokens: Some(self.max_tokens),
                     },
                     None,
                     interactive,
@@ -164,6 +166,7 @@ impl AnthropicRunState {
                             extra: self.extra_params(),
                             tool_filter: self.tool_filter.as_deref(),
                             classify_error: Some(default_classify as ErrorClassifier),
+                            max_tokens: Some(self.max_tokens),
                         },
                         None,
                         interactive,
@@ -228,7 +231,21 @@ impl AnthropicBackend {
         };
 
         let tool_filter = openai_protocol::tool_filter(native_block);
-        let client_params = openai_protocol::string_map(extra_params);
+        let mut client_params = openai_protocol::string_map(extra_params);
+
+        // Resolve max_tokens: client-spec override > default 64_000.
+        let max_tokens: u64 = match client_params.remove("max_tokens") {
+            Some(v) => match v.parse::<u64>() {
+                Ok(n) => n,
+                Err(_) => {
+                    log::warn!(
+                        "Anthropic: max_tokens={v:?} is not a valid u64, falling back to 64000"
+                    );
+                    64_000
+                }
+            },
+            None => 64_000,
+        };
 
         let http_client = ReqwestClient::builder()
             .build()
@@ -281,6 +298,7 @@ impl AnthropicBackend {
                 model,
                 tool_filter,
                 client_params,
+                max_tokens,
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
@@ -394,6 +412,10 @@ fn build_anthropic_extra_params(
     let mut params = serde_json::Map::new();
 
     for (k, v) in client_params {
+        // max_tokens is handled as a top-level field; skip it here.
+        if k == "max_tokens" {
+            continue;
+        }
         let val = match serde_json::from_str::<serde_json::Value>(v) {
             Ok(parsed) => parsed,
             Err(_) => serde_json::Value::String(v.clone()),
@@ -565,6 +587,7 @@ mod tests {
                 model: "claude-sonnet-4-6".into(),
                 tool_filter: None,
                 client_params: HashMap::new(),
+                max_tokens: 64_000,
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),

@@ -105,6 +105,7 @@ pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,
     pub(crate) classify_error: Option<ErrorClassifier>,
+    pub(crate) max_tokens: Option<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -255,6 +256,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         extra: None,
         tool_filter,
         classify_error: None,
+        max_tokens: None,
     };
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;
@@ -608,6 +610,9 @@ async fn run_agent_loop_core<M: CompletionModel>(
         }
         if let Some(params) = opts.extra.clone() {
             builder = builder.additional_params(params);
+        }
+        if let Some(mt) = opts.max_tokens {
+            builder = builder.max_tokens(mt);
         }
 
         let mut response = match builder.stream().await {
@@ -1645,6 +1650,7 @@ mod tests {
             extra: None,
             tool_filter: filter,
             classify_error: None,
+            max_tokens: None,
         }
     }
 

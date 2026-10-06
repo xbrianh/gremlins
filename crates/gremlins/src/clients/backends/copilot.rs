@@ -362,6 +362,7 @@ impl Backend for CopilotBackend {
                             extra: None,
                             tool_filter: self.state.tool_filter.as_deref(),
                             classify_error: Some(default_classify as ErrorClassifier),
+                            max_tokens: None,
                         },
                         task_selector,
                         interactive,
