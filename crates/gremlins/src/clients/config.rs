@@ -550,12 +550,12 @@ mod tests {
     #[test]
     fn test_providers_azure_auth_method() {
         let _sandbox = Sandbox::with_providers(
-            r#"{"azure-foundry": {"azure": {"auth": "cli", "scope": "https://example.com/.default"}}}"#,
+            r#"{"anthropic": {"azure": {"auth": "cli", "scope": "https://example.com/.default"}}}"#,
         );
         let keys = Providers::load();
-        assert_eq!(keys.azure_auth_method("azure-foundry"), Some("cli"));
+        assert_eq!(keys.azure_auth_method("anthropic"), Some("cli"));
         assert_eq!(
-            keys.azure_auth_scope("azure-foundry"),
+            keys.azure_auth_scope("anthropic"),
             Some("https://example.com/.default")
         );
     }
@@ -563,18 +563,18 @@ mod tests {
     #[test]
     fn test_providers_azure_auth_empty_ignored() {
         let _sandbox =
-            Sandbox::with_providers(r#"{"azure-foundry": {"azure": {"auth": "", "scope": ""}}}"#);
+            Sandbox::with_providers(r#"{"anthropic": {"azure": {"auth": "", "scope": ""}}}"#);
         let keys = Providers::load();
-        assert!(keys.azure_auth_method("azure-foundry").is_none());
-        assert!(keys.azure_auth_scope("azure-foundry").is_none());
+        assert!(keys.azure_auth_method("anthropic").is_none());
+        assert!(keys.azure_auth_scope("anthropic").is_none());
     }
 
     #[test]
     fn test_providers_azure_auth_missing() {
-        let _sandbox = Sandbox::with_providers(r#"{"azure-foundry": {"api-key": "sk-test"}}"#);
+        let _sandbox = Sandbox::with_providers(r#"{"anthropic": {"api-key": "sk-test"}}"#);
         let keys = Providers::load();
-        assert!(keys.azure_auth_method("azure-foundry").is_none());
-        assert!(keys.azure_auth_scope("azure-foundry").is_none());
+        assert!(keys.azure_auth_method("anthropic").is_none());
+        assert!(keys.azure_auth_scope("anthropic").is_none());
     }
 
     #[test]
@@ -673,12 +673,12 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("providers.yaml"),
-            r#"{"azure-foundry": {"token": "file-token"}}"#,
+            r#"{"anthropic": {"token": "file-token"}}"#,
         )
         .unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
         env.set("TEST_TOKEN", "env-token");
-        let result = auth_token("TEST_TOKEN", "azure-foundry");
+        let result = auth_token("TEST_TOKEN", "anthropic");
         assert_eq!(result, Some("env-token".to_string()));
     }
 
@@ -690,18 +690,18 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("providers.yaml"),
-            r#"{"azure-foundry": {"token": "file-token"}}"#,
+            r#"{"anthropic": {"token": "file-token"}}"#,
         )
         .unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        let result = auth_token("TEST_TOKEN_NONEXISTENT", "azure-foundry");
+        let result = auth_token("TEST_TOKEN_NONEXISTENT", "anthropic");
         assert_eq!(result, Some("file-token".to_string()));
     }
 
     #[test]
     fn test_auth_token_none_when_missing() {
         let _env = EnvGuard::lock();
-        let result = auth_token("TEST_TOKEN_NONEXISTENT", "azure-foundry");
+        let result = auth_token("TEST_TOKEN_NONEXISTENT", "anthropic");
         assert!(result.is_none());
     }
 
@@ -713,18 +713,14 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("providers.yaml"),
-            r#"{"azure-foundry": {"azure": {"auth": "cli"}}}"#,
+            r#"{"anthropic": {"azure": {"auth": "cli"}}}"#,
         )
         .unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
         env.set("TEST_AZURE_AUTH", "managed-identity");
-        let result = azure_auth_method(
-            "TEST_AZURE_AUTH",
-            "azure-foundry",
-            "TEST_TOKEN",
-            "TEST_API_KEY",
-        )
-        .unwrap();
+        let result =
+            azure_auth_method("TEST_AZURE_AUTH", "anthropic", "TEST_TOKEN", "TEST_API_KEY")
+                .unwrap();
         assert!(matches!(result, ProviderAuth::ManagedIdentity));
     }
 
@@ -736,13 +732,13 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("providers.yaml"),
-            r#"{"azure-foundry": {"azure": {"auth": "client-secret"}}}"#,
+            r#"{"anthropic": {"azure": {"auth": "client-secret"}}}"#,
         )
         .unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
         let result = azure_auth_method(
             "TEST_AZURE_AUTH_NONEXISTENT",
-            "azure-foundry",
+            "anthropic",
             "TEST_TOKEN_NONEXISTENT",
             "TEST_API_KEY_NONEXISTENT",
         )
@@ -756,7 +752,7 @@ mod tests {
         env.set("TEST_TOKEN", "fallback-token");
         let result = azure_auth_method(
             "TEST_AZURE_AUTH_NONEXISTENT",
-            "azure-foundry",
+            "anthropic",
             "TEST_TOKEN",
             "TEST_API_KEY_NONEXISTENT",
         )
@@ -770,7 +766,7 @@ mod tests {
         env.set("TEST_API_KEY", "fallback-key");
         let result = azure_auth_method(
             "TEST_AZURE_AUTH_NONEXISTENT",
-            "azure-foundry",
+            "anthropic",
             "TEST_TOKEN_NONEXISTENT",
             "TEST_API_KEY",
         )
@@ -783,7 +779,7 @@ mod tests {
         let _env = EnvGuard::lock();
         let result = azure_auth_method(
             "TEST_AZURE_AUTH_NONEXISTENT",
-            "azure-foundry",
+            "anthropic",
             "TEST_TOKEN_NONEXISTENT",
             "TEST_API_KEY_NONEXISTENT",
         );
@@ -798,14 +794,14 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("providers.yaml"),
-            r#"{"azure-foundry": {"azure": {"scope": "https://file.example.com/.default"}}}"#,
+            r#"{"anthropic": {"azure": {"scope": "https://file.example.com/.default"}}}"#,
         )
         .unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
         env.set("TEST_AZURE_SCOPE", "https://env.example.com/.default");
         let result = azure_auth_scope(
             "TEST_AZURE_SCOPE",
-            "azure-foundry",
+            "anthropic",
             "https://default.example.com/.default",
         );
         assert_eq!(result, "https://env.example.com/.default");
@@ -819,13 +815,13 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("providers.yaml"),
-            r#"{"azure-foundry": {"azure": {"scope": "https://file.example.com/.default"}}}"#,
+            r#"{"anthropic": {"azure": {"scope": "https://file.example.com/.default"}}}"#,
         )
         .unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
         let result = azure_auth_scope(
             "TEST_AZURE_SCOPE_NONEXISTENT",
-            "azure-foundry",
+            "anthropic",
             "https://default.example.com/.default",
         );
         assert_eq!(result, "https://file.example.com/.default");
@@ -836,7 +832,7 @@ mod tests {
         let _env = EnvGuard::lock();
         let result = azure_auth_scope(
             "TEST_AZURE_SCOPE_NONEXISTENT",
-            "azure-foundry",
+            "anthropic",
             "https://default.example.com/.default",
         );
         assert_eq!(result, "https://default.example.com/.default");

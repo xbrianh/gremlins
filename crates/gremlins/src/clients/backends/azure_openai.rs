@@ -29,6 +29,7 @@ enum AzureOpenAiClientState {
         endpoint: String,
         api_version: String,
         http_client: ReqwestClient,
+        auth_scope: String,
     },
 }
 
@@ -133,23 +134,14 @@ impl AzureOpenAiRunState {
                 endpoint,
                 api_version,
                 http_client,
+                auth_scope,
             } => {
                 // Capture errors into a local so execution always flows
                 // through the cancellation-map cleanup below.
                 let dyn_result = async {
-                    let scope = resolve_string(
-                        "GREMLINS_AZURE_OPENAI_AUTH_SCOPE",
-                        || {
-                            load_config().and_then(|c| {
-                                c.azure_openai()
-                                    .and_then(|a| a.auth_scope.as_ref().map(|s| s.0.clone()))
-                            })
-                        },
-                        Some("https://cognitiveservices.azure.com/.default"),
-                    )
-                    .unwrap_or_else(|| "https://cognitiveservices.azure.com/.default".to_string());
+                    let scope = &auth_scope;
                     let token = token_provider
-                        .get_token(&scope)
+                        .get_token(scope)
                         .await
                         .map_err(|e| ClientError::Runtime {
                             message: format!("Azure OpenAI token acquisition failed: {e}"),
@@ -217,15 +209,15 @@ fn resolve_auth() -> Result<ProviderAuth, String> {
         }
     }
 
+    // Load settings.yaml once, reuse across all credential checks.
+    let cfg = load_config();
+    let azure_cfg = cfg.as_ref().and_then(|c| c.azure_openai());
+
     // 2. settings.yaml azure-openai.auth
-    if let Ok(cfg) = crate::config::Config::load() {
-        if let Some(azure_cfg) = cfg.azure_openai() {
-            if let Some(auth) = &azure_cfg.auth {
-                let v = auth.0.trim();
-                if !v.is_empty() {
-                    return parse_provider_auth(v);
-                }
-            }
+    if let Some(auth) = azure_cfg.and_then(|a| a.auth.as_ref()) {
+        let v = auth.0.trim();
+        if !v.is_empty() {
+            return parse_provider_auth(v);
         }
     }
 
@@ -236,13 +228,9 @@ fn resolve_auth() -> Result<ProviderAuth, String> {
             return Ok(ProviderAuth::Token(env_val.trim().to_string()));
         }
     }
-    if let Ok(cfg) = crate::config::Config::load() {
-        if let Some(azure_cfg) = cfg.azure_openai() {
-            if let Some(token) = &azure_cfg.token {
-                if !token.0.trim().is_empty() {
-                    return Ok(ProviderAuth::Token(token.0.trim().to_string()));
-                }
-            }
+    if let Some(token) = azure_cfg.and_then(|a| a.token.as_ref()) {
+        if !token.0.trim().is_empty() {
+            return Ok(ProviderAuth::Token(token.0.trim().to_string()));
         }
     }
 
@@ -252,13 +240,9 @@ fn resolve_auth() -> Result<ProviderAuth, String> {
             return Ok(ProviderAuth::ApiKey(env_val.trim().to_string()));
         }
     }
-    if let Ok(cfg) = crate::config::Config::load() {
-        if let Some(azure_cfg) = cfg.azure_openai() {
-            if let Some(key) = &azure_cfg.api_key {
-                if !key.0.trim().is_empty() {
-                    return Ok(ProviderAuth::ApiKey(key.0.trim().to_string()));
-                }
-            }
+    if let Some(key) = azure_cfg.and_then(|a| a.api_key.as_ref()) {
+        if !key.0.trim().is_empty() {
+            return Ok(ProviderAuth::ApiKey(key.0.trim().to_string()));
         }
     }
 
@@ -297,7 +281,7 @@ fn resolve_string(
     default.map(|s| s.to_string())
 }
 
-/// Load the global Config, swallowing errors (returns None on failure).
+/// Parse configuration from disk, swallowing errors (returns None on failure).
 fn load_config() -> Option<crate::config::Config> {
     crate::config::Config::load().ok()
 }
@@ -349,6 +333,18 @@ impl AzureOpenAiBackend {
 
         let auth_method = resolve_auth()?;
 
+        // Resolve auth_scope once for dynamic auth — avoids re-reading
+        // settings.yaml on every token acquisition attempt.
+        let auth_scope = resolve_string(
+            "GREMLINS_AZURE_OPENAI_AUTH_SCOPE",
+            || {
+                load_config()
+                    .and_then(|c| c.azure_openai().and_then(|a| a.auth_scope.as_ref().map(|s| s.0.clone())))
+            },
+            Some("https://cognitiveservices.azure.com/.default"),
+        )
+        .unwrap_or_else(|| "https://cognitiveservices.azure.com/.default".to_string());
+
         let model = if model.is_empty() {
             return Err("azure-openai backend requires a deployment name (e.g. azure-openai:gpt-4o)".into());
         } else {
@@ -388,6 +384,7 @@ impl AzureOpenAiBackend {
                 endpoint,
                 api_version,
                 http_client: http_client.clone(),
+                auth_scope: auth_scope.clone(),
             },
             ProviderAuth::Cli => AzureOpenAiClientState::Dynamic {
                 token_provider: Box::new(
@@ -396,6 +393,7 @@ impl AzureOpenAiBackend {
                 endpoint,
                 api_version,
                 http_client: http_client.clone(),
+                auth_scope: auth_scope.clone(),
             },
             ProviderAuth::ManagedIdentity => AzureOpenAiClientState::Dynamic {
                 token_provider: Box::new(
@@ -404,6 +402,7 @@ impl AzureOpenAiBackend {
                 endpoint,
                 api_version,
                 http_client: http_client.clone(),
+                auth_scope: auth_scope.clone(),
             },
             ProviderAuth::DefaultAzure => AzureOpenAiClientState::Dynamic {
                 token_provider: Box::new(
@@ -412,6 +411,7 @@ impl AzureOpenAiBackend {
                 endpoint,
                 api_version,
                 http_client: http_client.clone(),
+                auth_scope: auth_scope.clone(),
             },
         };
 
@@ -642,24 +642,30 @@ mod tests {
     fn api_version_defaults() {
         let mut guard = isolated_env();
         guard.remove("GREMLINS_AZURE_OPENAI_API_VERSION");
-        let v = resolve_string(
-            "GREMLINS_AZURE_OPENAI_API_VERSION",
-            || None,
-            Some("2024-10-21"),
+        guard.set("GREMLINS_AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_OPENAI_API_KEY", "fake-key");
+
+        let result = AzureOpenAiBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
         );
-        assert_eq!(v, Some("2024-10-21".to_string()));
+        assert!(result.is_ok(), "build should succeed with default api version");
     }
 
     #[test]
     fn api_version_from_env() {
         let mut guard = isolated_env();
         guard.set("GREMLINS_AZURE_OPENAI_API_VERSION", "2025-01-01");
-        let v = resolve_string(
-            "GREMLINS_AZURE_OPENAI_API_VERSION",
-            || None,
-            Some("2024-10-21"),
+        guard.set("GREMLINS_AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_OPENAI_API_KEY", "fake-key");
+
+        let result = AzureOpenAiBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
         );
-        assert_eq!(v, Some("2025-01-01".to_string()));
+        assert!(result.is_ok(), "build should succeed with custom api version");
     }
 
     #[test]

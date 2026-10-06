@@ -198,7 +198,7 @@ impl AnthropicBackend {
     ///
     /// Auth is resolved via [`crate::clients::config::azure_auth_method`]:
     ///
-    /// | `anthropic.auth` / `ANTHROPIC_AUTH` | Behaviour |
+    /// | `anthropic.azure.auth` / `ANTHROPIC_AUTH` | Behaviour |
     /// |---|---|
     /// | (unset) | Static fallback: `anthropic.token` → `anthropic.api-key` |
     /// | `"client-secret"` | Service principal via `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` |
