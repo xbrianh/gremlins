@@ -14,8 +14,8 @@ use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
-use crate::clients::token_provider::{self, TokenProvider};
-use crate::config::AzureAuthMethod;
+use crate::clients::token_provider::TokenProvider;
+use crate::config::ProviderAuth;
 use rig_core::http_client::ReqwestClient;
 
 // ── AzureClientState ─────────────────────────────────────────────────────
@@ -137,8 +137,9 @@ impl AzureRunState {
                 // Capture errors into a local so execution always flows
                 // through the cancellation-map cleanup below.
                 let dyn_result = async {
+                    let scope = crate::config::auth_scope("GREMLINS_AZURE_AUTH_SCOPE", "azure-foundry", "https://cognitiveservices.azure.com/.default");
                     let token = token_provider
-                        .get_token(token_provider::AZURE_SCOPE)
+                        .get_token(&scope)
                         .await
                         .map_err(|e| ClientError::Runtime {
                             message: format!("Azure token acquisition failed: {e}"),
@@ -214,13 +215,13 @@ impl AzureBackend {
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        let endpoint = crate::config::azure_endpoint().ok_or_else(|| {
-            "GREMLINS_AZURE_ENDPOINT (or settings.yaml azure.endpoint) is required for the Azure backend".to_string()
+        let endpoint = crate::config::endpoint("GREMLINS_AZURE_ENDPOINT", "azure-foundry").ok_or_else(|| {
+            "GREMLINS_AZURE_ENDPOINT (or providers.yaml azure-foundry.endpoint) is required for the Azure backend".to_string()
         })?;
 
-        let api_version = crate::config::azure_api_version();
+        let api_version = crate::config::api_version("GREMLINS_AZURE_API_VERSION", "azure-foundry", "2024-10-21");
 
-        let auth_method = crate::config::resolve_azure_auth_method()?;
+        let auth_method = crate::config::auth_method("GREMLINS_AZURE_AUTH", "azure-foundry", "GREMLINS_AZURE_TOKEN", "GREMLINS_AZURE_API_KEY")?;
 
         let model = if model.is_empty() {
             return Err("azure backend requires a deployment name (e.g. azure:gpt-4o)".into());
@@ -236,7 +237,7 @@ impl AzureBackend {
             .map_err(|e| format!("failed to create HTTP client: {e}"))?;
 
         let client_state = match auth_method {
-            AzureAuthMethod::ApiKey(key) => {
+            ProviderAuth::ApiKey(key) => {
                 let client = azure::Client::builder()
                     .api_key(AzureOpenAIAuth::ApiKey(key))
                     .api_version(&api_version)
@@ -245,7 +246,7 @@ impl AzureBackend {
                     .map_err(|e| format!("failed to build Azure client: {e}"))?;
                 AzureClientState::Static(client)
             }
-            AzureAuthMethod::Token(token) => {
+            ProviderAuth::Token(token) => {
                 let client = azure::Client::builder()
                     .api_key(AzureOpenAIAuth::Token(token))
                     .api_version(&api_version)
@@ -254,7 +255,7 @@ impl AzureBackend {
                     .map_err(|e| format!("failed to build Azure client: {e}"))?;
                 AzureClientState::Static(client)
             }
-            AzureAuthMethod::ClientSecret => AzureClientState::Dynamic {
+            ProviderAuth::ClientSecret => AzureClientState::Dynamic {
                 token_provider: Box::new(
                     crate::clients::token_provider::ClientSecretProvider::new(),
                 ),
@@ -262,7 +263,7 @@ impl AzureBackend {
                 api_version,
                 http_client: http_client.clone(),
             },
-            AzureAuthMethod::Cli => AzureClientState::Dynamic {
+            ProviderAuth::Cli => AzureClientState::Dynamic {
                 token_provider: Box::new(
                     crate::clients::token_provider::AzureCliProvider::new(),
                 ),
@@ -270,7 +271,7 @@ impl AzureBackend {
                 api_version,
                 http_client: http_client.clone(),
             },
-            AzureAuthMethod::ManagedIdentity => AzureClientState::Dynamic {
+            ProviderAuth::ManagedIdentity => AzureClientState::Dynamic {
                 token_provider: Box::new(
                     crate::clients::token_provider::ManagedIdentityProvider::new(),
                 ),
@@ -278,7 +279,7 @@ impl AzureBackend {
                 api_version,
                 http_client: http_client.clone(),
             },
-            AzureAuthMethod::DefaultAzure => AzureClientState::Dynamic {
+            ProviderAuth::DefaultAzure => AzureClientState::Dynamic {
                 token_provider: Box::new(
                     crate::clients::token_provider::DefaultAzureProvider::new(),
                 ),
@@ -407,6 +408,7 @@ mod tests {
         guard.remove("GREMLINS_AZURE_ENDPOINT");
         guard.remove("GREMLINS_AZURE_API_VERSION");
         guard.remove("GREMLINS_AZURE_AUTH");
+        guard.remove("GREMLINS_AZURE_AUTH_SCOPE");
         guard.remove("AZURE_CLIENT_ID");
         guard.remove("AZURE_CLIENT_SECRET");
         guard.remove("AZURE_TENANT_ID");
@@ -467,7 +469,7 @@ mod tests {
         );
         let err = result.err().expect("should be an error");
         assert!(
-            err.contains("no credentials for provider 'azure'"),
+            err.contains("no credentials for provider \"azure-foundry\""),
             "got: {err}"
         );
     }
@@ -480,33 +482,33 @@ mod tests {
         guard.set("GREMLINS_AZURE_TOKEN", "bearer-token-123");
         guard.set("GREMLINS_AZURE_API_KEY", "api-key-456");
 
-        let method = crate::config::resolve_azure_auth_method().unwrap();
+        let method = crate::config::auth_method("GREMLINS_AZURE_AUTH", "azure-foundry", "GREMLINS_AZURE_TOKEN", "GREMLINS_AZURE_API_KEY").unwrap();
         assert!(
-            matches!(method, AzureAuthMethod::Token(t) if t == "bearer-token-123"),
+            matches!(method, ProviderAuth::Token(t) if t == "bearer-token-123"),
             "GREMLINS_AZURE_TOKEN should win over GREMLINS_AZURE_API_KEY"
         );
     }
 
     #[test]
-    fn auth_precedence_settings_yaml_over_env() {
+    fn auth_precedence_env_over_providers_yaml() {
         let mut guard = isolated_env();
         guard.set("GREMLINS_AZURE_API_KEY", "env-api-key");
 
-        // Write a settings.yaml so we can prove it wins over the env var.
+        // Write a providers.yaml — env var should win over it.
         let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
         let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"azure": {"api-key": "settings-yaml-key"}}"#,
+            config_dir.join("providers.yaml"),
+            r#"{"azure-foundry": {"api-key": "providers-yaml-key"}}"#,
         )
         .unwrap();
         crate::config::init_global().unwrap();
 
-        let method = crate::config::resolve_azure_auth_method().unwrap();
+        let method = crate::config::auth_method("GREMLINS_AZURE_AUTH", "azure-foundry", "GREMLINS_AZURE_TOKEN", "GREMLINS_AZURE_API_KEY").unwrap();
         assert!(
-            matches!(method, AzureAuthMethod::ApiKey(k) if k == "settings-yaml-key"),
-            "settings.yaml azure.api-key should win over GREMLINS_AZURE_API_KEY"
+            matches!(method, ProviderAuth::ApiKey(k) if k == "env-api-key"),
+            "GREMLINS_AZURE_API_KEY env var should win over providers.yaml"
         );
     }
 
@@ -514,14 +516,14 @@ mod tests {
     fn api_version_defaults() {
         let mut guard = isolated_env();
         guard.remove("GREMLINS_AZURE_API_VERSION");
-        assert_eq!(crate::config::azure_api_version(), "2024-10-21");
+        assert_eq!(crate::config::api_version("GREMLINS_AZURE_API_VERSION", "azure-foundry", "2024-10-21"), "2024-10-21");
     }
 
     #[test]
     fn api_version_from_env() {
         let mut guard = isolated_env();
         guard.set("GREMLINS_AZURE_API_VERSION", "2025-01-01");
-        assert_eq!(crate::config::azure_api_version(), "2025-01-01");
+        assert_eq!(crate::config::api_version("GREMLINS_AZURE_API_VERSION", "azure-foundry", "2024-10-21"), "2025-01-01");
     }
 
     #[test]
@@ -695,7 +697,7 @@ mod tests {
         );
         let err = result.err().expect("should be an error");
         assert!(
-            err.contains("unknown azure.auth value"),
+            err.contains("unknown auth value"),
             "got: {err}"
         );
     }
@@ -710,16 +712,16 @@ mod tests {
         let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"azure": {"auth": "managed-identity"}}"#,
+            config_dir.join("providers.yaml"),
+            r#"{"azure-foundry": {"auth": "managed-identity"}}"#,
         )
         .unwrap();
         crate::config::init_global().unwrap();
 
-        let method = crate::config::resolve_azure_auth_method().unwrap();
+        let method = crate::config::auth_method("GREMLINS_AZURE_AUTH", "azure-foundry", "GREMLINS_AZURE_TOKEN", "GREMLINS_AZURE_API_KEY").unwrap();
         assert!(
-            matches!(method, AzureAuthMethod::ManagedIdentity),
-            "settings.yaml azure.auth should win over GREMLINS_AZURE_AUTH"
+            matches!(method, ProviderAuth::ManagedIdentity),
+            "providers.yaml azure-foundry.auth should win over GREMLINS_AZURE_AUTH"
         );
     }
 

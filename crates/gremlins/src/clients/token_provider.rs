@@ -2,9 +2,6 @@ use async_trait::async_trait;
 use azure_core::credentials::{Secret, TokenCredential};
 use std::sync::{Arc, Mutex};
 
-/// The Azure resource scope for cognitive services.
-pub(crate) const AZURE_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
-
 // ── TokenProviderError ────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]

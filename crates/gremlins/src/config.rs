@@ -47,7 +47,6 @@ pub struct Config {
     exact_task_clients: HashMap<String, String>,
     prefix_task_clients: HashMap<String, String>,
     path_overrides: PathOverrides,
-    azure: Option<AzureConfig>,
 }
 
 /// A string newtype that rejects non-string YAML scalars (numbers,
@@ -118,53 +117,11 @@ struct ConfigFile {
     #[serde(rename = "task-clients")]
     task_clients: Option<IndexMap<String, StrictString>>,
     paths: Option<HashMap<String, StrictString>>,
-    azure: Option<AzureConfigFile>,
 }
 
-/// Deserialization helper for the `azure` section of settings.yaml.
-#[derive(Debug, Deserialize)]
-struct AzureConfigFile {
-    endpoint: Option<StrictString>,
-    #[serde(rename = "api-version")]
-    api_version: Option<StrictString>,
-    token: Option<StrictString>,
-    #[serde(rename = "api-key")]
-    api_key: Option<StrictString>,
-    #[serde(default)]
-    auth: Option<StrictString>,
-}
-
-/// Validate an `azure.auth` value against the known set of auth-method names.
-fn validate_azure_auth(raw: Option<StrictString>) -> Result<Option<String>, String> {
-    match raw {
-        Some(s) => {
-            let v = s.0.trim();
-            match v {
-                "client-secret" | "cli" | "managed-identity" | "default" => {
-                    Ok(Some(v.to_owned()))
-                }
-                other => Err(format!(
-                    "unknown azure.auth value {other:?}: expected \"client-secret\", \"cli\", \"managed-identity\", or \"default\"",
-                )),
-            }
-        }
-        None => Ok(None),
-    }
-}
-
-/// Azure backend configuration from settings.yaml.
-#[derive(Debug, Clone, Default)]
-pub struct AzureConfig {
-    pub(crate) endpoint: Option<StrictString>,
-    pub(crate) api_version: Option<StrictString>,
-    pub(crate) token: Option<StrictString>,
-    pub(crate) api_key: Option<StrictString>,
-    pub(crate) auth: Option<String>,
-}
-
-/// Resolved Azure authentication method.
+/// Resolved provider authentication method.
 #[derive(Debug, Clone)]
-pub(crate) enum AzureAuthMethod {
+pub enum ProviderAuth {
     ApiKey(String),
     Token(String),
     ClientSecret,
@@ -173,53 +130,14 @@ pub(crate) enum AzureAuthMethod {
     DefaultAzure,
 }
 
-/// Resolve the effective [`AzureAuthMethod`] from config and env vars.
-///
-/// Precedence:
-/// 1. `settings.yaml` `azure.auth` field
-/// 2. `GREMLINS_AZURE_AUTH` env var
-/// 3. If neither is set, fall back to static credentials: `azure.token` → `azure.api-key`
-pub(crate) fn resolve_azure_auth_method() -> Result<AzureAuthMethod, String> {
-    // 1. settings.yaml azure.auth
-    if let Some(cfg) = get_global() {
-        if let Some(azure) = cfg.azure() {
-            if let Some(ref auth) = azure.auth {
-                let v = auth.trim();
-                return parse_auth_method(v);
-            }
-        }
-    }
-
-    // 2. GREMLINS_AZURE_AUTH env var
-    if let Ok(env_val) = std::env::var("GREMLINS_AZURE_AUTH") {
-        let v = env_val.trim();
-        return parse_auth_method(v);
-    }
-
-    // 3. Fall back to static credentials: token → api-key
-    if let Some(token) = azure_auth_token() {
-        return Ok(AzureAuthMethod::Token(token));
-    }
-    if let Some(key) = azure_api_key() {
-        return Ok(AzureAuthMethod::ApiKey(key));
-    }
-
-    Err(
-        "no credentials for provider 'azure': set GREMLINS_AZURE_AUTH, \
-         GREMLINS_AZURE_TOKEN, GREMLINS_AZURE_API_KEY, \
-         or add azure.auth / azure.token / azure.api-key in settings.yaml"
-            .to_string(),
-    )
-}
-
-fn parse_auth_method(v: &str) -> Result<AzureAuthMethod, String> {
+fn parse_provider_auth(v: &str) -> Result<ProviderAuth, String> {
     match v {
-        "client-secret" => Ok(AzureAuthMethod::ClientSecret),
-        "cli" => Ok(AzureAuthMethod::Cli),
-        "managed-identity" => Ok(AzureAuthMethod::ManagedIdentity),
-        "default" => Ok(AzureAuthMethod::DefaultAzure),
+        "client-secret" => Ok(ProviderAuth::ClientSecret),
+        "cli" => Ok(ProviderAuth::Cli),
+        "managed-identity" => Ok(ProviderAuth::ManagedIdentity),
+        "default" => Ok(ProviderAuth::DefaultAzure),
         other => Err(format!(
-            "unknown azure.auth value {other:?}: expected \"client-secret\", \"cli\", \"managed-identity\", or \"default\"",
+            "unknown auth value {other:?}: expected \"client-secret\", \"cli\", \"managed-identity\", or \"default\"",
         )),
     }
 }
@@ -267,23 +185,6 @@ impl Config {
             })
             .unwrap_or_default();
 
-        let azure = cfg_file.azure.map(|a| {
-            let auth = match validate_azure_auth(a.auth) {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("invalid azure.auth in settings.yaml: {e}");
-                    None
-                }
-            };
-            AzureConfig {
-                endpoint: a.endpoint,
-                api_version: a.api_version,
-                token: a.token,
-                api_key: a.api_key,
-                auth,
-            }
-        });
-
         Ok(Config {
             default_client,
             exact_stage_clients,
@@ -291,7 +192,6 @@ impl Config {
             exact_task_clients,
             prefix_task_clients,
             path_overrides,
-            azure,
         })
     }
 
@@ -316,10 +216,6 @@ impl Config {
 
     pub fn path_overrides(&self) -> &PathOverrides {
         &self.path_overrides
-    }
-
-    pub fn azure(&self) -> Option<&AzureConfig> {
-        self.azure.as_ref()
     }
 
     pub fn overlay_dirname(&self) -> &'static str {
@@ -515,74 +411,6 @@ pub(crate) fn max_agent_turns() -> usize {
 /// GREMLINS_REASONING_EFFORT override. None means use provider default.
 pub(crate) fn reasoning_effort() -> Option<String> {
     std::env::var("GREMLINS_REASONING_EFFORT").ok()
-}
-
-/// GREMLINS_AZURE_ENDPOINT or settings.yaml `azure.endpoint`.
-/// Required for the Azure backend.
-pub(crate) fn azure_endpoint() -> Option<String> {
-    if let Some(cfg) = get_global() {
-        if let Some(azure) = cfg.azure() {
-            if let Some(ref ep) = azure.endpoint {
-                if !ep.0.trim().is_empty() {
-                    return Some(ep.0.clone());
-                }
-            }
-        }
-    }
-    std::env::var("GREMLINS_AZURE_ENDPOINT")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-}
-
-/// GREMLINS_AZURE_API_VERSION or settings.yaml `azure.api-version`.
-/// Defaults to "2024-10-21".
-pub(crate) fn azure_api_version() -> String {
-    if let Some(cfg) = get_global() {
-        if let Some(azure) = cfg.azure() {
-            if let Some(ref ver) = azure.api_version {
-                if !ver.0.trim().is_empty() {
-                    return ver.0.clone();
-                }
-            }
-        }
-    }
-    std::env::var("GREMLINS_AZURE_API_VERSION")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "2024-10-21".into())
-}
-
-/// GREMLINS_AZURE_TOKEN or settings.yaml `azure.token`.
-/// Entra ID bearer token for Azure auth.
-pub(crate) fn azure_auth_token() -> Option<String> {
-    if let Some(cfg) = get_global() {
-        if let Some(azure) = cfg.azure() {
-            if let Some(ref token) = azure.token {
-                if !token.0.trim().is_empty() {
-                    return Some(token.0.clone());
-                }
-            }
-        }
-    }
-    std::env::var("GREMLINS_AZURE_TOKEN")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-}
-
-/// GREMLINS_AZURE_API_KEY or settings.yaml `azure.api-key`.
-pub(crate) fn azure_api_key() -> Option<String> {
-    if let Some(cfg) = get_global() {
-        if let Some(azure) = cfg.azure() {
-            if let Some(ref key) = azure.api_key {
-                if !key.0.trim().is_empty() {
-                    return Some(key.0.clone());
-                }
-            }
-        }
-    }
-    std::env::var("GREMLINS_AZURE_API_KEY")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
 }
 
 /// Copilot API key: `GITHUB_COPILOT_API_KEY` then `COPILOT_API_KEY`.
@@ -865,14 +693,20 @@ pub fn scratch_root(gremlin_id: Option<&str>) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// ApiKeys — loaded from providers.yaml, not part of Config
+// Providers — loaded from providers.yaml, not part of Config
 // ---------------------------------------------------------------------------
 
 /// Parsed content of providers.yaml.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ApiKeys {
+pub(crate) struct Providers {
     api_keys: HashMap<String, String>,
     pats: HashMap<String, String>,
+    base_urls: HashMap<String, String>,
+    endpoints: HashMap<String, String>,
+    api_versions: HashMap<String, String>,
+    tokens: HashMap<String, String>,
+    auth_methods: HashMap<String, String>,
+    auth_scopes: HashMap<String, String>,
 }
 
 /// Typed structure for providers.yaml — a newtype over the provider map.
@@ -890,20 +724,50 @@ struct ProviderEntry {
     api_key: Option<StrictString>,
     #[serde(default)]
     pat: Option<StrictString>,
+    #[serde(rename = "base-url", default)]
+    base_url: Option<StrictString>,
+    #[serde(default)]
+    endpoint: Option<StrictString>,
+    #[serde(rename = "api-version", default)]
+    api_version: Option<StrictString>,
+    #[serde(default)]
+    token: Option<StrictString>,
+    #[serde(default)]
+    auth: Option<StrictString>,
+    #[serde(rename = "auth-scope", default)]
+    auth_scope: Option<StrictString>,
 }
 
-impl ApiKeys {
+impl Providers {
     /// Load from `user_config_root() / "providers.yaml"`.
     pub(crate) fn load() -> Self {
         let path = user_config_root().join("providers.yaml");
         match parse_api_keys(&path) {
-            Ok((api_keys, pats)) => ApiKeys { api_keys, pats },
+            Ok((
+                api_keys,
+                pats,
+                base_urls,
+                endpoints,
+                api_versions,
+                tokens,
+                auth_methods,
+                auth_scopes,
+            )) => Providers {
+                api_keys,
+                pats,
+                base_urls,
+                endpoints,
+                api_versions,
+                tokens,
+                auth_methods,
+                auth_scopes,
+            },
             Err(e) => {
-                if !matches!(&e, ApiKeysError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound)
+                if !matches!(&e, ProvidersError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound)
                 {
                     warn!("failed to load {}: {e}", path.display());
                 }
-                ApiKeys::default()
+                Providers::default()
             }
         }
     }
@@ -923,15 +787,78 @@ impl ApiKeys {
             .map(|s| s.as_str())
             .filter(|s| !s.trim().is_empty())
     }
+
+    /// Get the base_url for a provider name.
+    pub(crate) fn base_url(&self, provider: &str) -> Option<&str> {
+        self.base_urls
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Get the endpoint for a provider name.
+    pub(crate) fn endpoint(&self, provider: &str) -> Option<&str> {
+        self.endpoints
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Get the api_version for a provider name.
+    pub(crate) fn api_version(&self, provider: &str) -> Option<&str> {
+        self.api_versions
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Get the auth token for a provider name.
+    pub(crate) fn token(&self, provider: &str) -> Option<&str> {
+        self.tokens
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Get the auth method for a provider name.
+    pub(crate) fn auth_method(&self, provider: &str) -> Option<&str> {
+        self.auth_methods
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Get the auth scope for a provider name.
+    pub(crate) fn auth_scope(&self, provider: &str) -> Option<&str> {
+        self.auth_scopes
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
 }
 
-type ParsedApiKeys = (HashMap<String, String>, HashMap<String, String>);
+type ParsedProviders = (
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+);
 
-fn parse_api_keys(path: &Path) -> Result<ParsedApiKeys, ApiKeysError> {
+fn parse_api_keys(path: &Path) -> Result<ParsedProviders, ProvidersError> {
     let content = std::fs::read_to_string(path)?;
     let providers_file: ProvidersFile = serde_yaml::from_str(&content)?;
     let mut api_keys = HashMap::new();
     let mut pats = HashMap::new();
+    let mut base_urls = HashMap::new();
+    let mut endpoints = HashMap::new();
+    let mut api_versions = HashMap::new();
+    let mut tokens = HashMap::new();
+    let mut auth_methods = HashMap::new();
+    let mut auth_scopes = HashMap::new();
     for (k, v) in providers_file.0 {
         if let Some(api_key) = v.api_key.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
             api_keys.insert(k.clone(), api_key);
@@ -939,15 +866,50 @@ fn parse_api_keys(path: &Path) -> Result<ParsedApiKeys, ApiKeysError> {
         if let Some(pat) = v.pat.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
             pats.insert(k.clone(), pat);
         }
-        if !api_keys.contains_key(&k) && !pats.contains_key(&k) {
-            warn!("providers.yaml entry {k:?} has no non-empty \"api-key\" or \"pat\" field — skipping");
+        if let Some(base_url) = v.base_url.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            base_urls.insert(k.clone(), base_url);
+        }
+        if let Some(endpoint) = v.endpoint.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            endpoints.insert(k.clone(), endpoint);
+        }
+        if let Some(api_version) = v.api_version.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            api_versions.insert(k.clone(), api_version);
+        }
+        if let Some(token) = v.token.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            tokens.insert(k.clone(), token);
+        }
+        if let Some(auth) = v.auth.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            auth_methods.insert(k.clone(), auth);
+        }
+        if let Some(auth_scope) = v.auth_scope.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            auth_scopes.insert(k.clone(), auth_scope);
+        }
+        if !api_keys.contains_key(&k)
+            && !pats.contains_key(&k)
+            && !base_urls.contains_key(&k)
+            && !endpoints.contains_key(&k)
+            && !api_versions.contains_key(&k)
+            && !tokens.contains_key(&k)
+            && !auth_methods.contains_key(&k)
+            && !auth_scopes.contains_key(&k)
+        {
+            warn!("providers.yaml entry {k:?} has no non-empty fields — skipping");
         }
     }
-    Ok((api_keys, pats))
+    Ok((
+        api_keys,
+        pats,
+        base_urls,
+        endpoints,
+        api_versions,
+        tokens,
+        auth_methods,
+        auth_scopes,
+    ))
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ApiKeysError {
+pub(crate) enum ProvidersError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -962,13 +924,113 @@ pub fn api_key(env_var_name: &str, provider_name: &str) -> Option<String> {
             return Some(key);
         }
     }
-    ApiKeys::load().get(provider_name).map(|s| s.to_string())
+    Providers::load().get(provider_name).map(|s| s.to_string())
 }
 
 /// Resolve a PAT (personal access token) for `provider` from
 /// `providers.yaml`. Returns None if not set.
 pub(crate) fn pat(provider_name: &str) -> Option<String> {
-    ApiKeys::load().pat(provider_name).map(|s| s.to_string())
+    Providers::load().pat(provider_name).map(|s| s.to_string())
+}
+
+/// Resolve base_url for a provider. Checks env var first, then providers.yaml, then default.
+pub fn base_url(env_var_name: &str, provider_name: &str, default: &str) -> String {
+    if let Ok(val) = std::env::var(env_var_name) {
+        if !val.trim().is_empty() {
+            return val;
+        }
+    }
+    Providers::load()
+        .base_url(provider_name)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Resolve endpoint for a provider. Checks env var first, then providers.yaml.
+pub fn endpoint(env_var_name: &str, provider_name: &str) -> Option<String> {
+    if let Ok(val) = std::env::var(env_var_name) {
+        if !val.trim().is_empty() {
+            return Some(val);
+        }
+    }
+    Providers::load()
+        .endpoint(provider_name)
+        .map(|s| s.to_string())
+}
+
+/// Resolve api_version for a provider. Checks env var first, then providers.yaml, then default.
+pub fn api_version(env_var_name: &str, provider_name: &str, default: &str) -> String {
+    if let Ok(val) = std::env::var(env_var_name) {
+        if !val.trim().is_empty() {
+            return val;
+        }
+    }
+    Providers::load()
+        .api_version(provider_name)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Resolve auth token for a provider. Checks env var first, then providers.yaml.
+pub fn auth_token(env_var_name: &str, provider_name: &str) -> Option<String> {
+    if let Ok(val) = std::env::var(env_var_name) {
+        if !val.trim().is_empty() {
+            return Some(val);
+        }
+    }
+    Providers::load()
+        .token(provider_name)
+        .map(|s| s.to_string())
+}
+
+/// Resolve auth scope for a provider. Checks env var first, then providers.yaml, then default.
+pub fn auth_scope(env_var_name: &str, provider_name: &str, default: &str) -> String {
+    if let Ok(val) = std::env::var(env_var_name) {
+        if !val.trim().is_empty() {
+            return val;
+        }
+    }
+    Providers::load()
+        .auth_scope(provider_name)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Resolve the auth method for a provider.
+/// Precedence: providers.yaml auth → env var → fallback to token → api-key
+///
+/// `token_env_var_name` and `api_key_env_var_name` are used for the
+/// static-credential fallback (step 3).
+pub fn auth_method(
+    env_var_name: &str,
+    provider_name: &str,
+    token_env_var_name: &str,
+    api_key_env_var_name: &str,
+) -> Result<ProviderAuth, String> {
+    // 1. providers.yaml provider.auth
+    if let Some(auth) = Providers::load().auth_method(provider_name) {
+        let v = auth.trim();
+        return parse_provider_auth(v);
+    }
+
+    // 2. env var
+    if let Ok(env_val) = std::env::var(env_var_name) {
+        let v = env_val.trim();
+        return parse_provider_auth(v);
+    }
+
+    // 3. Fall back to token → api-key
+    if let Some(token) = auth_token(token_env_var_name, provider_name) {
+        return Ok(ProviderAuth::Token(token));
+    }
+    if let Some(key) = api_key(api_key_env_var_name, provider_name) {
+        return Ok(ProviderAuth::ApiKey(key));
+    }
+
+    Err(format!(
+        "no credentials for provider {provider_name:?}: set {env_var_name}, \
+         or add {provider_name}.auth / {provider_name}.token / {provider_name}.api-key in providers.yaml"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1337,18 +1399,18 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // ApiKeys tests
+    // Providers tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_api_keys_load_missing() {
+    fn test_providers_load_missing() {
         let _sandbox = Sandbox::new();
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.get("openai").is_none());
     }
 
     #[test]
-    fn test_api_keys_load_valid() {
+    fn test_providers_load_valid() {
         let sandbox = Sandbox::new();
         let config_dir = sandbox.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
@@ -1357,31 +1419,31 @@ mod tests {
             r#"{"openai": {"api-key": "sk-test"}, "xai": {"api-key": "xai-test"}}"#,
         )
         .unwrap();
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert_eq!(keys.get("openai"), Some("sk-test"));
         assert_eq!(keys.get("xai"), Some("xai-test"));
     }
 
     #[test]
-    fn test_api_keys_object_empty_api_key_ignored() {
+    fn test_providers_object_empty_api_key_ignored() {
         let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": ""}}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.get("openai").is_none());
     }
 
     #[test]
-    fn test_api_keys_object_whitespace_api_key_ignored() {
+    fn test_providers_object_whitespace_api_key_ignored() {
         let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": "   "}}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.get("openai").is_none());
     }
 
     #[test]
-    fn test_api_keys_object_integer_api_key_rejected() {
+    fn test_providers_object_integer_api_key_rejected() {
         // Non-string api-key values (e.g. integers) must be rejected —
         // YAML type coercion would otherwise turn 42 into "42".
         let _sandbox = Sandbox::with_providers(r#"{"openai": {"api-key": 42}}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(
             keys.get("openai").is_none(),
             "integer api-key must be rejected"
@@ -1389,68 +1451,68 @@ mod tests {
     }
 
     #[test]
-    fn test_api_keys_malformed_yaml() {
+    fn test_providers_malformed_yaml() {
         let _sandbox = Sandbox::with_providers("{bad");
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.get("openai").is_none());
     }
 
     #[test]
-    fn test_api_keys_not_an_object() {
+    fn test_providers_not_an_object() {
         let _sandbox = Sandbox::with_providers("[1, 2, 3]");
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.get("openai").is_none());
     }
 
     #[test]
-    fn test_api_keys_string_value_ignored() {
+    fn test_providers_string_value_ignored() {
         // YAML will reject a string value where a mapping is expected.
         let _sandbox = Sandbox::with_providers(r#"{"openai": "sk-test"}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.get("openai").is_none());
     }
 
     #[test]
-    fn test_api_keys_object_missing_api_key() {
+    fn test_providers_object_missing_api_key() {
         let _sandbox = Sandbox::with_providers(r#"{"openai": {}}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.get("openai").is_none());
     }
 
     #[test]
-    fn test_api_keys_unknown_provider() {
+    fn test_providers_unknown_provider() {
         let _sandbox = Sandbox::with_providers(r#"{"foo": "bar"}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.get("openai").is_none());
     }
 
     #[test]
-    fn test_api_keys_pat_field() {
+    fn test_providers_pat_field() {
         let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": "ghp_test_token"}}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.get("copilot").is_none());
         assert_eq!(keys.pat("copilot"), Some("ghp_test_token"));
     }
 
     #[test]
-    fn test_api_keys_pat_empty_ignored() {
+    fn test_providers_pat_empty_ignored() {
         let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": ""}}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.pat("copilot").is_none());
     }
 
     #[test]
-    fn test_api_keys_pat_whitespace_ignored() {
+    fn test_providers_pat_whitespace_ignored() {
         let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": "   "}}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert!(keys.pat("copilot").is_none());
     }
 
     #[test]
-    fn test_api_keys_both_api_key_and_pat() {
+    fn test_providers_both_api_key_and_pat() {
         let _sandbox =
             Sandbox::with_providers(r#"{"copilot": {"api-key": "sk-fake", "pat": "ghp_fake"}}"#);
-        let keys = ApiKeys::load();
+        let keys = Providers::load();
         assert_eq!(keys.get("copilot"), Some("sk-fake"));
         assert_eq!(keys.pat("copilot"), Some("ghp_fake"));
     }
@@ -1485,244 +1547,5 @@ mod tests {
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_COMPLETION_NUDGE_BUDGET", "7");
         assert_eq!(completion_nudge_budget(), 7);
-    }
-
-    // -----------------------------------------------------------------------
-    // Azure config tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_azure_config_deserialization_all_fields() {
-        let _sandbox = Sandbox::with_config(Some(
-            r#"{"azure": {"endpoint": "https://example.openai.azure.com", "api-version": "2025-01-01", "token": "bearer-token", "api-key": "sk-azure-key"}}"#,
-        ));
-        let cfg = Config::load().unwrap();
-        let azure = cfg.azure().expect("azure section should be present");
-        assert_eq!(
-            azure.endpoint.as_ref().map(|s| s.0.as_str()),
-            Some("https://example.openai.azure.com")
-        );
-        assert_eq!(
-            azure.api_version.as_ref().map(|s| s.0.as_str()),
-            Some("2025-01-01")
-        );
-        assert_eq!(
-            azure.token.as_ref().map(|s| s.0.as_str()),
-            Some("bearer-token")
-        );
-        assert_eq!(
-            azure.api_key.as_ref().map(|s| s.0.as_str()),
-            Some("sk-azure-key")
-        );
-    }
-
-    #[test]
-    fn test_azure_config_fields_default_to_none() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"azure": {}}"#));
-        let cfg = Config::load().unwrap();
-        let azure = cfg.azure().expect("azure section should be present");
-        assert!(azure.endpoint.is_none());
-        assert!(azure.api_version.is_none());
-        assert!(azure.token.is_none());
-        assert!(azure.api_key.is_none());
-    }
-
-    #[test]
-    fn test_azure_config_absent_section() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "a:b"}"#));
-        let cfg = Config::load().unwrap();
-        assert!(cfg.azure().is_none());
-    }
-
-    #[test]
-    fn test_azure_endpoint_settings_yaml_wins_over_env() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"azure": {"endpoint": "https://yaml.openai.azure.com"}}"#,
-        )
-        .unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("GREMLINS_AZURE_ENDPOINT", "https://env.openai.azure.com");
-        init_global().unwrap();
-        assert_eq!(
-            azure_endpoint().as_deref(),
-            Some("https://yaml.openai.azure.com")
-        );
-    }
-
-    #[test]
-    fn test_azure_endpoint_env_var_fallback() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("GREMLINS_AZURE_ENDPOINT", "https://env.openai.azure.com");
-        init_global().unwrap();
-        assert_eq!(
-            azure_endpoint().as_deref(),
-            Some("https://env.openai.azure.com")
-        );
-    }
-
-    #[test]
-    fn test_azure_api_key_settings_yaml_wins_over_env() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"azure": {"api-key": "yaml-key"}}"#,
-        )
-        .unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("GREMLINS_AZURE_API_KEY", "env-key");
-        init_global().unwrap();
-        assert_eq!(azure_api_key().as_deref(), Some("yaml-key"));
-    }
-
-    #[test]
-    fn test_azure_api_key_env_var_fallback() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("GREMLINS_AZURE_API_KEY", "env-key");
-        init_global().unwrap();
-        assert_eq!(azure_api_key().as_deref(), Some("env-key"));
-    }
-
-    #[test]
-    fn test_azure_api_version_default_fallback() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        init_global().unwrap();
-        assert_eq!(azure_api_version(), "2024-10-21");
-    }
-
-    #[test]
-    fn test_azure_api_version_settings_yaml_wins_over_env() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"azure": {"api-version": "2025-01-01"}}"#,
-        )
-        .unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("GREMLINS_AZURE_API_VERSION", "2025-06-01");
-        init_global().unwrap();
-        assert_eq!(azure_api_version(), "2025-01-01");
-    }
-
-    #[test]
-    fn test_azure_token_settings_yaml_wins_over_env() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"azure": {"token": "yaml-token"}}"#,
-        )
-        .unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("GREMLINS_AZURE_TOKEN", "env-token");
-        init_global().unwrap();
-        assert_eq!(azure_auth_token().as_deref(), Some("yaml-token"));
-    }
-
-    #[test]
-    fn test_azure_token_env_var_fallback() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("GREMLINS_AZURE_TOKEN", "env-token");
-        init_global().unwrap();
-        assert_eq!(azure_auth_token().as_deref(), Some("env-token"));
-    }
-
-    // ── legacy AZURE_OPENAI_* namespace is ignored ──────────────────
-
-    #[test]
-    fn test_legacy_azure_openai_endpoint_ignored() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("AZURE_OPENAI_ENDPOINT", "https://legacy.openai.azure.com");
-        init_global().unwrap();
-        assert!(
-            azure_endpoint().is_none(),
-            "legacy AZURE_OPENAI_ENDPOINT must be ignored"
-        );
-    }
-
-    #[test]
-    fn test_legacy_azure_openai_api_key_ignored() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("AZURE_OPENAI_API_KEY", "legacy-key");
-        init_global().unwrap();
-        assert!(
-            azure_api_key().is_none(),
-            "legacy AZURE_OPENAI_API_KEY must be ignored"
-        );
-    }
-
-    #[test]
-    fn test_legacy_azure_openai_token_ignored() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("AZURE_OPENAI_TOKEN", "legacy-bearer");
-        init_global().unwrap();
-        assert!(
-            azure_auth_token().is_none(),
-            "legacy AZURE_OPENAI_TOKEN must be ignored"
-        );
-    }
-
-    #[test]
-    fn test_legacy_azure_openai_api_version_ignored() {
-        let mut env = EnvGuard::lock();
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("settings.yaml"), r#"{"azure": {}}"#).unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        env.set("AZURE_OPENAI_API_VERSION", "2025-06-01");
-        init_global().unwrap();
-        assert_eq!(
-            azure_api_version(),
-            "2024-10-21",
-            "legacy AZURE_OPENAI_API_VERSION must be ignored; default should prevail"
-        );
     }
 }

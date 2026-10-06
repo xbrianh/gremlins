@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::config;
 
 /// Environment variables the path resolvers read directly.
-const OVERRIDES: [&str; 8] = [
+const OVERRIDES: [&str; 13] = [
     "GREMLINS_SANDBOX_ROOT",
     "GREMLINS_PROJECT_ROOT",
     "GREMLINS_OVERLAY_DIR",
@@ -29,6 +29,11 @@ const OVERRIDES: [&str; 8] = [
     "GREMLINS_AZURE_TOKEN",
     "GREMLINS_AZURE_API_KEY",
     "GREMLINS_AZURE_AUTH",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH",
+    "ANTHROPIC_AUTH_SCOPE",
+    "GREMLINS_AZURE_AUTH_SCOPE",
 ];
 
 /// Holds the process-state lock and undoes the environment changes its holder
@@ -115,7 +120,7 @@ impl Sandbox {
     }
 
     /// A sandbox whose `config/providers.yaml` holds `json` — the file
-    /// [`crate::config::ApiKeys`] reads API keys from.
+    /// [`crate::config::Providers`] reads API keys from.
     pub(crate) fn with_providers(json: &str) -> Self {
         Sandbox::with_config_file("providers.yaml", Some(json))
     }
