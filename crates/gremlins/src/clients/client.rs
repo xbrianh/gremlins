@@ -462,7 +462,7 @@ mod tests {
             "xai",
             "openrouter",
             "cmd",
-            "azure",
+            "azure-openai",
             "anthropic",
         ] {
             assert!(is_known_provider(p), "{p}");

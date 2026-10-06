@@ -108,7 +108,7 @@ impl OpenRouterBackend {
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
         let key =
-            crate::config::api_key(API_KEY_ENV, PROVIDER_NAME).ok_or_else(|| {
+            crate::clients::config::api_key(API_KEY_ENV, PROVIDER_NAME).ok_or_else(|| {
                 format!(
                     "no API key for provider '{PROVIDER_NAME}': set {API_KEY_ENV} or add an entry in {}",
                     crate::config::user_config_root()
@@ -116,7 +116,7 @@ impl OpenRouterBackend {
                         .display(),
                 )
             })?;
-        let base_url = crate::config::base_url("OPENROUTER_BASE_URL", PROVIDER_NAME, BASE_URL);
+        let base_url = crate::clients::config::base_url("OPENROUTER_BASE_URL", PROVIDER_NAME, BASE_URL);
         let client = openai_protocol::build_openai_client(&key, &base_url)?;
         let model = if model.is_empty() {
             "gpt-4o".to_string()

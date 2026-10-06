@@ -90,7 +90,7 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
     }
 
     // providers.yaml: try api-key first, then pat.
-    if let Some(key) = crate::config::api_key("", PROVIDER_NAME) {
+    if let Some(key) = crate::clients::config::api_key("", PROVIDER_NAME) {
         let client = copilot::Client::builder()
             .api_key(key)
             .allow_device_flow(false)
@@ -99,7 +99,7 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
         return Ok((client, CopilotAuthSource::ProvidersYaml));
     }
 
-    if let Some(token) = crate::config::pat(PROVIDER_NAME) {
+    if let Some(token) = crate::clients::config::pat(PROVIDER_NAME) {
         let client = copilot::Client::builder()
             .github_access_token(token)
             .allow_device_flow(false)

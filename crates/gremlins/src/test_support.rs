@@ -24,17 +24,17 @@ const OVERRIDES: [&str; 17] = [
     "GREMLINS_SANDBOX_ROOT",
     "GREMLINS_PROJECT_ROOT",
     "GREMLINS_OVERLAY_DIR",
-    "GREMLINS_AZURE_ENDPOINT",
-    "GREMLINS_AZURE_API_VERSION",
-    "GREMLINS_AZURE_TOKEN",
-    "GREMLINS_AZURE_API_KEY",
-    "GREMLINS_AZURE_AUTH",
+    "GREMLINS_AZURE_OPENAI_ENDPOINT",
+    "GREMLINS_AZURE_OPENAI_API_VERSION",
+    "GREMLINS_AZURE_OPENAI_TOKEN",
+    "GREMLINS_AZURE_OPENAI_API_KEY",
+    "GREMLINS_AZURE_OPENAI_AUTH",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH",
     "ANTHROPIC_AUTH_SCOPE",
-    "GREMLINS_AZURE_AUTH_SCOPE",
+    "GREMLINS_AZURE_OPENAI_AUTH_SCOPE",
     "OPENAI_BASE_URL",
     "XAI_BASE_URL",
     "OPENROUTER_BASE_URL",
@@ -124,7 +124,7 @@ impl Sandbox {
     }
 
     /// A sandbox whose `config/providers.yaml` holds `json` — the file
-    /// [`crate::config::Providers`] reads API keys from.
+    /// [`crate::clients::config::Providers`] reads API keys from.
     pub(crate) fn with_providers(json: &str) -> Self {
         Sandbox::with_config_file("providers.yaml", Some(json))
     }
