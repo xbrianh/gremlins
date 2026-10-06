@@ -195,11 +195,11 @@ pub struct AzureBackend {
 impl AzureBackend {
     /// Build an Azure backend.
     ///
-    /// Auth is resolved via [`crate::config::resolve_azure_auth_method`]:
+    /// Auth is resolved via [`crate::config::auth_method`]:
     ///
-    /// | `azure.auth` / `GREMLINS_AZURE_AUTH` | Behaviour |
+    /// | `azure-foundry.auth` / `GREMLINS_AZURE_AUTH` | Behaviour |
     /// |---|---|
-    /// | (unset) | Static fallback: `azure.token` → `azure.api-key` |
+    /// | (unset) | Static fallback: `azure-foundry.token` → `azure-foundry.api-key` |
     /// | `"client-secret"` | Service principal via `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` |
     /// | `"cli"` | `az account get-access-token` |
     /// | `"managed-identity"` | Azure IMDS endpoint |
@@ -208,8 +208,8 @@ impl AzureBackend {
     /// For dynamic methods the client is built per attempt (token acquisition
     /// is async).  Configuration errors (bad env vars) surface at first use.
     ///
-    /// `GREMLINS_AZURE_ENDPOINT` (or settings.yaml `azure.endpoint`) is required.
-    /// `GREMLINS_AZURE_API_VERSION` (or settings.yaml `azure.api-version`) defaults to `"2024-10-21"`.
+    /// `GREMLINS_AZURE_ENDPOINT` (or `providers.yaml` `azure-foundry.endpoint`) is required.
+    /// `GREMLINS_AZURE_API_VERSION` (or `providers.yaml` `azure-foundry.api-version`) defaults to `"2024-10-21"`.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,

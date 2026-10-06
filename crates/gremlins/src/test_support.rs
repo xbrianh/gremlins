@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::config;
 
 /// Environment variables the path resolvers read directly.
-const OVERRIDES: [&str; 13] = [
+const OVERRIDES: [&str; 17] = [
     "GREMLINS_SANDBOX_ROOT",
     "GREMLINS_PROJECT_ROOT",
     "GREMLINS_OVERLAY_DIR",
@@ -30,10 +30,14 @@ const OVERRIDES: [&str; 13] = [
     "GREMLINS_AZURE_API_KEY",
     "GREMLINS_AZURE_AUTH",
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH",
     "ANTHROPIC_AUTH_SCOPE",
     "GREMLINS_AZURE_AUTH_SCOPE",
+    "OPENAI_BASE_URL",
+    "XAI_BASE_URL",
+    "OPENROUTER_BASE_URL",
 ];
 
 /// Holds the process-state lock and undoes the environment changes its holder

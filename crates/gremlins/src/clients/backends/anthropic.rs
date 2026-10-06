@@ -36,6 +36,7 @@ enum AnthropicClientState {
 struct AnthropicRunState {
     client_state: AnthropicClientState,
     model: String,
+    tool_filter: Option<Vec<String>>,
     client_params: HashMap<String, String>,
     last_ctx: Mutex<Option<RunContext>>,
     cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
@@ -45,7 +46,7 @@ struct AnthropicRunState {
 
 impl AnthropicRunState {
     fn extra_params(&self) -> Option<serde_json::Value> {
-        openai_protocol::build_extra_params(&self.client_params)
+        build_anthropic_extra_params(&self.client_params)
     }
 
     fn effective_model(&self, override_model: Option<&str>) -> String {
@@ -118,7 +119,7 @@ impl AnthropicRunState {
                     cancel,
                     LoopOpts {
                         extra: self.extra_params(),
-                        tool_filter: None,
+                        tool_filter: self.tool_filter.as_deref(),
                         classify_error: Some(default_classify as ErrorClassifier),
                     },
                     None,
@@ -161,7 +162,7 @@ impl AnthropicRunState {
                         cancel,
                         LoopOpts {
                             extra: self.extra_params(),
-                            tool_filter: None,
+                            tool_filter: self.tool_filter.as_deref(),
                             classify_error: Some(default_classify as ErrorClassifier),
                         },
                         None,
@@ -209,7 +210,7 @@ impl AnthropicBackend {
     /// is async).  Configuration errors (bad env vars) surface at first use.
     pub fn build(
         model: &str,
-        _native_block: &HashMap<String, Vec<String>>,
+        native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
         let base_url = crate::config::base_url(
@@ -226,6 +227,7 @@ impl AnthropicBackend {
             model.to_string()
         };
 
+        let tool_filter = openai_protocol::tool_filter(native_block);
         let client_params = openai_protocol::string_map(extra_params);
 
         let http_client = ReqwestClient::builder()
@@ -277,6 +279,7 @@ impl AnthropicBackend {
             state: AnthropicRunState {
                 client_state,
                 model,
+                tool_filter,
                 client_params,
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
@@ -374,6 +377,34 @@ impl Backend for AnthropicBackend {
 
     fn total_cost_usd(&self) -> Option<f64> {
         None
+    }
+}
+
+// ── Anthropic-specific extra params ────────────────────────────────────
+
+/// Build the `extra` JSON blob for Anthropic requests.
+///
+/// Unlike the OpenAI-protocol helper, this does **not** inject
+/// `parallel_tool_calls` (Anthropic controls parallelism via
+/// `tool_choice.disable_parallel_tool_use`) or the OpenAI `reasoning`
+/// object.  Only passthrough client params are forwarded.
+fn build_anthropic_extra_params(
+    client_params: &HashMap<String, String>,
+) -> Option<serde_json::Value> {
+    let mut params = serde_json::Map::new();
+
+    for (k, v) in client_params {
+        let val = match serde_json::from_str::<serde_json::Value>(v) {
+            Ok(parsed) => parsed,
+            Err(_) => serde_json::Value::String(v.clone()),
+        };
+        params.insert(k.clone(), val);
+    }
+
+    if params.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(params))
     }
 }
 
@@ -532,6 +563,7 @@ mod tests {
             state: AnthropicRunState {
                 client_state: AnthropicClientState::Static(client),
                 model: "claude-sonnet-4-6".into(),
+                tool_filter: None,
                 client_params: HashMap::new(),
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
