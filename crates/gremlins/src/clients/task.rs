@@ -144,6 +144,7 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
     max_turns: usize,
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    max_tokens: Option<u64>,
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
@@ -158,6 +159,7 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
         String::new(),
         completion_nudge_budget,
         log_tx,
+        max_tokens,
     )
 }
 
@@ -175,6 +177,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
     id_chain: String,
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    max_tokens: Option<u64>,
 ) -> tools::TaskFn {
     Arc::new(move |description: String, task: String| {
         let model = model.clone();
@@ -221,6 +224,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 new_chain,
                 completion_nudge_budget,
                 log_tx.clone(),
+                max_tokens,
             ));
 
             let work_root = tools::worktree_root(task_cwd.as_deref());
@@ -241,6 +245,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
                 max_turns,
                 completion_nudge_budget,
                 log_tx.clone(),
+                max_tokens,
             )
             .await;
 
@@ -454,6 +459,7 @@ mod tests {
             10,
             0,
             None,
+            None,
         );
 
         // First invocation: depth 0 < 3, should succeed.
@@ -533,6 +539,7 @@ mod tests {
             10,
             0,
             None,
+            None,
         );
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
@@ -568,6 +575,7 @@ mod tests {
             MAX_DEPTH,
             String::new(),
             0,
+            None,
             None,
         );
 
@@ -656,6 +664,7 @@ mod tests {
                 10,
                 0,
                 Some(log_tx),
+                None,
             );
             (runner, log_rx)
         }

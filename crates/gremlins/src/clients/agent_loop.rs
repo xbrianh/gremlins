@@ -105,6 +105,7 @@ pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,
     pub(crate) classify_error: Option<ErrorClassifier>,
+    pub(crate) max_tokens: Option<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -204,6 +205,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         max_turns,
         ctx.completion_nudge_budget,
         ctx.params.log_tx.clone(),
+        opts.max_tokens,
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -247,6 +249,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     max_turns: usize,
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    max_tokens: Option<u64>,
 ) -> Result<CompletedRun, ClientError> {
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
@@ -255,6 +258,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         extra: None,
         tool_filter,
         classify_error: None,
+        max_tokens,
     };
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;
@@ -608,6 +612,9 @@ async fn run_agent_loop_core<M: CompletionModel>(
         }
         if let Some(params) = opts.extra.clone() {
             builder = builder.additional_params(params);
+        }
+        if let Some(mt) = opts.max_tokens {
+            builder = builder.max_tokens(mt);
         }
 
         let mut response = match builder.stream().await {
@@ -1645,6 +1652,7 @@ mod tests {
             extra: None,
             tool_filter: filter,
             classify_error: None,
+            max_tokens: None,
         }
     }
 
@@ -2935,6 +2943,182 @@ mod tests {
             task_result.contains("# Scout"),
             "task result should carry its description header, got: {task_result}"
         );
+    }
+
+    // ── max_tokens propagation tests ─────────────────────────────────
+
+    /// When `LoopOpts.max_tokens` is `Some(8192)`, every turn's
+    /// `CompletionRequest` must carry `max_tokens: Some(8192)`.
+    #[tokio::test]
+    async fn max_tokens_set_on_every_turn() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-mt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Two-turn run: tool call then Done.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({"file_path": "/dev/null"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let mut opts = loop_opts(None);
+        opts.max_tokens = Some(8192);
+        run_agent_loop(&model, "go", ctx, cancel, opts, None, None)
+            .await
+            .unwrap();
+
+        for req in model.requests() {
+            assert_eq!(
+                req.max_tokens,
+                Some(8192),
+                "every turn must carry max_tokens=8192"
+            );
+        }
+    }
+
+    /// When `LoopOpts.max_tokens` is `None`, the `CompletionRequest`
+    /// must leave `max_tokens` unset.
+    #[tokio::test]
+    async fn max_tokens_none_leaves_field_unset() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-mtnone-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("ok"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None); // max_tokens: None
+        run_agent_loop(&model, "go", ctx, cancel, opts, None, None)
+            .await
+            .unwrap();
+
+        for req in model.requests() {
+            assert_eq!(
+                req.max_tokens, None,
+                "max_tokens must be None when not set in opts"
+            );
+        }
+    }
+
+    /// When `max_tokens` is set, it propagates through the Task runner
+    /// to every nested agent loop turn.
+    #[tokio::test]
+    async fn max_tokens_propagates_to_nested_task() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let task_call = |id: &str| {
+            MockStreamEvent::tool_call(
+                id,
+                "Task",
+                serde_json::json!({"description": "Scout", "prompt": "look"}),
+            )
+        };
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({"summary": summary}))
+        };
+
+        let parent = MockCompletionModel::from_stream_turns([
+            vec![
+                task_call("t1"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                done_call("d1", "outer done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let child = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("scout result"),
+            done_call("d2", "scout result"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+
+        let child_handle = child.clone();
+        let factory: super::super::task::TaskModelFactory<MockCompletionModel> =
+            Arc::new(move |_spec: &str| Some(child_handle.clone()));
+
+        let selector = super::super::task::TaskModelSelector::new(
+            HashMap::from([("scout".to_string(), "openai:mini".to_string())]),
+            HashMap::new(),
+            factory,
+        )
+        .expect("configured");
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let mut opts = loop_opts(None);
+        opts.max_tokens = Some(8192);
+
+        run_agent_loop(
+            &parent,
+            "go",
+            ctx,
+            CancelToken::new(),
+            opts,
+            Some(selector),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Parent turns must carry max_tokens.
+        for req in parent.requests() {
+            assert_eq!(
+                req.max_tokens,
+                Some(8192),
+                "parent turn must carry max_tokens"
+            );
+        }
+        // Child (nested task) turns must also carry max_tokens.
+        for req in child.requests() {
+            assert_eq!(
+                req.max_tokens,
+                Some(8192),
+                "nested task turn must carry max_tokens"
+            );
+        }
     }
 
     // ── PauseToken tests ───────────────────────────────────────────────

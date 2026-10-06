@@ -307,6 +307,7 @@ pub(crate) async fn run_with_agent_loop(
             extra,
             tool_filter,
             classify_error,
+            max_tokens: None,
         },
         task_model_selector,
         interactive,
