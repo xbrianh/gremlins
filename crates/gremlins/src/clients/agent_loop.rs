@@ -205,6 +205,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
         max_turns,
         ctx.completion_nudge_budget,
         ctx.params.log_tx.clone(),
+        opts.max_tokens,
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -248,6 +249,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     max_turns: usize,
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    max_tokens: Option<u64>,
 ) -> Result<CompletedRun, ClientError> {
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
@@ -256,7 +258,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
         extra: None,
         tool_filter,
         classify_error: None,
-        max_tokens: None,
+        max_tokens,
     };
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;
