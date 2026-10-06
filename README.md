@@ -51,28 +51,28 @@ can have running gremlins simultaneously without interference.
 - `git` — [Git](https://git-scm.com/downloads) (pre-installed on most systems)
 
 A provider also requires either its API key (`OPENAI_API_KEY`, `XAI_API_KEY`,
-`OPENROUTER_API_KEY`, `GREMLINS_AZURE_API_KEY` or `GREMLINS_AZURE_TOKEN`) or a `cmd:`
+`OPENROUTER_API_KEY`, `GREMLINS_AZURE_OPENAI_API_KEY` or `GREMLINS_AZURE_OPENAI_TOKEN`) or a `cmd:`
 command on `PATH`.
 
-**Azure OpenAI / Azure AI Foundry** uses `azure:<deployment>` as the client
-specifier. Set `GREMLINS_AZURE_ENDPOINT` (required) and one of
-`GREMLINS_AZURE_TOKEN` (Entra ID bearer token) or `GREMLINS_AZURE_API_KEY`
-(API key). Optionally set `GREMLINS_AZURE_API_VERSION` (defaults to
+**Azure OpenAI / Azure AI Foundry** uses `azure-openai:<deployment>` as the client
+specifier. Set `GREMLINS_AZURE_OPENAI_ENDPOINT` (required) and one of
+`GREMLINS_AZURE_OPENAI_TOKEN` (Entra ID bearer token) or `GREMLINS_AZURE_OPENAI_API_KEY`
+(API key). Optionally set `GREMLINS_AZURE_OPENAI_API_VERSION` (defaults to
 `2024-10-21`).
 
 Alternatively, configure Azure in `~/.config/gremlins/settings.yaml` under an
-`azure` key:
+`azure-openai` key:
 
 ```yaml
-azure:
+azure-openai:
   endpoint: "https://example.openai.azure.com"
   api-version: "2025-01-01"   # optional; defaults to "2024-10-21"
   token: "<entra-id-bearer-token>"
   api-key: "<api-key>"
 ```
 
-`settings.yaml` values take precedence over the corresponding
-`GREMLINS_AZURE_*` environment variables.
+Environment variables take precedence over the corresponding
+`settings.yaml` values.
 
 ## Dev install
 
@@ -281,7 +281,7 @@ stages:
     client: openai:gpt-4o      # this stage uses openai instead
 ```
 
-Providers: `openai`, `xai`, `openrouter`, `cmd`. The CLI `--client provider:model` flag overrides the definition-level `default_client:` but yields to per-stage `client:` settings.
+Providers: `openai`, `xai`, `openrouter`, `azure-openai`, `cmd`. The CLI `--client provider:model` flag overrides the definition-level `default_client:` but yields to per-stage `client:` settings.
 
 ### `prompt:` field
 
