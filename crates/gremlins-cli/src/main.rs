@@ -340,11 +340,79 @@ fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
 /// The fallback arm for `gremlins <id>`: an unknown subcommand is exactly the
 /// single-id status command, provided it was given exactly one token.
 async fn status_external(args: &[OsString]) -> Result<(), String> {
+    // Check if the first arg looks like a mistyped subcommand — do this
+    // before the arity check so single-token typos (e.g. `gremlins lnch`)
+    // get a suggestion instead of being treated as a gremlin ID.
+    if let Some(first) = args.first() {
+        let first = first.to_string_lossy();
+        if let Some(closest) = closest_subcommand(&first) {
+            return Err(format!(
+                "unknown subcommand \"{first}\" — did you mean \"{closest}\"?"
+            ));
+        }
+    }
     if args.len() != 1 {
         return Err("expected exactly one gremlin id".to_string());
     }
     let id = args[0].to_string_lossy();
     status(&id).await
+}
+
+/// Known subcommand names (including hidden `serve`).
+const KNOWN_SUBCOMMANDS: &[&str] = &[
+    "launch", "ls", "info", "stop", "resume", "log", "debug", "clean", "rm", "land", "serve",
+];
+
+/// If `arg` looks like a mistyped subcommand, return the closest match by
+/// Levenshtein distance (threshold ≤ 3). Returns `None` when the arg contains
+/// a `/` (looks like a path), is longer than 16 chars, matches a known
+/// subcommand exactly, or has no close match.
+fn closest_subcommand(arg: &str) -> Option<String> {
+    if arg.contains('/') {
+        return None;
+    }
+    if arg.len() > 16 {
+        return None;
+    }
+    if KNOWN_SUBCOMMANDS.contains(&arg) {
+        return None;
+    }
+    let (closest, dist) = KNOWN_SUBCOMMANDS
+        .iter()
+        .map(|&cmd| (cmd, levenshtein(arg, cmd)))
+        .min_by_key(|&(_, d)| d)
+        .unwrap();
+    if dist <= 3 {
+        Some(closest.to_string())
+    } else {
+        None
+    }
+}
+
+/// Compute the Levenshtein (edit) distance between two strings.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let n = a_chars.len();
+    let m = b_chars.len();
+
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut curr: Vec<usize> = vec![0; m + 1];
+
+    for i in 1..=n {
+        curr[0] = i;
+        for j in 1..=m {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[m]
 }
 
 /// Print the detailed status block for one gremlin.
