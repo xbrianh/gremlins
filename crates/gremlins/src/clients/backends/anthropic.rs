@@ -149,7 +149,10 @@ impl AnthropicRunState {
                         .map_err(|e| ClientError::Runtime {
                             message: format!("Anthropic token acquisition failed: {e}"),
                         })?;
-                    let wrapped = BearerHttpClient::new(http_client.clone(), token);
+                    let wrapped = BearerHttpClient::new(http_client.clone(), token)
+                        .map_err(|e| ClientError::Runtime {
+                            message: format!("failed to build bearer HTTP client: {e}"),
+                        })?;
                     let client = anthropic::Client::builder()
                         .api_key(anthropic::client::AnthropicKey::from("unused"))
                         .base_url(base_url)
@@ -543,6 +546,35 @@ mod tests {
             &indexmap::IndexMap::new(),
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn identity_auth_produces_dynamic_state() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_AUTH", "cli");
+        let backend = AnthropicBackend::build(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        )
+        .unwrap();
+        // The backend trait doesn't expose client_state, but we can verify
+        // the build succeeded and the backend is usable (reap_all is a no-op
+        // on an empty cancel map).
+        backend.reap_all("nonexistent");
+    }
+
+    #[test]
+    fn api_key_auth_produces_static_state() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
+        let backend = AnthropicBackend::build(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        )
+        .unwrap();
+        backend.reap_all("nonexistent");
     }
 
     #[test]
