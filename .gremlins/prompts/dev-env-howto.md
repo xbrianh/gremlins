@@ -65,3 +65,22 @@ missing separator in template references), do a single `rg` to
 enumerate all occurrences, then apply every edit in one batch pass.
 Iterating "find one → fix → find another" wastes turns and risks
 introducing regressions from partial fixes.
+
+## Searching code safely
+
+**Always use `rg` (ripgrep), never `grep -r`.** `rg` respects `.gitignore`
+and skips `target/` by default. `grep -r` with an empty file list (e.g.
+from a `$(find …)` that returned nothing) silently falls back to searching
+the entire working directory — including `target/` — which can dump
+megabytes of garbage into context and overflow the model's token window.
+
+When you need to understand a dependency's trait or type definition, look
+in the cargo registry source, not the worktree:
+
+```bash
+# Find where a dependency's source lives
+find ~/.cargo/registry/src -path "*<crate-name>*" -name "*.rs" | head -5
+```
+
+Do **not** run `cargo doc` just to grep its output. The generated HTML
+is enormous and useless for code search.
