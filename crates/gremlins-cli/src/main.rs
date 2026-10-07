@@ -82,7 +82,11 @@ enum Cmds {
     /// Remove a gremlin and all its filesystem assets.
     Rm {
         /// Gremlin id to remove.
-        id: String,
+        #[arg(required_unless_present = "all")]
+        id: Option<String>,
+        /// Remove every gremlin in a terminal state (done/stopped/orphaned).
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
     },
     /// Run the definition's land block in the current working directory.
     Land {
@@ -120,7 +124,15 @@ async fn main() {
         Some(Cmds::Log { id }) => log_gremlin(&id).await,
         Some(Cmds::Debug { id }) => debug_gremlin(&id).await,
         Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
-        Some(Cmds::Rm { id }) => rm(&id).await,
+        Some(Cmds::Rm { id, all }) => {
+            if all {
+                rm_all().await
+            } else if let Some(ref id) = id {
+                rm_one(id).await
+            } else {
+                Err("gremlins rm requires an <id> or --all".to_string())
+            }
+        }
         Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::External(args)) => status_external(&args).await,
@@ -998,7 +1010,8 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
 // rm
 // ---------------------------------------------------------------------------
 
-async fn rm(id: &str) -> Result<(), String> {
+/// Remove a single gremlin by id.
+async fn rm_one(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
@@ -1063,6 +1076,122 @@ async fn rm(id: &str) -> Result<(), String> {
     gremlin.clean(true).await;
     println!("gremlin {id} removed");
     Ok(())
+}
+
+/// Remove every gremlin in a terminal state (done/stopped/orphaned).
+async fn rm_all() -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    let entries = state::list_state_dirs();
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let mut removed = 0usize;
+    let mut skipped = 0usize;
+    let mut executor_reachable: Option<bool> = None;
+
+    for (id, state_json_path) in &entries {
+        let (outcome, next_reachable) = rm_all_entry(id, state_json_path, executor_reachable).await;
+        executor_reachable = next_reachable;
+        match outcome {
+            RmAllEntry::Removed => removed += 1,
+            RmAllEntry::Skipped(msg) => {
+                println!("gremlin {id}: skipped ({msg})");
+                skipped += 1;
+            }
+            RmAllEntry::Ignored => {}
+        }
+    }
+
+    if removed > 0 || skipped > 0 {
+        log::info!("rm --all: {removed} removed, {skipped} skipped");
+    }
+    Ok(())
+}
+
+/// Per-entry outcome for `rm --all`.
+enum RmAllEntry {
+    /// Entry was removed.
+    Removed,
+    /// Entry was skipped with a reason.
+    Skipped(String),
+    /// Entry was not eligible (closed marker, unknown status, etc.) — no message.
+    Ignored,
+}
+
+/// Evaluate a single gremlin entry for `rm --all` eligibility and, if eligible,
+/// remove it. Returns the outcome and the (possibly updated) executor
+/// reachability flag so the caller can thread it across iterations.
+async fn rm_all_entry(
+    id: &str,
+    state_json_path: &Path,
+    mut executor_reachable: Option<bool>,
+) -> (RmAllEntry, Option<bool>) {
+    let Some(state_dir) = state_json_path.parent() else {
+        return (RmAllEntry::Ignored, executor_reachable);
+    };
+
+    // Skip entries that have already been `clean --keep`'d.
+    if state_dir.join("closed").is_file() {
+        return (RmAllEntry::Ignored, executor_reachable);
+    }
+
+    // Read status from state.json.
+    let state_map = read_state_object(state_json_path);
+    let status = state_map
+        .as_ref()
+        .and_then(|m| m.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    match status {
+        "done" | "stopped" => {
+            // Terminal — safe to remove.
+        }
+        "running" => {
+            // Lazily check executor reachability on first running entry.
+            let reachable = match executor_reachable {
+                Some(r) => r,
+                None => {
+                    let r = spawn::connect().await.is_ok();
+                    executor_reachable = Some(r);
+                    r
+                }
+            };
+            if reachable {
+                match is_live_in_executor(id).await {
+                    Ok(true) => {
+                        return (
+                            RmAllEntry::Skipped("still running".to_string()),
+                            executor_reachable,
+                        );
+                    }
+                    Err(e) => {
+                        return (RmAllEntry::Skipped(e), executor_reachable);
+                    }
+                    Ok(false) => {
+                        // Orphaned — safe to remove.
+                    }
+                }
+            } else {
+                return (
+                    RmAllEntry::Skipped("executor unreachable".to_string()),
+                    executor_reachable,
+                );
+            }
+        }
+        _ => {
+            // Unknown or empty status — skip.
+            return (RmAllEntry::Ignored, executor_reachable);
+        }
+    }
+
+    // Delegate to the single-id helper. Errors are logged, not fatal.
+    match rm_one(id).await {
+        Ok(()) => (RmAllEntry::Removed, executor_reachable),
+        Err(e) => (RmAllEntry::Skipped(e), executor_reachable),
+    }
 }
 
 /// Check whether a gremlin is truly live in the executor's run_map.
