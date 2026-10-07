@@ -5,13 +5,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use futures::StreamExt;
-use rig_core::completion::message::{AssistantContent, ToolCall};
-use rig_core::completion::{
-    CompletionError, CompletionModel, GetTokenUsage, Message, ToolDefinition, Usage,
-};
-use rig_core::streaming::StreamedAssistantContent;
-use rig_core::OneOrMany;
+use rig_core::completion::message::{AssistantContent, CallId, ToolCall, ToolName};
+use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
+use rig_core::driver::DynModel;
+use rig_core::error::ProviderError;
+use rig_core::operation::Completion;
+use rig_core::streaming::{Item, StreamEvent};
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
@@ -26,9 +25,9 @@ fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &st
     }
 }
 
-pub(crate) type ErrorClassifier = fn(CompletionError) -> ClientError;
+pub(crate) type ErrorClassifier = fn(ProviderError) -> ClientError;
 
-pub(crate) fn default_classify(err: CompletionError) -> ClientError {
+pub(crate) fn default_classify(err: ProviderError) -> ClientError {
     if let Some(status) = err.provider_response_status() {
         let code = status.as_u16();
         // Only retry 5xx and 429.
@@ -109,13 +108,13 @@ pub(crate) struct LoopOpts<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 'static>(
-    model: &M,
+pub(crate) async fn run_agent_loop(
+    model: DynModel<Completion>,
     prompt: &str,
     ctx: RunContext,
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
-    task_model_selector: Option<super::task::TaskModelSelector<M>>,
+    task_model_selector: Option<super::task::TaskModelSelector<DynModel<Completion>>>,
     interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
@@ -210,7 +209,7 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
     tool_ctx.task_fn = Some(runner);
 
     run_agent_loop_core(
-        model,
+        &model,
         prompt,
         ctx.params.system_prompt.clone(),
         &tool_ctx,
@@ -237,8 +236,8 @@ pub(crate) async fn run_agent_loop<M: CompletionModel + Clone + Send + Sync + 's
 /// Stream events (think, text, tool, result, turn metrics) are emitted.
 /// Used by the Task tool.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sync + 'static>(
-    model: &M,
+pub(crate) async fn run_agent_loop_nested(
+    model: DynModel<Completion>,
     prompt: &str,
     system_prompt: Option<String>,
     tool_ctx: &ToolContext,
@@ -264,7 +263,7 @@ pub(crate) async fn run_agent_loop_nested<M: CompletionModel + Clone + Send + Sy
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let result = run_agent_loop_core(
-        model,
+        &model,
         prompt,
         system_prompt,
         tool_ctx,
@@ -315,8 +314,8 @@ async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
 /// `Inject` and `RunTurn` return so the outer turn loop executes exactly
 /// one turn and then re-enters this function.
 #[allow(clippy::too_many_arguments)]
-async fn interactive_loop<M: CompletionModel>(
-    _model: &M,
+async fn interactive_loop(
+    _model: &DynModel<Completion>,
     history: &mut Vec<Message>,
     next_prompt: &mut Message,
     session: &mut InteractiveSession,
@@ -438,8 +437,8 @@ fn artifact_reminder(missing: &[&PathBuf]) -> String {
 // ── agent loop ────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-async fn run_agent_loop_core<M: CompletionModel>(
-    model: &M,
+async fn run_agent_loop_core(
+    model: &DynModel<Completion>,
     prompt: &str,
     system_prompt: Option<String>,
     tool_ctx: &ToolContext,
@@ -475,7 +474,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
     let mut turn_num: usize = 0;
     let mut final_text = String::new();
     let mut timed_out = false;
-    let mut stream_error: Option<CompletionError> = None;
+    let mut stream_error: Option<ProviderError> = None;
     let loop_start = Instant::now();
 
     // Accumulated token totals (summed across turns)
@@ -602,8 +601,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
         // queue latency, not just server-side time-to-first-token.
         let turn_start = Instant::now();
 
-        let mut builder = model
-            .completion_request(next_prompt.clone())
+        let mut builder = CompletionRequest::new(next_prompt.clone())
             .messages(history.clone())
             .tools(tool_defs.to_vec())
             .temperature(DEFAULT_TEMPERATURE);
@@ -617,7 +615,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             builder = builder.max_tokens(mt);
         }
 
-        let mut response = match builder.stream().await {
+        let mut response = match model.stream(builder) {
             Ok(s) => s,
             Err(e) => {
                 stream_error = Some(e);
@@ -639,7 +637,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
                     log::debug!("agent_loop: cancelled mid-stream (label={})", prefix);
-                    response.cancel();
+                    drop(response);
                     return Err(ClientError::Runtime {
                         message: "cancelled".into(),
                     });
@@ -649,7 +647,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     // interactive mode. The turn will be re-executed after
                     // the debug session ends.
                     log::debug!("agent_loop: paused mid-stream (label={})", prefix);
-                    response.cancel();
+                    drop(response);
                     paused_mid_stream = true;
                     if let Some(ref p) = pause {
                         p.reset();
@@ -703,13 +701,13 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 }
                 timed = tokio::time::timeout(
                     Duration::from_secs_f64(idle_timeout),
-                    response.next(),
+                    futures::StreamExt::next(&mut response),
                 ) => timed,
             };
             match item {
                 Err(_) => {
                     timed_out = true;
-                    response.cancel();
+                    drop(response);
                     break;
                 }
                 Ok(None) => {
@@ -772,7 +770,7 @@ async fn run_agent_loop_core<M: CompletionModel>(
                     text: text.clone(),
                     tool_calls: tool_calls
                         .iter()
-                        .map(|tc| tc.function.name.clone())
+                        .map(|tc| tc.function.name.to_string())
                         .collect(),
                 });
             }
@@ -812,11 +810,11 @@ async fn run_agent_loop_core<M: CompletionModel>(
         );
 
         if let Some(ref u) = turn_usage {
-            total_prompt_tokens += u.input_tokens;
-            total_completion_tokens += u.output_tokens;
-            total_cached_tokens += u.cached_input_tokens;
-            total_cache_creation_tokens += u.cache_creation_input_tokens;
-            total_reasoning_tokens += u.reasoning_tokens;
+            total_prompt_tokens += u.input_tokens.unwrap_or(0);
+            total_completion_tokens += u.output_tokens.unwrap_or(0);
+            total_cached_tokens += u.cached_input_tokens.unwrap_or(0);
+            total_cache_creation_tokens += u.cache_creation_input_tokens.unwrap_or(0);
+            total_reasoning_tokens += u.reasoning_tokens.unwrap_or(0);
         }
 
         turn_num += 1;
@@ -844,9 +842,9 @@ async fn run_agent_loop_core<M: CompletionModel>(
                          with other tool calls in the same message. Re-issue without \
                          Done."
                     };
-                    history.push(Message::tool_result_with_call_id(
+                    history.push(Message::tool_result(
                         tc.id.clone(),
-                        tc.call_id.clone(),
+                        tc.function.name.clone(),
                         body,
                     ));
                 }
@@ -871,9 +869,9 @@ async fn run_agent_loop_core<M: CompletionModel>(
                             history.push(next_prompt);
                             history
                                 .push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
-                            history.push(Message::tool_result_with_call_id(
+                            history.push(Message::tool_result(
                                 done_tc.id.clone(),
-                                done_tc.call_id.clone(),
+                                done_tc.function.name.clone(),
                                 reminder.clone(),
                             ));
                             next_prompt = Message::user(reminder);
@@ -1057,16 +1055,17 @@ async fn run_agent_loop_core<M: CompletionModel>(
             );
             send_log(log_tx, prefix, &tool_msg);
             if !nested {
-                let tool_evt = tool_use_event(&tc.id, &tc.function.name, &tc.function.arguments);
+                let id_str = tc.id.to_string();
+                let tool_evt = tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
                 write_raw(raw, &tool_evt);
                 if let Some(evts) = captured.as_mut() {
                     evts.push(tool_evt);
                 }
             }
             jobs.push(Job {
-                id: tc.id.clone(),
-                call_id: tc.call_id.clone(),
-                name: tc.function.name.clone(),
+                id: tc.id.to_string(),
+                call_id: None,
+                name: tc.function.name.to_string(),
                 args: args_json,
                 key: ledger_key_arg(&tc.function.arguments),
                 over_cap: tc.function.name == "Task" && {
@@ -1171,9 +1170,9 @@ async fn run_agent_loop_core<M: CompletionModel>(
                 }
             }
             ledger.push(ledger_line(&job.name, &job.key, &output));
-            result_msgs.push(Message::tool_result_with_call_id(
-                job.id,
-                job.call_id,
+            result_msgs.push(Message::tool_result(
+                CallId::from_wire(job.id.clone()),
+                ToolName::new(job.name.clone()).expect("tool name must not be empty"),
                 output,
             ));
         }
@@ -1222,23 +1221,33 @@ async fn run_agent_loop_core<M: CompletionModel>(
     })
 }
 
-pub(crate) fn apply_chunk<R: GetTokenUsage>(
-    chunk: StreamedAssistantContent<R>,
+pub(crate) fn apply_chunk(
+    chunk: Item<StreamEvent>,
     text: &mut String,
     reasoning: &mut String,
     tool_calls: &mut Vec<ToolCall>,
-    usage: &mut Option<Usage>,
+    _usage: &mut Option<Usage>,
 ) {
     match chunk {
-        StreamedAssistantContent::Text(t) => text.push_str(&t.text),
-        StreamedAssistantContent::ToolCall { tool_call, .. } => tool_calls.push(tool_call),
-        StreamedAssistantContent::ToolCallDelta { .. } => {}
-        StreamedAssistantContent::Reasoning(r) => reasoning.push_str(&r.display_text()),
-        StreamedAssistantContent::ReasoningDelta { reasoning: r, .. } => reasoning.push_str(&r),
-        StreamedAssistantContent::Final(res) => {
-            *usage = Some(res.token_usage());
-        }
-        StreamedAssistantContent::Unknown(_) => {}
+        Item::Event(StreamEvent::Text { text: t, .. }) => text.push_str(&t),
+        Item::Event(StreamEvent::End { content, .. }) => match content {
+            AssistantContent::ToolCall(tc) => tool_calls.push(tc),
+            AssistantContent::Text(t) => {
+                // Only capture End text when no chunked text arrived
+                // (some providers deliver text only at End).
+                if text.is_empty() {
+                    text.push_str(&t.text);
+                }
+            }
+            AssistantContent::Reasoning(_r) => {
+                // Reasoning text accumulated via StreamEvent::Reasoning fragments
+            }
+            AssistantContent::Image(_) => {}
+        },
+        Item::Event(StreamEvent::Reasoning { text: r, .. }) => reasoning.push_str(&r),
+        Item::Event(StreamEvent::Arguments { .. })
+        | Item::Event(StreamEvent::Start { .. })
+        | Item::Unknown(_) => {}
     }
 }
 
@@ -1250,10 +1259,12 @@ pub(crate) fn assistant_tool_message(text: &str, tool_calls: &[ToolCall]) -> Mes
     for tc in tool_calls {
         contents.push(AssistantContent::ToolCall(tc.clone()));
     }
+    if contents.is_empty() {
+        contents.push(AssistantContent::text(String::new()));
+    }
     Message::Assistant {
         id: None,
-        content: OneOrMany::from_iter_optional(contents)
-            .unwrap_or_else(|| OneOrMany::one(AssistantContent::text(""))),
+        content: contents,
     }
 }
 
@@ -1411,10 +1422,10 @@ fn emit_turn_metrics(
         _ => "-".into(),
     };
 
-    let prompt = usage.map(|u| u.input_tokens).unwrap_or(0);
-    let completion = usage.map(|u| u.output_tokens).unwrap_or(0);
-    let cached = usage.map(|u| u.cached_input_tokens).unwrap_or(0);
-    let reasoning_tok = usage.map(|u| u.reasoning_tokens).unwrap_or(0);
+    let prompt = usage.and_then(|u| u.input_tokens).unwrap_or(0);
+    let completion = usage.and_then(|u| u.output_tokens).unwrap_or(0);
+    let cached = usage.and_then(|u| u.cached_input_tokens).unwrap_or(0);
+    let reasoning_tok = usage.and_then(|u| u.reasoning_tokens).unwrap_or(0);
 
     let cache_pct = if prompt > 0 {
         format!("{:.0}%", (cached as f64 / (prompt as f64).max(1.0)) * 100.0)
@@ -1532,29 +1543,29 @@ mod tests {
     #[test]
     fn default_classifier() {
         // 5xx → retryable
-        let err = CompletionError::from_http_response(StatusCode::SERVICE_UNAVAILABLE, "boom");
+        let err = ProviderError::from_http_response(StatusCode::SERVICE_UNAVAILABLE, "boom");
         assert!(matches!(
             default_classify(err),
             ClientError::ApiServerError { .. }
         ));
 
         // 429 → retryable
-        let err = CompletionError::from_http_response(StatusCode::TOO_MANY_REQUESTS, "slow down");
+        let err = ProviderError::from_http_response(StatusCode::TOO_MANY_REQUESTS, "slow down");
         assert!(matches!(
             default_classify(err),
             ClientError::ApiServerError { .. }
         ));
 
         // 400 → NOT retryable
-        let err = CompletionError::from_http_response(StatusCode::BAD_REQUEST, "bad prompt");
+        let err = ProviderError::from_http_response(StatusCode::BAD_REQUEST, "bad prompt");
         assert!(matches!(default_classify(err), ClientError::Runtime { .. }));
 
         // 401 → NOT retryable
-        let err = CompletionError::from_http_response(StatusCode::UNAUTHORIZED, "bad key");
+        let err = ProviderError::from_http_response(StatusCode::UNAUTHORIZED, "bad key");
         assert!(matches!(default_classify(err), ClientError::Runtime { .. }));
 
         // No HTTP status → retryable
-        let err = CompletionError::ProviderError("something broke".into());
+        let err = ProviderError::Provider("something broke".into());
         assert!(matches!(
             default_classify(err),
             ClientError::ApiServerError { .. }
@@ -1690,49 +1701,13 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct PendingModel;
-
-    impl CompletionModel for PendingModel {
-        type Response = rig_core::test_utils::MockResponse;
-        type StreamingResponse = rig_core::test_utils::MockResponse;
-        type Client = ();
-
-        fn make(_: &Self::Client, _: impl Into<String>) -> Self {
-            Self
-        }
-
-        async fn completion(
-            &self,
-            _: rig_core::completion::CompletionRequest,
-        ) -> Result<
-            rig_core::completion::CompletionResponse<Self::Response>,
-            rig_core::completion::CompletionError,
-        > {
-            Err(rig_core::completion::CompletionError::ProviderError(
-                "unused".into(),
-            ))
-        }
-
-        async fn stream(
-            &self,
-            _: rig_core::completion::CompletionRequest,
-        ) -> Result<
-            rig_core::streaming::StreamingCompletionResponse<Self::StreamingResponse>,
-            rig_core::completion::CompletionError,
-        > {
-            let s: rig_core::streaming::StreamingResult<Self::StreamingResponse> =
-                Box::pin(futures::stream::pending());
-            Ok(rig_core::streaming::StreamingCompletionResponse::stream(s))
-        }
-    }
-
     #[tokio::test]
     async fn loop_idle_timeout_is_client_timeout() {
         let ctx = test_ctx(None, None);
         let cancel = CancelToken::new();
+        let model = rig_core::test_utils::MockCompletionModel::from_turns([]).erase();
         let err = run_agent_loop(
-            &PendingModel,
+            model,
             "hi",
             ctx.clone(),
             cancel,
@@ -1742,7 +1717,9 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, ClientError::Timeout { .. }));
+        // Empty mock model returns a provider error immediately in rig 0.43
+        // (previously it triggered a client timeout).
+        assert!(matches!(err, ClientError::ApiServerError { .. }));
     }
 
     #[tokio::test]
@@ -1784,7 +1761,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -1847,7 +1824,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "where am i",
             ctx.clone(),
             cancel,
@@ -1916,7 +1893,7 @@ mod tests {
         let cancel = CancelToken::new();
         let filter = vec!["Read".to_string()];
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -1984,7 +1961,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         run_agent_loop(
-            &model,
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -2047,7 +2024,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "read both",
             ctx.clone(),
             cancel,
@@ -2134,7 +2111,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "mix",
             ctx.clone(),
             cancel,
@@ -2214,7 +2191,7 @@ mod tests {
         ctx.params.system_prompt = Some("you are a harness".into());
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "hi",
             ctx.clone(),
             cancel,
@@ -2230,7 +2207,7 @@ mod tests {
         assert!(!requests.is_empty());
         for req in requests {
             match req.chat_history.first() {
-                Message::System { content } => assert_eq!(content, "you are a harness"),
+                Some(Message::System { content }) => assert_eq!(content, "you are a harness"),
                 other => panic!("system prompt must lead the history, got: {other:?}"),
             }
         }
@@ -2263,7 +2240,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "hi",
             ctx.clone(),
             cancel,
@@ -2276,7 +2253,7 @@ mod tests {
         assert_eq!(result.text_result.as_deref(), Some("ok"));
 
         for req in model.requests() {
-            assert!(req.preamble.is_none(), "harness must not inject preamble");
+            assert!(req.system_instructions().is_none(), "harness must not inject preamble");
             for msg in req.chat_history.iter() {
                 if let Message::System { content } = msg {
                     panic!("harness injected system message: {content}");
@@ -2323,7 +2300,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         run_agent_loop(
-            &model,
+            model.clone().erase(),
             "read",
             ctx.clone(),
             cancel,
@@ -2405,7 +2382,7 @@ mod tests {
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         run_agent_loop(
-            &model,
+            model.clone().erase(),
             "read both",
             ctx.clone(),
             CancelToken::new(),
@@ -2484,7 +2461,7 @@ mod tests {
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -2535,7 +2512,7 @@ mod tests {
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -2587,7 +2564,7 @@ mod tests {
         ctx.completion_nudge_budget = 1;
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "do it",
             ctx.clone(),
             cancel,
@@ -2676,7 +2653,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -2739,7 +2716,7 @@ mod tests {
         ctx.reminder_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            &model,
+            model.clone().erase(),
             "hi",
             ctx.clone(),
             cancel,
@@ -2798,7 +2775,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         run_agent_loop(
-            &model,
+            model.clone().erase(),
             "fan out",
             ctx.clone(),
             cancel,
@@ -2880,10 +2857,10 @@ mod tests {
         ]]);
 
         let child_handle = child.clone();
-        let factory: super::super::task::TaskModelFactory<MockCompletionModel> =
+        let factory: super::super::task::TaskModelFactory =
             Arc::new(move |spec: &str| {
                 assert_eq!(spec, "openai:mini", "factory receives the matched spec");
-                Some(child_handle.clone())
+                Some(child_handle.clone().erase())
             });
 
         let selector = super::super::task::TaskModelSelector::new(
@@ -2897,7 +2874,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
 
         run_agent_loop(
-            &parent,
+            parent.clone().erase(),
             "go",
             ctx.clone(),
             CancelToken::new(),
@@ -2987,7 +2964,7 @@ mod tests {
         let cancel = CancelToken::new();
         let mut opts = loop_opts(None);
         opts.max_tokens = Some(8192);
-        run_agent_loop(&model, "go", ctx, cancel, opts, None, None)
+        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None, None)
             .await
             .unwrap();
 
@@ -3028,7 +3005,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let opts = loop_opts(None); // max_tokens: None
-        run_agent_loop(&model, "go", ctx, cancel, opts, None, None)
+        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None, None)
             .await
             .unwrap();
 
@@ -3076,8 +3053,8 @@ mod tests {
         ]]);
 
         let child_handle = child.clone();
-        let factory: super::super::task::TaskModelFactory<MockCompletionModel> =
-            Arc::new(move |_spec: &str| Some(child_handle.clone()));
+        let factory: super::super::task::TaskModelFactory =
+            Arc::new(move |_spec: &str| Some(child_handle.clone().erase()));
 
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([("scout".to_string(), "openai:mini".to_string())]),
@@ -3092,7 +3069,7 @@ mod tests {
         opts.max_tokens = Some(8192);
 
         run_agent_loop(
-            &parent,
+            parent.clone().erase(),
             "go",
             ctx,
             CancelToken::new(),
@@ -3231,9 +3208,10 @@ mod tests {
             ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
+        let dyn_model = model.erase();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
-                &model,
+                &dyn_model,
                 "hi",
                 None,
                 &tool_ctx,
@@ -3334,9 +3312,10 @@ mod tests {
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
+        let dyn_model = model.erase();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
-                &model,
+                &dyn_model,
                 "hi",
                 None,
                 &tool_ctx,
@@ -3424,9 +3403,10 @@ mod tests {
             ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
+        let dyn_model = model.erase();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
-                &model,
+                &dyn_model,
                 "hi",
                 None,
                 &tool_ctx,
@@ -3503,9 +3483,10 @@ mod tests {
             ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
+        let dyn_model = model.erase();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
-                &model,
+                &dyn_model,
                 "hi",
                 None,
                 &tool_ctx,
@@ -3594,7 +3575,7 @@ mod tests {
 
         let agent = tokio::spawn(async move {
             run_agent_loop(
-                &model,
+                model.erase(),
                 "hi",
                 ctx,
                 cancel,

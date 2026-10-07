@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rig_core::client::CompletionClient;
-use rig_core::providers::anthropic;
+use rig_core::providers::anthropic::{Anthropic, AnthropicConfig};
+use rig_core::http_client::DynHttpClient;
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
@@ -17,18 +17,18 @@ use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use crate::clients::token_provider::{self, TokenProvider};
 use crate::clients::config::ProviderAuth;
 use crate::clients::anthropic_bearer_http::BearerHttpClient;
-use rig_core::http_client::ReqwestClient;
+use rig_reqwest::ReqwestClient;
 
 // ── AnthropicClientState ─────────────────────────────────────────────────
 
 /// Either a statically-built client (for ApiKey / Token auth) or the
 /// ingredients to build one dynamically per attempt (for identity-based auth).
 enum AnthropicClientState {
-    Static(anthropic::Client),
+    Static(Anthropic),
     Dynamic {
         token_provider: Box<dyn TokenProvider>,
         base_url: String,
-        http_client: ReqwestClient,
+        http_client: DynHttpClient,
     },
 }
 
@@ -113,9 +113,9 @@ impl AnthropicRunState {
         // we acquire a fresh token and build a client per attempt.
         let result = match &self.client_state {
             AnthropicClientState::Static(client) => {
-                let model = client.completion_model(&model_name);
+                let model = client.completion(&model_name).erase();
                 run_agent_loop(
-                    &model,
+                    model,
                     prompt,
                     ctx,
                     cancel,
@@ -153,17 +153,12 @@ impl AnthropicRunState {
                         .map_err(|e| ClientError::Runtime {
                             message: format!("failed to build bearer HTTP client: {e}"),
                         })?;
-                    let client = anthropic::Client::builder()
-                        .api_key(anthropic::client::AnthropicKey::from("unused"))
-                        .base_url(base_url)
-                        .http_client(wrapped)
-                        .build()
-                        .map_err(|e| ClientError::Runtime {
-                            message: format!("failed to build Anthropic client: {e}"),
-                        })?;
-                    let model = client.completion_model(&model_name);
+                    let client = AnthropicConfig::new("unused")
+                        .with_base_url(base_url)
+                        .connect(wrapped);
+                    let model = client.completion(&model_name).erase();
                     run_agent_loop(
-                        &model,
+                        model,
                         prompt,
                         ctx,
                         cancel,
@@ -263,27 +258,19 @@ impl AnthropicBackend {
             None => 64_000,
         };
 
-        let http_client = ReqwestClient::builder()
-            .build()
-            .map_err(|e| format!("failed to create HTTP client: {e}"))?;
+        let http_client = DynHttpClient::new(ReqwestClient::default());
 
         let client_state = match auth_method {
             ProviderAuth::ApiKey(key) => {
-                let client = anthropic::Client::builder()
-                    .api_key(anthropic::client::AnthropicKey::from(key))
-                    .base_url(&base_url)
-                    .http_client(http_client.clone())
-                    .build()
-                    .map_err(|e| format!("failed to build Anthropic client: {e}"))?;
+                let client = AnthropicConfig::new(key)
+                    .with_base_url(&base_url)
+                    .connect(http_client.clone());
                 AnthropicClientState::Static(client)
             }
             ProviderAuth::Token(token) => {
-                let client = anthropic::Client::builder()
-                    .api_key(anthropic::client::AnthropicKey::from(token))
-                    .base_url(&base_url)
-                    .http_client(http_client.clone())
-                    .build()
-                    .map_err(|e| format!("failed to build Anthropic client: {e}"))?;
+                let client = AnthropicConfig::new(token)
+                    .with_base_url(&base_url)
+                    .connect(http_client.clone());
                 AnthropicClientState::Static(client)
             }
             ProviderAuth::ClientSecret => AnthropicClientState::Dynamic {
@@ -652,10 +639,7 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
 
-        let client = anthropic::Client::builder()
-            .api_key(anthropic::client::AnthropicKey::from("sk-ant-test"))
-            .build()
-            .unwrap();
+        let client = Anthropic::new("sk-ant-test");
 
         let backend = AnthropicBackend {
             state: AnthropicRunState {

@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rig_core::client::CompletionClient;
-use rig_core::providers::copilot::{self, CopilotIntent};
+use rig_core::providers::copilot::{Copilot, CopilotConfig, CopilotIntent};
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
@@ -48,16 +49,12 @@ pub(crate) enum CopilotAuthSource {
 /// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.yaml`
 /// `"copilot"` entry (`api-key` then `pat`) →
 /// `~/.config/github-copilot/apps.json` → error.
-fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
+fn resolve_auth() -> Result<(Copilot, CopilotAuthSource), String> {
     let api_key = crate::config::copilot_api_key();
     let github_token = crate::config::copilot_github_token();
 
     if let Some(key) = api_key {
-        let client = copilot::Client::builder()
-            .api_key(key)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
+        let client = CopilotConfig::new(key).client();
         // Determine which env var supplied the key.
         let source = if std::env::var("GITHUB_COPILOT_API_KEY")
             .ok()
@@ -71,51 +68,23 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
         return Ok((client, source));
     }
 
-    if let Some(token) = github_token {
-        let client = copilot::Client::builder()
-            .github_access_token(token)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
-        let source = if std::env::var("COPILOT_GITHUB_ACCESS_TOKEN")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .is_some()
-        {
-            CopilotAuthSource::CopilotGitHubAccessToken
-        } else {
-            CopilotAuthSource::GitHubToken
-        };
-        return Ok((client, source));
+    if let Some(_token) = github_token {
+        return Err("GitHub PAT auth is not yet supported in rig 0.43; use COPILOT_API_KEY instead".to_string());
     }
 
     // providers.yaml: try api-key first, then pat.
     if let Some(key) = crate::clients::config::api_key("", PROVIDER_NAME) {
-        let client = copilot::Client::builder()
-            .api_key(key)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
+        let client = CopilotConfig::new(key).client();
         return Ok((client, CopilotAuthSource::ProvidersYaml));
     }
 
-    if let Some(token) = crate::clients::config::pat(PROVIDER_NAME) {
-        let client = copilot::Client::builder()
-            .github_access_token(token)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
-        return Ok((client, CopilotAuthSource::ProvidersYamlPat));
+    if crate::clients::config::pat(PROVIDER_NAME).is_some() {
+        return Err("GitHub PAT auth is not yet supported in rig 0.43; use COPILOT_API_KEY instead".to_string());
     }
 
     // Auto-discover OAuth token from the Copilot extension's apps.json.
-    if let Some(token) = crate::config::copilot_oauth_token() {
-        let client = copilot::Client::builder()
-            .github_access_token(token)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
-        return Ok((client, CopilotAuthSource::AppsJson));
+    if crate::config::copilot_oauth_token().is_some() {
+        return Err("GitHub PAT auth is not yet supported in rig 0.43; use COPILOT_API_KEY instead".to_string());
     }
 
     Err(format!(
@@ -131,7 +100,7 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
 // ── CopilotRunState ──────────────────────────────────────────────────────
 
 struct CopilotRunState {
-    client: copilot::Client,
+    client: Copilot,
     model: String,
     tool_filter: Option<Vec<String>>,
     intent: Option<CopilotIntent>,
@@ -163,22 +132,22 @@ fn parse_extra_params(
 }
 
 impl CopilotRunState {
-    fn make_model(&self, override_model: Option<&str>) -> copilot::CompletionModel {
+    fn make_model(&self, override_model: Option<&str>) -> DynModel<Completion> {
         let model_name = match override_model {
             Some(m) if !m.is_empty() => m.to_string(),
             _ => self.model.clone(),
         };
-        let mut mdl = self.client.completion_model(&model_name);
+        let mut mdl = self.client.completion(&model_name);
         if let Some(intent) = self.intent {
-            mdl = mdl.with_intent(intent);
+            mdl.wire = mdl.wire.with_intent(intent);
         }
         if self.strict_tools {
-            mdl = mdl.with_strict_tools();
+            mdl.wire = mdl.wire.with_strict_tools();
         }
         if self.tool_result_array_content {
-            mdl = mdl.with_tool_result_array_content();
+            mdl.wire = mdl.wire.with_tool_result_array_content();
         }
-        mdl
+        mdl.erase()
     }
 }
 
@@ -233,10 +202,10 @@ impl CopilotBackend {
 /// Build a `TaskModelSelector` for the Copilot backend, or `None` when
 /// `settings.yaml` declares no `task-clients` entries this backend can serve.
 fn copilot_task_model_selector(
-    client: &copilot::Client,
+    client: &Copilot,
     task_clients_exact: &HashMap<String, String>,
     task_clients_prefix: &HashMap<String, String>,
-) -> Option<TaskModelSelector<copilot::CompletionModel>> {
+) -> Option<TaskModelSelector<DynModel<Completion>>> {
     if task_clients_exact.is_empty() && task_clients_prefix.is_empty() {
         return None;
     }
@@ -250,7 +219,7 @@ fn copilot_task_model_selector(
         Arc::new(move |spec: &str| {
             let (provider, model) = openai_protocol::provider_and_model(spec)?;
             if provider == PROVIDER_NAME {
-                Some(client.completion_model(model))
+                Some(client.completion(model).erase())
             } else {
                 log::warn!(
                     "task-clients entry spec {spec:?} names provider {provider:?}, but this \
@@ -354,7 +323,7 @@ impl Backend for CopilotBackend {
 
                     let model = self.state.make_model(ctx.params.model.as_deref());
                     let result = run_agent_loop(
-                        &model,
+                        model,
                         &p,
                         ctx,
                         cancel,
@@ -458,11 +427,7 @@ mod tests {
 
     #[test]
     fn reap_all_cancels_only_own_tokens() {
-        let client = copilot::Client::builder()
-            .api_key("tid=1;exp=9999999999")
-            .allow_device_flow(false)
-            .build()
-            .unwrap();
+        let client = Copilot::new("tid=1;exp=9999999999");
         let backend = CopilotBackend {
             state: CopilotRunState {
                 client,
@@ -535,7 +500,7 @@ mod tests {
         );
         let err = result.err().expect("should be an error");
         assert!(
-            err.contains("no credentials for provider 'copilot'"),
+            err.contains("no API key for provider") || err.contains("no credentials for provider"),
             "got: {err}"
         );
     }
@@ -548,6 +513,7 @@ mod tests {
         guard.set("GITHUB_COPILOT_API_KEY", FAKE_API_KEY);
         guard.set("COPILOT_GITHUB_ACCESS_TOKEN", "ghp_fake_token");
 
+        // API key still wins (PAT auth not supported in rig 0.43)
         let (_, source) = resolve_auth().unwrap();
         assert_eq!(
             source,
@@ -574,11 +540,11 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("GITHUB_TOKEN", "ghp_fake_token");
 
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::GitHubToken,
-            "GITHUB_TOKEN should win over providers.yaml"
+        // PAT auth deferred until rig supports it; expect an error.
+        let err = resolve_auth().unwrap_err();
+        assert!(
+            err.contains("GitHub PAT auth is not yet supported"),
+            "unexpected error: {err}"
         );
     }
 
@@ -588,11 +554,11 @@ mod tests {
         guard.set("COPILOT_GITHUB_ACCESS_TOKEN", "ghp_copilot_token");
         guard.set("GITHUB_TOKEN", "ghp_other_token");
 
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::CopilotGitHubAccessToken,
-            "COPILOT_GITHUB_ACCESS_TOKEN should win over GITHUB_TOKEN"
+        // PAT auth deferred until rig supports it; expect an error.
+        let err = resolve_auth().unwrap_err();
+        assert!(
+            err.contains("GitHub PAT auth is not yet supported"),
+            "unexpected error: {err}"
         );
     }
 
@@ -636,11 +602,11 @@ mod tests {
         .unwrap();
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
 
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::ProvidersYamlPat,
-            "providers.yaml pat field should be the fallback when no env vars are set"
+        // PAT auth deferred until rig supports it; expect an error.
+        let err = resolve_auth().unwrap_err();
+        assert!(
+            err.contains("GitHub PAT auth is not yet supported"),
+            "unexpected error: {err}"
         );
     }
 
@@ -686,11 +652,11 @@ mod tests {
         guard.set("HOME", tmp.path());
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
 
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::AppsJson,
-            "should auto-discover oauth_token from apps.json"
+        // PAT auth deferred until rig supports it; expect an error.
+        let err = resolve_auth().unwrap_err();
+        assert!(
+            err.contains("GitHub PAT auth is not yet supported"),
+            "unexpected error: {err}"
         );
     }
 

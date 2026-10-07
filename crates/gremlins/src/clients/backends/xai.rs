@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use rig_core::providers::openai::OpenAI;
+
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
@@ -19,7 +21,7 @@ pub struct XaiBackend {
 
 impl XaiBackend {
     pub fn new(
-        client: rig_core::providers::openai::CompletionsClient,
+        client: OpenAI,
         model: String,
         tool_filter: Option<Vec<String>>,
         client_params: HashMap<String, String>,
