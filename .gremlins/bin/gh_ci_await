@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # Wait for CI jobs to become available on a PR.
-# Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval] [sync_timeout]
+# Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval]
 #
 # Phases:
-#   - No fix_head: startup grace — wait for check-runs to appear AND SHA to sync
+#   - No fix_head: startup grace — wait for check-runs to appear AND SHA to sync.
+#                  If no checks appear within the grace period, output "skipped".
+#                  If checks appear but SHA hasn't synced, keep waiting (bounded
+#                  by the exec-stage timeout).
 #   - fix_head:    SHA sync — wait for headRefOid to reflect the pushed commit
-#   - sync_timeout: max seconds to wait for SHA sync (default 180)
+#                  (bounded by the exec-stage timeout).
 #
 # Outputs:
 #   stdout: "skipped" if no check-runs after grace (exit 0)
 #           nothing otherwise (exit 0 when jobs are available)
-#   stderr: bail message on timeout / REVIEW_REQUIRED (exit 2)
+#   stderr: bail message on REVIEW_REQUIRED (exit 2)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,10 +23,9 @@ pr_url="${1:-}"
 fix_head="${2:-}"
 startup_grace_secs="${3:-60}"
 poll_interval="${4:-30}"
-sync_timeout="${5:-180}"
 
 if [ -z "$pr_url" ]; then
-    die "Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval] [sync_timeout]"
+    die "Usage: gh_ci_await <pr_url> [fix_head] [startup_grace_secs] [poll_interval]"
 fi
 
 # --- helpers ---
@@ -72,6 +74,9 @@ if [ -z "$fix_head" ]; then
     # Startup grace: wait for check-runs to appear AND SHA to sync.
     # Both must be satisfied — stale check-runs from a previous commit
     # must not be mistaken for current CI.
+    # The grace deadline only applies to the no-checks-appeared case;
+    # once checks appear we keep waiting for SHA sync (bounded by
+    # the exec-stage timeout).
     grace_deadline=$(( $(date +%s) + startup_grace_secs ))
     rollup_len=0
     head_oid=""
@@ -86,15 +91,14 @@ if [ -z "$fix_head" ]; then
         if [ "$rollup_len" -gt 0 ] && sha_matches "$head_oid" "$fix_head"; then
             break
         fi
-        if [ "$(date +%s)" -ge "$grace_deadline" ]; then
+        # Only break on deadline when no checks have appeared at all.
+        # If checks exist but SHA hasn't synced, keep waiting — the
+        # exec-stage timeout will bound the total wait.
+        if [ "$(date +%s)" -ge "$grace_deadline" ] && [ "$rollup_len" -eq 0 ]; then
             break
         fi
         sleep "$poll_interval"
     done
-    if ! sha_matches "$head_oid" "$fix_head"; then
-        printf 'ci-gate: timed out waiting for GitHub to reflect current commit (expected %s, got %s)\n' "$fix_head" "$head_oid" >&2
-        exit 2
-    fi
     if [ "$rollup_len" -eq 0 ]; then
         info "ci-gate: no check-runs after ${startup_grace_secs}s grace; skipping"
         printf 'skipped\n'
@@ -104,20 +108,14 @@ if [ -z "$fix_head" ]; then
 else
     # Post-fix: wait for GitHub to reflect the pushed commit SHA
     info "ci-gate: waiting for SHA sync (expecting ${fix_head})"
-    sync_deadline=$(( $(date +%s) + sync_timeout ))
     while true; do
-        remaining=$(( sync_deadline - $(date +%s) ))
         meta=$(fetch_meta)
         decision=$(printf '%s' "$meta" | sed -n '1p')
         head_oid=$(printf '%s' "$meta" | sed -n '3p')
-        info "ci-gate: SHA sync poll... current=${head_oid} expected=${fix_head} ${remaining}s remaining"
+        info "ci-gate: SHA sync poll... current=${head_oid} expected=${fix_head}"
         bail_review_required "$decision"
         if sha_matches "$head_oid" "$fix_head"; then
             break
-        fi
-        if [ "$(date +%s)" -ge "$sync_deadline" ]; then
-            printf 'ci-gate: timed out waiting for GitHub to reflect pushed SHA\n' >&2
-            exit 2
         fi
         sleep "$poll_interval"
     done

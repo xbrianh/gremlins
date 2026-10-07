@@ -24,10 +24,8 @@ stages:
           timeout: 1470
           startup_grace_secs: 60
           poll_interval: 30
-          sync_timeout: 180
-          poll_timeout: 1200
           cmds:
-            - ci_wait "{pr_url}" "{fix_head}" "{done}" "{status}" {startup_grace_secs} {poll_interval} {sync_timeout} {poll_timeout}
+            - ci_wait "{pr_url}" "{fix_head}" "{done}" "{status}" {startup_grace_secs} {poll_interval}
 
       - name: ci-failure-log
         type: sequence

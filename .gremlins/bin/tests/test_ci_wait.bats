@@ -48,7 +48,7 @@ skipped"
 @test "await+poll: touches done and writes status when poll returns 'passed'" {
     mk_mock gh_ci_await "ci-gate: check typename=CheckRun name=ci/test status=IN_PROGRESS conclusion=N/A"
     mk_mock gh_ci_poll $'ci-gate: polling...\npassed'
-    run bash "$SCRIPT" "$PR_URL" "" "$DONE" "$STATUS" 60 30 180 5
+    run bash "$SCRIPT" "$PR_URL" "" "$DONE" "$STATUS" 60 30
     [ "$status" -eq 0 ]
     [ -f "$DONE" ]
     [ "$(tail -n 1 "$STATUS")" = "passed" ]
@@ -59,7 +59,7 @@ skipped"
 @test "await+poll: writes status but does NOT touch done when poll returns 'failed'" {
     mk_mock gh_ci_await "ci-gate: check typename=CheckRun name=ci/test status=IN_PROGRESS conclusion=N/A"
     mk_mock gh_ci_poll $'ci-gate: polling...\nfailed'
-    run bash "$SCRIPT" "$PR_URL" "" "$DONE" "$STATUS" 60 30 180 5
+    run bash "$SCRIPT" "$PR_URL" "" "$DONE" "$STATUS" 60 30
     [ "$status" -eq 0 ]
     [ ! -f "$DONE" ]
     [ "$(tail -n 1 "$STATUS")" = "failed" ]
@@ -76,7 +76,7 @@ skipped"
 @test "exits 2 when gh_ci_poll fails" {
     mk_mock gh_ci_await "ci-gate: check typename=CheckRun name=ci/test status=IN_PROGRESS conclusion=N/A"
     mk_mock gh_ci_poll "timeout" 2
-    run bash "$SCRIPT" "$PR_URL" "" "$DONE" "$STATUS" 60 30 180 5
+    run bash "$SCRIPT" "$PR_URL" "" "$DONE" "$STATUS" 60 30
     [ "$status" -eq 2 ]
 }
 
