@@ -65,6 +65,7 @@ pub struct Config {
     prefix_task_clients: HashMap<String, String>,
     path_overrides: PathOverrides,
     azure_openai: Option<AzureOpenAiSettings>,
+    max_tool_output_bytes: u64,
 }
 
 /// A string newtype that rejects non-string YAML scalars (numbers,
@@ -137,6 +138,8 @@ struct ConfigFile {
     paths: Option<HashMap<String, StrictString>>,
     #[serde(rename = "azure-openai", default)]
     azure_openai: Option<AzureOpenAiSettings>,
+    #[serde(rename = "max-tool-output-bytes", default)]
+    max_tool_output_bytes: Option<u64>,
 }
 
 impl Config {
@@ -147,8 +150,13 @@ impl Config {
         let cfg_file = match parse_yaml_config(&path) {
             Ok(v) => v,
             Err(ConfigError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                let max_tool_output_bytes = std::env::var("GREMLINS_MAX_TOOL_OUTPUT_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
                 return Ok(Config {
                     default_client: env_default_client(),
+                    max_tool_output_bytes,
                     ..Config::default()
                 });
             }
@@ -182,6 +190,15 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let max_tool_output_bytes = cfg_file
+            .max_tool_output_bytes
+            .or_else(|| {
+                std::env::var("GREMLINS_MAX_TOOL_OUTPUT_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
+
         Ok(Config {
             default_client,
             exact_stage_clients,
@@ -190,6 +207,7 @@ impl Config {
             prefix_task_clients,
             path_overrides,
             azure_openai: cfg_file.azure_openai,
+            max_tool_output_bytes,
         })
     }
 
@@ -218,6 +236,10 @@ impl Config {
 
     pub(crate) fn azure_openai(&self) -> Option<&AzureOpenAiSettings> {
         self.azure_openai.as_ref()
+    }
+
+    pub fn max_tool_output_bytes(&self) -> u64 {
+        self.max_tool_output_bytes
     }
 
     pub fn overlay_dirname(&self) -> &'static str {
@@ -481,6 +503,23 @@ pub(crate) fn completion_nudge_budget() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(11)
+}
+
+/// Default cap for tool output: 300 000 bytes.
+pub(crate) const DEFAULT_MAX_TOOL_OUTPUT_BYTES: u64 = 300_000;
+
+/// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.
+/// Default 300 000. 0 means no limit. Settings.yaml `max-tool-output-bytes`
+/// takes precedence over the env var.
+pub(crate) fn max_tool_output_bytes() -> u64 {
+    get_global()
+        .map(|c| c.max_tool_output_bytes())
+        .or_else(|| {
+            std::env::var("GREMLINS_MAX_TOOL_OUTPUT_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
 }
 
 /// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
@@ -1089,5 +1128,63 @@ mod tests {
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_COMPLETION_NUDGE_BUDGET", "7");
         assert_eq!(completion_nudge_budget(), 7);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_default() {
+        let _env = EnvGuard::lock();
+        assert_eq!(max_tool_output_bytes(), DEFAULT_MAX_TOOL_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "5000");
+        assert_eq!(max_tool_output_bytes(), 5000);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_zero_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "0");
+        assert_eq!(max_tool_output_bytes(), 0);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_from_settings_yaml() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"max-tool-output-bytes": 12345}"#));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_tool_output_bytes(), 12345);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_settings_overrides_env() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"max-tool-output-bytes": 77777}"#));
+        // Env var is set after sandbox creation (sandbox clears it on init).
+        // settings.yaml value (77777) must win over the env var (999).
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "999");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_tool_output_bytes(), 77777);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_env_fallback_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        // No config/settings.yaml — simulates absent settings file.
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        env.set("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "4242");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_tool_output_bytes(), 4242);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_default_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        // No settings.yaml, no env var — should get the 300_000 default.
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_tool_output_bytes(), DEFAULT_MAX_TOOL_OUTPUT_BYTES);
     }
 }
