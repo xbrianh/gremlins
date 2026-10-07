@@ -737,22 +737,16 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
 
-        let backend = AnthropicBackend::build(
+        let backend = AnthropicBackend::build_concrete(
             "claude-sonnet-4-6",
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        // Access the internal state through the trait object by
-        // downcasting — but the trait is not `Any`.  Instead, verify
-        // that `extra_params()` does not contain max_tokens and that
-        // the build succeeded (the default was applied internally).
-        //
-        // The real verification is in the agent-loop tests below
-        // (MockCompletionModel::requests() inspects the actual
-        // CompletionRequest).  Here we just confirm the build path
-        // is exercised.
-        drop(backend);
+        assert_eq!(
+            backend.state.max_tokens, 128_000,
+            "default max_tokens must be 128_000"
+        );
     }
 
     /// `max_tokens=8192` in client params overrides the default.
@@ -783,13 +777,16 @@ mod tests {
         let mut extra = indexmap::IndexMap::new();
         extra.insert("max_tokens".into(), "not-a-number".into());
 
-        let backend = AnthropicBackend::build(
+        let backend = AnthropicBackend::build_concrete(
             "claude-sonnet-4-6",
             &HashMap::new(),
             &extra,
         )
         .unwrap();
-        drop(backend);
+        assert_eq!(
+            backend.state.max_tokens, 128_000,
+            "malformed max_tokens must fall back to 128_000"
+        );
     }
 
     /// `max_tokens` is stripped from `additional_params` so it is not
