@@ -174,7 +174,7 @@ async fn read_loop(read_half: OwnedReadHalf, state: Arc<ReadState>) {
             continue;
         }
 
-        // Forward as a raw line (log_line, debug_status, etc.).
+        // Forward as a raw line (log_line, status, etc.).
         let _ = state.raw_tx.send(value);
     }
 }

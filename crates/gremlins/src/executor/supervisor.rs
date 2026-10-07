@@ -434,7 +434,7 @@ fn error_response(message: &str) -> Value {
 }
 
 async fn send_debug_status(writer: &SharedWriter, stage: &str) {
-    let payload = serde_json::json!({"type": "debug_status", "stage": stage});
+    let payload = serde_json::json!({"type": "status", "stage": stage});
     let _ = writer.write_json_line(&payload).await;
 }
 
@@ -1603,14 +1603,14 @@ async fn handle_debug(
         return;
     }
 
-    // Send debug_ready to the client.
-    log::debug!("handle_debug: sending debug_ready for {id}");
+    // Send ready to the client.
+    log::debug!("handle_debug: sending ready for {id}");
     let ready_payload = serde_json::json!({
-        "type": "debug_ready",
+        "type": "ready",
         "id": id,
     });
     if writer.write_json_line(&ready_payload).await.is_err() {
-        log::debug!("handle_debug: failed to send debug_ready for {id}, client disconnected");
+        log::debug!("handle_debug: failed to send ready for {id}, client disconnected");
         let _ = interactive_handle
             .cmd_tx
             .send(InteractiveCommand::Quit)
@@ -1618,7 +1618,7 @@ async fn handle_debug(
         interactive_handle.pause.reset();
         return;
     }
-    log::debug!("handle_debug: debug_ready sent, entering command loop for {id}");
+    log::debug!("handle_debug: ready sent, entering command loop for {id}");
 
     // Bidirectional loop: read commands from client, forward to agent.
     loop {
@@ -1672,23 +1672,30 @@ async fn handle_debug(
                         // No action needed — we're already in the interactive loop.
                     }
                     Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls }) => {
-                        let payload = serde_json::json!({"type": "debug_turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
+                        let payload = serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
                         if writer.write_json_line(&payload).await.is_err() {
                             let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
                         }
                     }
                     Ok(InteractiveEvent::Done { text, usage }) => {
-                        let payload = serde_json::json!({"type": "debug_done", "text": text, "usage": usage});
+                        let payload = serde_json::json!({"type": "done", "text": text, "usage": usage});
                         if writer.write_json_line(&payload).await.is_err() {
                             let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
                         }
                     }
                     Ok(InteractiveEvent::Ended { reason }) => {
-                        let payload = serde_json::json!({"type": "debug_ended", "reason": reason});
+                        let payload = serde_json::json!({"type": "ended", "reason": reason});
                         let _ = writer.write_json_line(&payload).await;
                         break;
+                    }
+                    Ok(InteractiveEvent::StreamChunk { text }) => {
+                        let payload = serde_json::json!({"type": "stream_chunk", "text": text});
+                        if writer.write_json_line(&payload).await.is_err() {
+                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -1949,14 +1956,14 @@ async fn handle_chat(
         return;
     }
 
-    // 12. Send debug_ready
-    log::debug!("handle_chat: sending debug_ready for {id}");
+    // 12. Send ready
+    log::debug!("handle_chat: sending ready for {id}");
     let ready_payload = serde_json::json!({
-        "type": "debug_ready",
+        "type": "ready",
         "id": id,
     });
     if writer.write_json_line(&ready_payload).await.is_err() {
-        log::debug!("handle_chat: failed to send debug_ready for {id}, client disconnected");
+        log::debug!("handle_chat: failed to send ready for {id}, client disconnected");
         let _ = interactive_handle
             .cmd_tx
             .send(InteractiveCommand::Quit)
@@ -2012,23 +2019,30 @@ async fn handle_chat(
                 match result {
                     Ok(InteractiveEvent::Ready { .. }) => {}
                     Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls }) => {
-                        let payload = serde_json::json!({"type": "debug_turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
+                        let payload = serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
                         if writer.write_json_line(&payload).await.is_err() {
                             let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
                         }
                     }
                     Ok(InteractiveEvent::Done { text, usage }) => {
-                        let payload = serde_json::json!({"type": "debug_done", "text": text, "usage": usage});
+                        let payload = serde_json::json!({"type": "done", "text": text, "usage": usage});
                         if writer.write_json_line(&payload).await.is_err() {
                             let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
                         }
                     }
                     Ok(InteractiveEvent::Ended { reason }) => {
-                        let payload = serde_json::json!({"type": "debug_ended", "reason": reason});
+                        let payload = serde_json::json!({"type": "ended", "reason": reason});
                         let _ = writer.write_json_line(&payload).await;
                         break;
+                    }
+                    Ok(InteractiveEvent::StreamChunk { text }) => {
+                        let payload = serde_json::json!({"type": "stream_chunk", "text": text});
+                        if writer.write_json_line(&payload).await.is_err() {
+                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -2049,7 +2063,7 @@ fn create_chat_gremlin(
     use crate::config;
     use crate::definition::GremlinDefinition;
     use crate::executor::gremlin::{validate_gremlin_id, Gremlin, RuntimeConfig, ScratchDir};
-    use crate::executor::state::{self, StateData, BlobMode};
+    use crate::executor::state::{self, BlobMode, StateData};
     use serde_json::{Map, Value};
     use std::collections::HashMap;
 
@@ -2122,8 +2136,7 @@ fn create_chat_gremlin(
     let client = Client::parse(default_client)
         .map_err(|e| format!("invalid default client '{default_client}': {e}"))?;
 
-    let scratch_dir =
-        ScratchDir::Persistent(config::scratch_root(Some(gremlin_id.as_str())));
+    let scratch_dir = ScratchDir::Persistent(config::scratch_root(Some(gremlin_id.as_str())));
 
     Ok(Gremlin {
         id: gremlin_id,

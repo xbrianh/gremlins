@@ -730,6 +730,15 @@ async fn run_agent_loop_core(
                         first_token = Some(now);
                     }
                     last_token = Some(now);
+                    // Emit StreamChunk for text deltas when interactive mode is active.
+                    if interactive_active {
+                        if let Some(ref evt_tx) = evt_tx {
+                            if let Item::Event(StreamEvent::Text { ref text, .. }) = &chunk {
+                                let _ = evt_tx
+                                    .send(InteractiveEvent::StreamChunk { text: text.clone() });
+                            }
+                        }
+                    }
                     apply_chunk(chunk, &mut text, &mut reasoning, &mut tool_calls);
                 }
             }

@@ -118,6 +118,8 @@ pub enum InteractiveEvent {
         /// Token usage summary.
         usage: Option<super::protocol::UsageStats>,
     },
+    /// Incremental text fragment from the model stream.
+    StreamChunk { text: String },
     /// Interactive session ended.
     Ended {
         /// How the session ended: "resumed", "bailed", or "disconnect".

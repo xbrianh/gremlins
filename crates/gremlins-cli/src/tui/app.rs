@@ -35,6 +35,11 @@ pub struct App {
     pub following_log: Option<String>,
     /// Active chat agent session. None when no default client is configured.
     pub chat: Option<ChatGremlin>,
+    /// Streaming block state for incremental response rendering.
+    /// Accumulated text for the current live streaming block.
+    pub stream_text: String,
+    /// Number of lines currently occupied by the live streaming block.
+    pub stream_lines: usize,
 }
 
 impl App {
@@ -51,6 +56,8 @@ impl App {
             project_name,
             following_log: None,
             chat: None,
+            stream_text: String::new(),
+            stream_lines: 0,
         }
     }
 

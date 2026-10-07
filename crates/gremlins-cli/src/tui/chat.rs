@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
     Ready,
+    StreamChunk(String),
     TurnComplete {
         #[allow(dead_code)]
         turn: usize,
@@ -51,13 +52,13 @@ impl ChatGremlin {
         socket::write_json_line(&mut write_half, &serde_json::json!({"op": "chat"})).await?;
 
         // Await the daemon's confirmation before declaring ready.
-        // The daemon may send debug_status messages before debug_ready.
+        // The daemon may send status messages before ready.
         let mut reader = BufReader::new(read_half);
         loop {
             match socket::read_json_line(&mut reader).await {
                 Ok(Some(value)) => match value.get("type").and_then(|v| v.as_str()) {
-                    Some("debug_ready") => break,
-                    Some("debug_status") => continue,
+                    Some("ready") => break,
+                    Some("status") => continue,
                     Some("error") => {
                         let msg = value
                             .get("message")
@@ -141,8 +142,8 @@ impl ChatGremlin {
 
 fn parse_chat_event(value: &Value) -> ChatEvent {
     match value.get("type").and_then(|v| v.as_str()) {
-        Some("debug_ready") => ChatEvent::Ready,
-        Some("debug_turn_complete") => ChatEvent::TurnComplete {
+        Some("ready") => ChatEvent::Ready,
+        Some("turn_complete") => ChatEvent::TurnComplete {
             turn: value.get("turn").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
             text: value
                 .get("text")
@@ -159,7 +160,7 @@ fn parse_chat_event(value: &Value) -> ChatEvent {
                 })
                 .unwrap_or_default(),
         },
-        Some("debug_done") => ChatEvent::Done {
+        Some("done") => ChatEvent::Done {
             text: value
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -167,17 +168,24 @@ fn parse_chat_event(value: &Value) -> ChatEvent {
                 .to_string(),
             usage: value.get("usage").cloned(),
         },
-        Some("debug_ended") => ChatEvent::Ended {
+        Some("ended") => ChatEvent::Ended {
             reason: value
                 .get("reason")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
         },
-        Some("debug_status") => {
+        Some("status") => {
             // Status updates from the daemon during startup; silently ignore.
             ChatEvent::Ready
         }
+        Some("stream_chunk") => ChatEvent::StreamChunk(
+            value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        ),
         Some("error") => ChatEvent::Error(
             value
                 .get("message")
