@@ -19,6 +19,10 @@ use crate::clients::config::ProviderAuth;
 use crate::clients::anthropic_bearer_http::BearerHttpClient;
 use rig_reqwest::ReqwestClient;
 
+/// Default `max_tokens` for Anthropic requests.
+/// Current-generation models (Opus 5.5, Sonnet 5.5, Fable 5.1) support up to 128_000 output tokens.
+const DEFAULT_MAX_TOKENS: u64 = 128_000;
+
 // ── AnthropicClientState ─────────────────────────────────────────────────
 
 /// Either a statically-built client (for ApiKey / Token auth) or the
@@ -244,18 +248,18 @@ impl AnthropicBackend {
         let tool_filter = openai_protocol::tool_filter(native_block);
         let mut client_params = openai_protocol::string_map(extra_params);
 
-        // Resolve max_tokens: client-spec override > default 64_000.
+        // Resolve max_tokens: client-spec override > default 128_000.
         let max_tokens: u64 = match client_params.remove("max_tokens") {
             Some(v) => match v.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => {
                     log::warn!(
-                        "Anthropic: max_tokens={v:?} is not a valid u64, falling back to 64000"
+                        "Anthropic: max_tokens={v:?} is not a valid u64, falling back to {DEFAULT_MAX_TOKENS}"
                     );
-                    64_000
+                    DEFAULT_MAX_TOKENS
                 }
             },
-            None => 64_000,
+            None => DEFAULT_MAX_TOKENS,
         };
 
         let http_client = DynHttpClient::new(ReqwestClient::default());
@@ -647,7 +651,7 @@ mod tests {
                 model: "claude-sonnet-4-6".into(),
                 tool_filter: None,
                 client_params: HashMap::new(),
-                max_tokens: 64_000,
+                max_tokens: DEFAULT_MAX_TOKENS,
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
@@ -727,9 +731,9 @@ mod tests {
     // ── max_tokens resolution tests ──────────────────────────────────
 
     /// When no `max_tokens` appears in client params, the resolved value
-    /// is the default 64_000.
+    /// is the default 128_000.
     #[test]
-    fn build_max_tokens_default_64000() {
+    fn build_max_tokens_default_128000() {
         let mut guard = isolated_env();
         guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
 
@@ -770,7 +774,7 @@ mod tests {
     }
 
     /// A malformed `max_tokens` value (not a valid u64) logs a warning
-    /// and falls back to 64_000.
+    /// and falls back to 128_000.
     #[test]
     fn build_max_tokens_malformed_falls_back() {
         let mut guard = isolated_env();
