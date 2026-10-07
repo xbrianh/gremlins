@@ -1682,11 +1682,31 @@ mod tests {
         }
     }
 
+    /// A transport whose frames never resolve — the stream hangs forever.
+    #[derive(Clone)]
+    struct PendingTransport;
+
+    impl rig_core::driver::Transport<rig_core::test_utils::MockScript> for PendingTransport {
+        fn send(
+            &self,
+            _request: rig_core::completion::CompletionRequest,
+            _exchange: rig_core::driver::Exchange,
+        ) -> rig_core::driver::Opening<rig_core::test_utils::MockFrame> {
+            rig_core::driver::Opening::ready(rig_core::driver::Opened::new(
+                futures::stream::pending(),
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn loop_idle_timeout_is_client_timeout() {
         let ctx = test_ctx(None, None);
         let cancel = CancelToken::new();
-        let model = rig_core::test_utils::MockCompletionModel::from_turns([]).erase();
+        let model = rig_core::driver::Model::new(
+            rig_core::test_utils::MockScript::default(),
+            PendingTransport,
+        )
+        .erase();
         let err = run_agent_loop(
             model,
             "hi",
@@ -1698,9 +1718,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        // Empty mock model returns a provider error immediately in rig 0.43
-        // (previously it triggered a client timeout).
-        assert!(matches!(err, ClientError::ApiServerError { .. }));
+        assert!(
+            matches!(err, ClientError::Timeout { .. }),
+            "expected ClientError::Timeout, got {err:?}"
+        );
     }
 
     #[tokio::test]

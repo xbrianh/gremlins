@@ -511,6 +511,61 @@ mod tests {
         );
     }
 
+    /// A transport whose frames never resolve — the stream hangs forever.
+    #[derive(Clone)]
+    struct PendingTransport;
+
+    impl rig_core::driver::Transport<rig_core::test_utils::MockScript> for PendingTransport {
+        fn send(
+            &self,
+            _request: rig_core::completion::CompletionRequest,
+            _exchange: rig_core::driver::Exchange,
+        ) -> rig_core::driver::Opening<rig_core::test_utils::MockFrame> {
+            rig_core::driver::Opening::ready(rig_core::driver::Opened::new(
+                futures::stream::pending(),
+            ))
+        }
+    }
+
+    /// Concurrent siblings share one depth level: N calls from the same parent
+    /// must not exhaust the recursion bound between them.
+    #[tokio::test]
+    async fn make_task_runner_concurrent_siblings_do_not_exhaust_depth() {
+        let ctx = depth_test_ctx();
+        let model = rig_core::driver::Model::new(
+            rig_core::test_utils::MockScript::default(),
+            PendingTransport,
+        )
+        .erase();
+        let cancel = super::super::agent_loop::CancelToken::new();
+        let runner = make_task_runner(
+            model,
+            None,
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            0.2,
+            10,
+            0,
+            None,
+            None,
+        );
+
+        // Ten concurrent siblings at depth 0 — none should be rejected as
+        // "max depth" even though they overlap in time.
+        let handles: Vec<_> = (0..10)
+            .map(|i| tokio::spawn(runner.clone()(format!("label {i}"), format!("call {i}"))))
+            .collect();
+        for h in handles {
+            let out = h.await.unwrap();
+            assert!(
+                !out.contains("max depth"),
+                "sibling at depth 0 must not hit the recursion guard, got: {out}"
+            );
+        }
+    }
+
     /// libtest replaces the test thread's stderr with an in-memory buffer, and
     /// `std::thread::spawn` propagates that capture to children, so `eprintln!`
     /// from the agent loop cannot be observed on fd 2 from a test thread. A raw
