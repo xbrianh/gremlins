@@ -19,6 +19,10 @@ use crate::clients::config::ProviderAuth;
 use crate::clients::anthropic_bearer_http::BearerHttpClient;
 use rig_reqwest::ReqwestClient;
 
+/// Default `max_tokens` for Anthropic requests.
+/// Current-generation models (Opus 5.5, Sonnet 5.5, Fable 5.1) support up to 128_000 output tokens.
+const DEFAULT_MAX_TOKENS: u64 = 128_000;
+
 // ── AnthropicClientState ─────────────────────────────────────────────────
 
 /// Either a statically-built client (for ApiKey / Token auth) or the
@@ -244,18 +248,18 @@ impl AnthropicBackend {
         let tool_filter = openai_protocol::tool_filter(native_block);
         let mut client_params = openai_protocol::string_map(extra_params);
 
-        // Resolve max_tokens: client-spec override > default 64_000.
+        // Resolve max_tokens: client-spec override > default 128_000.
         let max_tokens: u64 = match client_params.remove("max_tokens") {
             Some(v) => match v.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => {
                     log::warn!(
-                        "Anthropic: max_tokens={v:?} is not a valid u64, falling back to 64000"
+                        "Anthropic: max_tokens={v:?} is not a valid u64, falling back to {DEFAULT_MAX_TOKENS}"
                     );
-                    64_000
+                    DEFAULT_MAX_TOKENS
                 }
             },
-            None => 64_000,
+            None => DEFAULT_MAX_TOKENS,
         };
 
         let http_client = DynHttpClient::new(ReqwestClient::default());
@@ -647,7 +651,7 @@ mod tests {
                 model: "claude-sonnet-4-6".into(),
                 tool_filter: None,
                 client_params: HashMap::new(),
-                max_tokens: 64_000,
+                max_tokens: DEFAULT_MAX_TOKENS,
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
@@ -727,28 +731,22 @@ mod tests {
     // ── max_tokens resolution tests ──────────────────────────────────
 
     /// When no `max_tokens` appears in client params, the resolved value
-    /// is the default 64_000.
+    /// is the default 128_000.
     #[test]
-    fn build_max_tokens_default_64000() {
+    fn build_max_tokens_default_128000() {
         let mut guard = isolated_env();
         guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
 
-        let backend = AnthropicBackend::build(
+        let backend = AnthropicBackend::build_concrete(
             "claude-sonnet-4-6",
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        // Access the internal state through the trait object by
-        // downcasting — but the trait is not `Any`.  Instead, verify
-        // that `extra_params()` does not contain max_tokens and that
-        // the build succeeded (the default was applied internally).
-        //
-        // The real verification is in the agent-loop tests below
-        // (MockCompletionModel::requests() inspects the actual
-        // CompletionRequest).  Here we just confirm the build path
-        // is exercised.
-        drop(backend);
+        assert_eq!(
+            backend.state.max_tokens, 128_000,
+            "default max_tokens must be 128_000"
+        );
     }
 
     /// `max_tokens=8192` in client params overrides the default.
@@ -770,7 +768,7 @@ mod tests {
     }
 
     /// A malformed `max_tokens` value (not a valid u64) logs a warning
-    /// and falls back to 64_000.
+    /// and falls back to 128_000.
     #[test]
     fn build_max_tokens_malformed_falls_back() {
         let mut guard = isolated_env();
@@ -779,13 +777,16 @@ mod tests {
         let mut extra = indexmap::IndexMap::new();
         extra.insert("max_tokens".into(), "not-a-number".into());
 
-        let backend = AnthropicBackend::build(
+        let backend = AnthropicBackend::build_concrete(
             "claude-sonnet-4-6",
             &HashMap::new(),
             &extra,
         )
         .unwrap();
-        drop(backend);
+        assert_eq!(
+            backend.state.max_tokens, 128_000,
+            "malformed max_tokens must fall back to 128_000"
+        );
     }
 
     /// `max_tokens` is stripped from `additional_params` so it is not
