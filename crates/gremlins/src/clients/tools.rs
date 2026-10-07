@@ -3274,7 +3274,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         // Generate output that is ~200 bytes — well over a 10-byte cap.
-        let args = serde_json::json!({"command": "printf 'x%.0s' {1..200}"}).to_string();
+        let args = serde_json::json!({"command": "i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
         let result = invoke("Bash", &c, &args).await;
         assert!(
@@ -3312,7 +3312,7 @@ mod tests {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
         let c = ctx(&dir);
-        let args = serde_json::json!({"command": "printf 'x%.0s' {1..200}"}).to_string();
+        let args = serde_json::json!({"command": "i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "0");
         let result = invoke("Bash", &c, &args).await;
         assert!(
