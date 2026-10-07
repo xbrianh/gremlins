@@ -192,7 +192,7 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
             })
-            .unwrap_or(300_000);
+            .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
 
         Ok(Config {
             default_client,
@@ -500,13 +500,21 @@ pub(crate) fn completion_nudge_budget() -> usize {
         .unwrap_or(11)
 }
 
+/// Default cap for tool output: 300 000 bytes.
+pub(crate) const DEFAULT_MAX_TOOL_OUTPUT_BYTES: u64 = 300_000;
+
 /// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.
 /// Default 300 000. 0 means no limit. Settings.yaml `max-tool-output-bytes`
 /// takes precedence over the env var.
 pub(crate) fn max_tool_output_bytes() -> u64 {
     get_global()
         .map(|c| c.max_tool_output_bytes())
-        .unwrap_or(300_000)
+        .or_else(|| {
+            std::env::var("GREMLINS_MAX_TOOL_OUTPUT_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
 }
 
 /// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
