@@ -34,7 +34,8 @@ fn resolve_auth() -> Result<Copilot, String> {
     }
     Err(format!(
         "no API key for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
-         COPILOT_API_KEY, or add an entry with \"api-key\" in {}",
+         COPILOT_API_KEY, or add an entry with \"api-key\" in {}. \
+         (PAT and GitHub-token auth are not yet supported in this rig version.)",
         crate::config::user_config_root()
             .join("providers.yaml")
             .display(),

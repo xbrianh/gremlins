@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use rig_core::providers::openai::{OpenAI, wire};
+use rig_core::providers::openai::OpenAI;
+use rig_core::providers::xai;
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
@@ -12,7 +13,7 @@ use crate::clients::protocol::CompletedRun;
 
 const PROVIDER_NAME: &str = "xai";
 const API_KEY_ENV: &str = "XAI_API_KEY";
-const BASE_URL: &str = "https://api.x.ai/v1";
+const BASE_URL: &str = "https://api.x.ai";
 const DEFAULT_MODEL: &str = "grok-4";
 
 pub struct XaiBackend {
@@ -58,7 +59,7 @@ impl XaiBackend {
                 )
             })?;
         let base_url = crate::clients::config::base_url("XAI_BASE_URL", PROVIDER_NAME, BASE_URL);
-        let client = openai_protocol::build_openai_client(&key, &base_url, &wire::OPENAI)?;
+        let client = openai_protocol::build_openai_client(&key, &base_url, &xai::DIALECT)?;
         Ok(Arc::new(Self::new(
             client,
             model.to_string(),
@@ -106,7 +107,7 @@ mod tests {
     fn provider_constants() {
         assert_eq!(PROVIDER_NAME, "xai");
         assert_eq!(API_KEY_ENV, "XAI_API_KEY");
-        assert_eq!(BASE_URL, "https://api.x.ai/v1");
+        assert_eq!(BASE_URL, "https://api.x.ai");
         assert_eq!(DEFAULT_MODEL, "grok-4");
     }
 }
