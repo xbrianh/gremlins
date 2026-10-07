@@ -206,6 +206,7 @@ pub(crate) async fn run_agent_loop(
         ctx.completion_nudge_budget,
         ctx.params.log_tx.clone(),
         opts.max_tokens,
+        opts.skip_temperature,
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -250,6 +251,7 @@ pub(crate) async fn run_agent_loop_nested(
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
+    skip_temperature: bool,
 ) -> Result<CompletedRun, ClientError> {
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
@@ -259,7 +261,7 @@ pub(crate) async fn run_agent_loop_nested(
         tool_filter,
         classify_error: None,
         max_tokens,
-        skip_temperature: false,
+        skip_temperature,
     };
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;

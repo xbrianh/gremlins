@@ -147,6 +147,7 @@ pub(crate) fn make_task_runner(
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
+    skip_temperature: bool,
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
@@ -162,6 +163,7 @@ pub(crate) fn make_task_runner(
         completion_nudge_budget,
         log_tx,
         max_tokens,
+        skip_temperature,
     )
 }
 
@@ -180,6 +182,7 @@ fn make_task_runner_at_depth(
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
+    skip_temperature: bool,
 ) -> tools::TaskFn {
     Arc::new(move |description: String, task: String| {
         let model = model.clone();
@@ -227,6 +230,7 @@ fn make_task_runner_at_depth(
                 completion_nudge_budget,
                 log_tx.clone(),
                 max_tokens,
+                skip_temperature,
             ));
 
             let work_root = tools::worktree_root(task_cwd.as_deref());
@@ -248,6 +252,7 @@ fn make_task_runner_at_depth(
                 completion_nudge_budget,
                 log_tx.clone(),
                 max_tokens,
+                skip_temperature,
             )
             .await;
 
@@ -462,6 +467,7 @@ mod tests {
             0,
             None,
             None,
+            false,
         );
 
         // First invocation: depth 0 < 3, should succeed.
@@ -502,6 +508,7 @@ mod tests {
             0,
             None,
             None,
+            false,
         );
 
         let blocked = runner("label".into(), "too deep".into()).await;
@@ -550,6 +557,7 @@ mod tests {
             0,
             None,
             None,
+            false,
         );
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
@@ -645,6 +653,7 @@ mod tests {
                 0,
                 Some(log_tx),
                 None,
+                false,
             );
             (runner, log_rx)
         }
