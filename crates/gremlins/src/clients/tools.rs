@@ -1530,6 +1530,21 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
         &ka,
         result_status(&res),
     );
+    // Cap output for tools that can produce unbounded results.
+    // Task and Done are excluded: Task manages its own context, Done is tiny.
+    // Edit and Write always return tiny results.
+    let cap = crate::config::max_tool_output_bytes();
+    if cap > 0 && matches!(name, "Read" | "Bash" | "Grep" | "Glob") && res.len() > cap as usize {
+        return format!(
+            "Tool output exceeded the limit ({} bytes, cap is {}). Try a narrower approach:\n\
+- Bash: pipe through `head`, filter with `grep`, or target a specific file.\n\
+- Grep: lower `max_matches`, use a more specific `glob`, or narrow the `path`.\n\
+- Read: use `offset`/`limit` to paginate.\n\
+- Glob: restrict the `path`.",
+            res.len(),
+            cap
+        );
+    }
     res
 }
 

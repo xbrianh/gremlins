@@ -65,6 +65,7 @@ pub struct Config {
     prefix_task_clients: HashMap<String, String>,
     path_overrides: PathOverrides,
     azure_openai: Option<AzureOpenAiSettings>,
+    max_tool_output_bytes: u64,
 }
 
 /// A string newtype that rejects non-string YAML scalars (numbers,
@@ -137,6 +138,8 @@ struct ConfigFile {
     paths: Option<HashMap<String, StrictString>>,
     #[serde(rename = "azure-openai", default)]
     azure_openai: Option<AzureOpenAiSettings>,
+    #[serde(rename = "max-tool-output-bytes", default)]
+    max_tool_output_bytes: Option<u64>,
 }
 
 impl Config {
@@ -182,6 +185,15 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let max_tool_output_bytes = cfg_file
+            .max_tool_output_bytes
+            .or_else(|| {
+                std::env::var("GREMLINS_MAX_TOOL_OUTPUT_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(300_000);
+
         Ok(Config {
             default_client,
             exact_stage_clients,
@@ -190,6 +202,7 @@ impl Config {
             prefix_task_clients,
             path_overrides,
             azure_openai: cfg_file.azure_openai,
+            max_tool_output_bytes,
         })
     }
 
@@ -218,6 +231,10 @@ impl Config {
 
     pub(crate) fn azure_openai(&self) -> Option<&AzureOpenAiSettings> {
         self.azure_openai.as_ref()
+    }
+
+    pub fn max_tool_output_bytes(&self) -> u64 {
+        self.max_tool_output_bytes
     }
 
     pub fn overlay_dirname(&self) -> &'static str {
@@ -481,6 +498,15 @@ pub(crate) fn completion_nudge_budget() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(11)
+}
+
+/// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.
+/// Default 300 000. 0 means no limit. Settings.yaml `max-tool-output-bytes`
+/// takes precedence over the env var.
+pub(crate) fn max_tool_output_bytes() -> u64 {
+    get_global()
+        .map(|c| c.max_tool_output_bytes())
+        .unwrap_or(300_000)
 }
 
 /// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
