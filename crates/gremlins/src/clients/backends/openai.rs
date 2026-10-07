@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use rig_core::providers::openai::{OpenAI, wire};
+
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
@@ -19,7 +21,7 @@ pub struct OpenAiBackend {
 
 impl OpenAiBackend {
     pub fn new(
-        client: rig_core::providers::openai::CompletionsClient,
+        client: OpenAI,
         model: String,
         tool_filter: Option<Vec<String>>,
         client_params: HashMap<String, String>,
@@ -56,7 +58,7 @@ impl OpenAiBackend {
                 )
             })?;
         let base_url = crate::clients::config::base_url("OPENAI_BASE_URL", PROVIDER_NAME, BASE_URL);
-        let client = openai_protocol::build_openai_client(&key, &base_url)?;
+        let client = openai_protocol::build_openai_client(&key, &base_url, &wire::OPENAI)?;
         Ok(Arc::new(Self::new(
             client,
             model.to_string(),
@@ -111,12 +113,7 @@ mod tests {
 
     #[test]
     fn reap_all_cancels_only_own_tokens() {
-        let client = rig_core::providers::openai::Client::builder()
-            .api_key(rig_core::client::BearerAuth::from("sk-test"))
-            .base_url("https://api.openai.com/v1")
-            .build()
-            .unwrap()
-            .completions_api();
+        let client = OpenAI::new("sk-test");
         let backend = OpenAiBackend::new(client, "gpt-4o".into(), None, HashMap::new());
         let a = CancelToken::new();
         let b = CancelToken::new();

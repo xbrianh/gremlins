@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rig_core::completion::CompletionError;
+use rig_core::error::ProviderError;
+use rig_core::providers::openai::{OpenAI, wire};
 
 use crate::clients::agent_loop::ErrorClassifier;
 use crate::clients::backend::{Backend, ClientError, RunParams};
@@ -40,7 +41,7 @@ const TRANSIENT_SUBSTRINGS: &[&str] = &[
     "tls handshake",
 ];
 
-fn classify_openrouter_error(err: CompletionError) -> ClientError {
+fn classify_openrouter_error(err: ProviderError) -> ClientError {
     let message = err.to_string();
     // Phase 1: status codes (same as default).
     if let Some(status) = err.provider_response_status() {
@@ -80,7 +81,7 @@ pub struct OpenRouterBackend {
 
 impl OpenRouterBackend {
     pub fn new(
-        client: rig_core::providers::openai::CompletionsClient,
+        client: OpenAI,
         model: String,
         tool_filter: Option<Vec<String>>,
         client_params: HashMap<String, String>,
@@ -117,7 +118,7 @@ impl OpenRouterBackend {
                 )
             })?;
         let base_url = crate::clients::config::base_url("OPENROUTER_BASE_URL", PROVIDER_NAME, BASE_URL);
-        let client = openai_protocol::build_openai_client(&key, &base_url)?;
+        let client = openai_protocol::build_openai_client(&key, &base_url, &wire::OPENROUTER)?;
         let model = if model.is_empty() {
             "gpt-4o".to_string()
         } else {
@@ -170,7 +171,7 @@ mod tests {
 
     #[test]
     fn phase1_5xx_retryable() {
-        let err = CompletionError::from_http_response(StatusCode::SERVICE_UNAVAILABLE, "boom");
+        let err = ProviderError::from_http_response(StatusCode::SERVICE_UNAVAILABLE, "boom");
         assert!(matches!(
             classify_openrouter_error(err),
             ClientError::ApiServerError { .. }
@@ -179,7 +180,7 @@ mod tests {
 
     #[test]
     fn phase1_429_retryable() {
-        let err = CompletionError::from_http_response(StatusCode::TOO_MANY_REQUESTS, "slow down");
+        let err = ProviderError::from_http_response(StatusCode::TOO_MANY_REQUESTS, "slow down");
         assert!(matches!(
             classify_openrouter_error(err),
             ClientError::ApiServerError { .. }
@@ -188,7 +189,7 @@ mod tests {
 
     #[test]
     fn phase1_no_http_status_retryable() {
-        let err = CompletionError::ProviderError("something broke".into());
+        let err = ProviderError::Provider("something broke".into());
         assert!(matches!(
             classify_openrouter_error(err),
             ClientError::ApiServerError { .. }
@@ -197,7 +198,7 @@ mod tests {
 
     #[test]
     fn phase2_server_error_match() {
-        let err = CompletionError::from_http_response(
+        let err = ProviderError::from_http_response(
             StatusCode::BAD_REQUEST,
             r#"{"error":{"message":"upstream server error","code":"server_error"}}"#,
         );
@@ -209,7 +210,7 @@ mod tests {
 
     #[test]
     fn phase2_upstream_match() {
-        let err = CompletionError::from_http_response(
+        let err = ProviderError::from_http_response(
             StatusCode::BAD_REQUEST,
             "upstream provider failure",
         );
@@ -221,7 +222,7 @@ mod tests {
 
     #[test]
     fn phase2_provider_error_match() {
-        let err = CompletionError::from_http_response(
+        let err = ProviderError::from_http_response(
             StatusCode::BAD_REQUEST,
             r#"{"error":"provider_error: model overloaded"}"#,
         );
@@ -233,7 +234,7 @@ mod tests {
 
     #[test]
     fn phase2_no_match_fatal() {
-        let err = CompletionError::from_http_response(
+        let err = ProviderError::from_http_response(
             StatusCode::BAD_REQUEST,
             "invalid request: missing required field",
         );
@@ -247,7 +248,7 @@ mod tests {
     fn phase2_non_4xx_never_retryable() {
         // A 2xx/3xx whose body contains a transient keyword must not be retried.
         for status in [StatusCode::OK, StatusCode::MOVED_PERMANENTLY] {
-            let err = CompletionError::from_http_response(status, "upstream server error");
+            let err = ProviderError::from_http_response(status, "upstream server error");
             assert!(matches!(
                 classify_openrouter_error(err),
                 ClientError::Runtime { .. }
@@ -257,7 +258,7 @@ mod tests {
 
     #[test]
     fn phase2_401_no_match_fatal() {
-        let err = CompletionError::from_http_response(StatusCode::UNAUTHORIZED, "bad key");
+        let err = ProviderError::from_http_response(StatusCode::UNAUTHORIZED, "bad key");
         assert!(matches!(
             classify_openrouter_error(err),
             ClientError::Runtime { .. }

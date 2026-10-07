@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rig_core::client::CompletionClient;
-use rig_core::providers::copilot::{self, CopilotIntent};
+use rig_core::providers::copilot::{Copilot, CopilotConfig, CopilotIntent};
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
@@ -19,109 +20,22 @@ use crate::clients::task::TaskModelSelector;
 const PROVIDER_NAME: &str = "copilot";
 const DEFAULT_MODEL: &str = "gpt-4o";
 
-// ── Auth source ──────────────────────────────────────────────────────────
-
-/// Which credential source was used to build the Copilot client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CopilotAuthSource {
-    /// `GITHUB_COPILOT_API_KEY` env var.
-    GitHubCopilotApiKey,
-    /// `COPILOT_API_KEY` env var.
-    CopilotApiKey,
-    /// `COPILOT_GITHUB_ACCESS_TOKEN` env var.
-    CopilotGitHubAccessToken,
-    /// `GITHUB_TOKEN` env var.
-    GitHubToken,
-    /// `providers.yaml` `"copilot"` entry (`api-key` field).
-    ProvidersYaml,
-    /// `providers.yaml` `"copilot"` entry (`pat` field).
-    ProvidersYamlPat,
-    /// Auto-discovered from `~/.config/github-copilot/apps.json`.
-    AppsJson,
-}
-
-/// Resolve credentials and build a Copilot client, returning the client and
-/// which source won.  OAuth device-code flow is disabled — gremlins run
-/// unattended.
+/// Resolve credentials and build a Copilot client.
+/// OAuth device-code flow is disabled — gremlins run unattended.
 ///
 /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
-/// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.yaml`
-/// `"copilot"` entry (`api-key` then `pat`) →
-/// `~/.config/github-copilot/apps.json` → error.
-fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
-    let api_key = crate::config::copilot_api_key();
-    let github_token = crate::config::copilot_github_token();
-
-    if let Some(key) = api_key {
-        let client = copilot::Client::builder()
-            .api_key(key)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
-        // Determine which env var supplied the key.
-        let source = if std::env::var("GITHUB_COPILOT_API_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .is_some()
-        {
-            CopilotAuthSource::GitHubCopilotApiKey
-        } else {
-            CopilotAuthSource::CopilotApiKey
-        };
-        return Ok((client, source));
+/// `providers.yaml` `"copilot"` entry (`api-key`).
+fn resolve_auth() -> Result<Copilot, String> {
+    if let Some(key) = crate::config::copilot_api_key() {
+        return Ok(CopilotConfig::new(key).client());
     }
-
-    if let Some(token) = github_token {
-        let client = copilot::Client::builder()
-            .github_access_token(token)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
-        let source = if std::env::var("COPILOT_GITHUB_ACCESS_TOKEN")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .is_some()
-        {
-            CopilotAuthSource::CopilotGitHubAccessToken
-        } else {
-            CopilotAuthSource::GitHubToken
-        };
-        return Ok((client, source));
-    }
-
-    // providers.yaml: try api-key first, then pat.
     if let Some(key) = crate::clients::config::api_key("", PROVIDER_NAME) {
-        let client = copilot::Client::builder()
-            .api_key(key)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
-        return Ok((client, CopilotAuthSource::ProvidersYaml));
+        return Ok(CopilotConfig::new(key).client());
     }
-
-    if let Some(token) = crate::clients::config::pat(PROVIDER_NAME) {
-        let client = copilot::Client::builder()
-            .github_access_token(token)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
-        return Ok((client, CopilotAuthSource::ProvidersYamlPat));
-    }
-
-    // Auto-discover OAuth token from the Copilot extension's apps.json.
-    if let Some(token) = crate::config::copilot_oauth_token() {
-        let client = copilot::Client::builder()
-            .github_access_token(token)
-            .allow_device_flow(false)
-            .build()
-            .map_err(|e| format!("{e}"))?;
-        return Ok((client, CopilotAuthSource::AppsJson));
-    }
-
     Err(format!(
-        "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
-         COPILOT_API_KEY, COPILOT_GITHUB_ACCESS_TOKEN, GITHUB_TOKEN, or add an \
-         entry with \"api-key\" or \"pat\" in {}",
+        "no API key for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
+         COPILOT_API_KEY, or add an entry with \"api-key\" in {}. \
+         (PAT and GitHub-token auth are not yet supported in this rig version.)",
         crate::config::user_config_root()
             .join("providers.yaml")
             .display(),
@@ -131,7 +45,7 @@ fn resolve_auth() -> Result<(copilot::Client, CopilotAuthSource), String> {
 // ── CopilotRunState ──────────────────────────────────────────────────────
 
 struct CopilotRunState {
-    client: copilot::Client,
+    client: Copilot,
     model: String,
     tool_filter: Option<Vec<String>>,
     intent: Option<CopilotIntent>,
@@ -163,22 +77,22 @@ fn parse_extra_params(
 }
 
 impl CopilotRunState {
-    fn make_model(&self, override_model: Option<&str>) -> copilot::CompletionModel {
+    fn make_model(&self, override_model: Option<&str>) -> DynModel<Completion> {
         let model_name = match override_model {
             Some(m) if !m.is_empty() => m.to_string(),
             _ => self.model.clone(),
         };
-        let mut mdl = self.client.completion_model(&model_name);
+        let mut mdl = self.client.completion(&model_name);
         if let Some(intent) = self.intent {
-            mdl = mdl.with_intent(intent);
+            mdl.wire = mdl.wire.with_intent(intent);
         }
         if self.strict_tools {
-            mdl = mdl.with_strict_tools();
+            mdl.wire = mdl.wire.with_strict_tools();
         }
         if self.tool_result_array_content {
-            mdl = mdl.with_tool_result_array_content();
+            mdl.wire = mdl.wire.with_tool_result_array_content();
         }
-        mdl
+        mdl.erase()
     }
 }
 
@@ -192,15 +106,13 @@ impl CopilotBackend {
     /// Build a Copilot backend.
     ///
     /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
-    /// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.yaml`
-    /// `"copilot"` entry → error. OAuth is disabled — gremlins run
-    /// unattended.
+    /// `providers.yaml` `"copilot"` entry → error.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        let (client, _auth_source) = resolve_auth()?;
+        let client = resolve_auth()?;
 
         let model = if model.is_empty() {
             DEFAULT_MODEL.to_string()
@@ -233,10 +145,10 @@ impl CopilotBackend {
 /// Build a `TaskModelSelector` for the Copilot backend, or `None` when
 /// `settings.yaml` declares no `task-clients` entries this backend can serve.
 fn copilot_task_model_selector(
-    client: &copilot::Client,
+    client: &Copilot,
     task_clients_exact: &HashMap<String, String>,
     task_clients_prefix: &HashMap<String, String>,
-) -> Option<TaskModelSelector<copilot::CompletionModel>> {
+) -> Option<TaskModelSelector<DynModel<Completion>>> {
     if task_clients_exact.is_empty() && task_clients_prefix.is_empty() {
         return None;
     }
@@ -250,7 +162,7 @@ fn copilot_task_model_selector(
         Arc::new(move |spec: &str| {
             let (provider, model) = openai_protocol::provider_and_model(spec)?;
             if provider == PROVIDER_NAME {
-                Some(client.completion_model(model))
+                Some(client.completion(model).erase())
             } else {
                 log::warn!(
                     "task-clients entry spec {spec:?} names provider {provider:?}, but this \
@@ -354,7 +266,7 @@ impl Backend for CopilotBackend {
 
                     let model = self.state.make_model(ctx.params.model.as_deref());
                     let result = run_agent_loop(
-                        &model,
+                        model,
                         &p,
                         ctx,
                         cancel,
@@ -427,16 +339,11 @@ mod tests {
     use super::*;
     use crate::test_support::EnvGuard;
 
-    /// A fake API key that `copilot::Client::builder().api_key(…).build()`
-    /// accepts without making network calls.
     const FAKE_API_KEY: &str = "tid=1;exp=9999999999";
 
-    /// Lock the process-state guard and scrub every Copilot credential source.
     fn scrub_copilot_env(guard: &mut EnvGuard) {
         guard.remove("GITHUB_COPILOT_API_KEY");
         guard.remove("COPILOT_API_KEY");
-        guard.remove("COPILOT_GITHUB_ACCESS_TOKEN");
-        guard.remove("GITHUB_TOKEN");
         guard.remove("XDG_CONFIG_HOME");
     }
 
@@ -458,11 +365,7 @@ mod tests {
 
     #[test]
     fn reap_all_cancels_only_own_tokens() {
-        let client = copilot::Client::builder()
-            .api_key("tid=1;exp=9999999999")
-            .allow_device_flow(false)
-            .build()
-            .unwrap();
+        let client = Copilot::new("tid=1;exp=9999999999");
         let backend = CopilotBackend {
             state: CopilotRunState {
                 client,
@@ -535,163 +438,40 @@ mod tests {
         );
         let err = result.err().expect("should be an error");
         assert!(
-            err.contains("no credentials for provider 'copilot'"),
+            err.contains("no API key for provider") || err.contains("no credentials for provider"),
             "got: {err}"
         );
     }
 
-    // ── auth precedence tests ─────────────────────────────────────────
+    // ── auth tests ───────────────────────────────────────────────────
 
     #[test]
-    fn auth_precedence_api_key_over_github_token() {
+    fn auth_github_copilot_api_key() {
         let mut guard = isolated_env();
         guard.set("GITHUB_COPILOT_API_KEY", FAKE_API_KEY);
-        guard.set("COPILOT_GITHUB_ACCESS_TOKEN", "ghp_fake_token");
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::GitHubCopilotApiKey,
-            "GITHUB_COPILOT_API_KEY should win over COPILOT_GITHUB_ACCESS_TOKEN"
-        );
+        assert!(resolve_auth().is_ok());
     }
 
     #[test]
-    fn auth_precedence_copilot_api_key_fallback() {
+    fn auth_copilot_api_key_fallback() {
         let mut guard = isolated_env();
         guard.set("COPILOT_API_KEY", FAKE_API_KEY);
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::CopilotApiKey,
-            "COPILOT_API_KEY should work as fallback"
-        );
+        assert!(resolve_auth().is_ok());
     }
 
     #[test]
-    fn auth_precedence_github_token_over_providers_json() {
-        let mut guard = isolated_env();
-        guard.set("GITHUB_TOKEN", "ghp_fake_token");
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::GitHubToken,
-            "GITHUB_TOKEN should win over providers.yaml"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_copilot_github_access_token_over_github_token() {
-        let mut guard = isolated_env();
-        guard.set("COPILOT_GITHUB_ACCESS_TOKEN", "ghp_copilot_token");
-        guard.set("GITHUB_TOKEN", "ghp_other_token");
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::CopilotGitHubAccessToken,
-            "COPILOT_GITHUB_ACCESS_TOKEN should win over GITHUB_TOKEN"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_providers_json_fallback() {
-        let mut guard = isolated_env();
-        // No env vars set — only providers.yaml.
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.yaml");
-        std::fs::write(
-            &providers_path,
-            format!(
-                r#"{{"copilot": {{"api-key": "{FAKE_API_KEY}"}}}}"#
-            ),
-        )
-        .unwrap();
-        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::ProvidersYaml,
-            "providers.yaml should be the fallback when no env vars are set"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_providers_json_pat_fallback() {
-        let mut guard = isolated_env();
-        // No env vars set — only providers.yaml with a pat field.
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.yaml");
-        std::fs::write(
-            &providers_path,
-            r#"{"copilot": {"pat": "ghp_fake_pat_token"}}"#,
-        )
-        .unwrap();
-        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::ProvidersYamlPat,
-            "providers.yaml pat field should be the fallback when no env vars are set"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_providers_json_api_key_wins_over_pat() {
+    fn auth_providers_yaml() {
         let mut guard = isolated_env();
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.yaml");
         std::fs::write(
-            &providers_path,
-            format!(
-                r#"{{"copilot": {{"api-key": "{FAKE_API_KEY}", "pat": "ghp_fake_pat_token"}}}}"#
-            ),
+            config_dir.join("providers.yaml"),
+            format!(r#"{{"copilot": {{"api-key": "{FAKE_API_KEY}"}}}}"#),
         )
         .unwrap();
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::ProvidersYaml,
-            "providers.yaml api-key should win over pat when both are present"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_apps_json_auto_discovery() {
-        let mut guard = isolated_env();
-        let tmp = tempfile::tempdir().unwrap();
-
-        // Simulate the Copilot extension's apps.json under $HOME/.config.
-        let copilot_config_dir = tmp.path().join(".config").join("github-copilot");
-        std::fs::create_dir_all(&copilot_config_dir).unwrap();
-        std::fs::write(
-            copilot_config_dir.join("apps.json"),
-            r#"{"github.com:app-id": {"oauth_token": "ghu_auto_token"}}"#,
-        )
-        .unwrap();
-
-        // Point $HOME at the temp dir so copilot_oauth_token() finds it.
-        guard.set("HOME", tmp.path());
-        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::AppsJson,
-            "should auto-discover oauth_token from apps.json"
-        );
+        assert!(resolve_auth().is_ok());
     }
 
     // ── parse_extra_params tests ─────────────────────────────────────

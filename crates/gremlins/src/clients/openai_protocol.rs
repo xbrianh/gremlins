@@ -3,9 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use indexmap::IndexMap;
-use rig_core::client::CompletionClient;
-use rig_core::http_client::ReqwestClient;
-use rig_core::providers::openai;
+use rig_core::driver::DynModel;
+use rig_core::http_client::DynHttpClient;
+use rig_core::operation::Completion;
+use rig_core::providers::openai::wire::Dialect;
+use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
 use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
 use super::backend::{ClientError, RunParams};
@@ -15,7 +17,7 @@ use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use super::task::TaskModelSelector;
 
 /// The completion model type shared by every OpenAI-compatible backend.
-pub(crate) type OpenAiModel = <openai::CompletionsClient as CompletionClient>::CompletionModel;
+pub(crate) type OpenAiModel = DynModel<Completion>;
 
 /// Shared state for OpenAI-protocol backends.
 ///
@@ -24,7 +26,7 @@ pub(crate) type OpenAiModel = <openai::CompletionsClient as CompletionClient>::C
 /// error classifier and provider name, which are passed as parameters to
 /// [`run_openai_compat`] and [`reap_openai_compat`].
 pub(crate) struct OpenAiRunState {
-    pub(crate) client: openai::CompletionsClient,
+    pub(crate) client: OpenAI,
     pub(crate) model: String,
     pub(crate) tool_filter: Option<Vec<String>>,
     pub(crate) client_params: HashMap<String, String>,
@@ -36,7 +38,7 @@ pub(crate) struct OpenAiRunState {
 
 impl OpenAiRunState {
     pub(crate) fn new(
-        client: openai::CompletionsClient,
+        client: OpenAI,
         model: String,
         tool_filter: Option<Vec<String>>,
         client_params: HashMap<String, String>,
@@ -207,8 +209,8 @@ pub(crate) fn reap_openai_compat(state: &OpenAiRunState, gremlin_id: &str) {
 
 // ── HTTP client pool + builder ──────────────────────────────────────────
 
-fn http_client_pool() -> &'static Mutex<HashMap<(String, String), ReqwestClient>> {
-    static POOL: OnceLock<Mutex<HashMap<(String, String), ReqwestClient>>> = OnceLock::new();
+fn http_client_pool() -> &'static Mutex<HashMap<(String, String), DynHttpClient>> {
+    static POOL: OnceLock<Mutex<HashMap<(String, String), DynHttpClient>>> = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -237,7 +239,8 @@ fn last_n_chars(s: &str, n: usize) -> &str {
 pub(crate) fn build_openai_client(
     api_key: &str,
     base_url: &str,
-) -> Result<openai::CompletionsClient, String> {
+    dialect: &Dialect,
+) -> Result<OpenAI, String> {
     let cache_key = (base_url.to_string(), api_key.to_string());
 
     let http_client = {
@@ -252,21 +255,15 @@ pub(crate) fn build_openai_client(
             client.clone()
         } else {
             log::info!("Creating new HTTP client for provider at {base_url}");
-            let client = ReqwestClient::builder()
-                .build()
-                .map_err(|e| e.to_string())?;
+            let client = DynHttpClient::new(rig_reqwest::ReqwestClient::default());
             pool.insert(cache_key, client.clone());
             client
         }
     };
 
-    openai::Client::builder()
-        .api_key(rig_core::client::BearerAuth::from(api_key.to_string()))
-        .base_url(base_url)
-        .http_client(http_client)
-        .build()
-        .map(|client| client.completions_api())
-        .map_err(|e| e.to_string())
+    Ok(OpenAIConfig::with_key(dialect, api_key)
+        .with_base_url(base_url)
+        .connect(http_client))
 }
 
 /// The `allowed_tools` entry of `native_block`, if any.
@@ -283,7 +280,7 @@ pub(crate) fn string_map(params: &IndexMap<String, String>) -> HashMap<String, S
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_with_agent_loop(
-    client: &openai::CompletionsClient,
+    client: &OpenAI,
     model_name: &str,
     prompt: &str,
     ctx: &RunContext,
@@ -294,12 +291,12 @@ pub(crate) async fn run_with_agent_loop(
     task_model_selector: Option<TaskModelSelector<OpenAiModel>>,
     interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
-    let model = client.completion_model(model_name);
+    let model = client.completion(model_name).erase();
     let mut ctx = ctx.clone();
     ctx.params.model = Some(model_name.to_string());
 
     run_agent_loop(
-        &model,
+        model,
         prompt,
         ctx,
         cancel,
@@ -322,7 +319,7 @@ pub(crate) async fn run_with_agent_loop(
 /// `Arc`, so each Task clones a pointer rather than the maps themselves. When
 /// nothing is configured the selector is `None` and the common path is free.
 pub(super) fn task_model_selector(
-    client: &openai::CompletionsClient,
+    client: &OpenAI,
     provider_name: &str,
     task_clients_exact: &HashMap<String, String>,
     task_clients_prefix: &HashMap<String, String>,
@@ -341,7 +338,7 @@ pub(super) fn task_model_selector(
         Arc::new(move |spec: &str| {
             let (provider, model) = provider_and_model(spec)?;
             if provider == provider_name {
-                Some(client.completion_model(model))
+                Some(client.completion(model).erase())
             } else {
                 log::warn!(
                     "task-clients entry spec {spec:?} names provider {provider:?}, but this \

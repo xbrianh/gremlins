@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rig_core::client::CompletionClient;
-use rig_core::providers::azure::{self, AzureOpenAIAuth};
+use rig_core::providers::openai::{OpenAI, OpenAIConfig};
+use rig_core::providers::openai::wire::AZURE;
+use rig_core::http_client::DynHttpClient;
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
@@ -16,19 +17,19 @@ use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use crate::clients::token_provider::TokenProvider;
 use crate::clients::config::ProviderAuth;
-use rig_core::http_client::ReqwestClient;
+use rig_reqwest::ReqwestClient;
 
 // ── AzureOpenAiClientState ───────────────────────────────────────────────
 
 /// Either a statically-built client (for ApiKey / Token auth) or the
 /// ingredients to build one dynamically per attempt (for identity-based auth).
 enum AzureOpenAiClientState {
-    Static(azure::Client),
+    Static(Box<OpenAI>),
     Dynamic {
         token_provider: Box<dyn TokenProvider>,
         endpoint: String,
         api_version: String,
-        http_client: ReqwestClient,
+        http_client: DynHttpClient,
         auth_scope: String,
     },
 }
@@ -113,9 +114,9 @@ impl AzureOpenAiRunState {
         // we acquire a fresh token and build a client per attempt.
         let result = match &self.client_state {
             AzureOpenAiClientState::Static(client) => {
-                let model = client.completion_model(&model_name);
+                let model = client.completion(&model_name).erase();
                 run_agent_loop(
-                    &model,
+                    model,
                     prompt,
                     ctx,
                     cancel,
@@ -147,18 +148,13 @@ impl AzureOpenAiRunState {
                         .map_err(|e| ClientError::Runtime {
                             message: format!("Azure OpenAI token acquisition failed: {e}"),
                         })?;
-                    let client = azure::Client::builder()
-                        .api_key(AzureOpenAIAuth::Token(token))
-                        .api_version(api_version)
-                        .azure_endpoint(endpoint.clone())
-                        .http_client(http_client.clone())
-                        .build()
-                        .map_err(|e| ClientError::Runtime {
-                            message: format!("failed to build Azure OpenAI client: {e}"),
-                        })?;
-                    let model = client.completion_model(&model_name);
+                    let client = OpenAIConfig::with_alternate_key(&AZURE, token)
+                        .with_api_version(api_version)
+                        .with_base_url(endpoint)
+                        .connect(http_client.clone());
+                    let model = client.completion(&model_name).erase();
                     run_agent_loop(
-                        &model,
+                        model,
                         prompt,
                         ctx,
                         cancel,
@@ -356,28 +352,22 @@ impl AzureOpenAiBackend {
         let tool_filter = openai_protocol::tool_filter(native_block);
         let client_params = openai_protocol::string_map(extra_params);
 
-        let http_client = ReqwestClient::builder()
-            .build()
-            .map_err(|e| format!("failed to create HTTP client: {e}"))?;
+        let http_client = DynHttpClient::new(ReqwestClient::default());
 
         let client_state = match auth_method {
             ProviderAuth::ApiKey(key) => {
-                let client = azure::Client::builder()
-                    .api_key(AzureOpenAIAuth::ApiKey(key))
-                    .api_version(&api_version)
-                    .azure_endpoint(endpoint)
-                    .build()
-                    .map_err(|e| format!("failed to build Azure OpenAI client: {e}"))?;
-                AzureOpenAiClientState::Static(client)
+                let client = OpenAIConfig::with_key(&AZURE, key)
+                    .with_api_version(&api_version)
+                    .with_base_url(&endpoint)
+                    .connect(http_client.clone());
+                AzureOpenAiClientState::Static(Box::new(client))
             }
             ProviderAuth::Token(token) => {
-                let client = azure::Client::builder()
-                    .api_key(AzureOpenAIAuth::Token(token))
-                    .api_version(&api_version)
-                    .azure_endpoint(endpoint)
-                    .build()
-                    .map_err(|e| format!("failed to build Azure OpenAI client: {e}"))?;
-                AzureOpenAiClientState::Static(client)
+                let client = OpenAIConfig::with_alternate_key(&AZURE, token)
+                    .with_api_version(&api_version)
+                    .with_base_url(&endpoint)
+                    .connect(http_client.clone());
+                AzureOpenAiClientState::Static(Box::new(client))
             }
             ProviderAuth::ClientSecret => AzureOpenAiClientState::Dynamic {
                 token_provider: Box::new(
@@ -678,14 +668,12 @@ mod tests {
 
         let client_params = openai_protocol::string_map(&extra);
         let state = AzureOpenAiRunState {
-            client_state: AzureOpenAiClientState::Static(
-                azure::Client::builder()
-                    .api_key(AzureOpenAIAuth::ApiKey("fake-key".into()))
-                    .api_version("2024-10-21")
-                    .azure_endpoint("https://example.openai.azure.com".to_string())
-                    .build()
-                    .unwrap(),
-            ),
+            client_state: AzureOpenAiClientState::Static(Box::new(
+                OpenAIConfig::with_key(&AZURE, "fake-key")
+            .with_api_version("2024-10-21")
+            .with_base_url("https://example.openai.azure.com")
+            .client(),
+            )),
             model: "gpt-4o".into(),
             tool_filter: None,
             client_params,
@@ -706,16 +694,14 @@ mod tests {
         guard.set("GREMLINS_AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
         guard.set("GREMLINS_AZURE_OPENAI_API_KEY", "fake-key");
 
-        let client = azure::Client::builder()
-            .api_key(AzureOpenAIAuth::ApiKey("fake-key".into()))
-            .api_version("2024-10-21")
-            .azure_endpoint("https://example.openai.azure.com".to_string())
-            .build()
-            .unwrap();
+        let client = OpenAIConfig::with_key(&AZURE, "fake-key")
+            .with_api_version("2024-10-21")
+            .with_base_url("https://example.openai.azure.com")
+            .client();
 
         let backend = AzureOpenAiBackend {
             state: AzureOpenAiRunState {
-                client_state: AzureOpenAiClientState::Static(client),
+                client_state: AzureOpenAiClientState::Static(Box::new(client)),
                 model: "gpt-4o".into(),
                 tool_filter: None,
                 client_params: HashMap::new(),

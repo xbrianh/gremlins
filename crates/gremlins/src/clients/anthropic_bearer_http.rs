@@ -13,24 +13,24 @@ use std::future::Future;
 use bytes::Bytes;
 use http::{HeaderValue, Request, Response};
 use rig_core::http_client::{
-    HttpClientExt, LazyBody, MultipartForm, ReqwestClient, Result, StreamingResponse,
+    DynHttpClient, HttpClientExt, LazyBody, MultipartForm, Result, StreamingResponse,
 };
 use rig_core::wasm_compat::WasmCompatSend;
 
-/// Wraps a [`ReqwestClient`] and rewrites auth headers on every request.
+/// Wraps a [`DynHttpClient`] and rewrites auth headers on every request.
 ///
 /// Cheaply cloneable — the inner client and the pre-formatted bearer header
 /// value are both cheap to clone.
 #[derive(Clone, Debug)]
 pub(crate) struct BearerHttpClient {
-    inner: ReqwestClient,
+    inner: DynHttpClient,
     bearer: HeaderValue,
 }
 
 impl Default for BearerHttpClient {
     fn default() -> Self {
         Self {
-            inner: ReqwestClient::new(),
+            inner: DynHttpClient::new(rig_reqwest::shared()),
             // Safe: "unused" contains only ASCII alphanumerics.
             bearer: HeaderValue::from_static("Bearer unused"),
         }
@@ -43,7 +43,7 @@ impl BearerHttpClient {
     ///
     /// Returns an error if `token` contains characters that are invalid in
     /// an HTTP header value (e.g. non-ASCII bytes, newlines).
-    pub(crate) fn new(inner: ReqwestClient, token: String) -> std::result::Result<Self, String> {
+    pub(crate) fn new(inner: DynHttpClient, token: String) -> std::result::Result<Self, String> {
         let mut bearer = HeaderValue::from_str(&format!("Bearer {}", token.trim()))
             .map_err(|e| format!("invalid bearer token: {e}"))?;
         bearer.set_sensitive(true);
@@ -107,23 +107,27 @@ mod tests {
 
     // ── construction ─────────────────────────────────────────────────
 
+    fn test_dyn_http() -> DynHttpClient {
+        DynHttpClient::new(rig_reqwest::shared())
+    }
+
     #[test]
     fn new_rejects_invalid_token() {
-        let inner = ReqwestClient::new();
+        let inner = test_dyn_http();
         let result = BearerHttpClient::new(inner, "token\nwith-newline".into());
         assert!(result.is_err());
     }
 
     #[test]
     fn new_accepts_valid_token() {
-        let inner = ReqwestClient::new();
+        let inner = test_dyn_http();
         let result = BearerHttpClient::new(inner, "valid-token".into());
         assert!(result.is_ok());
     }
 
     #[test]
     fn new_trims_whitespace_from_token() {
-        let inner = ReqwestClient::new();
+        let inner = test_dyn_http();
         let wrapper = BearerHttpClient::new(inner, "  padded-token  ".into()).unwrap();
         let req = Request::builder()
             .uri("https://example.com/")
@@ -145,7 +149,7 @@ mod tests {
 
     #[test]
     fn rewrites_x_api_key_to_bearer() {
-        let client = ReqwestClient::new();
+        let client = test_dyn_http();
         let wrapper = BearerHttpClient::new(client, "test-token".into()).unwrap();
 
         let req = Request::builder()
@@ -178,7 +182,7 @@ mod tests {
 
     #[test]
     fn rewrite_request_without_x_api_key_adds_bearer() {
-        let client = ReqwestClient::new();
+        let client = test_dyn_http();
         let wrapper = BearerHttpClient::new(client, "tok".into()).unwrap();
 
         let req = Request::builder()
@@ -213,7 +217,7 @@ mod tests {
     #[test]
     fn send_rewrites_headers_on_wire() {
         let (listener, port) = bind_ephemeral();
-        let inner = ReqwestClient::new();
+        let inner = test_dyn_http();
         let wrapper = BearerHttpClient::new(inner, "tok".into()).unwrap();
 
         let req = Request::builder()
@@ -261,7 +265,7 @@ mod tests {
     #[test]
     fn send_streaming_rewrites_headers_on_wire() {
         let (listener, port) = bind_ephemeral();
-        let inner = ReqwestClient::new();
+        let inner = test_dyn_http();
         let wrapper = BearerHttpClient::new(inner, "tok".into()).unwrap();
 
         let req = Request::builder()
@@ -308,7 +312,7 @@ mod tests {
     #[test]
     fn send_multipart_is_passthrough() {
         let (listener, port) = bind_ephemeral();
-        let inner = ReqwestClient::new();
+        let inner = test_dyn_http();
         let wrapper = BearerHttpClient::new(inner, "tok".into()).unwrap();
 
         let form = MultipartForm::new();
@@ -356,7 +360,7 @@ mod tests {
 
     #[test]
     fn bearer_http_client_is_cloneable() {
-        let client = ReqwestClient::new();
+        let client = test_dyn_http();
         let wrapper = BearerHttpClient::new(client, "cloned-token".into()).unwrap();
         let _clone = wrapper.clone();
     }

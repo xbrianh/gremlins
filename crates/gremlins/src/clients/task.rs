@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rig_core::completion::CompletionModel;
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 use super::tools::{self, ToolContext};
 
@@ -11,7 +12,8 @@ const MAX_DEPTH: u32 = 3;
 /// Builds the model named by a matching `task-clients` entry, for use by one
 /// Task invocation.  Returns `None` when the spec names a provider this
 /// backend does not serve — the caller falls back to the parent's model.
-pub(crate) type TaskModelFactory<M> = Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
+pub(crate) type TaskModelFactory<M = DynModel<Completion>> =
+    Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
 
 /// Lookup maps for `task-clients`, already lowercased at parse time. Shared
 /// behind an `Arc` so a Task fan-out clones one pointer per invocation rather
@@ -46,12 +48,12 @@ impl TaskClientOverrides {
 /// keeps the parent's model. Cloning a selector is O(1) — both halves sit behind
 /// an `Arc` — which matters because a Task fan-out clones one per invocation.
 #[derive(Clone)]
-pub(crate) struct TaskModelSelector<M> {
+pub(crate) struct TaskModelSelector<M = DynModel<Completion>> {
     overrides: Arc<TaskClientOverrides>,
     factory: TaskModelFactory<M>,
 }
 
-impl<M> TaskModelSelector<M> {
+impl<M: Clone> TaskModelSelector<M> {
     /// Assemble a selector from parsed config. Returns `None` when both maps are
     /// empty — the common case, where nothing ever needs building.
     pub(crate) fn new(
@@ -133,9 +135,9 @@ fn task_prefix(base: &str, chain: &str) -> String {
 /// tasks launched from one parent all share the same depth and never
 /// exhaust the bound between them. Only genuine nesting increments depth.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'static>(
-    model: M,
-    task_model_selector: Option<TaskModelSelector<M>>,
+pub(crate) fn make_task_runner(
+    model: DynModel<Completion>,
+    task_model_selector: Option<TaskModelSelector<DynModel<Completion>>>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -164,9 +166,9 @@ pub(crate) fn make_task_runner<M: CompletionModel + Clone + Send + Sync + 'stati
 }
 
 #[allow(clippy::too_many_arguments)]
-fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>(
-    model: M,
-    task_model_selector: Option<TaskModelSelector<M>>,
+fn make_task_runner_at_depth(
+    model: DynModel<Completion>,
+    task_model_selector: Option<TaskModelSelector<DynModel<Completion>>>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -234,7 +236,7 @@ fn make_task_runner_at_depth<M: CompletionModel + Clone + Send + Sync + 'static>
             ));
 
             let result = crate::clients::agent_loop::run_agent_loop_nested(
-                &selected_model,
+                selected_model,
                 &task,
                 system_prompt,
                 &child_ctx,
@@ -449,7 +451,7 @@ mod tests {
 
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
-            model.clone(),
+            model.clone().erase(),
             None,
             None,
             cancel,
@@ -472,7 +474,7 @@ mod tests {
         // The task harness prompt must reach the model as a leading system message.
         for req in model.requests() {
             match req.chat_history.first() {
-                Message::System { content } => assert!(
+                Some(Message::System { content }) => assert!(
                     content.contains("<tools>"),
                     "unexpected system prompt: {content}"
                 ),
@@ -481,42 +483,47 @@ mod tests {
         }
     }
 
-    /// A model whose stream never resolves — used to keep task calls
-    /// in-flight so concurrent siblings overlap in time.
+    #[tokio::test]
+    async fn make_task_runner_rejects_at_max_depth() {
+        let ctx = depth_test_ctx();
+        let model = rig_core::test_utils::MockCompletionModel::from_turns([]).erase();
+        let cancel = super::super::agent_loop::CancelToken::new();
+        let runner = make_task_runner_at_depth(
+            model,
+            None,
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            0.2,
+            10,
+            MAX_DEPTH,
+            String::new(),
+            0,
+            None,
+            None,
+        );
+
+        let blocked = runner("label".into(), "too deep".into()).await;
+        assert!(
+            blocked.contains("max depth (3) exceeded"),
+            "call at MAX_DEPTH should be rejected, got: {blocked}"
+        );
+    }
+
+    /// A transport whose frames never resolve — the stream hangs forever.
     #[derive(Clone)]
-    struct PendingModel;
+    struct PendingTransport;
 
-    impl rig_core::completion::CompletionModel for PendingModel {
-        type Response = rig_core::test_utils::MockResponse;
-        type StreamingResponse = rig_core::test_utils::MockResponse;
-        type Client = ();
-
-        fn make(_: &Self::Client, _: impl Into<String>) -> Self {
-            Self
-        }
-
-        async fn completion(
+    impl rig_core::driver::Transport<rig_core::test_utils::MockScript> for PendingTransport {
+        fn send(
             &self,
-            _: rig_core::completion::CompletionRequest,
-        ) -> Result<
-            rig_core::completion::CompletionResponse<Self::Response>,
-            rig_core::completion::CompletionError,
-        > {
-            Err(rig_core::completion::CompletionError::ProviderError(
-                "unused".into(),
+            _request: rig_core::completion::CompletionRequest,
+            _exchange: rig_core::driver::Exchange,
+        ) -> rig_core::driver::Opening<rig_core::test_utils::MockFrame> {
+            rig_core::driver::Opening::ready(rig_core::driver::Opened::new(
+                futures::stream::pending(),
             ))
-        }
-
-        async fn stream(
-            &self,
-            _: rig_core::completion::CompletionRequest,
-        ) -> Result<
-            rig_core::streaming::StreamingCompletionResponse<Self::StreamingResponse>,
-            rig_core::completion::CompletionError,
-        > {
-            let s: rig_core::streaming::StreamingResult<Self::StreamingResponse> =
-                Box::pin(futures::stream::pending());
-            Ok(rig_core::streaming::StreamingCompletionResponse::stream(s))
         }
     }
 
@@ -525,8 +532,11 @@ mod tests {
     #[tokio::test]
     async fn make_task_runner_concurrent_siblings_do_not_exhaust_depth() {
         let ctx = depth_test_ctx();
-        // Hangs forever so all siblings overlap in time.
-        let model = PendingModel;
+        let model = rig_core::driver::Model::new(
+            rig_core::test_utils::MockScript::default(),
+            PendingTransport,
+        )
+        .erase();
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
             model,
@@ -554,36 +564,6 @@ mod tests {
                 "sibling at depth 0 must not hit the recursion guard, got: {out}"
             );
         }
-    }
-
-    /// The recursion bound is enforced per call chain: a runner already at
-    /// MAX_DEPTH rejects, standing in for a chain nested that many levels deep.
-    #[tokio::test]
-    async fn make_task_runner_rejects_at_max_depth() {
-        let ctx = depth_test_ctx();
-        let model = PendingModel;
-        let cancel = super::super::agent_loop::CancelToken::new();
-        let runner = make_task_runner_at_depth(
-            model,
-            None,
-            None,
-            cancel,
-            ctx,
-            String::new(),
-            0.2,
-            10,
-            MAX_DEPTH,
-            String::new(),
-            0,
-            None,
-            None,
-        );
-
-        let blocked = runner("label".into(), "too deep".into()).await;
-        assert!(
-            blocked.contains("max depth (3) exceeded"),
-            "call at MAX_DEPTH should be rejected, got: {blocked}"
-        );
     }
 
     /// libtest replaces the test thread's stderr with an in-memory buffer, and
@@ -654,7 +634,7 @@ mod tests {
         ) -> (tools::TaskFn, tokio::sync::mpsc::UnboundedReceiver<String>) {
             let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
             let runner = make_task_runner(
-                rig_core::test_utils::MockCompletionModel::from_stream_turns(turns),
+                rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase(),
                 None,
                 None,
                 super::super::super::agent_loop::CancelToken::new(),

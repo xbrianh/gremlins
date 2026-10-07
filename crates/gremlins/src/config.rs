@@ -449,37 +449,6 @@ pub(crate) fn copilot_api_key() -> Option<String> {
         })
 }
 
-/// Copilot GitHub token: `COPILOT_GITHUB_ACCESS_TOKEN` then `GITHUB_TOKEN`.
-pub(crate) fn copilot_github_token() -> Option<String> {
-    std::env::var("COPILOT_GITHUB_ACCESS_TOKEN")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("GITHUB_TOKEN")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-}
-
-/// Copilot OAuth token auto-discovered from the Copilot extension's
-/// `apps.json` (e.g. `~/.config/github-copilot/apps.json`).
-pub(crate) fn copilot_oauth_token() -> Option<String> {
-    // Copilot uses XDG config convention on all platforms.
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| Some(home_dir().join(".config")))?;
-    let apps_path = config_dir.join("github-copilot").join("apps.json");
-    let content = std::fs::read_to_string(&apps_path).ok()?;
-    let apps: serde_json::Value = serde_json::from_str(&content).ok()?;
-    // Return the oauth_token from the first entry.
-    apps.as_object()?
-        .values()
-        .find_map(|v| v.get("oauth_token")?.as_str().map(String::from))
-        .filter(|s| !s.trim().is_empty())
-}
-
 /// GREMLINS_TELEMETRY — "1" or "true" enables per-turn telemetry logging.
 pub(crate) fn telemetry_enabled() -> bool {
     std::env::var("GREMLINS_TELEMETRY")
