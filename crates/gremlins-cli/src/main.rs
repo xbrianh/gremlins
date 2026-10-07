@@ -82,7 +82,10 @@ enum Cmds {
     /// Remove a gremlin and all its filesystem assets.
     Rm {
         /// Gremlin id to remove.
-        id: String,
+        id: Option<String>,
+        /// Remove every gremlin in a terminal state (done/stopped/orphaned).
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
     },
     /// Run the definition's land block in the current working directory.
     Land {
@@ -120,7 +123,15 @@ async fn main() {
         Some(Cmds::Log { id }) => log_gremlin(&id).await,
         Some(Cmds::Debug { id }) => debug_gremlin(&id).await,
         Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
-        Some(Cmds::Rm { id }) => rm(&id).await,
+        Some(Cmds::Rm { id, all }) => {
+            if all {
+                rm_all().await
+            } else if let Some(ref id) = id {
+                rm_one(id).await
+            } else {
+                Err("gremlins rm requires an <id> or --all".to_string())
+            }
+        }
         Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::External(args)) => status_external(&args).await,
@@ -998,7 +1009,8 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
 // rm
 // ---------------------------------------------------------------------------
 
-async fn rm(id: &str) -> Result<(), String> {
+/// Remove a single gremlin by id.
+async fn rm_one(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
@@ -1062,6 +1074,85 @@ async fn rm(id: &str) -> Result<(), String> {
 
     gremlin.clean(true).await;
     println!("gremlin {id} removed");
+    Ok(())
+}
+
+/// Remove every gremlin in a terminal state (done/stopped/orphaned).
+async fn rm_all() -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    let entries = state::list_state_dirs();
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    // Determine executor reachability once.
+    let executor_reachable = spawn::connect().await.is_ok();
+
+    let mut removed = 0usize;
+    let mut skipped = 0usize;
+
+    for (id, state_json_path) in &entries {
+        let state_dir = state_json_path.parent().unwrap();
+
+        // Skip entries that have already been `clean --keep`'d.
+        if state_dir.join("closed").is_file() {
+            continue;
+        }
+
+        // Read status from state.json.
+        let state_map = read_state_object(state_json_path);
+        let status = state_map
+            .as_ref()
+            .and_then(|m| m.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        match status {
+            "done" | "stopped" => {
+                // Terminal — safe to remove.
+            }
+            "running" => {
+                if executor_reachable {
+                    match is_live_in_executor(id).await {
+                        Ok(true) => {
+                            // Live — skip.
+                            skipped += 1;
+                            continue;
+                        }
+                        Err(_) => {
+                            // Executor error — conservatively skip.
+                            skipped += 1;
+                            continue;
+                        }
+                        Ok(false) => {
+                            // Orphaned — safe to remove.
+                        }
+                    }
+                } else {
+                    // Executor unreachable — conservatively skip running entries.
+                    skipped += 1;
+                    continue;
+                }
+            }
+            _ => {
+                // Unknown or empty status — skip.
+                continue;
+            }
+        }
+
+        // Delegate to the single-id helper. Errors are logged, not fatal.
+        if let Err(e) = rm_one(id).await {
+            log::warn!("gremlin {id}: {e}");
+            skipped += 1;
+        } else {
+            removed += 1;
+        }
+    }
+
+    if removed > 0 || skipped > 0 {
+        log::info!("rm --all: {removed} removed, {skipped} skipped");
+    }
     Ok(())
 }
 
