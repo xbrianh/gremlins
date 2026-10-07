@@ -56,7 +56,7 @@ else
     printf '%s\n' "$FAILED_RUN_IDS" | while IFS= read -r run_id; do
         echo
         echo "--- run $run_id logs ---"
-        timeout 30 gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
+        gh run view "$run_id" --log-failed 2>/dev/null | head -c 10000 \
             || printf '(could not fetch run logs)\n'
         echo "---"
     done
