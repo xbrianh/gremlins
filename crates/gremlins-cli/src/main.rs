@@ -82,6 +82,7 @@ enum Cmds {
     /// Remove a gremlin and all its filesystem assets.
     Rm {
         /// Gremlin id to remove.
+        #[arg(required_unless_present = "all")]
         id: Option<String>,
         /// Remove every gremlin in a terminal state (done/stopped/orphaned).
         #[arg(long, conflicts_with = "id")]
@@ -1086,14 +1087,16 @@ async fn rm_all() -> Result<(), String> {
         return Ok(());
     }
 
-    // Determine executor reachability once.
-    let executor_reachable = spawn::connect().await.is_ok();
-
     let mut removed = 0usize;
     let mut skipped = 0usize;
 
+    // Defer executor reachability check until we encounter a "running" entry.
+    let mut executor_reachable: Option<bool> = None;
+
     for (id, state_json_path) in &entries {
-        let state_dir = state_json_path.parent().unwrap();
+        let Some(state_dir) = state_json_path.parent() else {
+            continue;
+        };
 
         // Skip entries that have already been `clean --keep`'d.
         if state_dir.join("closed").is_file() {
@@ -1113,15 +1116,26 @@ async fn rm_all() -> Result<(), String> {
                 // Terminal — safe to remove.
             }
             "running" => {
-                if executor_reachable {
+                // Lazily check executor reachability on first running entry.
+                let reachable = match executor_reachable {
+                    Some(r) => r,
+                    None => {
+                        let r = spawn::connect().await.is_ok();
+                        executor_reachable = Some(r);
+                        r
+                    }
+                };
+                if reachable {
                     match is_live_in_executor(id).await {
                         Ok(true) => {
                             // Live — skip.
+                            println!("gremlin {id}: skipped (still running)");
                             skipped += 1;
                             continue;
                         }
-                        Err(_) => {
+                        Err(e) => {
                             // Executor error — conservatively skip.
+                            println!("gremlin {id}: skipped ({e})");
                             skipped += 1;
                             continue;
                         }
@@ -1131,6 +1145,7 @@ async fn rm_all() -> Result<(), String> {
                     }
                 } else {
                     // Executor unreachable — conservatively skip running entries.
+                    println!("gremlin {id}: skipped (executor unreachable)");
                     skipped += 1;
                     continue;
                 }
@@ -1143,7 +1158,7 @@ async fn rm_all() -> Result<(), String> {
 
         // Delegate to the single-id helper. Errors are logged, not fatal.
         if let Err(e) = rm_one(id).await {
-            log::warn!("gremlin {id}: {e}");
+            println!("gremlin {id}: skipped ({e})");
             skipped += 1;
         } else {
             removed += 1;
