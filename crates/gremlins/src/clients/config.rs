@@ -107,7 +107,6 @@ struct AzureEntry {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Providers {
     api_keys: HashMap<String, String>,
-    pats: HashMap<String, String>,
     base_urls: HashMap<String, String>,
     tokens: HashMap<String, String>,
     azure_auth_methods: HashMap<String, String>,
@@ -127,8 +126,6 @@ struct ProvidersFile(HashMap<String, ProviderEntry>);
 struct ProviderEntry {
     #[serde(rename = "api-key", default)]
     api_key: Option<StrictString>,
-    #[serde(default)]
-    pat: Option<StrictString>,
     #[serde(rename = "base-url", default)]
     base_url: Option<StrictString>,
     #[serde(default)]
@@ -156,14 +153,6 @@ impl Providers {
     /// Get the API key for a provider name (e.g. "openai", "xai").
     pub(crate) fn get(&self, provider: &str) -> Option<&str> {
         self.api_keys
-            .get(provider)
-            .map(|s| s.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    /// Get the PAT (personal access token) for a provider name.
-    pub(crate) fn pat(&self, provider: &str) -> Option<&str> {
-        self.pats
             .get(provider)
             .map(|s| s.as_str())
             .filter(|s| !s.trim().is_empty())
@@ -206,7 +195,6 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
     let content = std::fs::read_to_string(path)?;
     let providers_file: ProvidersFile = serde_yaml::from_str(&content)?;
     let mut api_keys = HashMap::new();
-    let mut pats = HashMap::new();
     let mut base_urls = HashMap::new();
     let mut tokens = HashMap::new();
     let mut azure_auth_methods = HashMap::new();
@@ -214,9 +202,6 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
     for (k, v) in providers_file.0 {
         if let Some(api_key) = v.api_key.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
             api_keys.insert(k.clone(), api_key);
-        }
-        if let Some(pat) = v.pat.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
-            pats.insert(k.clone(), pat);
         }
         if let Some(base_url) = v.base_url.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
             base_urls.insert(k.clone(), base_url);
@@ -233,7 +218,6 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
             }
         }
         if !api_keys.contains_key(&k)
-            && !pats.contains_key(&k)
             && !base_urls.contains_key(&k)
             && !tokens.contains_key(&k)
             && !azure_auth_methods.contains_key(&k)
@@ -244,7 +228,6 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
     }
     Ok(Providers {
         api_keys,
-        pats,
         base_urls,
         tokens,
         azure_auth_methods,
@@ -269,12 +252,6 @@ pub(crate) fn api_key(env_var_name: &str, provider_name: &str) -> Option<String>
         }
     }
     Providers::load().get(provider_name).map(|s| s.to_string())
-}
-
-/// Resolve a PAT (personal access token) for `provider` from
-/// `providers.yaml`. Returns None if not set.
-pub(crate) fn pat(provider_name: &str) -> Option<String> {
-    Providers::load().pat(provider_name).map(|s| s.to_string())
 }
 
 /// Resolve base_url for a provider. Checks env var first, then providers.yaml, then default.
@@ -514,37 +491,6 @@ mod tests {
         let _sandbox = Sandbox::with_providers(r#"{"foo": "bar"}"#);
         let keys = Providers::load();
         assert!(keys.get("openai").is_none());
-    }
-
-    #[test]
-    fn test_providers_pat_field() {
-        let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": "ghp_test_token"}}"#);
-        let keys = Providers::load();
-        assert!(keys.get("copilot").is_none());
-        assert_eq!(keys.pat("copilot"), Some("ghp_test_token"));
-    }
-
-    #[test]
-    fn test_providers_pat_empty_ignored() {
-        let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": ""}}"#);
-        let keys = Providers::load();
-        assert!(keys.pat("copilot").is_none());
-    }
-
-    #[test]
-    fn test_providers_pat_whitespace_ignored() {
-        let _sandbox = Sandbox::with_providers(r#"{"copilot": {"pat": "   "}}"#);
-        let keys = Providers::load();
-        assert!(keys.pat("copilot").is_none());
-    }
-
-    #[test]
-    fn test_providers_both_api_key_and_pat() {
-        let _sandbox =
-            Sandbox::with_providers(r#"{"copilot": {"api-key": "sk-fake", "pat": "ghp_fake"}}"#);
-        let keys = Providers::load();
-        assert_eq!(keys.get("copilot"), Some("sk-fake"));
-        assert_eq!(keys.pat("copilot"), Some("ghp_fake"));
     }
 
     #[test]

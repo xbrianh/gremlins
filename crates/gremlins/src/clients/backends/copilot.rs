@@ -20,76 +20,20 @@ use crate::clients::task::TaskModelSelector;
 const PROVIDER_NAME: &str = "copilot";
 const DEFAULT_MODEL: &str = "gpt-4o";
 
-// ── Auth source ──────────────────────────────────────────────────────────
-
-/// Which credential source was used to build the Copilot client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum CopilotAuthSource {
-    /// `GITHUB_COPILOT_API_KEY` env var.
-    GitHubCopilotApiKey,
-    /// `COPILOT_API_KEY` env var.
-    CopilotApiKey,
-    /// `COPILOT_GITHUB_ACCESS_TOKEN` env var.
-    CopilotGitHubAccessToken,
-    /// `GITHUB_TOKEN` env var.
-    GitHubToken,
-    /// `providers.yaml` `"copilot"` entry (`api-key` field).
-    ProvidersYaml,
-    /// `providers.yaml` `"copilot"` entry (`pat` field).
-    ProvidersYamlPat,
-    /// Auto-discovered from `~/.config/github-copilot/apps.json`.
-    AppsJson,
-}
-
-/// Resolve credentials and build a Copilot client, returning the client and
-/// which source won.  OAuth device-code flow is disabled — gremlins run
-/// unattended.
+/// Resolve credentials and build a Copilot client.
+/// OAuth device-code flow is disabled — gremlins run unattended.
 ///
-/// Currently only API-key auth is supported (rig 0.43): `GITHUB_COPILOT_API_KEY`
-/// → `COPILOT_API_KEY` → `providers.yaml` `"copilot"` entry (`api-key`).
-/// PAT paths (`COPILOT_GITHUB_ACCESS_TOKEN`, `GITHUB_TOKEN`, `providers.yaml`
-/// `pat`, `apps.json`) are detected but rejected until support is restored.
-fn resolve_auth() -> Result<(Copilot, CopilotAuthSource), String> {
-    let api_key = crate::config::copilot_api_key();
-    let github_token = crate::config::copilot_github_token();
-
-    if let Some(key) = api_key {
-        let client = CopilotConfig::new(key).client();
-        // Determine which env var supplied the key.
-        let source = if std::env::var("GITHUB_COPILOT_API_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .is_some()
-        {
-            CopilotAuthSource::GitHubCopilotApiKey
-        } else {
-            CopilotAuthSource::CopilotApiKey
-        };
-        return Ok((client, source));
+/// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
+/// `providers.yaml` `"copilot"` entry (`api-key`).
+fn resolve_auth() -> Result<Copilot, String> {
+    if let Some(key) = crate::config::copilot_api_key() {
+        return Ok(CopilotConfig::new(key).client());
     }
-
-    if let Some(_token) = github_token {
-        return Err("GitHub PAT auth is not yet supported in rig 0.43; use COPILOT_API_KEY instead".to_string());
-    }
-
-    // providers.yaml: try api-key first, then pat.
     if let Some(key) = crate::clients::config::api_key("", PROVIDER_NAME) {
-        let client = CopilotConfig::new(key).client();
-        return Ok((client, CopilotAuthSource::ProvidersYaml));
+        return Ok(CopilotConfig::new(key).client());
     }
-
-    if crate::clients::config::pat(PROVIDER_NAME).is_some() {
-        return Err("GitHub PAT auth is not yet supported in rig 0.43; use COPILOT_API_KEY instead".to_string());
-    }
-
-    // Auto-discover OAuth token from the Copilot extension's apps.json.
-    if crate::config::copilot_oauth_token().is_some() {
-        return Err("GitHub PAT auth is not yet supported in rig 0.43; use COPILOT_API_KEY instead".to_string());
-    }
-
     Err(format!(
-        "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
+        "no API key for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
          COPILOT_API_KEY, or add an entry with \"api-key\" in {}",
         crate::config::user_config_root()
             .join("providers.yaml")
@@ -161,15 +105,13 @@ impl CopilotBackend {
     /// Build a Copilot backend.
     ///
     /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
-    /// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.yaml`
-    /// `"copilot"` entry → error. OAuth is disabled — gremlins run
-    /// unattended.
+    /// `providers.yaml` `"copilot"` entry → error.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        let (client, _auth_source) = resolve_auth()?;
+        let client = resolve_auth()?;
 
         let model = if model.is_empty() {
             DEFAULT_MODEL.to_string()
@@ -396,16 +338,11 @@ mod tests {
     use super::*;
     use crate::test_support::EnvGuard;
 
-    /// A fake API key that `copilot::Client::builder().api_key(…).build()`
-    /// accepts without making network calls.
     const FAKE_API_KEY: &str = "tid=1;exp=9999999999";
 
-    /// Lock the process-state guard and scrub every Copilot credential source.
     fn scrub_copilot_env(guard: &mut EnvGuard) {
         guard.remove("GITHUB_COPILOT_API_KEY");
         guard.remove("COPILOT_API_KEY");
-        guard.remove("COPILOT_GITHUB_ACCESS_TOKEN");
-        guard.remove("GITHUB_TOKEN");
         guard.remove("XDG_CONFIG_HOME");
     }
 
@@ -505,159 +442,35 @@ mod tests {
         );
     }
 
-    // ── auth precedence tests ─────────────────────────────────────────
+    // ── auth tests ───────────────────────────────────────────────────
 
     #[test]
-    fn auth_precedence_api_key_over_github_token() {
+    fn auth_github_copilot_api_key() {
         let mut guard = isolated_env();
         guard.set("GITHUB_COPILOT_API_KEY", FAKE_API_KEY);
-        guard.set("COPILOT_GITHUB_ACCESS_TOKEN", "ghp_fake_token");
-
-        // API key still wins (PAT auth not supported in rig 0.43)
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::GitHubCopilotApiKey,
-            "GITHUB_COPILOT_API_KEY should win over COPILOT_GITHUB_ACCESS_TOKEN"
-        );
+        assert!(resolve_auth().is_ok());
     }
 
     #[test]
-    fn auth_precedence_copilot_api_key_fallback() {
+    fn auth_copilot_api_key_fallback() {
         let mut guard = isolated_env();
         guard.set("COPILOT_API_KEY", FAKE_API_KEY);
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::CopilotApiKey,
-            "COPILOT_API_KEY should work as fallback"
-        );
+        assert!(resolve_auth().is_ok());
     }
 
     #[test]
-    fn auth_precedence_github_token_over_providers_json() {
-        let mut guard = isolated_env();
-        guard.set("GITHUB_TOKEN", "ghp_fake_token");
-
-        // PAT auth deferred until rig supports it; expect an error.
-        let err = resolve_auth().unwrap_err();
-        assert!(
-            err.contains("GitHub PAT auth is not yet supported"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_copilot_github_access_token_over_github_token() {
-        let mut guard = isolated_env();
-        guard.set("COPILOT_GITHUB_ACCESS_TOKEN", "ghp_copilot_token");
-        guard.set("GITHUB_TOKEN", "ghp_other_token");
-
-        // PAT auth deferred until rig supports it; expect an error.
-        let err = resolve_auth().unwrap_err();
-        assert!(
-            err.contains("GitHub PAT auth is not yet supported"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_providers_json_fallback() {
-        let mut guard = isolated_env();
-        // No env vars set — only providers.yaml.
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.yaml");
-        std::fs::write(
-            &providers_path,
-            format!(
-                r#"{{"copilot": {{"api-key": "{FAKE_API_KEY}"}}}}"#
-            ),
-        )
-        .unwrap();
-        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::ProvidersYaml,
-            "providers.yaml should be the fallback when no env vars are set"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_providers_json_pat_fallback() {
-        let mut guard = isolated_env();
-        // No env vars set — only providers.yaml with a pat field.
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.yaml");
-        std::fs::write(
-            &providers_path,
-            r#"{"copilot": {"pat": "ghp_fake_pat_token"}}"#,
-        )
-        .unwrap();
-        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-
-        // PAT auth deferred until rig supports it; expect an error.
-        let err = resolve_auth().unwrap_err();
-        assert!(
-            err.contains("GitHub PAT auth is not yet supported"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_providers_json_api_key_wins_over_pat() {
+    fn auth_providers_yaml() {
         let mut guard = isolated_env();
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        let providers_path = config_dir.join("providers.yaml");
         std::fs::write(
-            &providers_path,
-            format!(
-                r#"{{"copilot": {{"api-key": "{FAKE_API_KEY}", "pat": "ghp_fake_pat_token"}}}}"#
-            ),
+            config_dir.join("providers.yaml"),
+            format!(r#"{{"copilot": {{"api-key": "{FAKE_API_KEY}"}}}}"#),
         )
         .unwrap();
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-
-        let (_, source) = resolve_auth().unwrap();
-        assert_eq!(
-            source,
-            CopilotAuthSource::ProvidersYaml,
-            "providers.yaml api-key should win over pat when both are present"
-        );
-    }
-
-    #[test]
-    fn auth_precedence_apps_json_auto_discovery() {
-        let mut guard = isolated_env();
-        let tmp = tempfile::tempdir().unwrap();
-
-        // Simulate the Copilot extension's apps.json under $HOME/.config.
-        let copilot_config_dir = tmp.path().join(".config").join("github-copilot");
-        std::fs::create_dir_all(&copilot_config_dir).unwrap();
-        std::fs::write(
-            copilot_config_dir.join("apps.json"),
-            r#"{"github.com:app-id": {"oauth_token": "ghu_auto_token"}}"#,
-        )
-        .unwrap();
-
-        // Point $HOME at the temp dir so copilot_oauth_token() finds it.
-        guard.set("HOME", tmp.path());
-        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-
-        // PAT auth deferred until rig supports it; expect an error.
-        let err = resolve_auth().unwrap_err();
-        assert!(
-            err.contains("GitHub PAT auth is not yet supported"),
-            "unexpected error: {err}"
-        );
+        assert!(resolve_auth().is_ok());
     }
 
     // ── parse_extra_params tests ─────────────────────────────────────

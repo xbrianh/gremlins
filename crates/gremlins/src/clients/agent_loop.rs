@@ -724,13 +724,7 @@ async fn run_agent_loop_core(
                         first_token = Some(now);
                     }
                     last_token = Some(now);
-                    apply_chunk(
-                        chunk,
-                        &mut text,
-                        &mut reasoning,
-                        &mut tool_calls,
-                        &mut turn_usage,
-                    );
+                    apply_chunk(chunk, &mut text, &mut reasoning, &mut tool_calls);
                 }
             }
         }
@@ -1226,28 +1220,15 @@ pub(crate) fn apply_chunk(
     text: &mut String,
     reasoning: &mut String,
     tool_calls: &mut Vec<ToolCall>,
-    _usage: &mut Option<Usage>,
 ) {
     match chunk {
-        Item::Event(StreamEvent::Text { text: t, .. }) => text.push_str(&t),
         Item::Event(StreamEvent::End { content, .. }) => match content {
+            AssistantContent::Text(t) => text.push_str(&t.text),
             AssistantContent::ToolCall(tc) => tool_calls.push(tc),
-            AssistantContent::Text(t) => {
-                // Only capture End text when no chunked text arrived
-                // (some providers deliver text only at End).
-                if text.is_empty() {
-                    text.push_str(&t.text);
-                }
-            }
-            AssistantContent::Reasoning(_r) => {
-                // Reasoning text accumulated via StreamEvent::Reasoning fragments
-            }
-            AssistantContent::Image(_) => {}
+            _ => {}
         },
         Item::Event(StreamEvent::Reasoning { text: r, .. }) => reasoning.push_str(&r),
-        Item::Event(StreamEvent::Arguments { .. })
-        | Item::Event(StreamEvent::Start { .. })
-        | Item::Unknown(_) => {}
+        _ => {}
     }
 }
 
