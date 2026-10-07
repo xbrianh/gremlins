@@ -56,9 +56,21 @@ impl RunHandle {
         state_tx: &watch::Sender<RunState>,
         shutdown_tx: Option<&watch::Sender<bool>>,
     ) {
-        // Send terminal state before removing from the run_map.
-        // The state_tx argument is a clone held by the caller, so
-        // it outlives the RunHandle.
+        let run_map = get_run_map();
+        let is_empty = {
+            let mut map = run_map.lock().unwrap();
+            // Remove before publishing — if the entry is already gone,
+            // a concurrent handle_stop / stop_child won the race and
+            // already published the terminal state.
+            if map.remove(id).is_none() {
+                return;
+            }
+            map.is_empty()
+        };
+
+        // Publish terminal state after winning the removal race.
+        // state_tx is a clone held by the spawned task, so it outlives
+        // the RunHandle that was just dropped by map.remove().
         let _ = state_tx.send(RunState {
             id: id.to_string(),
             status: if result == 0 { "done" } else { "stopped" }.to_string(),
@@ -66,14 +78,6 @@ impl RunHandle {
             started_at: String::new(),
         });
 
-        let run_map = get_run_map();
-        let is_empty = {
-            let mut map = run_map.lock().unwrap();
-            if map.remove(id).is_none() {
-                return;
-            }
-            map.is_empty()
-        };
         if is_empty {
             if let Some(tx) = shutdown_tx {
                 let _ = tx.send(true);
