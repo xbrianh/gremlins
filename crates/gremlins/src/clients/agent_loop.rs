@@ -486,7 +486,6 @@ async fn run_agent_loop_core(
 
     struct Job {
         id: String,
-        call_id: Option<String>,
         name: String,
         args: String,
         key: String,
@@ -1056,7 +1055,8 @@ async fn run_agent_loop_core(
             send_log(log_tx, prefix, &tool_msg);
             if !nested {
                 let id_str = tc.id.to_string();
-                let tool_evt = tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
+                let tool_evt =
+                    tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
                 write_raw(raw, &tool_evt);
                 if let Some(evts) = captured.as_mut() {
                     evts.push(tool_evt);
@@ -1064,7 +1064,6 @@ async fn run_agent_loop_core(
             }
             jobs.push(Job {
                 id: tc.id.to_string(),
-                call_id: None,
                 name: tc.function.name.to_string(),
                 args: args_json,
                 key: ledger_key_arg(&tc.function.arguments),
@@ -2253,7 +2252,10 @@ mod tests {
         assert_eq!(result.text_result.as_deref(), Some("ok"));
 
         for req in model.requests() {
-            assert!(req.system_instructions().is_none(), "harness must not inject preamble");
+            assert!(
+                req.system_instructions().is_none(),
+                "harness must not inject preamble"
+            );
             for msg in req.chat_history.iter() {
                 if let Message::System { content } = msg {
                     panic!("harness injected system message: {content}");
@@ -2857,11 +2859,10 @@ mod tests {
         ]]);
 
         let child_handle = child.clone();
-        let factory: super::super::task::TaskModelFactory =
-            Arc::new(move |spec: &str| {
-                assert_eq!(spec, "openai:mini", "factory receives the matched spec");
-                Some(child_handle.clone().erase())
-            });
+        let factory: super::super::task::TaskModelFactory = Arc::new(move |spec: &str| {
+            assert_eq!(spec, "openai:mini", "factory receives the matched spec");
+            Some(child_handle.clone().erase())
+        });
 
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([("scout".to_string(), "openai:mini".to_string())]),

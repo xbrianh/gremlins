@@ -24,7 +24,7 @@ use rig_reqwest::ReqwestClient;
 /// Either a statically-built client (for ApiKey / Token auth) or the
 /// ingredients to build one dynamically per attempt (for identity-based auth).
 enum AzureOpenAiClientState {
-    Static(OpenAI),
+    Static(Box<OpenAI>),
     Dynamic {
         token_provider: Box<dyn TokenProvider>,
         endpoint: String,
@@ -360,14 +360,14 @@ impl AzureOpenAiBackend {
                     .with_api_version(&api_version)
                     .with_base_url(&endpoint)
                     .connect(http_client.clone());
-                AzureOpenAiClientState::Static(client)
+                AzureOpenAiClientState::Static(Box::new(client))
             }
             ProviderAuth::Token(token) => {
                 let client = OpenAIConfig::with_key(&AZURE, token)
                     .with_api_version(&api_version)
                     .with_base_url(&endpoint)
                     .connect(http_client.clone());
-                AzureOpenAiClientState::Static(client)
+                AzureOpenAiClientState::Static(Box::new(client))
             }
             ProviderAuth::ClientSecret => AzureOpenAiClientState::Dynamic {
                 token_provider: Box::new(
@@ -668,12 +668,12 @@ mod tests {
 
         let client_params = openai_protocol::string_map(&extra);
         let state = AzureOpenAiRunState {
-            client_state: AzureOpenAiClientState::Static(
+            client_state: AzureOpenAiClientState::Static(Box::new(
                 OpenAIConfig::with_key(&AZURE, "fake-key")
             .with_api_version("2024-10-21")
             .with_base_url("https://example.openai.azure.com")
             .client(),
-            ),
+            )),
             model: "gpt-4o".into(),
             tool_filter: None,
             client_params,
@@ -701,7 +701,7 @@ mod tests {
 
         let backend = AzureOpenAiBackend {
             state: AzureOpenAiRunState {
-                client_state: AzureOpenAiClientState::Static(client),
+                client_state: AzureOpenAiClientState::Static(Box::new(client)),
                 model: "gpt-4o".into(),
                 tool_filter: None,
                 client_params: HashMap::new(),

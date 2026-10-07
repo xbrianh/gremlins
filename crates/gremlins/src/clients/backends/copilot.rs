@@ -24,6 +24,7 @@ const DEFAULT_MODEL: &str = "gpt-4o";
 
 /// Which credential source was used to build the Copilot client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum CopilotAuthSource {
     /// `GITHUB_COPILOT_API_KEY` env var.
     GitHubCopilotApiKey,

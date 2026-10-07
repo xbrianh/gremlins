@@ -12,7 +12,8 @@ const MAX_DEPTH: u32 = 3;
 /// Builds the model named by a matching `task-clients` entry, for use by one
 /// Task invocation.  Returns `None` when the spec names a provider this
 /// backend does not serve — the caller falls back to the parent's model.
-pub(crate) type TaskModelFactory<M = DynModel<Completion>> = Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
+pub(crate) type TaskModelFactory<M = DynModel<Completion>> =
+    Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
 
 /// Lookup maps for `task-clients`, already lowercased at parse time. Shared
 /// behind an `Arc` so a Task fan-out clones one pointer per invocation rather
@@ -481,7 +482,6 @@ mod tests {
             }
         }
     }
-
 
     #[tokio::test]
     async fn make_task_runner_rejects_at_max_depth() {
