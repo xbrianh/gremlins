@@ -55,12 +55,9 @@ GHMOCK
 
 @test "outputs 'passed' when statusCheckRollup is empty" {
     create_gh_jq_mock "$FIXTURES/ci_rollup_no_checks.json"
-    # Empty rollup causes the jq filter to return checks_done=false forever.
-    # This is intentional — an empty rollup means checks haven't populated yet.
-    # Use a 1s timeout to verify it bails rather than looping forever.
-    run bash "$SCRIPT" "$PR_URL" 1 30
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"checks incomplete"* ]]
+    # Empty rollup causes the jq filter to return checks_done=false, so the
+    # script would loop forever. Timeouts are handled by the exec stage now.
+    skip "poll timeout removed — exec stage handles time limits"
 }
 
 @test "dies without arguments" {

@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 # Poll CI checks on a PR until all complete, then output status.
-# Usage: gh_ci_poll <pr_url> [poll_timeout] [poll_interval]
+# Usage: gh_ci_poll <pr_url> [poll_interval]
 #
 # Outputs:
 #   stdout: "passed" or "failed"
-#   stderr: bail message on timeout / REVIEW_REQUIRED (exit 2)
+#   stderr: bail message on REVIEW_REQUIRED (exit 2)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/logging.sh"
 
 pr_url="${1:-}"
-poll_timeout="${2:-1200}"
-poll_interval="${3:-30}"
+poll_interval="${2:-30}"
 
 if [ -z "$pr_url" ]; then
-    die "Usage: gh_ci_poll <pr_url> [poll_timeout] [poll_interval]"
+    die "Usage: gh_ci_poll <pr_url> [poll_interval]"
 fi
 
 # --- helpers ---
@@ -92,27 +91,21 @@ bail_review_required() {
 
 # --- main ---
 
-info "ci-gate: polling CI checks for ${pr_url} (timeout=${poll_timeout}s, interval=${poll_interval}s)"
-poll_deadline=$(( $(date +%s) + poll_timeout ))
+info "ci-gate: polling CI checks for ${pr_url} (interval=${poll_interval}s)"
 
 while true; do
-    remaining=$(( poll_deadline - $(date +%s) ))
     meta=$(fetch_meta)
     decision=$(printf '%s' "$meta" | sed -n '1p')
     checks_done=$(printf '%s' "$meta" | sed -n '2p')
     rollup_len=$(printf '%s' "$meta" | sed -n '3p')
     in_progress=$(printf '%s' "$meta" | sed -n '4p')
-    info "ci-gate: poll iteration... checks_done=${checks_done} in_progress=${in_progress} total=${rollup_len} ${remaining}s remaining"
+    info "ci-gate: poll iteration... checks_done=${checks_done} in_progress=${in_progress} total=${rollup_len}"
     bail_review_required "$decision"
 
     if [ "$checks_done" = "true" ]; then
         break
     fi
 
-    if [ "$(date +%s)" -ge "$poll_deadline" ]; then
-        printf 'ci-gate: checks incomplete after %ss timeout\n' "$poll_timeout" >&2
-        exit 2
-    fi
     sleep "$poll_interval"
 done
 
