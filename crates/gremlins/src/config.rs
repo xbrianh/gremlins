@@ -150,8 +150,13 @@ impl Config {
         let cfg_file = match parse_yaml_config(&path) {
             Ok(v) => v,
             Err(ConfigError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                let max_tool_output_bytes = std::env::var("GREMLINS_MAX_TOOL_OUTPUT_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
                 return Ok(Config {
                     default_client: env_default_client(),
+                    max_tool_output_bytes,
                     ..Config::default()
                 });
             }
@@ -1123,5 +1128,63 @@ mod tests {
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_COMPLETION_NUDGE_BUDGET", "7");
         assert_eq!(completion_nudge_budget(), 7);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_default() {
+        let _env = EnvGuard::lock();
+        assert_eq!(max_tool_output_bytes(), DEFAULT_MAX_TOOL_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "5000");
+        assert_eq!(max_tool_output_bytes(), 5000);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_zero_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "0");
+        assert_eq!(max_tool_output_bytes(), 0);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_from_settings_yaml() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"max-tool-output-bytes": 12345}"#));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_tool_output_bytes(), 12345);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_settings_overrides_env() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"max-tool-output-bytes": 77777}"#));
+        // Env var is set after sandbox creation (sandbox clears it on init).
+        // settings.yaml value (77777) must win over the env var (999).
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "999");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_tool_output_bytes(), 77777);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_env_fallback_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        // No config/settings.yaml — simulates absent settings file.
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        env.set("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "4242");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_tool_output_bytes(), 4242);
+    }
+
+    #[test]
+    fn test_max_tool_output_bytes_default_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        // No settings.yaml, no env var — should get the 300_000 default.
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_tool_output_bytes(), DEFAULT_MAX_TOOL_OUTPUT_BYTES);
     }
 }

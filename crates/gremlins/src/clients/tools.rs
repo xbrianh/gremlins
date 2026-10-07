@@ -3265,4 +3265,110 @@ mod tests {
         let err = bash_check(&roots, "cat /etc/passwd", Some(&worktree)).unwrap();
         assert!(err.contains("outside sandbox"), "got: {err}");
     }
+
+    // --- Part 5: Output size cap tests ---
+
+    #[tokio::test]
+    async fn invoke_caps_oversized_bash_result() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        // Generate output that is ~200 bytes — well over a 10-byte cap.
+        let args = serde_json::json!({"command": "printf 'x%.0s' {1..200}"}).to_string();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+        let result = invoke("Bash", &c, &args).await;
+        assert!(
+            result.contains("Tool output exceeded the limit"),
+            "oversized Bash must be capped, got: {result}"
+        );
+        assert!(
+            !result.contains("xxxxxxxxxx"),
+            "output must not leak through cap message"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_caps_oversized_read_result() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        let big = "x".repeat(500);
+        std::fs::write(dir.join("big.txt"), &big).unwrap();
+        let args = serde_json::json!({"file_path": "big.txt"}).to_string();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+        let result = invoke("Read", &c, &args).await;
+        assert!(
+            result.contains("Tool output exceeded the limit"),
+            "oversized Read must be capped, got: {result}"
+        );
+        assert!(
+            !result.contains("xxx"),
+            "file content must not leak through cap message"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_zero_cap_disables_limit() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"command": "printf 'x%.0s' {1..200}"}).to_string();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "0");
+        let result = invoke("Bash", &c, &args).await;
+        assert!(
+            result.contains('x'),
+            "cap=0 must return actual output, got: {result}"
+        );
+        assert!(
+            !result.contains("Tool output exceeded the limit"),
+            "cap=0 must not trigger cap message"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_does_not_cap_done() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        let long_summary = "x".repeat(500);
+        let args = serde_json::json!({"summary": &long_summary}).to_string();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+        let result = invoke("Done", &c, &args).await;
+        assert!(
+            result.starts_with("Done. "),
+            "Done must not be capped, got: {result}"
+        );
+        assert!(
+            result.contains(&long_summary),
+            "Done summary must be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_does_not_cap_task() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let task_fn: TaskFn = Arc::new(|_d, _p| Box::pin(async move { "x".repeat(500) }));
+        let c = ToolContext {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            base_env: None,
+            allowed_roots: vec![dir.clone()],
+            audit_log: None,
+            allowed_tools: None,
+            task_fn: Some(task_fn),
+            audit_lock: None,
+        };
+        let args = serde_json::json!({"description": "t", "prompt": "go"}).to_string();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+        let result = invoke("Task", &c, &args).await;
+        assert!(
+            result.contains('x'),
+            "Task must not be capped, got: {result}"
+        );
+        assert!(
+            !result.contains("Tool output exceeded the limit"),
+            "Task must not trigger cap message"
+        );
+    }
 }
