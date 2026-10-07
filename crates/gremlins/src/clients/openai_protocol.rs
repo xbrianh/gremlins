@@ -6,8 +6,8 @@ use indexmap::IndexMap;
 use rig_core::driver::DynModel;
 use rig_core::http_client::DynHttpClient;
 use rig_core::operation::Completion;
-use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 use rig_core::providers::openai::wire::Dialect;
+use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
 use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
 use super::backend::{ClientError, RunParams};
@@ -236,7 +236,11 @@ fn last_n_chars(s: &str, n: usize) -> &str {
 /// targeting the same provider endpoint shares one connection pool.  The pool
 /// lock is held across construction so that concurrent callers cannot race to
 /// build duplicate clients.
-pub(crate) fn build_openai_client(api_key: &str, base_url: &str, dialect: &Dialect) -> Result<OpenAI, String> {
+pub(crate) fn build_openai_client(
+    api_key: &str,
+    base_url: &str,
+    dialect: &Dialect,
+) -> Result<OpenAI, String> {
     let cache_key = (base_url.to_string(), api_key.to_string());
 
     let http_client = {
