@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rig_core::error::ProviderError;
-use rig_core::providers::openai::OpenAI;
+use rig_core::providers::openai::{OpenAI, wire};
 
 use crate::clients::agent_loop::ErrorClassifier;
 use crate::clients::backend::{Backend, ClientError, RunParams};
@@ -118,7 +118,7 @@ impl OpenRouterBackend {
                 )
             })?;
         let base_url = crate::clients::config::base_url("OPENROUTER_BASE_URL", PROVIDER_NAME, BASE_URL);
-        let client = openai_protocol::build_openai_client(&key, &base_url)?;
+        let client = openai_protocol::build_openai_client(&key, &base_url, &wire::OPENROUTER)?;
         let model = if model.is_empty() {
             "gpt-4o".to_string()
         } else {

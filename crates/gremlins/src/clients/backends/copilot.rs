@@ -46,10 +46,10 @@ pub(crate) enum CopilotAuthSource {
 /// which source won.  OAuth device-code flow is disabled — gremlins run
 /// unattended.
 ///
-/// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
-/// `COPILOT_GITHUB_ACCESS_TOKEN` → `GITHUB_TOKEN` → `providers.yaml`
-/// `"copilot"` entry (`api-key` then `pat`) →
-/// `~/.config/github-copilot/apps.json` → error.
+/// Currently only API-key auth is supported (rig 0.43): `GITHUB_COPILOT_API_KEY`
+/// → `COPILOT_API_KEY` → `providers.yaml` `"copilot"` entry (`api-key`).
+/// PAT paths (`COPILOT_GITHUB_ACCESS_TOKEN`, `GITHUB_TOKEN`, `providers.yaml`
+/// `pat`, `apps.json`) are detected but rejected until support is restored.
 fn resolve_auth() -> Result<(Copilot, CopilotAuthSource), String> {
     let api_key = crate::config::copilot_api_key();
     let github_token = crate::config::copilot_github_token();
@@ -90,8 +90,7 @@ fn resolve_auth() -> Result<(Copilot, CopilotAuthSource), String> {
 
     Err(format!(
         "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
-         COPILOT_API_KEY, COPILOT_GITHUB_ACCESS_TOKEN, GITHUB_TOKEN, or add an \
-         entry with \"api-key\" or \"pat\" in {}",
+         COPILOT_API_KEY, or add an entry with \"api-key\" in {}",
         crate::config::user_config_root()
             .join("providers.yaml")
             .display(),

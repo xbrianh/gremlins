@@ -148,7 +148,7 @@ impl AzureOpenAiRunState {
                         .map_err(|e| ClientError::Runtime {
                             message: format!("Azure OpenAI token acquisition failed: {e}"),
                         })?;
-                    let client = OpenAIConfig::with_key(&AZURE, token)
+                    let client = OpenAIConfig::with_alternate_key(&AZURE, token)
                         .with_api_version(api_version)
                         .with_base_url(endpoint)
                         .connect(http_client.clone());
@@ -363,7 +363,7 @@ impl AzureOpenAiBackend {
                 AzureOpenAiClientState::Static(Box::new(client))
             }
             ProviderAuth::Token(token) => {
-                let client = OpenAIConfig::with_key(&AZURE, token)
+                let client = OpenAIConfig::with_alternate_key(&AZURE, token)
                     .with_api_version(&api_version)
                     .with_base_url(&endpoint)
                     .connect(http_client.clone());

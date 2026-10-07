@@ -711,6 +711,7 @@ async fn run_agent_loop_core(
                 }
                 Ok(None) => {
                     ended = true;
+                    turn_usage = Some(response.partial().usage);
                     break;
                 }
                 Ok(Some(Err(e))) => {

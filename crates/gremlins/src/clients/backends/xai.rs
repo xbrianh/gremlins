@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use rig_core::providers::openai::OpenAI;
+use rig_core::providers::openai::{OpenAI, wire};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
@@ -58,7 +58,7 @@ impl XaiBackend {
                 )
             })?;
         let base_url = crate::clients::config::base_url("XAI_BASE_URL", PROVIDER_NAME, BASE_URL);
-        let client = openai_protocol::build_openai_client(&key, &base_url)?;
+        let client = openai_protocol::build_openai_client(&key, &base_url, &wire::OPENAI)?;
         Ok(Arc::new(Self::new(
             client,
             model.to_string(),

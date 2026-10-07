@@ -50,7 +50,6 @@ The `Cargo.toml` was bumped from `rig-core = "0.41"` to `>=0.43` in commit `6306
 ## Still deferred
 
 - **Copilot PAT auth** — GitHub PAT / apps.json / providers.yaml PAT authentication is not yet supported in rig 0.43; `resolve_auth()` returns an error. The copilot API key (`COPILOT_API_KEY`) path works.
-- **`Job.call_id` field** — still unused; populated but never read. Can be cleaned up later.
 
 ## Migration approach
 
