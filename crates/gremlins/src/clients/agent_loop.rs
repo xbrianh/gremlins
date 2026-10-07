@@ -105,6 +105,7 @@ pub(crate) struct LoopOpts<'a> {
     pub(crate) tool_filter: Option<&'a [String]>,
     pub(crate) classify_error: Option<ErrorClassifier>,
     pub(crate) max_tokens: Option<u64>,
+    pub(crate) skip_temperature: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -205,6 +206,7 @@ pub(crate) async fn run_agent_loop(
         ctx.completion_nudge_budget,
         ctx.params.log_tx.clone(),
         opts.max_tokens,
+        opts.skip_temperature,
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -249,6 +251,7 @@ pub(crate) async fn run_agent_loop_nested(
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
+    skip_temperature: bool,
 ) -> Result<CompletedRun, ClientError> {
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
@@ -258,6 +261,7 @@ pub(crate) async fn run_agent_loop_nested(
         tool_filter,
         classify_error: None,
         max_tokens,
+        skip_temperature,
     };
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;
@@ -602,8 +606,10 @@ async fn run_agent_loop_core(
 
         let mut builder = CompletionRequest::new(next_prompt.clone())
             .messages(history.clone())
-            .tools(tool_defs.to_vec())
-            .temperature(DEFAULT_TEMPERATURE);
+            .tools(tool_defs.to_vec());
+        if !opts.skip_temperature {
+            builder = builder.temperature(DEFAULT_TEMPERATURE);
+        }
         if let Some(ref sys) = system_prompt {
             builder = builder.preamble(sys.clone());
         }
@@ -1645,6 +1651,7 @@ mod tests {
             tool_filter: filter,
             classify_error: None,
             max_tokens: None,
+            skip_temperature: false,
         }
     }
 
