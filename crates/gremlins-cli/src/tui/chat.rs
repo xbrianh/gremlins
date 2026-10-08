@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 pub enum ChatEvent {
     Ready,
     StreamChunk(String),
+    ReasoningChunk(String),
     TurnComplete {
         #[allow(dead_code)]
         turn: usize,
@@ -180,6 +181,13 @@ fn parse_chat_event(value: &Value) -> ChatEvent {
             ChatEvent::Ready
         }
         Some("stream_chunk") => ChatEvent::StreamChunk(
+            value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        ),
+        Some("reasoning_chunk") => ChatEvent::ReasoningChunk(
             value
                 .get("text")
                 .and_then(|v| v.as_str())

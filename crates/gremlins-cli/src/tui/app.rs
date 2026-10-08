@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use crate::tui::chat::ChatGremlin;
 
+/// Number of lines reserved in the ratatui viewport for live streaming content
+/// (reasoning + visible text deltas).
+pub const STREAMING_HEIGHT: u16 = 10;
+
 /// Application state for the TUI.
 ///
 /// Pure state, no I/O. Owned by the event loop and passed mutably to the
@@ -38,8 +42,13 @@ pub struct App {
     /// Streaming block state for incremental response rendering.
     /// Accumulated text for the current live streaming block.
     pub stream_text: String,
-    /// Number of lines currently occupied by the live streaming block.
-    pub stream_lines: usize,
+    /// Whether any visible StreamChunk has been received this turn.
+    pub streamed_visible_text: bool,
+    /// Whether the turn's text has already been committed to scrollback
+    /// (guards against double-commit when Done arrives after TurnComplete).
+    pub turn_committed: bool,
+    /// Whether the next reasoning character starts a new line (needs "  " prefix).
+    pub reasoning_line_start: bool,
 }
 
 impl App {
@@ -57,7 +66,9 @@ impl App {
             following_log: None,
             chat: None,
             stream_text: String::new(),
-            stream_lines: 0,
+            streamed_visible_text: false,
+            turn_committed: false,
+            reasoning_line_start: true,
         }
     }
 

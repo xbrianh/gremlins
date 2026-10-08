@@ -7,28 +7,38 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::App;
+use crate::tui::app::{App, STREAMING_HEIGHT};
 
 /// Render the bottom-region TUI layout.
 ///
-/// Ratatui draws only the bottom two lines:
-/// 1. Input bar  — prompt + current input.
-/// 2. Info bar   — single-line status.
+/// Ratatui draws three regions:
+/// 1. Streaming area — live reasoning + visible text deltas.
+/// 2. Input bar   — prompt + current input.
+/// 3. Info bar    — single-line status.
 ///
 /// The transcript (command output, help text, subprocess results) is inserted
 /// above the inline viewport via `terminal.insert_before()` and becomes normal
 /// terminal scrollback — it is never ratatui-rendered.
-///
-/// With `Viewport::Inline(2)`, `frame.area()` already covers exactly the
-/// bottom two rows; no area trimming is needed.
 pub fn render(frame: &mut Frame, app: &App, gremlin_count: &str, project_name: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(STREAMING_HEIGHT),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
 
-    render_input_bar(frame, chunks[0], app);
-    render_info_bar(frame, chunks[1], app, gremlin_count, project_name);
+    render_streaming(frame, chunks[0], app);
+    render_input_bar(frame, chunks[1], app);
+    render_info_bar(frame, chunks[2], app, gremlin_count, project_name);
+}
+
+fn render_streaming(frame: &mut Frame, area: Rect, app: &App) {
+    let line_count = app.stream_text.lines().count();
+    let scroll = line_count.saturating_sub(area.height as usize) as u16;
+    let paragraph = Paragraph::new(app.stream_text.as_str()).scroll((scroll, 0));
+    frame.render_widget(paragraph, area);
 }
 
 fn render_info_bar(

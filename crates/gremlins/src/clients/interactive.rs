@@ -120,6 +120,8 @@ pub enum InteractiveEvent {
     },
     /// Incremental text fragment from the model stream.
     StreamChunk { text: String },
+    /// Incremental reasoning fragment from the model stream.
+    ReasoningChunk { text: String },
     /// Interactive session ended.
     Ended {
         /// How the session ended: "resumed", "bailed", or "disconnect".

@@ -6,15 +6,13 @@ pub mod editor;
 pub mod ui;
 
 use std::io;
-use std::io::Write;
 use std::sync::Arc;
 
 use crossterm::{
     cursor,
     event::{Event, KeyCode, KeyEventKind},
     execute,
-    style::Print,
-    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -23,7 +21,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
-use app::App;
+use app::{App, STREAMING_HEIGHT};
 use chat::ChatGremlin;
 use commands::{dispatch, CommandResult};
 use editor::open_editor;
@@ -56,7 +54,7 @@ pub async fn run() {
     let mut terminal = Terminal::with_options(
         backend,
         TerminalOptions {
-            viewport: Viewport::Inline(2),
+            viewport: Viewport::Inline(2 + STREAMING_HEIGHT),
         },
     )
     .expect("failed to create terminal");
@@ -78,71 +76,6 @@ fn transcript_line(
     terminal.insert_before(1, |buf| {
         Paragraph::new(text.as_str()).render(buf.area, buf);
     })
-}
-
-/// Write the live streaming block above the ratatui viewport.
-/// Must be called after `terminal.draw()` — the cursor is at the bottom
-/// of the 2-line viewport. We move up 2 lines to reach viewport start,
-/// then further up past any existing block, write the new block downward,
-/// and restore the cursor to the viewport start position.
-fn write_stream_block(app: &mut App) -> io::Result<()> {
-    let mut stdout = io::stdout();
-
-    // Move up 2 lines from post-draw position to viewport start.
-    execute!(stdout, cursor::MoveUp(2))?;
-
-    // If we have an existing block, move up and clear it.
-    if app.stream_lines > 0 {
-        execute!(stdout, cursor::MoveUp(app.stream_lines as u16))?;
-        for _ in 0..app.stream_lines {
-            execute!(stdout, Clear(ClearType::CurrentLine), Print("\n"))?;
-        }
-        execute!(stdout, cursor::MoveUp(app.stream_lines as u16))?;
-    }
-
-    // Write the new block downward from the current position.
-    let lines: Vec<&str> = app.stream_text.lines().collect();
-    for line in &lines {
-        execute!(
-            stdout,
-            Clear(ClearType::CurrentLine),
-            Print(*line),
-            Print("\n")
-        )?;
-    }
-
-    app.stream_lines = lines.len();
-
-    // Restore cursor to viewport start (bottom of the streaming block).
-    // After writing N lines downward, cursor is at viewport_start + N.
-    // Move up N lines to get back to viewport start.
-    execute!(stdout, cursor::MoveUp(app.stream_lines as u16))?;
-
-    stdout.flush()?;
-    Ok(())
-}
-
-/// Clear the live streaming block, restoring cursor to viewport start.
-/// Must be called after `terminal.draw()` — cursor is at viewport bottom.
-fn clear_stream_block(app: &mut App) -> io::Result<()> {
-    if app.stream_lines == 0 {
-        return Ok(());
-    }
-    let mut stdout = io::stdout();
-
-    // Move up 2 lines from post-draw position to viewport start,
-    // then up past the streaming block to its top.
-    execute!(stdout, cursor::MoveUp(2 + app.stream_lines as u16))?;
-    for _ in 0..app.stream_lines {
-        execute!(stdout, Clear(ClearType::CurrentLine), Print("\n"))?;
-    }
-    // After clearing N lines with newlines, cursor is at viewport start.
-    // No extra MoveUp needed — we're already at the right position.
-
-    app.stream_lines = 0;
-    app.stream_text.clear();
-    stdout.flush()?;
-    Ok(())
 }
 
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
@@ -376,8 +309,6 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 let you = format!("You: {input}");
                                 transcript_line(terminal, &you)?;
                                 app.push_line(&you);
-                                transcript_line(terminal, "  thinking…")?;
-                                app.push_line("  thinking…");
                                 if let Some(ref chat) = app.chat {
                                     chat.talk(&input);
                                 } else {
@@ -507,17 +438,41 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                     chat::ChatEvent::Ready => {}
                     chat::ChatEvent::StreamChunk(text) => {
                         app.stream_text.push_str(&text);
-                        write_stream_block(&mut app)?;
+                        app.streamed_visible_text = true;
+                    }
+                    chat::ChatEvent::ReasoningChunk(text) => {
+                        for ch in text.chars() {
+                            if app.reasoning_line_start {
+                                app.stream_text.push_str("  ");
+                                app.reasoning_line_start = false;
+                            }
+                            app.stream_text.push(ch);
+                            if ch == '\n' {
+                                app.reasoning_line_start = true;
+                            }
+                        }
                     }
                     chat::ChatEvent::TurnComplete { turn: _, text, tool_calls } => {
-                        // Clear the live streaming block.
-                        clear_stream_block(&mut app)?;
-                        if !text.is_empty() {
+                        // Commit streaming content to scrollback.
+                        if !app.stream_text.is_empty() {
+                            let stream_lines: Vec<String> = app.stream_text.lines().map(String::from).collect();
+                            for line in &stream_lines {
+                                transcript_line(terminal, line)?;
+                                app.push_line(line);
+                            }
+                        }
+                        // Commit assembled text if it wasn't captured in the stream.
+                        if !text.is_empty() && !app.streamed_visible_text {
                             for line in text.lines() {
                                 transcript_line(terminal, line)?;
                                 app.push_line(line);
                             }
                         }
+                        app.stream_text.clear();
+                        app.streamed_visible_text = false;
+                        app.reasoning_line_start = true;
+                        app.turn_committed = true;
+
                         for tc in &tool_calls {
                             let line = format!("  {tc}");
                             transcript_line(terminal, &line)?;
@@ -533,17 +488,34 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         }
                     }
                     chat::ChatEvent::Done { text, .. } => {
-                        // Clear the live streaming block.
-                        clear_stream_block(&mut app)?;
-                        if !text.is_empty() {
+                        // If TurnComplete already committed the stream, skip.
+                        if app.turn_committed {
+                            app.turn_committed = false;
+                            continue;
+                        }
+                        // Commit streaming content to scrollback.
+                        if !app.stream_text.is_empty() {
+                            let stream_lines: Vec<String> = app.stream_text.lines().map(String::from).collect();
+                            for line in &stream_lines {
+                                transcript_line(terminal, line)?;
+                                app.push_line(line);
+                            }
+                        }
+                        if !text.is_empty() && !app.streamed_visible_text {
                             for line in text.lines() {
                                 transcript_line(terminal, line)?;
                                 app.push_line(line);
                             }
                         }
+                        app.stream_text.clear();
+                        app.streamed_visible_text = false;
+                        app.reasoning_line_start = true;
                     }
                     chat::ChatEvent::Ended { reason } => {
-                        clear_stream_block(&mut app)?;
+                        app.stream_text.clear();
+                        app.streamed_visible_text = false;
+                        app.reasoning_line_start = true;
+                        app.turn_committed = false;
                         let msg = format!("chat ended: {reason}");
                         transcript_line(terminal, &msg)?;
                         app.push_line(&msg);
@@ -551,7 +523,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         chat_event_rx = None;
                     }
                     chat::ChatEvent::Error(msg) => {
-                        clear_stream_block(&mut app)?;
+                        app.stream_text.clear();
+                        app.streamed_visible_text = false;
+                        app.reasoning_line_start = true;
+                        app.turn_committed = false;
                         let full = format!("chat error: {msg}");
                         transcript_line(terminal, &full)?;
                         app.push_line(&full);

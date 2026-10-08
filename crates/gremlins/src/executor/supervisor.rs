@@ -1697,6 +1697,13 @@ async fn handle_debug(
                             break;
                         }
                     }
+                    Ok(InteractiveEvent::ReasoningChunk { text }) => {
+                        let payload = serde_json::json!({"type": "reasoning_chunk", "text": text});
+                        if writer.write_json_line(&payload).await.is_err() {
+                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
+                            break;
+                        }
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -2039,6 +2046,13 @@ async fn handle_chat(
                     }
                     Ok(InteractiveEvent::StreamChunk { text }) => {
                         let payload = serde_json::json!({"type": "stream_chunk", "text": text});
+                        if writer.write_json_line(&payload).await.is_err() {
+                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
+                            break;
+                        }
+                    }
+                    Ok(InteractiveEvent::ReasoningChunk { text }) => {
+                        let payload = serde_json::json!({"type": "reasoning_chunk", "text": text});
                         if writer.write_json_line(&payload).await.is_err() {
                             let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
