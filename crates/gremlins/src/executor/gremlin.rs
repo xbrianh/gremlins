@@ -819,7 +819,7 @@ impl Gremlin {
         child.insert("pid".to_string(), Value::Null);
         child.insert("exit_code".to_string(), Value::Null);
 
-        let mut child_state = StateData::from_store(Some(child_id.to_string()), forked_store);
+        let child_state = StateData::from_store(Some(child_id.to_string()), forked_store);
         child_state
             .write_state(&child)
             .map_err(|e| RunError::Message(format!("failed to write child state: {e}")))?;

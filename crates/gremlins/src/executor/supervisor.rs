@@ -139,10 +139,10 @@ pub(crate) struct RunHandle {
     pub log_broadcast: broadcast::Sender<String>,
     /// Interactive handle (supervisor → agent loop).
     pub interactive: InteractiveHandle,
-    /// State directory path — stored so handle_status / handle_info can read
-    /// state directly for live gremlins whose state may be in a TempDir
-    /// (ephemeral runs) rather than under config::state_root().
-    pub state_dir: PathBuf,
+    /// State store handle — stored so handle_status / handle_info / handle_ls
+    /// can read state directly for live gremlins whose state may be in a
+    /// TempDir (ephemeral runs) rather than under config::state_root().
+    pub store: Arc<dyn state::StateStore + Send + Sync>,
     /// Scratch directory path for live gremlins.
     pub scratch_dir: PathBuf,
 }
@@ -578,9 +578,9 @@ async fn handle_launch(
     // to the backend.
     gremlin.cancel_token = Some(cancel_token.clone());
 
-    // Capture state_dir and scratch_dir before gremlin is moved into the
+    // Capture state store handle and scratch_dir before gremlin is moved into the
     // spawned task.
-    let state_dir = gremlin.state.state_dir().to_path_buf();
+    let store = gremlin.state.store_handle();
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
     // Spawn before inserting into run_map so the JoinHandle is available
@@ -603,7 +603,7 @@ async fn handle_launch(
         state_tx,
         log_broadcast,
         interactive: interactive_handle,
-        state_dir,
+        store,
         scratch_dir,
     };
     let definition_name = definition_path
@@ -816,9 +816,9 @@ async fn handle_resume(
 
     gremlin.cancel_token = Some(cancel_token.clone());
 
-    // Capture state_dir and scratch_dir before gremlin is moved into the
+    // Capture state store handle and scratch_dir before gremlin is moved into the
     // spawned task.
-    let state_dir = gremlin.state.state_dir().to_path_buf();
+    let store = gremlin.state.store_handle();
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
     let definition_name = gremlin.state.read_str("kind");
 
@@ -842,7 +842,7 @@ async fn handle_resume(
         state_tx,
         log_broadcast,
         interactive: interactive_handle,
-        state_dir,
+        store,
         scratch_dir,
     };
     get_run_map().lock().unwrap().insert(id.to_string(), handle);
@@ -866,54 +866,59 @@ async fn handle_resume(
 // ---------------------------------------------------------------------------
 
 async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
-    let live: HashMap<String, String> = {
-        let map = get_run_map().lock().unwrap();
-        map.keys()
-            .map(|id| (id.clone(), "running".to_string()))
-            .collect()
-    };
-
     let mut rows: Vec<Value> = Vec::new();
 
-    for (id, status) in &live {
-        let state_dir = state_root.join(id);
-        let state_file = state_dir.join("state.json");
-        let raw = state::read_state_json(Some(&state_file));
-        let stage = raw
-            .get("stage")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let started_at = raw
-            .get("started_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let project = raw
-            .get("project_root")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let launch = raw
-            .get("metadata")
-            .and_then(|v| v.get("cli"))
-            .and_then(|v| v.get("launch_cmd"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+    // Live gremlins: collect (id, store) pairs under the lock, then read
+    // state trees outside the lock so synchronous I/O doesn't block the
+    // run map for other supervisor tasks.
+    let live_ids: std::collections::HashSet<String>;
+    {
+        let map = get_run_map().lock().unwrap();
+        live_ids = map.keys().cloned().collect();
+        let pairs: Vec<(String, Arc<dyn state::StateStore + Send + Sync>)> = map
+            .iter()
+            .map(|(id, handle)| (id.clone(), handle.store.clone()))
+            .collect();
+        drop(map);
 
-        rows.push(serde_json::json!({
-            "id": id,
-            "status": status,
-            "stage": stage,
-            "started_at": started_at,
-            "project": project,
-            "launch": launch,
-        }));
+        for (id, store) in &pairs {
+            let tree = store.state_tree();
+            let stage = tree
+                .get("stage")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let started_at = tree
+                .get("started_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let project = tree
+                .get("project_root")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let launch = tree
+                .get("metadata")
+                .and_then(|v| v.get("cli"))
+                .and_then(|v| v.get("launch_cmd"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            rows.push(serde_json::json!({
+                "id": id,
+                "status": "running",
+                "stage": stage,
+                "started_at": started_at,
+                "project": project,
+                "launch": launch,
+            }));
+        }
     }
 
     for (id, state_json_path) in state::list_state_dirs() {
-        if live.contains_key(&id) {
+        if live_ids.contains(&id) {
             continue;
         }
         if state_root.join(&id).join("closed").exists() {
@@ -991,30 +996,27 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
     }
 
     // Check the run_map first — live gremlins (including ephemeral ones
-    // whose state is in a TempDir) have their state_dir stored in the
+    // whose state is in a TempDir) have their store handle stored in the
     // RunHandle.
     let live = {
         let map = get_run_map().lock().unwrap();
-        map.get(id).map(|h| h.state_dir.clone())
+        map.get(id).map(|h| h.store.clone())
     };
 
-    if let Some(state_dir) = live {
-        let state_file = state_dir.join("state.json");
-        if !state_file.is_file() {
-            return error_response(&format!("gremlin {id}: state file not found"));
-        }
-        let raw = state::read_state_json(Some(&state_file));
-        if raw.is_empty() {
-            return error_response(&format!("gremlin {id}: state file is empty or unparseable"));
+    if let Some(store) = live {
+        let tree = store.state_tree();
+        if tree.is_empty() {
+            return error_response(&format!("gremlin {id}: state is empty"));
         }
 
+        let state_dir = store.state_dir();
         let status = "running".to_string();
-        let stage = raw
+        let stage = tree
             .get("stage")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let definition = raw
+        let definition = tree
             .get("definition_path")
             .and_then(|v| v.as_str())
             .and_then(|s| {
@@ -1024,41 +1026,41 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
                     .map(String::from)
             })
             .unwrap_or_else(|| {
-                raw.get("kind")
+                tree.get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string()
             });
-        let project_root = raw
+        let project_root = tree
             .get("project_root")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let workdir = raw
+        let workdir = tree
             .get("workdir")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
         let artifact_dir = state_dir.join("artifacts");
-        let started_at = raw
+        let started_at = tree
             .get("started_at")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let ended_at = raw.get("ended_at").cloned().unwrap_or(Value::Null);
-        let exit_code = raw.get("exit_code").cloned().unwrap_or(Value::Null);
-        let pid = raw.get("pid").cloned().unwrap_or(Value::Null);
-        let client = raw
+        let ended_at = tree.get("ended_at").cloned().unwrap_or(Value::Null);
+        let exit_code = tree.get("exit_code").cloned().unwrap_or(Value::Null);
+        let pid = tree.get("pid").cloned().unwrap_or(Value::Null);
+        let client = tree
             .get("client")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let attempt = raw
+        let attempt = tree
             .get("attempt")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let kind = raw
+        let kind = tree
             .get("kind")
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -1131,31 +1133,28 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
     }
 
     // Check the run_map first — live gremlins (including ephemeral ones
-    // whose state is in a TempDir) have their state_dir stored in the
+    // whose state is in a TempDir) have their store handle stored in the
     // RunHandle.
     let live = {
         let map = get_run_map().lock().unwrap();
         map.get(id)
-            .map(|h| (h.state_dir.clone(), h.scratch_dir.clone()))
+            .map(|h| (h.store.clone(), h.scratch_dir.clone()))
     };
 
-    if let Some((state_dir, scratch_dir)) = live {
-        let state_file = state_dir.join("state.json");
-        if !state_file.is_file() {
-            return error_response(&format!("gremlin {id}: state file not found"));
-        }
-        let raw = state::read_state_json(Some(&state_file));
-        if raw.is_empty() {
-            return error_response(&format!("gremlin {id}: state file is empty or unparseable"));
+    if let Some((store, scratch_dir)) = live {
+        let tree = store.state_tree();
+        if tree.is_empty() {
+            return error_response(&format!("gremlin {id}: state is empty"));
         }
 
+        let state_dir = store.state_dir();
         let status = "running".to_string();
-        let stage = raw
+        let stage = tree
             .get("stage")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let definition = raw
+        let definition = tree
             .get("definition_path")
             .and_then(|v| v.as_str())
             .and_then(|s| {
@@ -1165,48 +1164,48 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
                     .map(String::from)
             })
             .unwrap_or_else(|| {
-                raw.get("kind")
+                tree.get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string()
             });
-        let project_root = raw
+        let project_root = tree
             .get("project_root")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let workdir = raw
+        let workdir = tree
             .get("workdir")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
         let artifact_dir = state_dir.join("artifacts");
         let log_file = state_dir.join("log");
-        let started_at = raw
+        let started_at = tree
             .get("started_at")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let ended_at = raw.get("ended_at").cloned().unwrap_or(Value::Null);
-        let exit_code = raw.get("exit_code").cloned().unwrap_or(Value::Null);
-        let pid = raw.get("pid").cloned().unwrap_or(Value::Null);
-        let client = raw
+        let ended_at = tree.get("ended_at").cloned().unwrap_or(Value::Null);
+        let exit_code = tree.get("exit_code").cloned().unwrap_or(Value::Null);
+        let pid = tree.get("pid").cloned().unwrap_or(Value::Null);
+        let client = tree
             .get("client")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let attempt = raw
+        let attempt = tree
             .get("attempt")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let kind = raw
+        let kind = tree
             .get("kind")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
         // Read bail_info from the state directory.
-        let bail_info = raw
+        let bail_info = tree
             .get("attempt")
             .and_then(|v| v.as_str())
             .filter(|a| !a.is_empty())
@@ -1301,12 +1300,12 @@ async fn handle_log(
     }
 
     // Resolve the state directory: for live gremlins (including ephemeral),
-    // use the state_dir stored in the RunHandle; otherwise fall back to
+    // use the store handle stored in the RunHandle; otherwise fall back to
     // config::state_root().
     let (state_dir, unknown) = {
         let map = get_run_map().lock().unwrap();
         if let Some(handle) = map.get(id) {
-            (handle.state_dir.clone(), false)
+            (handle.store.state_dir().to_path_buf(), false)
         } else {
             let sd = config::state_root().join(id);
             let sf = sd.join("state.json");
@@ -1433,12 +1432,12 @@ async fn handle_debug(
     }
 
     // Resolve the state directory: for live gremlins (including ephemeral),
-    // use the state_dir stored in the RunHandle; otherwise fall back to
+    // use the store handle stored in the RunHandle; otherwise fall back to
     // config::state_root().
     let (state_dir, unknown) = {
         let map = get_run_map().lock().unwrap();
         if let Some(handle) = map.get(id) {
-            (handle.state_dir.clone(), false)
+            (handle.store.state_dir().to_path_buf(), false)
         } else {
             let sd = config::state_root().join(id);
             let sf = sd.join("state.json");
@@ -1872,9 +1871,9 @@ async fn handle_chat(
 
     gremlin.cancel_token = Some(cancel_token.clone());
 
-    // Capture state_dir and scratch_dir before gremlin is moved into
+    // Capture state store handle and scratch_dir before gremlin is moved into
     // the spawned task.
-    let state_dir = gremlin.state.state_dir().to_path_buf();
+    let store = gremlin.state.store_handle();
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
     let join_handle = tokio::spawn(async move {
@@ -1896,7 +1895,7 @@ async fn handle_chat(
         state_tx,
         log_broadcast,
         interactive: interactive_handle.clone(),
-        state_dir,
+        store,
         scratch_dir,
     };
     get_run_map().lock().unwrap().insert(id.clone(), handle);
@@ -2068,10 +2067,12 @@ async fn handle_chat(
     interactive_handle.pause.reset();
 }
 
+static CHAT_SEQ: AtomicUsize = AtomicUsize::new(0);
+
 fn create_chat_gremlin(
     definition: &crate::definition::StaticDefinition,
     default_client: &str,
-    state_root: &Path,
+    _state_root: &Path,
 ) -> Result<Gremlin, String> {
     use crate::clients::client::Client;
     use crate::config;
@@ -2083,16 +2084,18 @@ fn create_chat_gremlin(
 
     let project_root = config::project_root();
 
-    // Generate ID
+    // Generate ID — use an atomic counter so concurrent chat sessions
+    // never collide. Chat gremlins are ephemeral so they never appear
+    // under config::state_root().
     let gremlin_id = loop {
-        let hex = state::token_hex(2);
-        let candidate = format!("chat-{hex}");
-        match std::fs::create_dir(state_root.join(&candidate)) {
-            Ok(()) => {
-                break validate_gremlin_id(&candidate).map_err(|e| format!("invalid id: {e}"))?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("failed to create state dir: {e}")),
+        let seq = CHAT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let candidate = format!("chat-{seq:04x}");
+        let id = validate_gremlin_id(&candidate).map_err(|e| format!("invalid id: {e}"))?;
+        // Double-check the run_map in case a previous chat session with
+        // the same counter value is still alive (extremely unlikely but
+        // cheap to guard against).
+        if !get_run_map().lock().unwrap().contains_key(id.as_str()) {
+            break id;
         }
     };
 
@@ -2124,7 +2127,7 @@ fn create_chat_gremlin(
     initial.insert("child_key".to_string(), Value::String(String::new()));
     initial.insert("metadata".to_string(), Value::Object(Map::new()));
 
-    let state = StateData::new(gremlin_id.as_str(), &initial, /* ephemeral */ false)
+    let state = StateData::new(gremlin_id.as_str(), &initial, /* ephemeral */ true)
         .map_err(|e| format!("failed to write state: {e}"))?;
 
     // Write definition.yaml via state blob.
@@ -2383,9 +2386,9 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
 
     let id_clone = id.clone();
 
-    // Capture state_dir and scratch_dir before gremlin is moved into the
+    // Capture state store handle and scratch_dir before gremlin is moved into the
     // spawned task.
-    let state_dir = gremlin.state.state_dir().to_path_buf();
+    let store = gremlin.state.store_handle();
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
     // Spawn before inserting into run_map so the JoinHandle is available
@@ -2418,7 +2421,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
         state_tx,
         log_broadcast,
         interactive: interactive_handle,
-        state_dir,
+        store,
         scratch_dir,
     };
     // Insert into RUN_MAP *after* spawning so the JoinHandle is present
