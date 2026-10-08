@@ -5,8 +5,9 @@ pub mod commands;
 pub mod editor;
 pub mod ui;
 
-use std::io;
+use std::io::{self, IsTerminal};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crossterm::{
     cursor,
@@ -16,13 +17,15 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Paragraph, Widget},
     Terminal, TerminalOptions, Viewport,
 };
 use tokio::sync::mpsc;
 
 use app::{App, STREAMING_HEIGHT};
-use chat::ChatGremlin;
+use chat::{send_message, ChatEvent};
 use commands::{dispatch, CommandResult};
 use editor::open_editor;
 use ui::render;
@@ -46,15 +49,44 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Recreate the terminal with a new inline viewport height.
+/// Used to collapse the streaming area when idle and expand it when
+/// a turn is active.
+fn set_viewport_height(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    height: u16,
+) -> io::Result<()> {
+    terminal.clear()?;
+    let _old_backend =
+        std::mem::replace(terminal.backend_mut(), CrosstermBackend::new(io::stdout()));
+    // _old_backend is dropped here, releasing the stdout handle.
+    *terminal = Terminal::with_options(
+        CrosstermBackend::new(io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Inline(height),
+        },
+    )
+    .expect("failed to recreate terminal");
+    Ok(())
+}
+
 /// Initialise the terminal, run the event loop, and restore on exit.
 pub async fn run() {
+    // Refuse to start the TUI when stdout is not a terminal.
+    if !std::io::stdout().is_terminal() {
+        eprintln!("gremlins: stdout is not a terminal — use `gremlins ls` to list gremlins");
+        return;
+    }
+
     let _guard = TerminalGuard::enter();
 
+    // Start with a minimal viewport (input + info only).
+    // The viewport expands to include the streaming area when a turn is active.
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::with_options(
         backend,
         TerminalOptions {
-            viewport: Viewport::Inline(2 + STREAMING_HEIGHT),
+            viewport: Viewport::Inline(2),
         },
     )
     .expect("failed to create terminal");
@@ -78,8 +110,155 @@ fn transcript_line(
     })
 }
 
+/// Like [`transcript_line`] but applies a ratatui [`Style`] to the line.
+fn transcript_styled(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    line: &str,
+    style: Style,
+) -> io::Result<()> {
+    let span = Span::styled(line, style);
+    terminal.insert_before(1, |buf| {
+        Paragraph::new(Line::from(span)).render(buf.area, buf);
+    })
+}
+
+// ── Thinking indicator helpers ───────────────────────────────────
+
+/// Show the "thinking..." placeholder in the streaming area.
+fn show_thinking(app: &mut App) {
+    app.streaming_active = true;
+    if !app.showing_thinking {
+        app.reasoning_stream = "thinking...".to_string();
+        app.response_stream.clear();
+        app.showing_thinking = true;
+        app.streaming_rows = 1;
+    }
+}
+
+/// Clear the "thinking..." placeholder when the first real chunk arrives.
+fn clear_thinking(app: &mut App) {
+    if app.showing_thinking {
+        app.reasoning_stream.clear();
+        app.showing_thinking = false;
+    }
+}
+
+/// Mark streaming as complete — clear streams and deactivate.
+fn finish_streaming(app: &mut App) {
+    app.prompt.clear();
+    app.prompt_lines = 0;
+    app.reasoning_stream.clear();
+    app.response_stream.clear();
+    app.streamed_visible_text = false;
+    app.turn_committed = false;
+    app.showing_thinking = false;
+    app.streaming_active = false;
+    app.response_area_open = false;
+    app.streaming_rows = 0;
+    app.response_rows = 0;
+}
+
+/// Viewport height: content height, capped at terminal height.
+fn active_viewport_height(app: &App, term_h: u16) -> u16 {
+    let response_h = if app.response_area_open { app.response_rows } else { 0 };
+    let needed = 2 + app.prompt_lines + app.streaming_rows + response_h;
+    needed.min(term_h)
+}
+
+/// Compute prompt line count (wrapping at ~80 cols) and snapshot it.
+fn snapshot_prompt_lines(prompt: &str) -> u16 {
+    let chars = prompt.chars().count();
+    let wrapped = (chars + 2).div_ceil(78); // +2 for "> " prefix
+    let explicit = prompt.lines().count();
+    (wrapped.max(explicit) as u16).max(1)
+}
+
+/// Grow streaming_rows to match reasoning_stream line count, capped at
+/// STREAMING_HEIGHT. Resizes viewport on change.
+fn sync_streaming_rows(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    viewport_height: &mut u16,
+    term_h: u16,
+) -> io::Result<()> {
+    let actual = (app.reasoning_stream.lines().count() as u16).max(1);
+    let target = actual.min(STREAMING_HEIGHT);
+    if target != app.streaming_rows {
+        app.streaming_rows = target;
+        let needed = active_viewport_height(app, term_h);
+        if *viewport_height != needed {
+            set_viewport_height(terminal, needed)?;
+            *viewport_height = needed;
+        }
+    }
+    Ok(())
+}
+
+/// Grow response_rows to match response_stream. No per-section cap —
+/// the total viewport is capped at terminal height by active_viewport_height.
+fn sync_response_rows(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    viewport_height: &mut u16,
+    term_h: u16,
+) -> io::Result<()> {
+    let actual = (app.response_stream.lines().count() as u16).max(1);
+    if actual != app.response_rows {
+        app.response_rows = actual;
+        let needed = active_viewport_height(app, term_h);
+        if *viewport_height != needed {
+            set_viewport_height(terminal, needed)?;
+            *viewport_height = needed;
+        }
+    }
+    Ok(())
+}
+
+/// Flush the current viewport content (prompt + last streaming lines +
+/// response) to scrollback, then clear state and collapse viewport.
+fn flush_and_collapse(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    viewport_height: &mut u16,
+    reason_style: Style,
+) -> io::Result<()> {
+    // Prompt.
+    if !app.prompt.is_empty() {
+        let prompt_line = format!("> {}", app.prompt);
+        transcript_line(terminal, &prompt_line)?;
+        app.push_line(&prompt_line);
+    }
+    // Last visible streaming lines only (not the entire history).
+    if !app.reasoning_stream.is_empty() {
+        let all_lines: Vec<String> = app.reasoning_stream.lines().map(String::from).collect();
+        let skip = all_lines.len().saturating_sub(app.streaming_rows as usize);
+        for line in &all_lines[skip..] {
+            let styled = format!("  {line}");
+            transcript_styled(terminal, &styled, reason_style)?;
+            app.push_line(&styled);
+        }
+    }
+    // Response.
+    if !app.response_stream.is_empty() {
+        let response_lines: Vec<String> =
+            app.response_stream.lines().map(String::from).collect();
+        for line in &response_lines {
+            transcript_line(terminal, line)?;
+            app.push_line(line);
+        }
+    }
+    finish_streaming(app);
+    if *viewport_height > 2 {
+        set_viewport_height(terminal, 2)?;
+        *viewport_height = 2;
+    }
+    Ok(())
+}
+
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     let mut app = App::new();
+    let mut viewport_height: u16 = 2; // input + info only; expands when streaming
+    let term_h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
 
     // ── Connect to the daemon socket ──────────────────────────────
     let (client, mut event_rx, mut raw_rx) = match client::connect().await {
@@ -114,12 +293,26 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
         }
     }
 
-    // ── Crossterm event channel (blocking thread → async) ─────────
+    // ── Crossterm event channel (polling task → async) ─────────
+    // Uses poll + sleep instead of blocking read so that ratatui's
+    // inline-viewport cursor-position query (which also reads stdin)
+    // is never starved by a background reader holding the stdin lock.
     let (ct_tx, mut ct_rx) = mpsc::unbounded_channel::<Event>();
-    std::thread::spawn(move || {
-        while let Ok(ev) = crossterm::event::read() {
-            if ct_tx.send(ev).is_err() {
-                break;
+    tokio::spawn(async move {
+        loop {
+            match crossterm::event::poll(Duration::from_millis(20)) {
+                Ok(true) => match crossterm::event::read() {
+                    Ok(ev) => {
+                        if ct_tx.send(ev).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                },
+                Ok(false) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(_) => break,
             }
         }
     });
@@ -129,6 +322,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
 
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
+    // ── Chat task handle (aborted on Esc to stop the agent) ───────
+    let mut chat_task: Option<tokio::task::JoinHandle<()>> = None;
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
     /// Drop-guard that aborts a JoinHandle on drop, ensuring the dedicated
@@ -146,23 +341,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
     transcript_line(terminal, banner)?;
     app.push_line(banner);
 
-    // ── Start chat agent ──────────────────────────────────────────
-    let (mut chat_event_rx, _chat_started) = match ChatGremlin::start().await {
-        Ok((chat, rx)) => {
-            app.chat = Some(chat);
-            let msg = "chat agent ready";
-            transcript_line(terminal, msg)?;
-            app.push_line(msg);
-            (Some(rx), true)
-        }
-        Err(e) => {
-            let msg = format!("chat: {e}");
-            transcript_line(terminal, &msg)?;
-            app.push_line(&msg);
-            (None, false)
-        }
-    };
-    app.push_line("");
+    // ── Channel for chat events from the current (or most recent) message.
+    let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<ChatEvent>();
 
     // ── Event loop ────────────────────────────────────────────────
     loop {
@@ -178,29 +358,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         KeyCode::Char('c')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
-                            // If a chat agent is active, cancel the current turn
-                            // and relaunch a fresh session.
-                            if let Some(ref chat) = app.chat {
-                                chat.cancel();
-                                // The Ended event will clear app.chat and chat_event_rx.
-                                // After that, start a fresh session.
-                                match ChatGremlin::start().await {
-                                    Ok((new_chat, rx)) => {
-                                        app.chat = Some(new_chat);
-                                        chat_event_rx = Some(rx);
-                                        let msg = "chat agent restarted";
-                                        transcript_line(terminal, msg)?;
-                                        app.push_line(msg);
-                                    }
-                                    Err(e) => {
-                                        let msg = format!("chat restart failed: {e}");
-                                        transcript_line(terminal, &msg)?;
-                                        app.push_line(&msg);
-                                    }
-                                }
-                            } else {
-                                break;
-                            }
+                            app.input.clear();
                         }
                         KeyCode::Char('d')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
@@ -223,6 +381,24 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         }
                         KeyCode::Esc => {
                             app.input.clear();
+                            // If a chat request is in-flight, abort it to
+                            // stop the agent loop and all tool calls.
+                            if app.active_request {
+                                if let Some(handle) = chat_task.take() {
+                                    handle.abort();
+                                }
+                                // Flush partial content so it stays visible.
+                                flush_and_collapse(
+                                    &mut app, terminal, &mut viewport_height,
+                                    Style::default()
+                                        .fg(Color::DarkGray)
+                                        .add_modifier(Modifier::ITALIC),
+                                )?;
+                                app.turn_committed = false;
+                                app.current_response.clear();
+                                app.pending_user_message.clear();
+                                app.active_request = false;
+                            }
                         }
                         KeyCode::Enter => {
                             let input = std::mem::take(&mut app.input);
@@ -248,12 +424,68 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                             app.push_line(line);
                                         }
                                     }
-                                    CommandResult::Clear => {
+                                    CommandResult::RestartChat => {
+                                        finish_streaming(&mut app);
+                                        app.prompt.clear();
                                         app.clear_output();
+                                        app.turn_committed = false;
+                                        app.conversation_history.clear();
+                                        app.current_response.clear();
+                                        app.input.clear();
+                                        if viewport_height > 2 {
+                                            set_viewport_height(terminal, 2)?;
+                                            viewport_height = 2;
+                                        }
                                         terminal.clear()?;
+                                        let msg = "chat history cleared";
+                                        transcript_line(terminal, msg)?;
+                                        app.push_line(msg);
                                     }
                                     CommandResult::Quit => {
                                         break;
+                                    }
+                                    CommandResult::ShowHistory => {
+                                        if app.conversation_history.is_empty() {
+                                            transcript_line(terminal, "(no history)")?;
+                                            app.push_line("(no history)");
+                                        } else {
+                                            let mut lines_to_push: Vec<String> = Vec::new();
+                                            for (i, entry) in app.conversation_history.iter().enumerate() {
+                                                let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                                                let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                                                // Truncate content for display, using char
+                                                // boundaries to avoid panicking on multi-byte
+                                                // UTF-8 characters.
+                                                let preview: String = if content.chars().count() > 60 {
+                                                    let truncated: String =
+                                                        content.chars().take(57).collect();
+                                                    format!("{truncated}...")
+                                                } else {
+                                                    content.to_string()
+                                                };
+                                                let line = format!("  [{i}] {role}: {preview}");
+                                                lines_to_push.push(line);
+                                            }
+                                            for line in &lines_to_push {
+                                                transcript_line(terminal, line)?;
+                                                app.push_line(line);
+                                            }
+                                        }
+                                    }
+                                    CommandResult::TruncateHistory(idx) => {
+                                        if idx >= app.conversation_history.len() {
+                                            let msg = format!(
+                                                "invalid index {idx} — history has {} entries",
+                                                app.conversation_history.len()
+                                            );
+                                            transcript_line(terminal, &msg)?;
+                                            app.push_line(&msg);
+                                        } else {
+                                            app.conversation_history.truncate(idx);
+                                            let msg = format!("history truncated to {idx} entries");
+                                            transcript_line(terminal, &msg)?;
+                                            app.push_line(&msg);
+                                        }
                                     }
                                     CommandResult::SocketOp { op, payload } => {
                                         if op == "log" {
@@ -305,17 +537,51 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 }
                             } else {
                                 // Plain text — send to chat agent.
-                                // Echo user message immediately.
-                                let you = format!("You: {input}");
-                                transcript_line(terminal, &you)?;
-                                app.push_line(&you);
-                                if let Some(ref chat) = app.chat {
-                                    chat.talk(&input);
-                                } else {
-                                    let msg = "no agent configured — type /help for commands";
+                                // Guard against concurrent requests.
+                                if app.active_request {
+                                    let msg = "a request is already in progress — wait for the response";
                                     transcript_line(terminal, msg)?;
                                     app.push_line(msg);
+                                    continue;
                                 }
+                                // Store prompt for display in the viewport.
+                                // Don't echo to scrollback — the viewport shows it.
+                                app.prompt = input.clone();
+                                app.prompt_lines = snapshot_prompt_lines(&app.prompt);
+
+                                // Do NOT push to conversation_history yet —
+                                // only commit the user+assistant pair on Done.
+                                // Send prior history (without this message) to the daemon.
+
+                                show_thinking(&mut app);
+                                // Expand viewport for streaming (prompt + streaming + response).
+                                let needed = active_viewport_height(&app, term_h);
+                                if viewport_height < needed {
+                                    set_viewport_height(terminal, needed)?;
+                                    viewport_height = needed;
+                                }
+                                // Force an immediate frame so "thinking..."
+                                // appears without waiting for the next event.
+                                terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name))?;
+
+                                app.active_request = true;
+                                app.pending_user_message = input.clone();
+                                let history = app.conversation_history.clone();
+                                let chat_tx = chat_tx.clone();
+                                chat_task = Some(tokio::spawn(async move {
+                                    match send_message(&input, &history).await {
+                                        Ok(mut rx) => {
+                                            while let Some(event) = rx.recv().await {
+                                                if chat_tx.send(event).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = chat_tx.send(ChatEvent::Error(e));
+                                        }
+                                    }
+                                }));
                             }
                         }
                         KeyCode::Backspace => {
@@ -428,110 +694,109 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
             }
 
             // ── Chat events ────────────────────────────────
-            Some(event) = async {
-                match &mut chat_event_rx {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                match event {
-                    chat::ChatEvent::Ready => {}
-                    chat::ChatEvent::StreamChunk(text) => {
-                        app.stream_text.push_str(&text);
-                        app.streamed_visible_text = true;
-                    }
-                    chat::ChatEvent::ReasoningChunk(text) => {
-                        for ch in text.chars() {
-                            if app.reasoning_line_start {
-                                app.stream_text.push_str("  ");
-                                app.reasoning_line_start = false;
-                            }
-                            app.stream_text.push(ch);
-                            if ch == '\n' {
-                                app.reasoning_line_start = true;
-                            }
-                        }
-                    }
-                    chat::ChatEvent::TurnComplete { turn: _, text, tool_calls } => {
-                        // Commit streaming content to scrollback.
-                        if !app.stream_text.is_empty() {
-                            let stream_lines: Vec<String> = app.stream_text.lines().map(String::from).collect();
-                            for line in &stream_lines {
-                                transcript_line(terminal, line)?;
-                                app.push_line(line);
-                            }
-                        }
-                        // Commit assembled text if it wasn't captured in the stream.
-                        if !text.is_empty() && !app.streamed_visible_text {
-                            for line in text.lines() {
-                                transcript_line(terminal, line)?;
-                                app.push_line(line);
-                            }
-                        }
-                        app.stream_text.clear();
-                        app.streamed_visible_text = false;
-                        app.reasoning_line_start = true;
-                        app.turn_committed = true;
+            Some(event) = chat_rx.recv() => {
+                let reason_style = Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC);
 
-                        for tc in &tool_calls {
-                            let line = format!("  {tc}");
-                            transcript_line(terminal, &line)?;
-                            app.push_line(&line);
+                match event {
+                    ChatEvent::StreamChunk(text) => {
+                        clear_thinking(&mut app);
+                        if !app.response_area_open {
+                            app.response_area_open = true;
                         }
-                        // Auto-continue when the turn had tool calls
-                        // but produced no text — the agent needs another
-                        // turn to process results and respond.
-                        if text.is_empty() && !tool_calls.is_empty() {
-                            if let Some(ref chat) = app.chat {
-                                chat.continue_turn();
-                            }
-                        }
+                        app.response_stream.push_str(&text);
+                        app.current_response.push_str(&text);
+                        app.streamed_visible_text = true;
+                        sync_response_rows(&mut app, terminal, &mut viewport_height, term_h)?;
                     }
-                    chat::ChatEvent::Done { text, .. } => {
-                        // If TurnComplete already committed the stream, skip.
-                        if app.turn_committed {
-                            app.turn_committed = false;
-                            continue;
-                        }
-                        // Commit streaming content to scrollback.
-                        if !app.stream_text.is_empty() {
-                            let stream_lines: Vec<String> = app.stream_text.lines().map(String::from).collect();
-                            for line in &stream_lines {
-                                transcript_line(terminal, line)?;
-                                app.push_line(line);
+                    ChatEvent::ReasoningChunk(text) => {
+                        clear_thinking(&mut app);
+                        app.reasoning_stream.push_str(&text);
+                        sync_streaming_rows(&mut app, terminal, &mut viewport_height, term_h)?;
+                    }
+                    ChatEvent::ToolResult { name, output } => {
+                        clear_thinking(&mut app);
+                        // Append to reasoning stream so it renders live
+                        // in the streaming viewport alongside thought.
+                        // Lines are unprefixed — TurnComplete adds "  " on flush.
+                        if output.is_empty() {
+                            app.reasoning_stream.push_str(&format!("{name}: (empty)\n"));
+                        } else {
+                            for (i, line) in output.lines().enumerate() {
+                                if i == 0 {
+                                    app.reasoning_stream.push_str(&format!("{name}: {line}\n"));
+                                } else {
+                                    app.reasoning_stream.push_str(&format!("      {line}\n"));
+                                }
                             }
                         }
+                        sync_streaming_rows(&mut app, terminal, &mut viewport_height, term_h)?;
+                    }
+                    ChatEvent::TurnComplete { turn: _, text, tool_calls: _ } => {
+                        clear_thinking(&mut app);
+                        // If we haven't streamed visible text yet, push the turn text.
                         if !text.is_empty() && !app.streamed_visible_text {
-                            for line in text.lines() {
-                                transcript_line(terminal, line)?;
-                                app.push_line(line);
+                            app.response_stream.push_str(&text);
+                            app.current_response.push_str(&text);
+                            if !app.response_area_open {
+                                app.response_area_open = true;
                             }
+                            sync_response_rows(&mut app, terminal, &mut viewport_height, term_h)?;
                         }
-                        app.stream_text.clear();
-                        app.streamed_visible_text = false;
-                        app.reasoning_line_start = true;
+                        // Keep everything in the viewport — flush nothing to
+                        // scrollback until Done, so content never jumps above
+                        // the current prompt.
+                        app.turn_committed = true;
                     }
-                    chat::ChatEvent::Ended { reason } => {
-                        app.stream_text.clear();
-                        app.streamed_visible_text = false;
-                        app.reasoning_line_start = true;
+                    ChatEvent::Done { text, .. } => {
+                        clear_thinking(&mut app);
+                        if !text.is_empty() && !app.streamed_visible_text {
+                            app.response_stream.push_str(&text);
+                            app.current_response.push_str(&text);
+                        }
+                        flush_and_collapse(&mut app, terminal, &mut viewport_height, reason_style)?;
+                        // Commit user+assistant pair to conversation history.
+                        let user_msg = std::mem::take(&mut app.pending_user_message);
+                        if !user_msg.is_empty() {
+                            app.conversation_history.push(serde_json::json!({"role": "user", "content": user_msg}));
+                        }
+                        let response_text = std::mem::take(&mut app.current_response);
+                        if !response_text.is_empty() {
+                            app.conversation_history.push(serde_json::json!({"role": "assistant", "content": response_text}));
+                        }
+                        app.active_request = false;
+                        chat_task = None;
+                    }
+                    ChatEvent::Ended { reason } => {
+                        finish_streaming(&mut app);
                         app.turn_committed = false;
+                        app.current_response.clear();
+                        app.pending_user_message.clear();
+                        app.active_request = false;
+                        chat_task = None;
+                        if viewport_height > 2 {
+                            set_viewport_height(terminal, 2)?;
+                            viewport_height = 2;
+                        }
                         let msg = format!("chat ended: {reason}");
                         transcript_line(terminal, &msg)?;
                         app.push_line(&msg);
-                        app.chat = None;
-                        chat_event_rx = None;
                     }
-                    chat::ChatEvent::Error(msg) => {
-                        app.stream_text.clear();
-                        app.streamed_visible_text = false;
-                        app.reasoning_line_start = true;
+                    ChatEvent::Error(msg) => {
+                        finish_streaming(&mut app);
                         app.turn_committed = false;
+                        app.current_response.clear();
+                        app.pending_user_message.clear();
+                        app.active_request = false;
+                        chat_task = None;
+                        if viewport_height > 2 {
+                            set_viewport_height(terminal, 2)?;
+                            viewport_height = 2;
+                        }
                         let full = format!("chat error: {msg}");
                         transcript_line(terminal, &full)?;
                         app.push_line(&full);
-                        app.chat = None;
-                        chat_event_rx = None;
                     }
                 }
             }

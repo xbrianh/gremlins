@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 
-use crate::tui::chat::ChatGremlin;
-
-/// Number of lines reserved in the ratatui viewport for live streaming content
-/// (reasoning + visible text deltas).
-pub const STREAMING_HEIGHT: u16 = 10;
+/// Max rows the streaming area grows to before scrolling internally.
+pub const STREAMING_HEIGHT: u16 = 8;
 
 /// Application state for the TUI.
 ///
@@ -18,9 +15,13 @@ pub const STREAMING_HEIGHT: u16 = 10;
 /// scrollback and tmux copy-mode history. Ratatui is **not** used for the
 /// transcript region.
 ///
-/// Only the bottom two lines (input bar + info bar) are managed by the TUI
-/// and redrawn in place on each frame. No `EnterAlternateScreen` — raw mode
-/// only, in the main terminal buffer.
+/// The ratatui inline viewport is split into three content sections when a
+/// turn is active:
+/// 1. Prompt — the user's message, static at the top.
+/// 2. Streaming area — live reasoning + tool results, fixed height, scrolls.
+/// 3. Response area — accumulated model response, grows downward.
+///
+/// No `EnterAlternateScreen` — raw mode only, in the main terminal buffer.
 ///
 /// The `output` buffer is a write-only in-memory log used for:
 /// - Reprinting the transcript after terminal resize (`Ctrl+L`).
@@ -37,18 +38,39 @@ pub struct App {
     /// When Some, the TUI is following a gremlin's log and printing log lines
     /// to the transcript as they arrive.
     pub following_log: Option<String>,
-    /// Active chat agent session. None when no default client is configured.
-    pub chat: Option<ChatGremlin>,
-    /// Streaming block state for incremental response rendering.
-    /// Accumulated text for the current live streaming block.
-    pub stream_text: String,
+    /// Accumulated reasoning text for the current live streaming block.
+    pub reasoning_stream: String,
+    /// Accumulated response text for the current live streaming block.
+    pub response_stream: String,
     /// Whether any visible StreamChunk has been received this turn.
     pub streamed_visible_text: bool,
+    /// Whether the response area has been expanded (first StreamChunk arrived).
+    /// Avoids a blank gap while the agent is still thinking / running tools.
+    pub response_area_open: bool,
     /// Whether the turn's text has already been committed to scrollback
     /// (guards against double-commit when Done arrives after TurnComplete).
     pub turn_committed: bool,
-    /// Whether the next reasoning character starts a new line (needs "  " prefix).
-    pub reasoning_line_start: bool,
+    /// Whether the "thinking..." placeholder is currently shown.
+    pub showing_thinking: bool,
+    /// Whether there is an active streaming session (used for dynamic
+    /// viewport sizing — collapses the streaming area when idle).
+    pub streaming_active: bool,
+    /// Ordered conversation history: each entry is {"role": "user"|"assistant", "content": "..."}
+    pub conversation_history: Vec<serde_json::Value>,
+    /// Accumulated assistant response text for the current turn (committed to history on Done).
+    pub current_response: String,
+    /// Whether a chat request is currently in-flight (guards against concurrent submissions).
+    pub active_request: bool,
+    /// The user message for the current in-flight request (committed to history on Done).
+    pub pending_user_message: String,
+    /// The user's prompt for display in the viewport during streaming.
+    pub prompt: String,
+    /// Snapshotted prompt line count so viewport height stays stable.
+    pub prompt_lines: u16,
+    /// Current streaming-area row count (grows up to STREAMING_HEIGHT).
+    pub streaming_rows: u16,
+    /// Current response-area row count.
+    pub response_rows: u16,
 }
 
 impl App {
@@ -64,11 +86,21 @@ impl App {
             active_runs: HashMap::new(),
             project_name,
             following_log: None,
-            chat: None,
-            stream_text: String::new(),
+            reasoning_stream: String::new(),
+            response_stream: String::new(),
             streamed_visible_text: false,
+            response_area_open: false,
             turn_committed: false,
-            reasoning_line_start: true,
+            showing_thinking: false,
+            streaming_active: false,
+            conversation_history: Vec::new(),
+            current_response: String::new(),
+            active_request: false,
+            pending_user_message: String::new(),
+            prompt: String::new(),
+            prompt_lines: 0,
+            streaming_rows: 0,
+            response_rows: 0,
         }
     }
 

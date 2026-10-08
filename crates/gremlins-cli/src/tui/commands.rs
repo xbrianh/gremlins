@@ -2,8 +2,8 @@
 pub enum CommandResult {
     /// Lines to append to the output buffer.
     Lines(Vec<String>),
-    /// Clear the output buffer.
-    Clear,
+    /// Clear output + input and restart the chat agent (a fresh session).
+    RestartChat,
     /// Exit the TUI.
     Quit,
     /// Send a JSON op over the socket (handled by the event loop).
@@ -11,6 +11,10 @@ pub enum CommandResult {
         op: String,
         payload: serde_json::Value,
     },
+    /// Show conversation history (handled by event loop with App state).
+    ShowHistory,
+    /// Truncate conversation history at the given 0-based index.
+    TruncateHistory(usize),
 }
 
 /// Parse `input` (minus the leading `/`) and dispatch.
@@ -28,7 +32,8 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
     let args: Vec<&str> = parts.collect();
 
     match cmd {
-        "clear" => Some(CommandResult::Clear),
+        "clear" => Some(CommandResult::RestartChat),
+        "new" => Some(CommandResult::RestartChat),
         "quit" => Some(CommandResult::Quit),
         "help" => Some(CommandResult::Lines(help_text())),
         "ls" => Some(CommandResult::SocketOp {
@@ -94,6 +99,18 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 .and_then(|c| c.default_client().map(String::from))
                 .unwrap_or_else(|| "(not configured)".to_string())
         )])),
+        "history" => Some(CommandResult::ShowHistory),
+        "rollback" => {
+            let idx: usize = match args.first().and_then(|s| s.parse().ok()) {
+                Some(n) => n,
+                None => {
+                    return Some(CommandResult::Lines(vec![
+                        "usage: /rollback <n> — truncate history at turn n".to_string(),
+                    ]));
+                }
+            };
+            Some(CommandResult::TruncateHistory(idx))
+        }
         _ => Some(CommandResult::Lines(vec![format!(
             "unknown command: /{cmd} — type /help for available commands"
         )])),
@@ -109,12 +126,14 @@ fn help_text() -> Vec<String> {
         "  /resume <id>     — resume a gremlin".to_string(),
         "  /log <id>        — show gremlin log".to_string(),
         "  /model           — show default client".to_string(),
-        "  /clear           — clear output".to_string(),
+        "  /history         — show conversation history".to_string(),
+        "  /rollback <n>    — truncate history at turn n".to_string(),
+        "  /clear, /new     — clear output + restart chat".to_string(),
         "  /help            — show this help".to_string(),
         "  /quit            — exit".to_string(),
         "".to_string(),
         "keybindings:".to_string(),
-        "  Ctrl+C           — exit".to_string(),
+        "  Ctrl+C           — clear input".to_string(),
         "  Ctrl+D (empty)   — exit".to_string(),
         "  Ctrl+L           — redraw screen".to_string(),
         "  Esc              — clear input".to_string(),

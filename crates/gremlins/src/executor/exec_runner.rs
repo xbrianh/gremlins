@@ -320,7 +320,7 @@ pub async fn commit_exec(
 ) -> Result<(), ExecError> {
     for (key, uri_str, optional) in &prepared.output_uris {
         let path = &prepared.output_paths[key];
-        let produced = local_state.has_file(path).await;
+        let produced = tokio::fs::metadata(path).await.is_ok();
         if produced {
             local_state
                 .commit(uri_str, path)

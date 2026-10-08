@@ -552,6 +552,7 @@ async fn handle_launch(
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    gremlin.runtime_config.stream_events = Some(interactive_handle.evt_tx.clone());
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer: reads from the channel, appends to $state_dir/log,
@@ -793,6 +794,7 @@ async fn handle_resume(
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    gremlin.runtime_config.stream_events = Some(interactive_handle.evt_tx.clone());
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.
@@ -1703,6 +1705,13 @@ async fn handle_debug(
                             break;
                         }
                     }
+                    Ok(InteractiveEvent::ToolResult { name, output }) => {
+                        let payload = serde_json::json!({"type": "tool_result", "name": name, "output": output});
+                        if writer.write_json_line(&payload).await.is_err() {
+                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
+                            break;
+                        }
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -1722,9 +1731,7 @@ const CHAT_SYSTEM_PROMPT: &str = r#"You are a conversational AI assistant integr
 
 ## Your role
 
-You are a chat agent — respond conversationally to the operator's messages. Do not call Done unless the operator explicitly asks to end the session. When the operator greets you or asks an open-ended question, respond with text first, then offer to use tools if they would help.
-
-When you need information, use your tools (Read, Grep, Glob, Bash, etc.) proactively — the operator expects you to look things up rather than ask them to provide information you can find yourself.
+You are a chat agent — respond conversationally to the operator's messages. When you have answered the operator's question completely, call Done to signal the end of your turn. When you need information, use your tools (Read, Grep, Glob, Bash, etc.) proactively — the operator expects you to look things up rather than ask them to provide information you can find yourself.
 
 ## Gremlins domain
 
@@ -1763,12 +1770,26 @@ You have access to standard tools: Read, Write, Edit, Grep, Glob, Bash, Task. Us
 - Work in the project root directory unless told otherwise."#;
 
 async fn handle_chat(
-    _request: &Value,
+    request: &Value,
     state_root: &Path,
     mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
     log::debug!("handle_chat: received chat request");
+
+    // Extract text and history from the request.
+    let text = request.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    if text.is_empty() {
+        let resp = error_response("missing 'text' field");
+        let _ = writer.write_json_line(&resp).await;
+        return;
+    }
+
+    let history: Vec<Value> = request
+        .get("history")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     // 1. Init config
     if let Err(e) = config::init_global() {
@@ -1794,10 +1815,14 @@ async fn handle_chat(
         }
     };
 
-    // 3. Build programmatic definition
+    // 3. Build the conversation transcript from history.
+    let transcript = render_history_transcript(&history);
+    let system_prompt = format!("{CHAT_SYSTEM_PROMPT}\n\n{transcript}");
+
+    // 4. Build programmatic definition — per-message ephemeral stage.
     let stage = match crate::builders::AgentBuilder::new("chat")
-        .prompt("You are in interactive mode. Wait for operator input.")
-        .option("system_prompt", CHAT_SYSTEM_PROMPT)
+        .prompt(text)
+        .option("system_prompt", system_prompt)
         .build()
     {
         Ok(s) => s,
@@ -1820,7 +1845,7 @@ async fn handle_chat(
         }
     };
 
-    // 4. Create chat gremlin
+    // 5. Create chat gremlin
     let mut gremlin = match create_chat_gremlin(&definition, &default_client, state_root) {
         Ok(g) => g,
         Err(e) => {
@@ -1832,30 +1857,21 @@ async fn handle_chat(
 
     let id = gremlin.id.to_string();
 
-    // 5. Set up log channel
+    // 6. Set up log channel
     let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
     let (log_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.log_tx = Some(log_tx.clone());
-
-    // 6. Set up interactive channels
-    let channels = InteractiveChannels::new();
-    let (interactive_handle, interactive_session) = channels.split();
-    gremlin.runtime_config.interactive = Some(interactive_handle.clone());
-    gremlin.interactive_session = Some(interactive_session);
 
     // Spawn log writer
     let log_path = gremlin.state.state_dir().join("log");
     spawn_log_writer(log_rx, log_path, log_broadcast.clone());
 
-    // 7. Pre-pause the agent
-    interactive_handle.pause.pause();
-    log::debug!("handle_chat: pre-paused agent for {id}");
+    // 7. Set up stream_events for forwarding to the TUI.
+    //    No interactive session — the agent runs to Done.
+    let (stream_tx, mut stream_rx) = broadcast::channel::<InteractiveEvent>(256);
+    gremlin.runtime_config.stream_events = Some(stream_tx.clone());
 
-    // 9. Subscribe to events BEFORE spawning the run task so we don't
-    // miss the Ready broadcast from the pre-paused agent.
-    let mut evt_rx = interactive_handle.evt_tx.subscribe();
-
-    // 10. Spawn run task
+    // 8. Spawn run task
     let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
         id: id.clone(),
@@ -1871,8 +1887,7 @@ async fn handle_chat(
 
     gremlin.cancel_token = Some(cancel_token.clone());
 
-    // Capture state store handle and scratch_dir before gremlin is moved into
-    // the spawned task.
+    // Capture state store handle and scratch_dir before gremlin is moved.
     let store = gremlin.state.store_handle();
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
@@ -1894,7 +1909,7 @@ async fn handle_chat(
         aborted: aborted.clone(),
         state_tx,
         log_broadcast,
-        interactive: interactive_handle.clone(),
+        interactive: InteractiveChannels::new().split().0,
         store,
         scratch_dir,
     };
@@ -1906,165 +1921,97 @@ async fn handle_chat(
         stage: "starting".to_string(),
     });
 
-    // 11. Wait for Ready from the agent
-
-    let cmd_tx_closed = interactive_handle.cmd_tx.closed();
-    tokio::pin!(cmd_tx_closed);
-    let ready = loop {
-        tokio::select! {
-            result = evt_rx.recv() => {
-                match result {
-                    Ok(InteractiveEvent::Ready { turn }) => {
-                        log::debug!("handle_chat: received Ready event (turn={turn}) for {id}");
-                        break true;
-                    }
-                    Ok(InteractiveEvent::Ended { reason }) => {
-                        log::debug!("handle_chat: received Ended event ({reason}) for {id}");
-                        break false;
-                    }
-                    Ok(other) => {
-                        log::debug!("handle_chat: ignoring event while waiting for Ready: {other:?}");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        log::debug!("handle_chat: broadcast lagged ({n}) for {id}, continuing");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        log::debug!("handle_chat: broadcast channel closed for {id}");
-                        break false;
-                    }
-                }
-            }
-            _ = &mut cmd_tx_closed => {
-                log::debug!("handle_chat: cmd_tx closed for {id} — agent session exited");
-                break false;
-            }
-            result = socket::read_json_line(&mut reader) => {
-                if let Ok(Some(cmd)) = result {
-                    let op = cmd.get("op").and_then(|v| v.as_str());
-                    log::debug!("handle_chat: client message before Ready: op={op:?}");
-                    if op == Some("quit") {
-                        let _ = interactive_handle
-                            .cmd_tx
-                            .send(InteractiveCommand::Quit)
-                            .await;
-                    }
-                }
-                break false;
-            }
-        }
-    };
-
-    if !ready {
-        log::debug!("handle_chat: agent did not become ready for {id}, resetting pause");
-        interactive_handle.pause.reset();
-        return;
-    }
-
-    // 12. Send ready
-    log::debug!("handle_chat: sending ready for {id}");
-    let ready_payload = serde_json::json!({
-        "type": "ready",
-        "id": id,
-    });
-    if writer.write_json_line(&ready_payload).await.is_err() {
-        log::debug!("handle_chat: failed to send ready for {id}, client disconnected");
-        let _ = interactive_handle
-            .cmd_tx
-            .send(InteractiveCommand::Quit)
-            .await;
-        interactive_handle.pause.reset();
-        return;
-    }
-
-    // 13. Bidirectional command loop (same as handle_debug)
-    log::debug!("handle_chat: entering command loop for {id}");
+    // 9. Forward stream events to the TUI until Done/Ended.
+    //    Also monitor the read half for client disconnect.
+    log::debug!("handle_chat: forwarding stream events for {id}");
+    let mut early_exit = true;
     loop {
         tokio::select! {
-            result = socket::read_json_line(&mut reader) => {
+            result = stream_rx.recv() => {
                 match result {
-                    Ok(Some(cmd)) => {
-                        let op = cmd.get("op").and_then(|v| v.as_str()).unwrap_or("");
-                        match op {
-                            "talk" => {
-                                let text = cmd.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                                if interactive_handle.cmd_tx.send(InteractiveCommand::Inject(text.to_string())).await.is_err() {
-                                    break;
-                                }
-                            }
-                            "continue" => {
-                                if interactive_handle.cmd_tx.send(InteractiveCommand::RunTurn).await.is_err() {
-                                    break;
-                                }
-                            }
-                            "bail" => {
-                                let reason = cmd.get("reason").and_then(|v| v.as_str()).unwrap_or("operator bailed");
-                                if interactive_handle.cmd_tx.send(InteractiveCommand::Bail(reason.to_string())).await.is_err() {
-                                    break;
-                                }
-                            }
-                            "quit" => {
-                                if interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await.is_err() {
-                                    break;
-                                }
-                            }
-                            _ => {
-                                let resp = error_response(&format!("unknown debug op: {op:?}"));
-                                let _ = writer.write_json_line(&resp).await;
-                            }
-                        }
-                    }
-                    Ok(None) | Err(_) => {
-                        let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                        break;
-                    }
-                }
-            }
-            result = evt_rx.recv() => {
-                match result {
-                    Ok(InteractiveEvent::Ready { .. }) => {}
-                    Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls }) => {
-                        let payload = serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
-                        if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                            break;
-                        }
-                    }
-                    Ok(InteractiveEvent::Done { text, usage }) => {
-                        let payload = serde_json::json!({"type": "done", "text": text, "usage": usage});
-                        if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                            break;
-                        }
-                    }
-                    Ok(InteractiveEvent::Ended { reason }) => {
-                        let payload = serde_json::json!({"type": "ended", "reason": reason});
-                        let _ = writer.write_json_line(&payload).await;
-                        break;
-                    }
                     Ok(InteractiveEvent::StreamChunk { text }) => {
                         let payload = serde_json::json!({"type": "stream_chunk", "text": text});
                         if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
                         }
                     }
                     Ok(InteractiveEvent::ReasoningChunk { text }) => {
                         let payload = serde_json::json!({"type": "reasoning_chunk", "text": text});
                         if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
                         }
                     }
+                    Ok(InteractiveEvent::ToolResult { name, output }) => {
+                        let payload = serde_json::json!({"type": "tool_result", "name": name, "output": output});
+                        if writer.write_json_line(&payload).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls }) => {
+                        let payload = serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
+                        if writer.write_json_line(&payload).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(InteractiveEvent::Done { text, usage }) => {
+                        early_exit = false;
+                        let payload = serde_json::json!({"type": "done", "text": text, "usage": usage});
+                        let _ = writer.write_json_line(&payload).await;
+                        break;
+                    }
+                    Ok(InteractiveEvent::Ended { reason }) => {
+                        early_exit = false;
+                        let payload = serde_json::json!({"type": "ended", "reason": reason});
+                        let _ = writer.write_json_line(&payload).await;
+                        break;
+                    }
+                    Ok(InteractiveEvent::Ready { .. }) => {
+                        // Ignore Ready in per-message mode — the agent
+                        // runs to completion without pausing.
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        early_exit = false;
+                        break;
+                    }
                 }
+            }
+            _ = socket::read_json_line(&mut reader) => {
+                // Client disconnected.
+                break;
             }
         }
     }
 
-    interactive_handle.pause.reset();
+    // Cancel the gremlin on early exit (client disconnect, write error).
+    if early_exit {
+        if let Some(handle) = get_run_map().lock().unwrap().get(id.as_str()) {
+            handle.cancel.cancel();
+        }
+    }
+
+    log::debug!("handle_chat: done forwarding for {id}");
+}
+
+/// Render conversation history into a compact transcript block for the
+/// system prompt.
+fn render_history_transcript(history: &[Value]) -> String {
+    if history.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec!["## Conversation history".to_string(), String::new()];
+    for entry in history {
+        let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let label = match role {
+            "user" => "Operator",
+            "assistant" => "Assistant",
+            _ => role,
+        };
+        lines.push(format!("{label}: {content}"));
+        lines.push(String::new());
+    }
+    lines.join("\n")
 }
 
 static CHAT_SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -2357,6 +2304,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    gremlin.runtime_config.stream_events = Some(interactive_handle.evt_tx.clone());
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.

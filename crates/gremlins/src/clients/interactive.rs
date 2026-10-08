@@ -122,6 +122,8 @@ pub enum InteractiveEvent {
     StreamChunk { text: String },
     /// Incremental reasoning fragment from the model stream.
     ReasoningChunk { text: String },
+    /// A tool result produced after execution.
+    ToolResult { name: String, output: String },
     /// Interactive session ended.
     Ended {
         /// How the session ended: "resumed", "bailed", or "disconnect".

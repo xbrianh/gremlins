@@ -344,6 +344,7 @@ async fn run_agent(
         task_clients_exact: gremlin.runtime_config.task_clients_exact.clone(),
         task_clients_prefix: gremlin.runtime_config.task_clients_prefix.clone(),
         cancel_token: gremlin.cancel_token.clone(),
+        stream_events: gremlin.runtime_config.stream_events.clone(),
     };
 
     // Build interactive session separately from RunParams.
