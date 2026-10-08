@@ -16,6 +16,7 @@ pub enum ChatEvent {
     TurnComplete {
         #[allow(dead_code)]
         turn: usize,
+        #[allow(dead_code)]
         text: String,
         #[allow(dead_code)]
         tool_calls: Vec<String>,

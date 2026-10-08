@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-/// Max rows the streaming area grows to before scrolling internally.
-pub const STREAMING_HEIGHT: u16 = 8;
+use crate::tui::widgets::StreamWidget;
 
 /// Application state for the TUI.
 ///
@@ -15,11 +14,13 @@ pub const STREAMING_HEIGHT: u16 = 8;
 /// scrollback and tmux copy-mode history. Ratatui is **not** used for the
 /// transcript region.
 ///
-/// The ratatui inline viewport is split into three content sections when a
-/// turn is active:
+/// The ratatui inline viewport is split into two regions when a turn is
+/// active:
 /// 1. Prompt — the user's message, static at the top.
-/// 2. Streaming area — live reasoning + tool results, fixed height, scrolls.
-/// 3. Response area — accumulated model response, grows downward.
+/// 2. Widget area — live streaming content (reasoning + tool results),
+///    rendered by the active [`DynamicWidget`].
+///
+/// When idle only the input bar and info bar are rendered.
 ///
 /// No `EnterAlternateScreen` — raw mode only, in the main terminal buffer.
 ///
@@ -38,23 +39,6 @@ pub struct App {
     /// When Some, the TUI is following a gremlin's log and printing log lines
     /// to the transcript as they arrive.
     pub following_log: Option<String>,
-    /// Accumulated reasoning text for the current live streaming block.
-    pub reasoning_stream: String,
-    /// Accumulated response text for the current live streaming block.
-    pub response_stream: String,
-    /// Whether any visible StreamChunk has been received this turn.
-    pub streamed_visible_text: bool,
-    /// Whether the response area has been expanded (first StreamChunk arrived).
-    /// Avoids a blank gap while the agent is still thinking / running tools.
-    pub response_area_open: bool,
-    /// Whether the turn's text has already been committed to scrollback
-    /// (guards against double-commit when Done arrives after TurnComplete).
-    pub turn_committed: bool,
-    /// Whether the "thinking..." placeholder is currently shown.
-    pub showing_thinking: bool,
-    /// Whether there is an active streaming session (used for dynamic
-    /// viewport sizing — collapses the streaming area when idle).
-    pub streaming_active: bool,
     /// Ordered conversation history: each entry is {"role": "user"|"assistant", "content": "..."}
     pub conversation_history: Vec<serde_json::Value>,
     /// Accumulated assistant response text for the current turn (committed to history on Done).
@@ -65,12 +49,11 @@ pub struct App {
     pub pending_user_message: String,
     /// The user's prompt for display in the viewport during streaming.
     pub prompt: String,
-    /// Snapshotted prompt line count so viewport height stays stable.
-    pub prompt_lines: u16,
-    /// Current streaming-area row count (grows up to STREAMING_HEIGHT).
-    pub streaming_rows: u16,
-    /// Current response-area row count.
-    pub response_rows: u16,
+    /// The active streaming widget, if any. None when idle.
+    pub widget: Option<StreamWidget>,
+    /// Accumulated model response text, flushed to scrollback on newline
+    /// boundaries during the turn and fully on Done.
+    pub response_stream: String,
 }
 
 impl App {
@@ -86,21 +69,13 @@ impl App {
             active_runs: HashMap::new(),
             project_name,
             following_log: None,
-            reasoning_stream: String::new(),
-            response_stream: String::new(),
-            streamed_visible_text: false,
-            response_area_open: false,
-            turn_committed: false,
-            showing_thinking: false,
-            streaming_active: false,
             conversation_history: Vec::new(),
             current_response: String::new(),
             active_request: false,
             pending_user_message: String::new(),
             prompt: String::new(),
-            prompt_lines: 0,
-            streaming_rows: 0,
-            response_rows: 0,
+            widget: None,
+            response_stream: String::new(),
         }
     }
 
@@ -147,5 +122,27 @@ impl App {
     /// Update state when a run is stopped.
     pub fn on_run_stopped(&mut self, id: String) {
         self.active_runs.insert(id, "stopped".to_string());
+    }
+
+    /// Compute prompt line count (wrapping at ~80 cols).
+    pub fn prompt_lines(&self) -> u16 {
+        if self.prompt.is_empty() {
+            return 0;
+        }
+        let mut total: u16 = 0;
+        for line in self.prompt.lines() {
+            let chars = line.chars().count();
+            // Each line gets a "> " prefix on its first wrapped row;
+            // subsequent wrapped rows use a 2-char indent.
+            let first_row_width = 78usize; // 80 - "> "
+            let cont_row_width = 78usize; // 80 - "  "
+            if chars == 0 || chars <= first_row_width {
+                total += 1;
+            } else {
+                let remaining = chars - first_row_width;
+                total += 1 + (remaining.div_ceil(cont_row_width) as u16);
+            }
+        }
+        total.max(1)
     }
 }

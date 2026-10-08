@@ -1,101 +1,71 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
 
 use crate::tui::app::App;
+use crate::tui::widgets::DynamicWidget;
 
 /// Render the bottom-region TUI layout.
 ///
-/// Ratatui draws up to five regions when a turn is active:
-/// 1. Prompt area      — user's message, static.
-/// 2. Streaming area   — live reasoning + tool results, fixed height, scrolls.
-/// 3. Response area    — accumulated model response, fixed height, scrolls.
-/// 4. Input bar        — prompt + current input.
-/// 5. Info bar         — single-line status.
-///
-/// When no turn is active sections 1-3 collapse to zero height
-/// so that only the input and info bars occupy the viewport.
+/// Two branches:
+/// - **Active widget:** prompt + widget + input-bar + info-bar.
+/// - **Idle:** input-bar + info-bar only.
 ///
 /// The transcript (command output, help text, subprocess results) is inserted
 /// above the inline viewport via `terminal.insert_before()` and becomes normal
 /// terminal scrollback — it is never ratatui-rendered.
 pub fn render(frame: &mut Frame, app: &App, gremlin_count: &str, project_name: &str) {
-    let (prompt_h, streaming_h, response_h) = if app.streaming_active {
-        let resp_h = if app.response_area_open {
-            Constraint::Min(0)
+    let has_widget = app.widget.as_ref().is_some_and(|w| !w.is_empty());
+    let has_prompt = !app.prompt.is_empty();
+
+    if has_widget {
+        let prompt_h = if has_prompt {
+            Constraint::Length(app.prompt_lines())
         } else {
             Constraint::Length(0)
         };
-        (
-            Constraint::Length(app.prompt_lines),
-            Constraint::Length(app.streaming_rows),
-            resp_h,
-        )
-    } else {
-        (
-            Constraint::Length(0),
-            Constraint::Length(0),
-            Constraint::Length(0),
-        )
-    };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            prompt_h,
-            streaming_h,
-            response_h,
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
+        let widget_h = Constraint::Length(app.widget.as_ref().map_or(0, |w| w.height()));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                prompt_h,
+                widget_h,
+                Constraint::Length(1), // input bar
+                Constraint::Length(1), // info bar
+            ])
+            .split(frame.area());
 
-    render_prompt(frame, chunks[0], app);
-    render_streaming(frame, chunks[1], app);
-    render_response(frame, chunks[2], app);
-    render_input_bar(frame, chunks[3], app);
-    render_info_bar(frame, chunks[4], app, gremlin_count, project_name);
+        if has_prompt {
+            render_prompt(frame, chunks[0], app);
+        }
+        if let Some(widget) = &app.widget {
+            widget.render(frame, chunks[1]);
+        }
+        render_input_bar(frame, chunks[2], app);
+        render_info_bar(frame, chunks[3], app, gremlin_count, project_name);
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // input bar
+                Constraint::Length(1), // info bar
+            ])
+            .split(frame.area());
+
+        render_input_bar(frame, chunks[0], app);
+        render_info_bar(frame, chunks[1], app, gremlin_count, project_name);
+    }
 }
 
 fn render_prompt(frame: &mut Frame, area: Rect, app: &App) {
     let prompt_style = Style::default().fg(Color::Cyan);
     let text = format!("> {}", app.prompt);
     let paragraph = Paragraph::new(Line::from(Span::styled(text, prompt_style)));
-    frame.render_widget(paragraph, area);
-}
-
-fn render_streaming(frame: &mut Frame, area: Rect, app: &App) {
-    let reason_style = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC);
-
-    let mut lines: Vec<Line> = Vec::new();
-    for line in app.reasoning_stream.lines() {
-        lines.push(Line::from(Span::styled(format!("  {line}"), reason_style)));
-    }
-
-    let line_count = lines.len().max(1);
-    let scroll = line_count.saturating_sub(area.height as usize) as u16;
-    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
-    frame.render_widget(paragraph, area);
-}
-
-fn render_response(frame: &mut Frame, area: Rect, app: &App) {
-    let mut lines: Vec<Line> = Vec::new();
-    for line in app.response_stream.lines() {
-        lines.push(Line::from(Span::styled(
-            line,
-            Style::default().fg(Color::White),
-        )));
-    }
-
-    let line_count = lines.len().max(1);
-    let scroll = line_count.saturating_sub(area.height as usize) as u16;
-    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
     frame.render_widget(paragraph, area);
 }
 
