@@ -23,7 +23,7 @@ fmt-check:
 # --- Lint ---
 
 clippy:
-	cargo clippy -q --all-targets -- -D warnings
+	cargo clippy -q --all-targets -- -D warnings -A deprecated
 
 # --- Autoformat ---
 

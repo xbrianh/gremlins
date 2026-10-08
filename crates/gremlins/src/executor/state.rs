@@ -228,16 +228,19 @@ pub trait StateStore: Send + Sync + Debug {
     // --- locality ---
 
     /// The state directory.
+    #[deprecated]
     fn state_dir(&self) -> &Path {
         Path::new("")
     }
 
     /// The artifact storage directory.
+    #[deprecated]
     fn artifact_dir(&self) -> PathBuf {
         PathBuf::new()
     }
 
     /// Check whether a file exists at `path` (empty files are valid).
+    #[deprecated]
     async fn has_file(&self, path: &str) -> bool {
         tokio::fs::metadata(path).await.is_ok()
     }
@@ -1197,14 +1200,17 @@ impl StateStore for FileSystemStateStore {
         Some(self)
     }
 
+    #[allow(deprecated)]
     fn state_dir(&self) -> &Path {
         self.root.path()
     }
 
+    #[allow(deprecated)]
     fn artifact_dir(&self) -> PathBuf {
         self.artifact_dir()
     }
 
+    #[allow(deprecated)]
     async fn has_file(&self, path: &str) -> bool {
         self.has_file(path).await
     }
@@ -1373,14 +1379,17 @@ impl StateStore for ScopedFileSystemStateStore {
         self.inner.checkout_registry(keys).await
     }
 
+    #[allow(deprecated)]
     fn state_dir(&self) -> &Path {
         self.inner.state_dir()
     }
 
+    #[allow(deprecated)]
     fn artifact_dir(&self) -> PathBuf {
         self.inner.artifact_dir()
     }
 
+    #[allow(deprecated)]
     async fn has_file(&self, path: &str) -> bool {
         self.inner.has_file(path).await
     }
