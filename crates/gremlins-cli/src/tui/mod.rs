@@ -257,8 +257,7 @@ async fn run_app(
     let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Vec<String>>();
 
     // ── Channel for run-snapshot refreshes (after event_lagged) ───
-    let (snapshot_tx, mut snapshot_rx) =
-        mpsc::unbounded_channel::<HashMap<String, String>>();
+    let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel::<HashMap<String, String>>();
 
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -604,27 +603,24 @@ async fn run_app(
                     let c = Arc::clone(&client);
                     let tx = snapshot_tx.clone();
                     tokio::spawn(async move {
-                        match c.send_request(serde_json::json!({"op": "ls"})).await {
-                            Ok(resp) => {
-                                let mut runs = HashMap::new();
-                                if let Some(gremlins) =
-                                    resp.get("gremlins").and_then(|v| v.as_array())
-                                {
-                                    for entry in gremlins {
-                                        if let (Some(id), Some(status)) = (
-                                            entry.get("id").and_then(|v| v.as_str()),
-                                            entry.get("status").and_then(|v| v.as_str()),
-                                        ) {
-                                            runs.insert(
-                                                id.to_string(),
-                                                status.to_string(),
-                                            );
-                                        }
+                        if let Ok(resp) = c.send_request(serde_json::json!({"op": "ls"})).await {
+                            let mut runs = HashMap::new();
+                            if let Some(gremlins) =
+                                resp.get("gremlins").and_then(|v| v.as_array())
+                            {
+                                for entry in gremlins {
+                                    if let (Some(id), Some(status)) = (
+                                        entry.get("id").and_then(|v| v.as_str()),
+                                        entry.get("status").and_then(|v| v.as_str()),
+                                    ) {
+                                        runs.insert(
+                                            id.to_string(),
+                                            status.to_string(),
+                                        );
                                     }
                                 }
-                                let _ = tx.send(runs);
                             }
-                            Err(_) => {}
+                            let _ = tx.send(runs);
                         }
                     });
                 } else if raw.get("type").and_then(|v| v.as_str()) == Some("error") {
