@@ -19,6 +19,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Paragraph, Widget, Wrap},
     Terminal, TerminalOptions, Viewport,
 };
@@ -29,7 +30,7 @@ use chat::{send_message, ChatEvent};
 use commands::{dispatch, CommandResult};
 use editor::open_editor;
 use ui::render;
-use widgets::{DynamicWidget, StreamWidget};
+use widgets::{DynamicWidget, SplitWidget};
 
 /// RAII guard that restores terminal state on drop.
 struct TerminalGuard;
@@ -111,6 +112,34 @@ fn promote_scrollback(
         })?;
     }
     Ok(())
+}
+
+/// Freeze the widget, push response lines and stream tail to scrollback,
+/// commit user+assistant pair to conversation history, and clear the widget.
+///
+/// This is the single freeze-and-commit path used by Done, Ended, Error,
+/// and Esc.
+fn freeze_and_commit(app: &mut App) {
+    if let Some(ref mut widget) = app.widget {
+        widget.flush_partial();
+        let (response_lines, stream_tail) = widget.freeze();
+        app.extend_scrollback(response_lines);
+        app.extend_scrollback(stream_tail);
+    }
+    app.widget = None;
+
+    // Commit user+assistant pair to conversation history.
+    let user_msg = std::mem::take(&mut app.pending_user_message);
+    if !user_msg.is_empty() {
+        app.conversation_history
+            .push(serde_json::json!({"role": "user", "content": user_msg}));
+    }
+    let response_text = std::mem::take(&mut app.current_response);
+    if !response_text.is_empty() {
+        app.conversation_history
+            .push(serde_json::json!({"role": "assistant", "content": response_text}));
+    }
+    app.active_request = false;
 }
 
 /// Initialise the terminal, run the event loop, and restore on exit.
@@ -254,7 +283,7 @@ async fn run_app(
     loop {
         let gremlin_count = app.gremlin_count_str();
         let project_name = app.project_name_str().to_string();
-        terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name))?;
+        terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name, term_h))?;
 
         tokio::select! {
             // ── Crossterm events ──────────────────────────────
@@ -292,29 +321,7 @@ async fn run_app(
                                 if let Some(handle) = chat_task.take() {
                                     handle.abort();
                                 }
-                                // Flush any remaining response_stream to scrollback first,
-                                // so model text appears contiguously above the frozen widget.
-                                if !app.response_stream.is_empty() {
-                                    let remaining = app.response_stream.clone();
-                                    app.push_scrollback(remaining);
-                                    app.response_stream.clear();
-                                }
-                                // Freeze widget content to scrollback.
-                                if let Some(ref mut widget) = app.widget {
-                                    let frozen = widget.freeze();
-                                    app.extend_scrollback(frozen);
-                                }
-                                app.widget = None;
-                                // Commit user+assistant pair to conversation history.
-                                let user_msg = std::mem::take(&mut app.pending_user_message);
-                                if !user_msg.is_empty() {
-                                    app.conversation_history.push(serde_json::json!({"role": "user", "content": user_msg}));
-                                }
-                                let response_text = std::mem::take(&mut app.current_response);
-                                if !response_text.is_empty() {
-                                    app.conversation_history.push(serde_json::json!({"role": "assistant", "content": response_text}));
-                                }
-                                app.active_request = false;
+                                freeze_and_commit(&mut app);
                                 promote_scrollback(&mut app, terminal, term_h, term_w)?;
                             }
                         }
@@ -344,16 +351,13 @@ async fn run_app(
                                     }
                                     CommandResult::RestartChat => {
                                         // Freeze any active widget.
-                                        if let Some(ref mut widget) = app.widget {
-                                            let frozen = widget.freeze();
-                                            app.extend_scrollback(frozen);
+                                        if app.widget.is_some() {
+                                            freeze_and_commit(&mut app);
                                         }
                                         // Abort in-flight chat task.
                                         if let Some(handle) = chat_task.take() {
                                             handle.abort();
                                         }
-                                        app.widget = None;
-                                        app.response_stream.clear();
                                         app.scrollback_lines.clear();
                                         app.conversation_history.clear();
                                         app.current_response.clear();
@@ -471,17 +475,20 @@ async fn run_app(
                                 app.push_scrollback_styled(echo, prompt_style);
                                 promote_scrollback(&mut app, terminal, term_h, term_w)?;
 
-                                // Create a StreamWidget and push the initial "thinking..." line.
+                                // Create a SplitWidget and push the initial "thinking..." line.
                                 let reason_style = Style::default()
                                     .fg(Color::DarkGray)
                                     .add_modifier(Modifier::ITALIC);
-                                let mut widget = StreamWidget::new(reason_style);
-                                widget.push("thinking...");
+                                let mut widget = SplitWidget::new();
+                                widget.push_stream(Line::from(Span::styled(
+                                    "  thinking...",
+                                    reason_style,
+                                )));
                                 app.widget = Some(widget);
 
                                 // Force an immediate frame so "thinking..."
                                 // appears without waiting for the next event.
-                                terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name))?;
+                                terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name, term_h))?;
 
                                 app.active_request = true;
                                 app.pending_user_message = input.clone();
@@ -616,32 +623,42 @@ async fn run_app(
             Some(event) = chat_rx.recv() => {
                 match event {
                     ChatEvent::StreamChunk(text) => {
-                        // Append to response_stream; flush completed lines to scrollback.
-                        app.response_stream.push_str(&text);
                         app.current_response.push_str(&text);
-                        // Flush complete lines (newline-terminated) to scrollback.
-                        while let Some(newline_pos) = app.response_stream.find('\n') {
-                            let line = app.response_stream[..newline_pos].to_string();
-                            app.response_stream = app.response_stream[newline_pos + 1..].to_string();
-                            app.push_scrollback(line);
+                        if let Some(ref mut widget) = app.widget {
+                            widget.push_response_text(&text);
                         }
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::ReasoningChunk(text) => {
+                        let reason_style = Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC);
                         if let Some(ref mut widget) = app.widget {
-                            widget.push_str(&text);
+                            widget.push_stream_text(&text, reason_style);
                         }
                     }
                     ChatEvent::ToolResult { name, output } => {
+                        let tool_style = Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC);
                         if let Some(ref mut widget) = app.widget {
                             if output.is_empty() {
-                                widget.push(&format!("{name}: (empty)"));
+                                widget.push_stream(Line::from(Span::styled(
+                                    format!("  {name}: (empty)"),
+                                    tool_style,
+                                )));
                             } else {
                                 for (i, line) in output.lines().enumerate() {
                                     if i == 0 {
-                                        widget.push(&format!("{name}: {line}"));
+                                        widget.push_stream(Line::from(Span::styled(
+                                            format!("  {name}: {line}"),
+                                            tool_style,
+                                        )));
                                     } else {
-                                        widget.push(&format!("      {line}"));
+                                        widget.push_stream(Line::from(Span::styled(
+                                            format!("        {line}"),
+                                            tool_style,
+                                        )));
                                     }
                                 }
                             }
@@ -651,78 +668,27 @@ async fn run_app(
                         // No-op: widget keeps rendering; no state flags to toggle.
                     }
                     ChatEvent::Done { text, .. } => {
-                        // Flush any remaining partial response_stream line first,
-                        // so model text appears contiguously above the frozen widget.
-                        if !app.response_stream.is_empty() {
-                            let remaining = app.response_stream.clone();
-                            app.push_scrollback(remaining);
-                            app.response_stream.clear();
-                        }
-                        // Freeze widget tail lines into scrollback.
-                        if let Some(ref mut widget) = app.widget {
-                            let frozen = widget.freeze();
-                            app.extend_scrollback(frozen);
-                        }
-                        app.widget = None;
-                        // If no streamed text was received, push the final text.
+                        // If no streamed text was received, route the final text
+                        // through the widget so it appears in the response section.
                         if !text.is_empty() && app.current_response.is_empty() {
                             app.current_response.push_str(&text);
-                            for line in text.lines() {
-                                app.push_scrollback(line.to_string());
+                            if let Some(ref mut widget) = app.widget {
+                                widget.push_response_text(&text);
                             }
                         }
-                        // Commit user+assistant pair to conversation history.
-                        let user_msg = std::mem::take(&mut app.pending_user_message);
-                        if !user_msg.is_empty() {
-                            app.conversation_history.push(serde_json::json!({"role": "user", "content": user_msg}));
-                        }
-                        let response_text = std::mem::take(&mut app.current_response);
-                        if !response_text.is_empty() {
-                            app.conversation_history.push(serde_json::json!({"role": "assistant", "content": response_text}));
-                        }
-                        app.active_request = false;
+                        freeze_and_commit(&mut app);
                         chat_task = None;
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Ended { reason } => {
-                        // Flush any remaining response_stream to scrollback first,
-                        // so model text appears contiguously above the frozen widget.
-                        if !app.response_stream.is_empty() {
-                            let remaining = app.response_stream.clone();
-                            app.push_scrollback(remaining);
-                            app.response_stream.clear();
-                        }
-                        // Freeze any active widget.
-                        if let Some(ref mut widget) = app.widget {
-                            let frozen = widget.freeze();
-                            app.extend_scrollback(frozen);
-                        }
-                        app.widget = None;
-                        app.current_response.clear();
-                        app.pending_user_message.clear();
-                        app.active_request = false;
+                        freeze_and_commit(&mut app);
                         chat_task = None;
                         let msg = format!("chat ended: {reason}");
                         app.push_scrollback(msg);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Error(msg) => {
-                        // Flush any remaining response_stream to scrollback first,
-                        // so model text appears contiguously above the frozen widget.
-                        if !app.response_stream.is_empty() {
-                            let remaining = app.response_stream.clone();
-                            app.push_scrollback(remaining);
-                            app.response_stream.clear();
-                        }
-                        // Freeze any active widget.
-                        if let Some(ref mut widget) = app.widget {
-                            let frozen = widget.freeze();
-                            app.extend_scrollback(frozen);
-                        }
-                        app.widget = None;
-                        app.current_response.clear();
-                        app.pending_user_message.clear();
-                        app.active_request = false;
+                        freeze_and_commit(&mut app);
                         chat_task = None;
                         let full = format!("chat error: {msg}");
                         app.push_scrollback(full);
@@ -736,15 +702,8 @@ async fn run_app(
     // ── Exit: preserve conversation in terminal scrollback ────────
 
     // Freeze any active widget.
-    if let Some(ref mut widget) = app.widget {
-        let frozen = widget.freeze();
-        app.extend_scrollback(frozen);
-    }
-    // Flush remaining response_stream.
-    if !app.response_stream.is_empty() {
-        let remaining = app.response_stream.clone();
-        app.push_scrollback(remaining);
-        app.response_stream.clear();
+    if app.widget.is_some() {
+        freeze_and_commit(&mut app);
     }
     // Drain all scrollback_lines into terminal scrollback.
     if !app.scrollback_lines.is_empty() {

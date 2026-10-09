@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use ratatui::style::Style;
 
-use crate::tui::widgets::StreamWidget;
+use crate::tui::widgets::SplitWidget;
 
 /// Application state for the TUI.
 ///
@@ -51,10 +51,7 @@ pub struct App {
     /// promotion threshold.
     pub scrollback_lines: Vec<(String, Style)>,
     /// The active streaming widget, if any. None when idle.
-    pub widget: Option<StreamWidget>,
-    /// Accumulated model response text, flushed to scrollback on newline
-    /// boundaries during the turn and fully on Done.
-    pub response_stream: String,
+    pub widget: Option<SplitWidget>,
 }
 
 impl App {
@@ -75,7 +72,6 @@ impl App {
             pending_user_message: String::new(),
             scrollback_lines: Vec::new(),
             widget: None,
-            response_stream: String::new(),
         }
     }
 

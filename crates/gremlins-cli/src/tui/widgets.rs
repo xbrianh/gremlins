@@ -1,10 +1,18 @@
 use ratatui::{
     prelude::Rect,
-    style::Style,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
+
+/// Minimum height of the stream section when response is present.
+const STREAM_MIN: u16 = 5;
+/// Number of stream lines to keep when freezing.
+const FREEZE_STREAM_LINES: usize = 3;
+
+/// Frozen content: `(response_lines, stream_tail)`.
+pub type FrozenLines = (Vec<(String, Style)>, Vec<(String, Style)>);
 
 /// A widget whose height can change dynamically during streaming.
 ///
@@ -12,117 +20,241 @@ use ratatui::{
 /// the event loop calls `set_viewport_height` to grow or shrink the
 /// inline terminal viewport.
 pub trait DynamicWidget {
-    /// Current height in rows (0 when empty).
-    fn height(&self) -> u16;
-    /// Minimum height when non-empty.
-    fn min_height(&self) -> u16;
-    /// Maximum height before internal scrolling takes over.
-    fn max_height(&self) -> u16;
+    /// Current height in rows given the available terminal height (0 when empty).
+    fn height(&self, available: u16) -> u16;
     /// True when there is no content to render.
     fn is_empty(&self) -> bool;
     /// Render into the given area. The widget may use internal scrolling
     /// when content exceeds the allocated height.
     fn render(&self, frame: &mut Frame, area: Rect);
-    /// Freeze the last few lines for scrollback, then clear the buffer.
+    /// Freeze content for scrollback, then clear both buffers.
     ///
-    /// Returns up to N most-recent lines with their [`Style`]. After this
-    /// call `is_empty()` returns true and `height()` returns 0.
-    fn freeze(&mut self) -> Vec<(String, Style)>;
+    /// Returns `(response_lines, stream_tail)` where response lines carry
+    /// plain [`Style::default()`] and stream tail lines carry dark gray
+    /// italic style with 2-space indent.
+    fn freeze(&mut self) -> FrozenLines;
 }
 
-/// A streaming text widget that grows up to [`StreamWidget::max_height`]
-/// rows and then scrolls internally.
+/// A dual-section streaming widget that routes model output into two
+/// independent buffers:
 ///
-/// Lines are pushed incrementally as reasoning chunks and tool results
-/// arrive. When the turn ends the last 3 lines are frozen to scrollback
-/// and the buffer is cleared.
-pub struct StreamWidget {
-    lines: Vec<String>,
-    /// Partial line buffer — text received without a trailing newline.
+/// - **Stream section** (top): reasoning chunks and tool results, styled
+///   dark gray italic with 2-space indent.
+/// - **Response section** (bottom): model text deltas, plain terminal style.
+///
+/// The response section gets priority in fluid height allocation. The
+/// stream section never goes below [`STREAM_MIN`] when the response
+/// section is present.
+pub struct SplitWidget {
+    /// Reasoning + tool result lines (already styled).
+    stream_lines: Vec<Line<'static>>,
+    /// Model text lines (plain style applied at render time).
+    response_lines: Vec<Line<'static>>,
+    /// Partial-line accumulator for `push_response_text`.
     partial: String,
-    style: Style,
+    /// Partial-line accumulator for `push_stream_text`.
+    stream_partial: String,
 }
 
-impl StreamWidget {
-    pub fn new(style: Style) -> Self {
+impl SplitWidget {
+    pub fn new() -> Self {
         Self {
-            lines: Vec::new(),
+            stream_lines: Vec::new(),
+            response_lines: Vec::new(),
             partial: String::new(),
-            style,
+            stream_partial: String::new(),
         }
     }
 
-    /// Flush any remaining partial text as a final line.
-    fn flush_partial(&mut self) {
-        if !self.partial.is_empty() {
-            self.lines.push(std::mem::take(&mut self.partial));
+    /// Compute (stream_h, response_h) given available height.
+    ///
+    /// Response gets priority. Stream never goes below `STREAM_MIN` when
+    /// response is present. Returns (0, 0) when both buffers are empty.
+    pub fn layout(&self, available: u16) -> (u16, u16) {
+        let stream_content =
+            self.stream_lines.len() as u16 + if self.stream_partial.is_empty() { 0 } else { 1 };
+        let response_content =
+            self.response_lines.len() as u16 + if self.partial.is_empty() { 0 } else { 1 };
+
+        if stream_content == 0 && response_content == 0 {
+            return (0, 0);
+        }
+
+        if available == 0 {
+            return (0, 0);
+        }
+
+        if response_content == 0 {
+            // Only stream content: give it what we have.
+            return (stream_content.min(available), 0);
+        }
+
+        if stream_content == 0 {
+            // Only response content: give it what we have.
+            return (0, response_content.min(available));
+        }
+
+        // Both present. Response gets priority.
+        // Stream floor: STREAM_MIN, but not more than content or
+        // available-1 (leave at least 1 row for response).
+        let stream_floor = STREAM_MIN
+            .min(stream_content)
+            .min(available.saturating_sub(1));
+
+        // Give response as much as possible after reserving stream floor.
+        let response_h = response_content.min(available.saturating_sub(stream_floor));
+        let stream_h = (available.saturating_sub(response_h)).min(stream_content);
+
+        (stream_h, response_h)
+    }
+
+    /// Push a styled line to the stream section.
+    pub fn push_stream(&mut self, line: Line<'static>) {
+        self.stream_lines.push(line);
+    }
+
+    /// Push raw text to the stream section, handling partial lines.
+    /// Completed lines are styled with `style` and indented 2 spaces.
+    pub fn push_stream_text(&mut self, text: &str, style: Style) {
+        self.stream_partial.push_str(text);
+        while let Some(newline_pos) = self.stream_partial.find('\n') {
+            let line: String = self.stream_partial[..newline_pos].into();
+            self.stream_partial = self.stream_partial[newline_pos + 1..].into();
+            self.stream_lines
+                .push(Line::from(Span::styled(format!("  {line}"), style)));
         }
     }
 
-    /// Push a complete line.
-    pub fn push(&mut self, line: &str) {
-        self.flush_partial();
-        self.lines.push(line.to_string());
+    /// Drain any remaining stream partial text as a final stream line.
+    fn flush_stream_partial(&mut self) {
+        if !self.stream_partial.is_empty() {
+            let remaining = std::mem::take(&mut self.stream_partial);
+            let style = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC);
+            self.stream_lines
+                .push(Line::from(Span::styled(format!("  {remaining}"), style)));
+        }
     }
 
-    /// Push text that may contain newlines or partial lines.
-    pub fn push_str(&mut self, text: &str) {
+    /// Push model text. Accumulates partial lines, emits completed
+    /// `Line`s to `response_lines` with default style.
+    pub fn push_response_text(&mut self, text: &str) {
         self.partial.push_str(text);
         while let Some(newline_pos) = self.partial.find('\n') {
-            let line = self.partial[..newline_pos].to_string();
-            self.partial = self.partial[newline_pos + 1..].to_string();
-            self.lines.push(line);
+            let line: String = self.partial[..newline_pos].into();
+            self.partial = self.partial[newline_pos + 1..].into();
+            self.response_lines
+                .push(Line::from(Span::styled(line, Style::default())));
+        }
+    }
+
+    /// Drain any remaining partial text as a final response line.
+    pub fn flush_partial(&mut self) {
+        if !self.partial.is_empty() {
+            let remaining = std::mem::take(&mut self.partial);
+            self.response_lines
+                .push(Line::from(Span::styled(remaining, Style::default())));
         }
     }
 }
 
-impl DynamicWidget for StreamWidget {
-    fn height(&self) -> u16 {
-        let count = self.lines.len() + if self.partial.is_empty() { 0 } else { 1 };
-        if count == 0 {
-            0
-        } else {
-            (count as u16).max(self.min_height()).min(self.max_height())
-        }
-    }
-
-    fn min_height(&self) -> u16 {
-        1
-    }
-
-    fn max_height(&self) -> u16 {
-        8
+impl DynamicWidget for SplitWidget {
+    fn height(&self, available: u16) -> u16 {
+        let (sh, rh) = self.layout(available);
+        sh + rh
     }
 
     fn is_empty(&self) -> bool {
-        self.lines.is_empty() && self.partial.is_empty()
+        self.stream_lines.is_empty()
+            && self.response_lines.is_empty()
+            && self.partial.is_empty()
+            && self.stream_partial.is_empty()
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
-        let mut rat_lines: Vec<Line> = Vec::new();
-        for line in &self.lines {
-            let indented = format!("  {line}");
-            rat_lines.push(Line::from(Span::styled(indented, self.style)));
+        let (stream_h, response_h) = self.layout(area.height);
+
+        if stream_h == 0 && response_h == 0 {
+            return;
         }
-        if !self.partial.is_empty() {
-            let indented = format!("  {}", self.partial);
-            rat_lines.push(Line::from(Span::styled(indented, self.style)));
+
+        // Split area vertically: stream on top, response on bottom.
+        let mut y = area.y;
+        let mut remaining_h = area.height;
+
+        if stream_h > 0 {
+            let mut lines = self.stream_lines.clone();
+            if !self.stream_partial.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    self.stream_partial.as_str(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+            }
+            let stream_area = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: stream_h.min(remaining_h),
+            };
+            let scroll = lines.len().saturating_sub(stream_area.height as usize) as u16;
+            let paragraph = Paragraph::new(lines).scroll((scroll, 0));
+            frame.render_widget(paragraph, stream_area);
+            y += stream_area.height;
+            remaining_h = remaining_h.saturating_sub(stream_area.height);
         }
-        let line_count = rat_lines.len().max(1);
-        let scroll = line_count.saturating_sub(area.height as usize) as u16;
-        let paragraph = Paragraph::new(rat_lines).scroll((scroll, 0));
-        frame.render_widget(paragraph, area);
+
+        if response_h > 0 && remaining_h > 0 {
+            let mut lines = self.response_lines.clone();
+            if !self.partial.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    self.partial.as_str(),
+                    Style::default(),
+                )));
+            }
+            let response_area = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: response_h.min(remaining_h),
+            };
+            let scroll = lines.len().saturating_sub(response_area.height as usize) as u16;
+            let paragraph = Paragraph::new(lines).scroll((scroll, 0));
+            frame.render_widget(paragraph, response_area);
+        }
     }
 
-    fn freeze(&mut self) -> Vec<(String, Style)> {
+    fn freeze(&mut self) -> FrozenLines {
         self.flush_partial();
-        let take_count = self.lines.len().min(3);
-        let start = self.lines.len() - take_count;
-        let result: Vec<(String, Style)> = self.lines[start..]
-            .iter()
-            .map(|l| (format!("  {l}"), self.style))
+        self.flush_stream_partial();
+
+        // Response lines: plain style.
+        let response_lines: Vec<(String, Style)> = std::mem::take(&mut self.response_lines)
+            .into_iter()
+            .map(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                (text, Style::default())
+            })
             .collect();
-        self.lines.clear();
-        result
+
+        // Stream tail: last FREEZE_STREAM_LINES, dark gray italic.
+        // Lines are already indented by the caller; do not add extra indent.
+        let stream_style = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC);
+        let take_count = self.stream_lines.len().min(FREEZE_STREAM_LINES);
+        let start = self.stream_lines.len() - take_count;
+        let stream_tail: Vec<(String, Style)> = self.stream_lines[start..]
+            .iter()
+            .map(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                (text, stream_style)
+            })
+            .collect();
+
+        self.stream_lines.clear();
+        (response_lines, stream_tail)
     }
 }
