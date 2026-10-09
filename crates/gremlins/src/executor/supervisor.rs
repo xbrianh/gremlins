@@ -285,12 +285,13 @@ async fn handle_connection(
 
     // Gate the event-forwarding subtask so that one-shot clients always
     // receive their request response before any broadcast events.
-    let event_start = Arc::new(tokio::sync::Notify::new());
-    let event_start_clone = Arc::clone(&event_start);
+    // Use a watch channel (latched) instead of Notify so that a permit
+    // set before the task reaches .changed() is not lost.
+    let (event_start_tx, mut event_start_rx) = tokio::sync::watch::channel(false);
     let event_writer = writer.clone();
     let event_handle = tokio::spawn(async move {
         // Wait until the first request has been fully processed.
-        event_start_clone.notified().await;
+        let _ = event_start_rx.wait_for(|v| *v).await;
         loop {
             match event_rx.recv().await {
                 Ok(event) => {
@@ -334,19 +335,19 @@ async fn handle_connection(
         // directly so they can monitor the read half for disconnect.
         if op == "log" {
             // Unblock events now that the streaming op is starting.
-            event_start.notify_waiters();
+            let _ = event_start_tx.send(true);
             handle_log(&request, &state_root, reader, &writer).await;
             break;
         }
 
         if op == "debug" {
-            event_start.notify_waiters();
+            let _ = event_start_tx.send(true);
             handle_debug(&request, &state_root, reader, &writer).await;
             break;
         }
 
         if op == "chat" {
-            event_start.notify_waiters();
+            let _ = event_start_tx.send(true);
             handle_chat(&request, &state_root, reader, &writer).await;
             break;
         }
@@ -354,7 +355,7 @@ async fn handle_connection(
         let _outcome = dispatch_op(&op, &request, &state_root, &shutdown_tx, &writer).await;
         // Unblock events *after* the response is written so one-shot
         // clients always read the response before any broadcast event.
-        event_start.notify_waiters();
+        let _ = event_start_tx.send(true);
     }
 
     // Abort the event-forwarding subtask so it doesn't leak the write
@@ -1727,47 +1728,10 @@ async fn handle_debug(
 // chat
 // ---------------------------------------------------------------------------
 
-const CHAT_SYSTEM_PROMPT: &str = r#"You are a conversational AI assistant integrated into the gremlins TUI. You help the operator develop and operate gremlin pipelines.
-
-## Your role
-
-You are a chat agent — respond conversationally to the operator's messages. When you have answered the operator's question completely, call Done to signal the end of your turn. When you need information, use your tools (Read, Grep, Glob, Bash, etc.) proactively — the operator expects you to look things up rather than ask them to provide information you can find yourself.
-
-## Gremlins domain
-
-Gremlins is a framework for running AI-powered pipelines defined in YAML files under the `.gremlins/` directory.
-
-### Key concepts
-
-- **Definitions** (`.gremlins/*.yaml`): Pipeline files declaring stages, their types, prompts, commands, and artifact wiring.
-- **Stages**: `agent` (LLM call), `exec` (shell command), `sequence` (loop), `parallel` (fan-out).
-- **Artifacts**: Files exchanged between stages via `artifact://` URIs. Stored in the gremlin's artifact directory.
-- **Bail**: A stage can bail to request operator intervention. The run pauses and waits for the operator to resolve the issue and resume.
-- **Worktrees**: Each gremlin run gets a detached git worktree at the commit it was launched from. The worktree is the `cwd` for all stage commands.
-- **State**: Each run has a state directory with `state.json`, logs, artifacts, and a hermetic definition snapshot.
-- **Overlay**: The `.gremlins/` directory in the project root contains pipeline definitions and tool scripts.
-
-### Common commands
-
-- `gremlins launch <definition>` — start a pipeline run
-- `gremlins ls` — list all runs
-- `gremlins info <id>` — show run details
-- `gremlins stop <id>` — stop a run
-- `gremlins resume <id>` — resume a paused/bailed run
-- `gremlins debug <id>` — attach interactively to an agent stage
-- `gremlins rm <id>` — remove a completed run
-
-## Your tools
-
-You have access to standard tools: Read, Write, Edit, Grep, Glob, Bash, Task. Use them to help the operator explore the codebase, edit files, run commands, and manage gremlin pipelines.
-
-## Guidelines
-
-- Be concise and direct. The operator is a developer who knows the codebase.
-- When reading files, use offset/limit for large files.
-- When editing, make targeted replacements with enough context for uniqueness.
-- Use `make test` to run tests, `make check` for linting.
-- Work in the project root directory unless told otherwise."#;
+/// Chat system prompt, loaded from the bundled prompt file so that
+/// major behavioral instructions live in a pipeline-owned prompt file
+/// rather than embedded in harness code.
+const CHAT_SYSTEM_PROMPT: &str = include_str!("../../prompts/chat_system.md");
 
 async fn handle_chat(
     request: &Value,
@@ -1868,10 +1832,16 @@ async fn handle_chat(
 
     // 7. Set up stream_events for forwarding to the TUI.
     //    No interactive session — the agent runs to Done.
+    //    Move (not clone) the sender into runtime_config so that the
+    //    channel closes when the agent task drops the gremlin. This
+    //    lets stream_rx.recv() return Closed when the agent exits
+    //    without emitting Done/Ended, instead of hanging both sides.
     let (stream_tx, mut stream_rx) = broadcast::channel::<InteractiveEvent>(256);
-    gremlin.runtime_config.stream_events = Some(stream_tx.clone());
+    gremlin.runtime_config.stream_events = Some(stream_tx);
 
-    // 8. Spawn run task
+    // 8. Spawn run task with a oneshot insertion barrier — same pattern
+    //    as launch/resume — so the task cannot finish before the handle
+    //    is inserted and RunStarted is emitted.
     let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
         id: id.clone(),
@@ -1891,7 +1861,9 @@ async fn handle_chat(
     let store = gremlin.state.store_handle();
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel();
     let join_handle = tokio::spawn(async move {
+        let _ = go_rx.await;
         let (result, _gremlin) = run_gremlin_task(gremlin, None).await;
         if !aborted_for_task.load(Ordering::Relaxed) {
             RunHandle::finish(
@@ -1915,11 +1887,14 @@ async fn handle_chat(
     };
     get_run_map().lock().unwrap().insert(id.clone(), handle);
 
+    // Emit RunStarted *before* releasing the barrier so subscribers
+    // always see the start event before any terminal event.
     emit_event(DaemonEvent::RunStarted {
         id: id.clone(),
         definition: "chat".to_string(),
         stage: "starting".to_string(),
     });
+    let _ = go_tx.send(());
 
     // 9. Forward stream events to the TUI until Done/Ended.
     //    Also monitor the read half for client disconnect.
@@ -2101,8 +2076,7 @@ fn create_chat_gremlin(
         .map_err(|e| format!("invalid default client '{default_client}': {e}"))?;
 
     let scratch_dir = ScratchDir::Temp(
-        tempfile::TempDir::new()
-            .map_err(|e| format!("failed to create temp scratch dir: {e}"))?,
+        tempfile::TempDir::new().map_err(|e| format!("failed to create temp scratch dir: {e}"))?,
     );
 
     Ok(Gremlin {

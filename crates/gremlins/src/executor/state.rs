@@ -96,7 +96,7 @@ pub trait StateStore: Send + Sync + Debug {
     fn state_tree(&self) -> Map<String, Value>;
 
     /// Write `data` as `state.json` into the store's directory.
-    fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError>;
+    fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>;
 
     /// Open a named blob in the state directory. Creates parent directories
     /// as needed. The returned handle supports Read + Write + Seek.
@@ -842,7 +842,7 @@ impl StateStore for FileSystemStateStore {
         read_state_json(Some(&self.state_file()))
     }
 
-    fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+    fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError> {
         write_state(self.root.path(), data)
     }
 
@@ -1106,7 +1106,7 @@ impl StateStore for FileSystemStateStore {
                 copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
             }
 
-            let mut child_store = FileSystemStateStore {
+            let child_store = FileSystemStateStore {
                 root: StateRoot::Temp(child_temp),
             };
 
@@ -1154,7 +1154,7 @@ impl StateStore for FileSystemStateStore {
             // Seed registry from parent, remapping file-backed bindings
             // that point into the parent artifact directory to the
             // corresponding child paths.
-            let mut child_store = FileSystemStateStore::open(child_gremlin_id)?;
+            let child_store = FileSystemStateStore::open(child_gremlin_id)?;
             let parent_registry = self.read_registry_json().await;
             if !parent_registry.is_empty() {
                 let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
@@ -1259,7 +1259,7 @@ impl StateStore for ScopedFileSystemStateStore {
         self.inner.state_tree()
     }
 
-    fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+    fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError> {
         self.inner.write_state(data)
     }
 
@@ -1488,7 +1488,7 @@ impl StateData {
     }
 
     pub fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError> {
-        write_state(self.state_dir(), data)
+        self.store.write_state(data)
     }
 
     pub(crate) fn open_blob(
@@ -2852,7 +2852,7 @@ mod tests {
             fn state_tree(&self) -> Map<String, Value> {
                 unimplemented!()
             }
-            fn write_state(&mut self, _data: &Map<String, Value>) -> Result<(), StateError> {
+            fn write_state(&self, _data: &Map<String, Value>) -> Result<(), StateError> {
                 unimplemented!()
             }
             fn open(&self, _name: &str, _mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {

@@ -669,12 +669,16 @@ async fn run_app(
                         if app.widget.is_none() {
                             continue;
                         }
-                        // If no streamed text was received, route the final text
-                        // through the widget so it appears in the response section.
-                        if !text.is_empty() && app.current_response.is_empty() {
-                            app.current_response.push_str(&text);
+                        // Reconcile accumulated stream with canonical text.
+                        // After a broadcast lag, current_response is nonempty
+                        // but missing chunks; the canonical Done.text is the
+                        // authoritative full response.
+                        if !text.is_empty()
+                            && app.current_response != text
+                        {
+                            app.current_response = text.clone();
                             if let Some(ref mut widget) = app.widget {
-                                widget.push_response_text(&text);
+                                widget.replace_response(&text);
                             }
                         }
                         freeze_and_commit(&mut app);

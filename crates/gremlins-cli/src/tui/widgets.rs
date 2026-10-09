@@ -175,6 +175,15 @@ impl SplitWidget {
         }
     }
 
+    /// Replace the entire response buffer with canonical text.
+    /// Used after a broadcast lag — the streamed chunks are incomplete
+    /// and the Done.text is authoritative.
+    pub fn replace_response(&mut self, text: &str) {
+        self.response_lines.clear();
+        self.partial.clear();
+        self.push_response_text(text);
+    }
+
     /// Drain any remaining partial text as a final response line.
     pub fn flush_partial(&mut self) {
         if !self.partial.is_empty() {

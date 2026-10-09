@@ -156,7 +156,15 @@ async fn read_loop(read_half: OwnedReadHalf, state: Arc<ReadState>) {
             Ok(None) | Err(_) => break,
         };
 
-        // Classify as a DaemonEvent first — unsolicited events can arrive
+        // Classify event_lagged notifications first — they don't
+        // deserialize as DaemonEvent and would otherwise be misrouted
+        // to a pending response waiter, corrupting FIFO alignment.
+        if value.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
+            let _ = state.raw_tx.send(value);
+            continue;
+        }
+
+        // Classify as a DaemonEvent next — unsolicited events can arrive
         // at any time, even when a request is pending.
         if let Ok(event) = serde_json::from_value::<DaemonEvent>(value.clone()) {
             let _ = state.event_tx.send(event);
@@ -177,4 +185,8 @@ async fn read_loop(read_half: OwnedReadHalf, state: Arc<ReadState>) {
         // Forward as a raw line (log_line, status, etc.).
         let _ = state.raw_tx.send(value);
     }
+
+    // Drop all pending response senders so waiters see "connection
+    // closed" instead of hanging forever.
+    state.response_txs.lock().await.clear();
 }
