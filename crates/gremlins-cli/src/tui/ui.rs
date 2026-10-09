@@ -12,45 +12,16 @@ use crate::tui::widgets::DynamicWidget;
 
 /// Render the bottom-region TUI layout.
 ///
-/// Always produces four vertical constraints (bottom-to-top):
-/// scrollback, dynamic transcript, input bar, info bar.
-/// Scrollback and transcript heights can be zero.
+/// Always produces four vertical constraints (top-to-bottom):
+/// scrollback (absorbs all free space), widget, input bar, info bar.
+/// Scrollback and widget heights can be zero.
 ///
-/// The transcript (command output, help text, subprocess results) is inserted
-/// above the inline viewport via `terminal.insert_before()` and becomes normal
-/// terminal scrollback — it is never ratatui-rendered.
+/// The scrollback section uses `Constraint::Min(0)` as the first (topmost)
+/// constraint so it absorbs all space not used by widget, input, and info.
 pub fn render(frame: &mut Frame, app: &App, gremlin_count: &str, project_name: &str) {
     let has_widget = app.widget.as_ref().is_some_and(|w| !w.is_empty());
-    let area_w = frame.area().width;
-    let scrollback_h = app.scrollback_height(area_w);
     let widget_h = if has_widget {
         app.widget.as_ref().map_or(0, |w| w.height())
-    } else {
-        0
-    };
-
-    // Clamp scrollback to available area so input + info bars are never starved.
-    let max_scrollback = frame.area().height.saturating_sub(widget_h + 2);
-    let clamped_scrollback_h = scrollback_h.min(max_scrollback);
-    // When clamped, skip the oldest lines so the tail is visible.
-    let skip_lines = if clamped_scrollback_h < scrollback_h {
-        let mut h: u16 = 0;
-        let wrap_w = (area_w as usize).max(1);
-        let mut skip: usize = 0;
-        for line in &app.scrollback_lines {
-            let chars = line.chars().count();
-            let rows = if chars == 0 {
-                1
-            } else {
-                chars.div_ceil(wrap_w)
-            } as u16;
-            if h + rows > scrollback_h - clamped_scrollback_h {
-                break;
-            }
-            h += rows;
-            skip += 1;
-        }
-        skip
     } else {
         0
     };
@@ -58,15 +29,18 @@ pub fn render(frame: &mut Frame, app: &App, gremlin_count: &str, project_name: &
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(clamped_scrollback_h),
+            Constraint::Min(0), // scrollback — absorbs all free space
             Constraint::Length(widget_h),
             Constraint::Length(1), // input bar
             Constraint::Length(1), // info bar
         ])
         .split(frame.area());
 
-    if clamped_scrollback_h > 0 {
-        render_scrollback(frame, chunks[0], app, skip_lines);
+    // Render scrollback only in the area above widget+input+info.
+    // The Min(0) constraint gives us the full free space; we render
+    // the tail of scrollback_lines into it.
+    if chunks[0].height > 0 && !app.scrollback_lines.is_empty() {
+        render_scrollback(frame, chunks[0], app);
     }
     if has_widget {
         if let Some(widget) = &app.widget {
@@ -77,9 +51,35 @@ pub fn render(frame: &mut Frame, app: &App, gremlin_count: &str, project_name: &
     render_info_bar(frame, chunks[3], app, gremlin_count, project_name);
 }
 
-fn render_scrollback(frame: &mut Frame, area: Rect, app: &App, skip_lines: usize) {
+fn render_scrollback(frame: &mut Frame, area: Rect, app: &App) {
     let prompt_style = Style::default().fg(Color::Cyan);
     let default_style = Style::default();
+
+    // Compute how many lines to skip so the tail is visible when the
+    // scrollback content exceeds the available area.
+    let area_w = area.width;
+    let scrollback_h = app.scrollback_height(area_w);
+    let skip_lines = if scrollback_h > area.height {
+        let mut h: u16 = 0;
+        let wrap_w = (area_w as usize).max(1);
+        let mut skip: usize = 0;
+        for line in &app.scrollback_lines {
+            let chars = line.chars().count();
+            let rows = if chars == 0 {
+                1
+            } else {
+                chars.div_ceil(wrap_w)
+            } as u16;
+            if h + rows > scrollback_h - area.height {
+                break;
+            }
+            h += rows;
+            skip += 1;
+        }
+        skip
+    } else {
+        0
+    };
 
     let lines: Vec<Line> = app
         .scrollback_lines

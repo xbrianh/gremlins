@@ -9,29 +9,23 @@ use crate::tui::widgets::StreamWidget;
 ///
 /// ## Rendering model
 ///
-/// The transcript (command output, help text, subprocess results) is printed
-/// directly to stdout as ordinary terminal lines — it becomes terminal
-/// scrollback and tmux copy-mode history. Ratatui is **not** used for the
-/// transcript region.
-///
-/// The ratatui inline viewport is split into up to four regions when a turn is
-/// active:
-/// 1. Scrollback — frozen prompt + response lines, rendered as plain text.
+/// The ratatui inline viewport fills the terminal and is split into four
+/// regions:
+/// 1. Scrollback — all transcript content (daemon events, command output,
+///    banner, chat history, frozen prompt + response lines). Rendered as
+///    plain text with `Constraint::Min(0)` so it absorbs all space not used
+///    by the other sections.
 /// 2. Widget area — live streaming content (reasoning + tool results),
 ///    rendered by the active [`DynamicWidget`].
 /// 3. Input bar.
 /// 4. Info bar.
 ///
-/// When idle only the input bar and info bar are rendered.
+/// Old lines are promoted to terminal scrollback via
+/// `terminal.insert_before()` when the scrollback buffer exceeds
+/// `term_h * 2` lines (accounting for wrapping).
 ///
 /// No `EnterAlternateScreen` — raw mode only, in the main terminal buffer.
-///
-/// The `output` buffer is a write-only in-memory log used for:
-/// - Reprinting the transcript after terminal resize (`Ctrl+L`).
-/// - `/clear` (resets the in-memory buffer; cannot retroactively clear stdout).
 pub struct App {
-    /// Lines accumulated in the output log (write-only; never ratatui-painted).
-    pub output: Vec<String>,
     /// Current text in the input bar.
     pub input: String,
     /// Live gremlin state: id → status ("running", "done", "stopped").
@@ -49,9 +43,10 @@ pub struct App {
     pub active_request: bool,
     /// The user message for the current in-flight request (committed to history on Done).
     pub pending_user_message: String,
-    /// Frozen content for the current turn: prompt line(s) and partial response
-    /// lines emitted on newline boundaries. Flushed to terminal scrollback at
-    /// turn end.
+    /// All transcript content: daemon events, command output, banner, chat
+    /// history, frozen prompt + response lines. Oldest lines are promoted to
+    /// terminal scrollback via `insert_before` when the buffer exceeds the
+    /// promotion threshold.
     pub scrollback_lines: Vec<String>,
     /// The active streaming widget, if any. None when idle.
     pub widget: Option<StreamWidget>,
@@ -68,7 +63,6 @@ impl App {
             .unwrap_or_else(|| "?".to_string());
 
         Self {
-            output: Vec::new(),
             input: String::new(),
             active_runs: HashMap::new(),
             project_name,
@@ -81,16 +75,6 @@ impl App {
             widget: None,
             response_stream: String::new(),
         }
-    }
-
-    /// Append a line to the output buffer.
-    pub fn push_line(&mut self, line: &str) {
-        self.output.push(line.to_string());
-    }
-
-    /// Clear the output buffer.
-    pub fn clear_output(&mut self) {
-        self.output.clear();
     }
 
     /// Number of active (running) gremlins.
@@ -136,6 +120,22 @@ impl App {
         let wrap_width = (width as usize).max(1);
         let mut total: u16 = 0;
         for line in &self.scrollback_lines {
+            let chars = line.chars().count();
+            let rows = if chars == 0 {
+                1
+            } else {
+                chars.div_ceil(wrap_width)
+            };
+            total += rows as u16;
+        }
+        total
+    }
+
+    /// Compute the number of wrapped rows for a set of lines at the given width.
+    pub fn wrapped_rows(lines: &[String], width: u16) -> u16 {
+        let wrap_width = (width as usize).max(1);
+        let mut total: u16 = 0;
+        for line in lines {
             let chars = line.chars().count();
             let rows = if chars == 0 {
                 1
