@@ -74,7 +74,6 @@ pub(crate) async fn run_parallel(
     };
 
     let enclosing_task_clients = task_clients.as_ref().or(enclosing_task_clients);
-    let _ = enclosing_task_clients;
 
     let total_children = children.len();
 
@@ -169,7 +168,7 @@ pub(crate) async fn run_parallel(
         );
 
         // Fork the child gremlin.
-        let child_gremlin = gremlin
+        let mut child_gremlin = gremlin
             .fork(
                 &child_id,
                 &parent_id,
@@ -180,6 +179,10 @@ pub(crate) async fn run_parallel(
                 effective_client,
             )
             .await?;
+
+        // Thread task-client overrides from the enclosing composite stage
+        // into the child so run_stage_scoped can merge them at runtime.
+        child_gremlin.enclosing_task_clients = enclosing_task_clients.cloned();
 
         // Populate the child workspace (fork commands run after fork()
         // completes). On failure the child state has already been
@@ -715,6 +718,7 @@ mod tests {
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
+            enclosing_task_clients: None,
         };
         (sandbox, gremlin)
     }

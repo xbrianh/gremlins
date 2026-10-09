@@ -687,6 +687,7 @@ mod tests {
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
+            enclosing_task_clients: None,
         };
         (sandbox, gremlin)
     }

@@ -511,6 +511,42 @@ pub fn merge_task_clients(
     Ok(Some(resolved))
 }
 
+/// Merge three layers of already-resolved task-client maps at runtime.
+///
+/// Layer order (later wins on key conflict):
+/// 1. Global `default-task-clients` from settings.yaml
+/// 2. Enclosing composite stage's effective task-clients
+/// 3. Current stage's own `task-clients`
+///
+/// Returns `None` when all layers are empty.
+pub fn merge_task_clients_runtime(
+    global: Option<&IndexMap<String, String>>,
+    enclosing: Option<&IndexMap<String, String>>,
+    stage: Option<&IndexMap<String, String>>,
+) -> Option<IndexMap<String, String>> {
+    let mut merged: IndexMap<String, String> = IndexMap::new();
+    if let Some(g) = global {
+        for (k, v) in g {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(e) = enclosing {
+        for (k, v) in e {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(s) = stage {
+        for (k, v) in s {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
 fn sandbox_override(subdir: &str) -> Option<PathBuf> {
     std::env::var("GREMLINS_SANDBOX_ROOT")
         .ok()

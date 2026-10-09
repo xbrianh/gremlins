@@ -384,17 +384,51 @@ fn yaml_client(
         .map_err(SchemaError::Generic)
 }
 
-/// Read `task-clients` — an ordered string→string map, merged over
-/// `settings.yaml`'s `default-task-clients` and resolved through profiles.
+/// Read `task-clients` — an ordered string→string map, resolved through
+/// profiles. Returns `None` when the stage has no `task-clients` key and
+/// its `client` does not reference a profile with task-clients.
+/// Global `default-task-clients` are NOT merged here; that happens at
+/// runtime so composite-stage inheritance works correctly.
+///
+/// When the stage's `client` references a profile (e.g. `profile:foo`),
+/// that profile's `task_clients` are used as a base layer; the stage's own
+/// `task-clients` entries win on key conflict.
 fn yaml_task_clients(
     mapping: &Mapping,
     settings: &config::Config,
 ) -> Result<Option<IndexMap<String, String>>, SchemaError> {
     let stage = yaml_string_map_ordered(mapping, "task-clients")?;
-    let merged =
-        config::merge_task_clients(stage.as_ref(), settings.default_task_clients(), settings)
-            .map_err(SchemaError::Generic)?;
-    Ok(merged)
+
+    // If the stage's client references a profile, pull in its task-clients
+    // as a base layer.
+    let profile_task_clients: Option<IndexMap<String, String>> = yaml_str(mapping, "client")
+        .and_then(|raw| raw.strip_prefix("profile:").map(|name| name.to_string()))
+        .and_then(|name| settings.client_profiles().get(&name))
+        .and_then(|profile| profile.task_clients.clone());
+
+    if stage.is_none() && profile_task_clients.is_none() {
+        return Ok(None);
+    }
+
+    // Merge: profile base + stage overrides (stage wins on conflict).
+    let mut resolved = IndexMap::new();
+    if let Some(ref profile_tc) = profile_task_clients {
+        for (key, value) in profile_tc {
+            resolved.insert(
+                key.clone(),
+                config::resolve_client_reference(value, settings).map_err(SchemaError::Generic)?,
+            );
+        }
+    }
+    if let Some(ref stage_tc) = stage {
+        for (key, value) in stage_tc {
+            resolved.insert(
+                key.clone(),
+                config::resolve_client_reference(value, settings).map_err(SchemaError::Generic)?,
+            );
+        }
+    }
+    Ok(Some(resolved))
 }
 
 fn resolve_client(raw: &str, settings: &config::Config) -> Result<String, String> {

@@ -82,6 +82,11 @@ async fn run_stage_scoped(
     enclosing_task_clients: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let _attempt = gremlin.state.read_str("attempt");
+    // Fall back to the gremlin's inherited task-clients when the caller
+    // doesn't pass an explicit enclosing map (e.g. parallel children
+    // dispatched via run_stage). Clone to avoid borrowing conflicts.
+    let inherited = gremlin.enclosing_task_clients.clone();
+    let enclosing_task_clients = enclosing_task_clients.or(inherited.as_ref());
     send_log(
         &gremlin.runtime_config.log_tx,
         format!(
@@ -212,9 +217,13 @@ async fn run_agent(
         unreachable!("run_agent is only called for agent stages")
     };
 
-    let effective_task_clients = stage_task_clients.as_ref().or(enclosing_task_clients);
+    let effective_task_clients = config::merge_task_clients_runtime(
+        gremlin.runtime_config.default_task_clients.as_ref(),
+        enclosing_task_clients,
+        stage_task_clients.as_ref(),
+    );
     let (task_clients_exact, task_clients_prefix) =
-        config::parse_task_clients_map(effective_task_clients);
+        config::parse_task_clients_map(effective_task_clients.as_ref());
 
     let client = resolve_client(node, gremlin, enclosing_client)?;
     let framework_subs = gremlin.framework_subs(&agent.name);
@@ -691,7 +700,12 @@ async fn run_sequence(
         .as_ref()
         .map(|c| c.0.as_str())
         .or(enclosing_client);
-    let enclosing_task_clients = seq.task_clients.as_ref().or(enclosing_task_clients);
+    let merged_task_clients = config::merge_task_clients_runtime(
+        None, // global defaults already baked into enclosing
+        enclosing_task_clients,
+        seq.task_clients.as_ref(),
+    );
+    let enclosing_task_clients = merged_task_clients.as_ref();
 
     let key = stage_key(scope, &seq.name);
     let max_iterations = seq.max_iterations.max(1);
@@ -1092,6 +1106,7 @@ mod tests {
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
+            enclosing_task_clients: None,
         };
         (sandbox, gremlin)
     }
