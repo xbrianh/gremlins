@@ -132,9 +132,9 @@ pub(crate) async fn run_agent_loop(
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| "model".into());
 
-    // Prepend model name to the log prefix so every agent-loop line
-    // identifies which model produced it.
-    let prefix = format!("[{model_name}]{}", ctx.prefix);
+    // Insert model name after the stage bracket so every agent-loop line
+    // identifies which model produced it: [stage][model] …
+    let prefix = format!("{}[{model_name}] ", ctx.prefix.trim_end());
 
     let cwd_display = cwd
         .as_ref()
@@ -204,7 +204,8 @@ pub(crate) async fn run_agent_loop(
         opts.tool_filter.map(|f| f.to_vec()),
         cancel.clone(),
         tool_ctx.clone(),
-        prefix.clone(),
+        ctx.prefix.clone(),
+        model_name.clone(),
         idle_timeout,
         max_turns,
         ctx.completion_nudge_budget,
@@ -257,9 +258,7 @@ pub(crate) async fn run_agent_loop_nested(
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
     skip_temperature: bool,
-    model_name: &str,
 ) -> Result<CompletedRun, ClientError> {
-    let prefix = format!("[{model_name}]{prefix}");
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
     }
@@ -281,7 +280,7 @@ pub(crate) async fn run_agent_loop_nested(
         &tool_defs,
         cancel,
         &opts,
-        &prefix,
+        prefix,
         max_turns,
         idle_timeout,
         &mut raw,

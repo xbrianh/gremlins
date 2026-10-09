@@ -145,6 +145,7 @@ pub(crate) fn make_task_runner(
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
     prefix: String,
+    parent_model_name: String,
     idle_timeout: f64,
     max_turns: usize,
     completion_nudge_budget: usize,
@@ -159,6 +160,7 @@ pub(crate) fn make_task_runner(
         cancel,
         ctx,
         prefix,
+        parent_model_name,
         idle_timeout,
         max_turns,
         0,
@@ -178,6 +180,7 @@ fn make_task_runner_at_depth(
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
     prefix: String,
+    parent_model_name: String,
     idle_timeout: f64,
     max_turns: usize,
     depth: u32,
@@ -194,6 +197,7 @@ fn make_task_runner_at_depth(
         let cancel = cancel.clone();
         let mut child_ctx = ctx.clone();
         let prefix = prefix.clone();
+        let parent_model_name = parent_model_name.clone();
         let id_chain = id_chain.clone();
 
         let task_cwd = ctx.cwd.clone();
@@ -210,10 +214,15 @@ fn make_task_runner_at_depth(
                 Some(selector) => selector.model_for(&description, &model),
                 None => (model.clone(), None),
             };
-            let model_name = selected_spec.as_deref().unwrap_or("model");
+            // Use the matched spec when available; fall back to the parent
+            // model name so that log lines always identify the actual model.
+            let model_name = selected_spec.as_deref().unwrap_or(&parent_model_name);
 
             let new_chain = child_chain(&id_chain);
-            let child_prefix = task_prefix(&prefix, &new_chain);
+            // Build the child prefix: [model_name] goes after the stage
+            // bracket and before the task-chain segment, e.g.
+            //   [stage][gpt-4o][task.a3f1]
+            let child_prefix = task_prefix(&format!("{prefix}[{model_name}]"), &new_chain);
 
             // Inject a child runner one level deeper so a nested task can
             // recurse again, bounded by MAX_DEPTH along this call chain.
@@ -227,6 +236,7 @@ fn make_task_runner_at_depth(
                 cancel.clone(),
                 child_ctx.clone(),
                 prefix.clone(),
+                model_name.to_string(),
                 idle_timeout,
                 max_turns,
                 depth + 1,
@@ -257,7 +267,6 @@ fn make_task_runner_at_depth(
                 log_tx.clone(),
                 max_tokens,
                 skip_temperature,
-                model_name,
             )
             .await;
 
@@ -470,6 +479,7 @@ mod tests {
             cancel,
             ctx,
             String::new(),
+            "model".into(),
             5.0,
             10,
             0,
@@ -509,6 +519,7 @@ mod tests {
             cancel,
             ctx,
             String::new(),
+            "model".into(),
             0.2,
             10,
             MAX_DEPTH,
@@ -560,6 +571,7 @@ mod tests {
             cancel,
             ctx,
             String::new(),
+            "model".into(),
             0.2,
             10,
             0,
@@ -656,6 +668,7 @@ mod tests {
                 super::super::super::agent_loop::CancelToken::new(),
                 depth_test_ctx(),
                 TEST_BASE.to_string(),
+                "model".into(),
                 5.0,
                 10,
                 0,
