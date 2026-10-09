@@ -1161,31 +1161,32 @@ impl StateStore for FileSystemStateStore {
             // spurious duplicate-producer errors.
             let child_store = FileSystemStateStore::open(child_gremlin_id)?;
             let parent_registry = self.read_registry_json().await;
-            if !parent_registry.is_empty() {
-                let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
-                child_store
-                    .locked_write(|data| {
-                        data.clear();
-                        for (key, path) in &parent_registry {
-                            // If the binding points inside the parent artifact
-                            // directory, remap it to the child's artifact
-                            // directory. External / non-file URIs are kept
-                            // as-is.
-                            if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
-                                let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
-                                let rel = rel.trim_start_matches('/');
-                                data.insert(
-                                    key.clone(),
-                                    child_artifact_dir.join(rel).to_string_lossy().to_string(),
-                                );
-                            } else {
-                                data.insert(key.clone(), path.clone());
-                            }
+            let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
+            child_store
+                .locked_write(|data| {
+                    // Clear stale entries before seeding — do this
+                    // unconditionally so an empty parent registry
+                    // doesn't leave stale child entries behind.
+                    data.clear();
+                    for (key, path) in &parent_registry {
+                        // If the binding points inside the parent artifact
+                        // directory, remap it to the child's artifact
+                        // directory. External / non-file URIs are kept
+                        // as-is.
+                        if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
+                            let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
+                            let rel = rel.trim_start_matches('/');
+                            data.insert(
+                                key.clone(),
+                                child_artifact_dir.join(rel).to_string_lossy().to_string(),
+                            );
+                        } else {
+                            data.insert(key.clone(), path.clone());
                         }
-                        Ok(())
-                    })
-                    .await?;
-            }
+                    }
+                    Ok(())
+                })
+                .await?;
 
             // Write initial state.json with id stamped.
             let mut initial = Map::new();

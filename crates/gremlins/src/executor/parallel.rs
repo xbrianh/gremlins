@@ -84,10 +84,16 @@ pub(crate) async fn run_parallel(
     // -resume-XXXX to the attempt on restart.
     let stable_loop_iter = {
         // loop_iter is "{base}~{stage_name}-{hex}[-resume-{hex}]*"
-        // Strip the last segment that starts with the group name.
-        let marker = format!("~{group_name}-");
-        if let Some(pos) = gremlin.loop_iter.rfind(&marker) {
-            gremlin.loop_iter[..pos].to_string()
+        // Strip the per-stage attempt suffix so done markers are
+        // stable across resume regardless of nesting depth.
+        let attempt = gremlin.state.read_str("attempt");
+        if !attempt.is_empty() {
+            let suffix = format!("~{attempt}");
+            if let Some(pos) = gremlin.loop_iter.rfind(&suffix) {
+                gremlin.loop_iter[..pos].to_string()
+            } else {
+                gremlin.loop_iter.clone()
+            }
         } else {
             gremlin.loop_iter.clone()
         }

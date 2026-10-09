@@ -1074,8 +1074,15 @@ impl Gremlin {
         // Run clean commands before removing workspace/scratch.
         // Forked children inherit the pipeline's clean commands; their own
         // definition (a StageSpec) has none.
+        // CLI rm / clean paths load commands into the definition but not
+        // the clean_cmds cache — fall back when the cache is empty.
         if !self.clean_cmds.is_empty() {
             self.run_clean_cmds(&self.clean_cmds).await;
+        } else {
+            let cmds = self.definition.clean_cmds();
+            if !cmds.is_empty() {
+                self.run_clean_cmds(cmds).await;
+            }
         }
 
         self.clean_workspace();
