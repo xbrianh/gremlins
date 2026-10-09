@@ -1537,9 +1537,9 @@ mod tests {
         assert_eq!(state_after["status"], "stopped");
 
         // The successful child "good" has a done marker in the registry. The
-        // scope embeds the attempt, so the marker URI is e.g.
-        // artifact://1~group-xxxx/group/done/good.
-        let scope = stage_key(&format!("1~{first_attempt}"), "group");
+        // scope uses a resume-stable base (the attempt suffix is stripped),
+        // so the marker URI is artifact://1/group/done/good.
+        let scope = stage_key("1", "group");
         let good_done_uri = format!("artifact://{scope}/done/good");
         assert!(
             gremlin.state.is_registered(&good_done_uri).await,

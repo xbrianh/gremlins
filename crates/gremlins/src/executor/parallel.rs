@@ -77,7 +77,22 @@ pub(crate) async fn run_parallel(
     );
 
     // --- Resumption guard ---
-    let scope = stage_key(&gremlin.loop_iter, group_name);
+    //
+    // Done markers use a resume-stable scope: we strip the per-stage
+    // attempt suffix from loop_iter so that markers written during an
+    // earlier attempt are still visible after the supervisor appends
+    // -resume-XXXX to the attempt on restart.
+    let stable_loop_iter = {
+        // loop_iter is "{base}~{stage_name}-{hex}[-resume-{hex}]*"
+        // Strip the last segment that starts with the group name.
+        let marker = format!("~{group_name}-");
+        if let Some(pos) = gremlin.loop_iter.rfind(&marker) {
+            gremlin.loop_iter[..pos].to_string()
+        } else {
+            gremlin.loop_iter.clone()
+        }
+    };
+    let scope = stage_key(&stable_loop_iter, group_name);
     let mut done: HashSet<String> = HashSet::new();
     for child in children {
         let child_name = child.first_stage_name().to_string();
@@ -153,6 +168,21 @@ pub(crate) async fn run_parallel(
                 effective_client,
             )
             .await?;
+
+        // Clean up stale git worktree metadata at the child's workdir
+        // before running fork commands. A prior run may have left a
+        // worktree registered at this path (e.g. after a bail), and
+        // git will refuse to re-create it.
+        if let Some(ref workdir) = child_gremlin.workdir {
+            let path = workdir.path();
+            if path.exists() {
+                let _ = std::process::Command::new("git")
+                    .args(["-C", &gremlin.project_root.to_string_lossy()])
+                    .args(["worktree", "remove", "--force"])
+                    .arg(path)
+                    .output();
+            }
+        }
 
         // Populate the child workspace (fork commands run after fork()
         // completes). On failure the child state has already been
