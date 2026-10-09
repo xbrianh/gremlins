@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
+use indexmap::IndexMap;
 use tokio::sync::watch;
 
 use crate::artifacts::uri::Uri;
@@ -54,6 +55,7 @@ pub(crate) async fn run_parallel(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
     enclosing_client: Option<&str>,
+    enclosing_task_clients: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let ExecutorStage::Parallel {
         name: group_name,
@@ -65,10 +67,14 @@ pub(crate) async fn run_parallel(
         skip_if_exists: _,
         fork,
         join,
+        task_clients,
     } = stage
     else {
         unreachable!("run_parallel is only called for parallel stages")
     };
+
+    let enclosing_task_clients = task_clients.as_ref().or(enclosing_task_clients);
+    let _ = enclosing_task_clients;
 
     let total_children = children.len();
 
@@ -723,13 +729,14 @@ mod tests {
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
             client: None,
+            task_clients: None,
             children: vec![],
             skip_if_exists: String::new(),
             fork: None,
             join: None,
         };
         let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd:true");
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok());
     }
 
@@ -748,7 +755,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -774,7 +781,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         match result {
             Err(RunError::StageFailed { stage, .. }) => {
                 assert_eq!(stage, "bad");
@@ -805,7 +812,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -829,7 +836,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         match result {
             Err(RunError::StageFailed { .. }) => {}
             other => panic!("expected StageFailed, got {other:?}"),
@@ -860,7 +867,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         match result {
             Err(RunError::StageFailed { stage, .. }) => {
                 assert_eq!(stage, "bad");
@@ -897,7 +904,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -926,7 +933,7 @@ mod tests {
         mark_child_done(gremlin.state.store_ref(), &scope, "a").await;
 
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
         assert!(gremlin.state.is_registered(&done_uri(&scope, "a")).await);
@@ -957,7 +964,7 @@ mod tests {
         mark_child_done(gremlin.state.store_ref(), &scope, "b").await;
 
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -976,7 +983,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -997,7 +1004,7 @@ mod tests {
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
 
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
         let merged_key = "writer/out.txt";
@@ -1023,7 +1030,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -1043,7 +1050,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None).await;
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 }

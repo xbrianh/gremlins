@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use serde_yaml::{Mapping, Value};
 use thiserror::Error;
 
@@ -50,16 +51,19 @@ pub enum StageSpec {
     Agent {
         stage: Agent,
         client: Option<ClientSpec>,
+        task_clients: Option<IndexMap<String, String>>,
     },
     Exec {
         stage: Exec,
         client: Option<ClientSpec>,
+        task_clients: Option<IndexMap<String, String>>,
     },
     Sequence {
         attrs: StageAttrs,
         max_iterations: u32,
         interval: Option<f64>,
         client: Option<ClientSpec>,
+        task_clients: Option<IndexMap<String, String>>,
         body: Vec<StageSpec>,
     },
     Parallel {
@@ -68,6 +72,7 @@ pub enum StageSpec {
         cancel_on_error: bool,
         error_policy: ErrorPolicy,
         client: Option<ClientSpec>,
+        task_clients: Option<IndexMap<String, String>>,
         body: Vec<StageSpec>,
         fork: Option<ForkSpec>,
         join: Option<JoinSpec>,
@@ -102,6 +107,16 @@ impl StageSpec {
             | StageSpec::Exec { client, .. }
             | StageSpec::Sequence { client, .. }
             | StageSpec::Parallel { client, .. } => client.as_ref(),
+        }
+    }
+
+    /// The stage's own task-client overrides, if any.
+    pub fn task_clients(&self) -> Option<&IndexMap<String, String>> {
+        match self {
+            StageSpec::Agent { task_clients, .. }
+            | StageSpec::Exec { task_clients, .. }
+            | StageSpec::Sequence { task_clients, .. }
+            | StageSpec::Parallel { task_clients, .. } => task_clients.as_ref(),
         }
     }
 
@@ -152,21 +167,38 @@ impl StageSpec {
     /// [`serde_yaml::Value`] matching the canonical expanded-YAML shape.
     pub fn to_yaml(&self) -> Value {
         match self {
-            StageSpec::Agent { stage, client } => agent_to_yaml(stage, client),
-            StageSpec::Exec { stage, client } => exec_to_yaml(stage, client),
+            StageSpec::Agent {
+                stage,
+                client,
+                task_clients,
+            } => agent_to_yaml(stage, client, task_clients),
+            StageSpec::Exec {
+                stage,
+                client,
+                task_clients,
+            } => exec_to_yaml(stage, client, task_clients),
             StageSpec::Sequence {
                 attrs,
                 max_iterations,
                 interval,
                 client,
+                task_clients,
                 body,
-            } => sequence_to_yaml(attrs, *max_iterations, *interval, client, body),
+            } => sequence_to_yaml(
+                attrs,
+                *max_iterations,
+                *interval,
+                client,
+                task_clients,
+                body,
+            ),
             StageSpec::Parallel {
                 attrs,
                 max_concurrent,
                 cancel_on_error,
                 error_policy,
                 client,
+                task_clients,
                 body,
                 fork,
                 join,
@@ -176,6 +208,7 @@ impl StageSpec {
                 *cancel_on_error,
                 *error_policy,
                 client,
+                task_clients,
                 body,
                 fork,
                 join,
@@ -279,7 +312,28 @@ fn client_to_yaml(client: &Option<ClientSpec>) -> Option<Value> {
     client.as_ref().map(|c| Value::String(c.0.clone()))
 }
 
-fn agent_to_yaml(stage: &Agent, client: &Option<ClientSpec>) -> Value {
+fn task_clients_to_yaml(task_clients: &Option<IndexMap<String, String>>) -> Value {
+    match task_clients {
+        Some(map) if !map.is_empty() => {
+            let mut out = Mapping::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(Value::String(k.clone()), Value::String(v.clone()));
+            }
+            Value::Mapping(out)
+        }
+        _ => Value::Mapping(Mapping::new()),
+    }
+}
+
+fn insert_task_clients(m: &mut Mapping, task_clients: &Option<IndexMap<String, String>>) {
+    insert_if_nonempty(m, "task-clients", task_clients_to_yaml(task_clients));
+}
+
+fn agent_to_yaml(
+    stage: &Agent,
+    client: &Option<ClientSpec>,
+    task_clients: &Option<IndexMap<String, String>>,
+) -> Value {
     let mut m = Mapping::new();
     m.insert(
         Value::String("name".to_string()),
@@ -321,10 +375,15 @@ fn agent_to_yaml(stage: &Agent, client: &Option<ClientSpec>) -> Value {
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
+    insert_task_clients(&mut m, task_clients);
     Value::Mapping(m)
 }
 
-fn exec_to_yaml(stage: &Exec, client: &Option<ClientSpec>) -> Value {
+fn exec_to_yaml(
+    stage: &Exec,
+    client: &Option<ClientSpec>,
+    task_clients: &Option<IndexMap<String, String>>,
+) -> Value {
     let mut m = Mapping::new();
     m.insert(
         Value::String("name".to_string()),
@@ -354,6 +413,7 @@ fn exec_to_yaml(stage: &Exec, client: &Option<ClientSpec>) -> Value {
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
+    insert_task_clients(&mut m, task_clients);
     Value::Mapping(m)
 }
 
@@ -362,6 +422,7 @@ fn sequence_to_yaml(
     max_iterations: u32,
     interval: Option<f64>,
     client: &Option<ClientSpec>,
+    task_clients: &Option<IndexMap<String, String>>,
     body: &[StageSpec],
 ) -> Value {
     let mut m = Mapping::new();
@@ -388,6 +449,7 @@ fn sequence_to_yaml(
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
+    insert_task_clients(&mut m, task_clients);
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
     let children: Vec<Value> = body.iter().map(StageSpec::to_yaml).collect();
     m.insert(Value::String("body".to_string()), Value::Sequence(children));
@@ -401,6 +463,7 @@ fn parallel_to_yaml(
     cancel_on_error: bool,
     error_policy: ErrorPolicy,
     client: &Option<ClientSpec>,
+    task_clients: &Option<IndexMap<String, String>>,
     body: &[StageSpec],
     fork: &Option<ForkSpec>,
     join: &Option<JoinSpec>,
@@ -435,6 +498,7 @@ fn parallel_to_yaml(
     if let Some(client_val) = client_to_yaml(client) {
         m.insert(Value::String("client".to_string()), client_val);
     }
+    insert_task_clients(&mut m, task_clients);
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
     if let Some(ref fork_spec) = fork {
         let cmds: Vec<Value> = fork_spec

@@ -55,6 +55,16 @@ pub(crate) struct AzureOpenAiSettings {
     pub api_key: Option<StrictString>,
 }
 
+/// A named client profile from `settings.yaml`.
+///
+/// A profile is flat: one concrete `client:` spec and an optional
+/// `task-clients` map. No inheritance, no merging between profiles.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClientProfile {
+    pub client: String,
+    pub task_clients: Option<IndexMap<String, String>>,
+}
+
 /// Parsed content of settings.yaml.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
@@ -63,6 +73,8 @@ pub struct Config {
     prefix_stage_clients: HashMap<String, String>,
     exact_task_clients: HashMap<String, String>,
     prefix_task_clients: HashMap<String, String>,
+    default_task_clients: Option<IndexMap<String, String>>,
+    client_profiles: IndexMap<String, ClientProfile>,
     path_overrides: PathOverrides,
     azure_openai: Option<AzureOpenAiSettings>,
     max_tool_output_bytes: u64,
@@ -133,13 +145,26 @@ struct ConfigFile {
     default_client: Option<StrictString>,
     #[serde(rename = "default-client-by-stage")]
     default_client_by_stage: Option<IndexMap<String, StrictString>>,
+    /// Deprecated spelling. `default-task-clients` wins when both are set.
     #[serde(rename = "task-clients")]
     task_clients: Option<IndexMap<String, StrictString>>,
+    #[serde(rename = "default-task-clients")]
+    default_task_clients: Option<IndexMap<String, StrictString>>,
+    #[serde(rename = "client-profiles")]
+    client_profiles: Option<IndexMap<String, ProfileFile>>,
     paths: Option<HashMap<String, StrictString>>,
     #[serde(rename = "azure-openai", default)]
     azure_openai: Option<AzureOpenAiSettings>,
     #[serde(rename = "max-tool-output-bytes", default)]
     max_tool_output_bytes: Option<u64>,
+}
+
+/// A single `client-profiles` entry as it appears in `settings.yaml`.
+#[derive(Debug, Deserialize)]
+struct ProfileFile {
+    client: Option<StrictString>,
+    #[serde(rename = "task-clients", default)]
+    task_clients: Option<IndexMap<String, StrictString>>,
 }
 
 impl Config {
@@ -176,9 +201,28 @@ impl Config {
             parse_stage_clients(stage_clients.as_ref());
 
         let task_clients: Option<IndexMap<String, String>> = cfg_file
-            .task_clients
+            .default_task_clients
+            .or(cfg_file.task_clients)
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
         let (exact_task_clients, prefix_task_clients) = parse_task_clients(task_clients.as_ref());
+
+        let client_profiles: IndexMap<String, ClientProfile> = cfg_file
+            .client_profiles
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, profile)| {
+                let task_clients = profile
+                    .task_clients
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
+                (
+                    name,
+                    ClientProfile {
+                        client: profile.client.map(|s| s.0).unwrap_or_default(),
+                        task_clients,
+                    },
+                )
+            })
+            .collect();
 
         let path_overrides = cfg_file
             .paths
@@ -205,6 +249,8 @@ impl Config {
             prefix_stage_clients,
             exact_task_clients,
             prefix_task_clients,
+            default_task_clients: task_clients,
+            client_profiles,
             path_overrides,
             azure_openai: cfg_file.azure_openai,
             max_tool_output_bytes,
@@ -228,6 +274,19 @@ impl Config {
     /// caller lowercases the `description` it looks up.
     pub fn task_clients(&self) -> (&HashMap<String, String>, &HashMap<String, String>) {
         (&self.exact_task_clients, &self.prefix_task_clients)
+    }
+
+    /// The raw `default-task-clients` map, in declaration order.
+    ///
+    /// Used by stage-level `task-clients` merging at pipeline-load time: a
+    /// stage map starts from this and adds its own entries.
+    pub fn default_task_clients(&self) -> Option<&IndexMap<String, String>> {
+        self.default_task_clients.as_ref()
+    }
+
+    /// The flat client-profile lookup table.
+    pub fn client_profiles(&self) -> &IndexMap<String, ClientProfile> {
+        &self.client_profiles
     }
 
     pub fn path_overrides(&self) -> &PathOverrides {
@@ -285,6 +344,14 @@ fn parse_stage_clients(
 ///
 /// Keys are lowercased here so lookup is case-insensitive; a key ending in `*`
 /// denotes a prefix match, anything else an exact match.
+/// Parse an already-resolved stage-level `task-clients` map into the
+/// `(exact, prefix)` lookup form used by task runners.
+pub fn parse_task_clients_map(
+    map: Option<&IndexMap<String, String>>,
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    parse_task_clients(map)
+}
+
 fn parse_task_clients(
     map: Option<&IndexMap<String, String>>,
 ) -> (HashMap<String, String>, HashMap<String, String>) {
@@ -386,6 +453,62 @@ fn env_default_client() -> Option<String> {
     std::env::var("GREMLINS_DEFAULT_CLIENT")
         .ok()
         .filter(|s| !s.is_empty())
+}
+
+// ---------------------------------------------------------------------------
+// Client-profile resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve a client reference through the flat `client-profiles` table.
+///
+/// Strings starting with `profile:` are profile lookups; everything else is
+/// already a `provider:model[:k=v]` spec and passes through unchanged. An
+/// unknown profile is an error.
+pub fn resolve_client_reference(spec: &str, config: &Config) -> Result<String, String> {
+    let name = match spec.strip_prefix("profile:") {
+        Some(name) => name,
+        None => return Ok(spec.to_string()),
+    };
+    let profile = config
+        .client_profiles
+        .get(name)
+        .ok_or_else(|| format!("unknown client profile {name:?}"))?;
+    if profile.client.trim().is_empty() {
+        return Err(format!("client profile {name:?} has no client"));
+    }
+    Ok(profile.client.clone())
+}
+
+/// Resolve a `client:` / `default-client:` value through the global config.
+pub fn resolve_client_with_global(spec: &str) -> Result<String, String> {
+    let config = global_config().map_err(|e| e.to_string())?;
+    resolve_client_reference(spec, &config)
+}
+
+/// Merge a stage-level `task-clients` map over the global
+/// `default-task-clients`, and resolve every value through profiles.
+///
+/// Stage entries win on key conflict; keys not present at the stage level
+/// fall back to the global map.
+pub fn merge_task_clients(
+    stage: Option<&IndexMap<String, String>>,
+    global: Option<&IndexMap<String, String>>,
+    config: &Config,
+) -> Result<Option<IndexMap<String, String>>, String> {
+    let mut merged: IndexMap<String, String> = global.cloned().unwrap_or_default();
+    if let Some(stage) = stage {
+        for (key, value) in stage {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    if merged.is_empty() {
+        return Ok(None);
+    }
+    let mut resolved = IndexMap::new();
+    for (key, value) in &merged {
+        resolved.insert(key.clone(), resolve_client_reference(value, config)?);
+    }
+    Ok(Some(resolved))
 }
 
 fn sandbox_override(subdir: &str) -> Option<PathBuf> {

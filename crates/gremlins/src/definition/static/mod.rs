@@ -260,13 +260,30 @@ impl StaticDefinition {
     /// Recursively convert one [`StageSpec`] into an [`ExecutorStage`].
     pub(crate) fn convert_stage(&self, stage: StageSpec) -> ExecutorStage {
         match stage {
-            StageSpec::Agent { stage, client } => ExecutorStage::Agent { stage, client },
-            StageSpec::Exec { stage, client } => ExecutorStage::Exec { stage, client },
+            StageSpec::Agent {
+                stage,
+                client,
+                task_clients,
+            } => ExecutorStage::Agent {
+                stage,
+                client,
+                task_clients,
+            },
+            StageSpec::Exec {
+                stage,
+                client,
+                task_clients,
+            } => ExecutorStage::Exec {
+                stage,
+                client,
+                task_clients,
+            },
             StageSpec::Sequence {
                 attrs,
                 max_iterations,
                 interval,
                 client: seq_client,
+                task_clients,
                 body,
             } => {
                 let stages: Vec<ExecutorStage> =
@@ -277,6 +294,7 @@ impl StaticDefinition {
                     scope: None,
                     skip_if_exists: attrs.skip_if_exists,
                     client: seq_client,
+                    task_clients,
                     max_iterations,
                     interval,
                 })
@@ -287,6 +305,7 @@ impl StaticDefinition {
                 cancel_on_error,
                 error_policy,
                 client,
+                task_clients,
                 body,
                 fork,
                 join,
@@ -303,6 +322,7 @@ impl StaticDefinition {
                     cancel_on_error,
                     error_policy,
                     client,
+                    task_clients,
                     children,
                     skip_if_exists: attrs.skip_if_exists,
                     fork,
@@ -591,6 +611,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: None,
+            task_clients: None,
         }
     }
 
@@ -603,6 +624,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: None,
+            task_clients: None,
         }
     }
 
@@ -632,6 +654,7 @@ mod tests {
             scope: None,
             skip_if_exists: String::new(),
             client: None,
+            task_clients: None,
             max_iterations: 1,
             interval: None,
         });
@@ -648,6 +671,7 @@ mod tests {
             scope: None,
             skip_if_exists: String::new(),
             client: None,
+            task_clients: None,
             max_iterations: 1,
             interval: None,
         });
@@ -662,6 +686,7 @@ mod tests {
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
             client: None,
+            task_clients: None,
             children: vec![],
             skip_if_exists: "artifact://reviews".into(),
             fork: None,
@@ -692,6 +717,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: Some(ClientSpec("xai:grok-5".into())),
+            task_clients: None,
         };
         assert_eq!(stage.client(), Some(&ClientSpec("xai:grok-5".into())));
     }
@@ -704,6 +730,7 @@ mod tests {
             scope: None,
             skip_if_exists: "artifact://guard".into(),
             client: None,
+            task_clients: None,
             max_iterations: 1,
             interval: None,
         });
@@ -735,6 +762,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: None,
+            task_clients: None,
         }
     }
 
@@ -748,6 +776,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: None,
+            task_clients: None,
         }
     }
 
@@ -860,6 +889,7 @@ mod tests {
             max_iterations: 1,
             interval: None,
             client: None,
+            task_clients: None,
             body: vec![parsed_agent("inner-a"), parsed_exec("inner-b")],
         };
         let def = definition_with(vec![seq]);
@@ -891,6 +921,7 @@ mod tests {
             max_iterations: 5,
             interval: Some(20.0),
             client: Some(ClientSpec("xai:grok".into())),
+            task_clients: None,
             body: vec![parsed_agent("loop-child")],
         };
         let def = definition_with(vec![seq]);
@@ -921,6 +952,7 @@ mod tests {
             cancel_on_error: true,
             error_policy: ErrorPolicy::All,
             client: Some(ClientSpec("openai:gpt-5".into())),
+            task_clients: None,
             body: vec![parsed_agent("rev-a"), parsed_agent("rev-b")],
             fork: None,
             join: None,
@@ -963,6 +995,7 @@ mod tests {
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
             client: None,
+            task_clients: None,
             body: vec![parsed_agent("sole-child")],
             fork: None,
             join: None,

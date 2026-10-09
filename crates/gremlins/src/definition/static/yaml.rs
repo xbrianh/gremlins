@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use indexmap::IndexMap;
 use serde_yaml::{Mapping, Value};
 
 use crate::builders::agent::AgentBuilder;
@@ -140,13 +141,28 @@ fn from_expanded_value(
 
     let raw_stages = stages_from_yaml(root)?;
 
+    // Bake every stage and default client with the current settings profile.
+    // Profile resolution is a load-time operation; the expanded definition
+    // must contain only concrete `provider:model[:k=v]` strings.
+    let settings = config::global_config()
+        .map_err(|e| SchemaError::Generic(format!("failed to load settings.yaml: {e}")))?;
+    let yaml_default_client = yaml_default_client
+        .map(|c| resolve_client(&c, &settings).map_err(SchemaError::Generic))
+        .transpose()?;
+    let config_default_client = config_default_client
+        .map(|c| resolve_client(c, &settings).map_err(SchemaError::Generic))
+        .transpose()?;
+    let default_client_override = default_client_override
+        .map(|c| resolve_client(c, &settings).map_err(SchemaError::Generic))
+        .transpose()?;
+
     // Parse stages through the per-type YAML→builder dispatch.
     let mut stages: Vec<StageSpec> = Vec::new();
     for raw in &raw_stages {
         let mapping = raw
             .as_mapping()
             .ok_or_else(|| SchemaError::Generic("each stage must be a mapping".to_string()))?;
-        stages.push(stage_from_yaml(mapping)?);
+        stages.push(stage_from_yaml(mapping, &settings)?);
     }
 
     // Bootstrap.
@@ -160,7 +176,7 @@ fn from_expanded_value(
         let land_mapping = land_val
             .as_mapping()
             .ok_or_else(|| SchemaError::Generic("'land' must be a mapping".to_string()))?;
-        let (land_stage, clean) = land_from_yaml_builder(land_mapping)?;
+        let (land_stage, clean) = land_from_yaml_builder(land_mapping, &settings)?;
         (Some(land_stage), clean)
     } else {
         (None, Vec::new())
@@ -168,8 +184,8 @@ fn from_expanded_value(
 
     let default_client = resolve_default_client(
         yaml_default_client,
-        default_client_override,
-        config_default_client,
+        default_client_override.as_deref(),
+        config_default_client.as_deref(),
     )?;
 
     let builder = DefinitionBuilder {
@@ -190,7 +206,7 @@ fn from_expanded_value(
 // ---------------------------------------------------------------------------
 
 /// Dispatch a single stage mapping to the appropriate per-type builder.
-fn stage_from_yaml(mapping: &Mapping) -> Result<StageSpec, SchemaError> {
+fn stage_from_yaml(mapping: &Mapping, settings: &config::Config) -> Result<StageSpec, SchemaError> {
     let name = mapping
         .get("name")
         .and_then(Value::as_str)
@@ -205,10 +221,10 @@ fn stage_from_yaml(mapping: &Mapping) -> Result<StageSpec, SchemaError> {
     }
 
     match stage_type {
-        "agent" => agent_from_yaml(mapping, &name),
-        "exec" => exec_from_yaml(mapping, &name),
-        "sequence" => sequence_from_yaml(mapping, &name),
-        "parallel" => parallel_from_yaml(mapping, &name),
+        "agent" => agent_from_yaml(mapping, &name, settings),
+        "exec" => exec_from_yaml(mapping, &name, settings),
+        "sequence" => sequence_from_yaml(mapping, &name, settings),
+        "parallel" => parallel_from_yaml(mapping, &name, settings),
         other => Err(SchemaError::Generic(format!(
             "stage {name:?}: unknown type {other:?}"
         ))),
@@ -289,6 +305,30 @@ fn yaml_string_map(mapping: &Mapping, key: &str) -> Result<HashMap<String, Strin
     Ok(result)
 }
 
+/// Read a YAML string→string mapping, preserving declaration order.
+fn yaml_string_map_ordered(
+    mapping: &Mapping,
+    key: &str,
+) -> Result<Option<IndexMap<String, String>>, SchemaError> {
+    let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let map = raw
+        .as_mapping()
+        .ok_or_else(|| SchemaError::Generic("'task-clients' must be a mapping".to_string()))?;
+    let mut result = IndexMap::new();
+    for (k, v) in map {
+        let ks = k.as_str().ok_or_else(|| {
+            SchemaError::Generic("'task-clients' keys must be strings".to_string())
+        })?;
+        let vs = v.as_str().ok_or_else(|| {
+            SchemaError::Generic("'task-clients' values must be strings".to_string())
+        })?;
+        result.insert(ks.to_string(), vs.to_string());
+    }
+    Ok(Some(result))
+}
+
 /// Read a YAML sequence of strings.
 fn yaml_string_list(mapping: &Mapping, key: &str) -> Result<Vec<String>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
@@ -333,17 +373,45 @@ fn yaml_skip_if_exists(mapping: &Mapping) -> String {
     yaml_str(mapping, "skip_if_exists").unwrap_or_default()
 }
 
-/// Read `client` — None when absent.
-fn yaml_client(mapping: &Mapping) -> Option<ClientSpec> {
-    yaml_str(mapping, "client").map(ClientSpec)
+/// Read `client` — None when absent. Values are resolved through profiles.
+fn yaml_client(
+    mapping: &Mapping,
+    settings: &config::Config,
+) -> Result<Option<ClientSpec>, SchemaError> {
+    yaml_str(mapping, "client")
+        .map(|raw| resolve_client(&raw, settings).map(ClientSpec))
+        .transpose()
+        .map_err(SchemaError::Generic)
+}
+
+/// Read `task-clients` — an ordered string→string map, merged over
+/// `settings.yaml`'s `default-task-clients` and resolved through profiles.
+fn yaml_task_clients(
+    mapping: &Mapping,
+    settings: &config::Config,
+) -> Result<Option<IndexMap<String, String>>, SchemaError> {
+    let stage = yaml_string_map_ordered(mapping, "task-clients")?;
+    let merged =
+        config::merge_task_clients(stage.as_ref(), settings.default_task_clients(), settings)
+            .map_err(SchemaError::Generic)?;
+    Ok(merged)
+}
+
+fn resolve_client(raw: &str, settings: &config::Config) -> Result<String, String> {
+    config::resolve_client_reference(raw, settings)
 }
 
 /// Build an [`AgentBuilder`] from a YAML stage mapping.
-fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
+fn agent_from_yaml(
+    mapping: &Mapping,
+    name: &str,
+    settings: &config::Config,
+) -> Result<StageSpec, SchemaError> {
     let prompts = yaml_string_list(mapping, "prompt")?;
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
-    let client = yaml_client(mapping);
+    let client = yaml_client(mapping, settings)?;
+    let task_clients = yaml_task_clients(mapping, settings)?;
 
     let mut builder = AgentBuilder::new(name);
     for p in prompts {
@@ -361,15 +429,23 @@ fn agent_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaErr
     if let Some(c) = client {
         builder = builder.client(c.0);
     }
+    if let Some(tc) = task_clients {
+        builder = builder.task_clients(tc);
+    }
 
     builder.build()
 }
 
 /// Build an [`ExecBuilder`] from a YAML stage mapping.
-fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
+fn exec_from_yaml(
+    mapping: &Mapping,
+    name: &str,
+    settings: &config::Config,
+) -> Result<StageSpec, SchemaError> {
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
-    let client = yaml_client(mapping);
+    let client = yaml_client(mapping, settings)?;
+    let task_clients = yaml_task_clients(mapping, settings)?;
 
     let mut builder = ExecBuilder::new(name);
     for (k, v) in interpolation_map {
@@ -384,12 +460,19 @@ fn exec_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaErro
     if let Some(c) = client {
         builder = builder.client(c.0);
     }
+    if let Some(tc) = task_clients {
+        builder = builder.task_clients(tc);
+    }
 
     builder.build()
 }
 
 /// Build a [`SequenceBuilder`] from a YAML stage mapping.
-fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
+fn sequence_from_yaml(
+    mapping: &Mapping,
+    name: &str,
+    settings: &config::Config,
+) -> Result<StageSpec, SchemaError> {
     let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
         None => 1u32,
         Some(v) => {
@@ -403,7 +486,8 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
         }
     };
     let skip_if_exists = yaml_skip_if_exists(mapping);
-    let client = yaml_client(mapping);
+    let client = yaml_client(mapping, settings)?;
+    let task_clients = yaml_task_clients(mapping, settings)?;
 
     // Interval from top-level key.  Only accepts numbers (YAML integers
     // coerce to f64 via as_f64).  Reject non-numeric values with a
@@ -420,7 +504,7 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
         },
     };
 
-    let body = yaml_children(mapping, "body")?;
+    let body = yaml_children(mapping, "body", settings)?;
 
     let mut builder = SequenceBuilder::new(name)
         .max_iterations(max_iterations)
@@ -434,12 +518,19 @@ fn sequence_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
     if let Some(c) = client {
         builder = builder.client(c.0);
     }
+    if let Some(tc) = task_clients {
+        builder = builder.task_clients(tc);
+    }
 
     builder.build()
 }
 
 /// Build a [`ParallelBuilder`] from a YAML stage mapping.
-fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, SchemaError> {
+fn parallel_from_yaml(
+    mapping: &Mapping,
+    name: &str,
+    settings: &config::Config,
+) -> Result<StageSpec, SchemaError> {
     let max_concurrent = match mapping.get("max_concurrent").filter(|v| !v.is_null()) {
         None => None,
         Some(v) => {
@@ -476,9 +567,10 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
         }
     };
     let skip_if_exists = yaml_skip_if_exists(mapping);
-    let client = yaml_client(mapping);
+    let client = yaml_client(mapping, settings)?;
+    let task_clients = yaml_task_clients(mapping, settings)?;
 
-    let body = yaml_children(mapping, "body")?;
+    let body = yaml_children(mapping, "body", settings)?;
 
     // Parse fork and join specs
     let fork = yaml_fork_join(mapping, "fork")?;
@@ -496,6 +588,9 @@ fn parallel_from_yaml(mapping: &Mapping, name: &str) -> Result<StageSpec, Schema
     }
     if let Some(c) = client {
         builder = builder.client(c.0);
+    }
+    if let Some(tc) = task_clients {
+        builder = builder.task_clients(tc);
     }
     if let Some(fork_cmds) = fork {
         builder = builder.fork(fork_cmds);
@@ -522,7 +617,11 @@ fn yaml_fork_join(mapping: &Mapping, key: &str) -> Result<Option<Vec<String>>, S
 
 /// Parse children from a composite's `key` ("body") through
 /// the same per-type dispatch.
-fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<StageSpec>, SchemaError> {
+fn yaml_children(
+    mapping: &Mapping,
+    key: &str,
+    settings: &config::Config,
+) -> Result<Vec<StageSpec>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(Vec::new());
     };
@@ -534,7 +633,7 @@ fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<StageSpec>, SchemaE
         let child_map = entry.as_mapping().ok_or_else(|| {
             SchemaError::Generic("each child stage must be a mapping".to_string())
         })?;
-        children.push(stage_from_yaml(child_map)?);
+        children.push(stage_from_yaml(child_map, settings)?);
     }
     fill_builder_names(&mut children);
     Ok(children)
@@ -542,7 +641,10 @@ fn yaml_children(mapping: &Mapping, key: &str) -> Result<Vec<StageSpec>, SchemaE
 
 /// Build the land stage from its YAML mapping, forcing name=land and
 /// type=exec through [`LandBuilder`]. Returns the land stage and clean_cmds.
-fn land_from_yaml_builder(mapping: &Mapping) -> Result<(StageSpec, Vec<String>), SchemaError> {
+fn land_from_yaml_builder(
+    mapping: &Mapping,
+    settings: &config::Config,
+) -> Result<(StageSpec, Vec<String>), SchemaError> {
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
     // Reject legacy options.cmds — land_cmds / clean_cmds are the only
@@ -553,7 +655,7 @@ fn land_from_yaml_builder(mapping: &Mapping) -> Result<(StageSpec, Vec<String>),
                 .to_string(),
         ));
     }
-    let client = yaml_client(mapping);
+    let client = yaml_client(mapping, settings)?;
 
     let land_cmds = yaml_string_list(mapping, "land_cmds")?;
     let clean_cmds = yaml_string_list(mapping, "clean_cmds")?;
@@ -679,12 +781,13 @@ mod tests {
     /// Helper: serialize a StageSpec to a YAML Mapping and parse it back
     /// through stage_from_yaml, asserting the two are equal.
     fn assert_round_trip(stage: &StageSpec) {
+        let settings = config::Config::default();
         let yaml_val = stage.to_yaml();
         let mapping = yaml_val
             .as_mapping()
             .expect("to_yaml must produce a mapping");
-        let round_tripped =
-            stage_from_yaml(mapping).expect("stage_from_yaml must accept to_yaml output");
+        let round_tripped = stage_from_yaml(mapping, &settings)
+            .expect("stage_from_yaml must accept to_yaml output");
         assert_eq!(
             stage,
             &round_tripped,
@@ -803,7 +906,7 @@ mod tests {
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
         );
         // String interval must produce a SchemaError.
-        let err = stage_from_yaml(&m).unwrap_err();
+        let err = stage_from_yaml(&m, &config::Config::default()).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("interval"),
@@ -856,7 +959,8 @@ mod tests {
             serde_yaml::Value::String("body".into()),
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
         );
-        let stage = stage_from_yaml(&m).expect("numeric interval should parse");
+        let stage =
+            stage_from_yaml(&m, &config::Config::default()).expect("numeric interval should parse");
         let yaml = stage.to_yaml();
         let mapping = yaml.as_mapping().unwrap();
         let interval = mapping.get("interval").and_then(|v| v.as_f64());

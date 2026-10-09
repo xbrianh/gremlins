@@ -359,6 +359,7 @@ impl LandBuilder {
             StageSpec::Exec {
                 stage,
                 client: self.client,
+                task_clients: None,
             },
             clean_cmds,
         ))

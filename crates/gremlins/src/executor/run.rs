@@ -18,6 +18,7 @@ use serde_json::{Map, Value};
 use crate::artifacts::resolve::ResolveError;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::Client;
+use crate::config;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
@@ -31,6 +32,7 @@ use crate::executor::state::{Collision, StateStore};
 use crate::executor::supervisor::get_run_map;
 use crate::executor::vars;
 use crate::executor::RunError;
+use indexmap::IndexMap;
 
 /// Send a log line through the per-gremlin channel if one is configured.
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: String) {
@@ -64,7 +66,7 @@ pub(crate) async fn run_stage(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
 ) -> Result<(), RunError> {
-    run_stage_scoped(stage, gremlin, "", None).await
+    run_stage_scoped(stage, gremlin, "", None, None).await
 }
 
 /// Run one stage, tracking it under `scope`.
@@ -77,6 +79,7 @@ async fn run_stage_scoped(
     gremlin: &mut Gremlin,
     scope: &str,
     enclosing_client: Option<&str>,
+    enclosing_task_clients: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let _attempt = gremlin.state.read_str("attempt");
     send_log(
@@ -89,15 +92,26 @@ async fn run_stage_scoped(
     );
 
     match stage {
-        ExecutorStage::Agent { .. } => run_agent(stage, gremlin, enclosing_client).await,
-        ExecutorStage::Exec { .. } => run_exec(stage, gremlin, enclosing_client).await,
+        ExecutorStage::Agent { .. } => {
+            run_agent(stage, gremlin, enclosing_client, enclosing_task_clients).await
+        }
+        ExecutorStage::Exec { .. } => {
+            run_exec(stage, gremlin, enclosing_client, enclosing_task_clients).await
+        }
         ExecutorStage::Sequence(_) => {
             log::debug!("stage '{}': entering sequence", stage.name());
-            run_sequence(stage, gremlin, scope, enclosing_client).await
+            run_sequence(
+                stage,
+                gremlin,
+                scope,
+                enclosing_client,
+                enclosing_task_clients,
+            )
+            .await
         }
         ExecutorStage::Parallel { .. } => {
             log::debug!("dispatching stage '{}' to run_parallel", stage.name());
-            run_parallel(stage, gremlin, enclosing_client).await
+            run_parallel(stage, gremlin, enclosing_client, enclosing_task_clients).await
         }
         ExecutorStage::Done => Ok(()),
     }
@@ -187,14 +201,20 @@ async fn run_agent(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
     enclosing_client: Option<&str>,
+    enclosing_task_clients: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let ExecutorStage::Agent {
         stage: agent,
         client: _stage_client,
+        task_clients: stage_task_clients,
     } = node
     else {
         unreachable!("run_agent is only called for agent stages")
     };
+
+    let effective_task_clients = stage_task_clients.as_ref().or(enclosing_task_clients);
+    let (task_clients_exact, task_clients_prefix) =
+        config::parse_task_clients_map(effective_task_clients);
 
     let client = resolve_client(node, gremlin, enclosing_client)?;
     let framework_subs = gremlin.framework_subs(&agent.name);
@@ -481,10 +501,12 @@ async fn run_exec(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
     _enclosing_client: Option<&str>,
+    _enclosing_task_clients: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let ExecutorStage::Exec {
         stage: exec,
         client: _stage_client,
+        task_clients: _task_clients,
     } = node
     else {
         unreachable!("run_exec is only called for exec stages")
@@ -658,6 +680,7 @@ async fn run_sequence(
     gremlin: &mut Gremlin,
     scope: &str,
     enclosing_client: Option<&str>,
+    enclosing_task_clients: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let ExecutorStage::Sequence(seq) = node else {
         unreachable!("run_sequence is only called for sequence stages")
@@ -668,6 +691,7 @@ async fn run_sequence(
         .as_ref()
         .map(|c| c.0.as_str())
         .or(enclosing_client);
+    let enclosing_task_clients = seq.task_clients.as_ref().or(enclosing_task_clients);
 
     let key = stage_key(scope, &seq.name);
     let max_iterations = seq.max_iterations.max(1);
@@ -688,7 +712,14 @@ async fn run_sequence(
             }
         }
         for child in &seq.stages {
-            Box::pin(run_stage_scoped(child, gremlin, &key, enclosing_client)).await?;
+            Box::pin(run_stage_scoped(
+                child,
+                gremlin,
+                &key,
+                enclosing_client,
+                enclosing_task_clients,
+            ))
+            .await?;
         }
         return Ok(());
     }
@@ -745,6 +776,7 @@ async fn run_sequence(
                 gremlin,
                 &loop_iter,
                 enclosing_client,
+                enclosing_task_clients,
             ))
             .await
             {

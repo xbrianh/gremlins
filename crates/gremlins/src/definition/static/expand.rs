@@ -842,6 +842,12 @@ fn _expand_stage_def(
                         client.clone(),
                     );
                 }
+                if let Some(task_clients) = call_site_map.get("task-clients") {
+                    inner_map.insert(
+                        serde_yaml::Value::String("task-clients".to_string()),
+                        task_clients.clone(),
+                    );
+                }
                 // Merge call-site interpolation.inputs into inner stage's interpolation.inputs
                 if let Some(interpolation_val) = call_site_map.get("interpolation") {
                     if let Some(m) = interpolation_val.as_mapping() {
@@ -977,8 +983,11 @@ fn _expand_stage_def(
     let mut merged = definition.clone();
     let merged_map = merged.as_mapping_mut().unwrap();
 
-    // Merge call-site keys: name, and interpolation (inputs/outputs)
-    for key in &["name", "interpolation"] {
+    // Merge call-site keys: name, interpolation (inputs/outputs), client, and
+    // task-clients. `client:` / `task-clients:` propagate to a
+    // single-primitive recipe the same way they propagate to the first inner
+    // stage of a multi-stage recipe.
+    for key in &["name", "interpolation", "client", "task-clients"] {
         if let Some(v) = call_site_map.get(*key) {
             if *key == "interpolation" {
                 // Handle nested interpolation merge

@@ -171,10 +171,6 @@ pub(crate) struct RuntimeConfig {
     pub stage_clients_exact: HashMap<String, String>,
     /// Prefix-match stage→client mappings from config.
     pub stage_clients_prefix: HashMap<String, String>,
-    /// Exact-match task→client mappings from config.
-    pub task_clients_exact: HashMap<String, String>,
-    /// Prefix-match task→client mappings from config.
-    pub task_clients_prefix: HashMap<String, String>,
     /// The default client from settings.yaml, if any.
     pub default_client: Option<String>,
     /// The base process environment captured at startup, before any
@@ -196,8 +192,6 @@ impl Clone for RuntimeConfig {
         Self {
             stage_clients_exact: self.stage_clients_exact.clone(),
             stage_clients_prefix: self.stage_clients_prefix.clone(),
-            task_clients_exact: self.task_clients_exact.clone(),
-            task_clients_prefix: self.task_clients_prefix.clone(),
             default_client: self.default_client.clone(),
             base_process_env: self.base_process_env.clone(),
             log_tx: self.log_tx.clone(),
@@ -216,11 +210,6 @@ impl RuntimeConfig {
             .map(|c| c.default_client_by_stage())
             .map(|(e, p)| (e.clone(), p.clone()))
             .unwrap_or_default();
-        let (task_exact, task_prefix) = cfg
-            .as_ref()
-            .map(|c| c.task_clients())
-            .map(|(e, p)| (e.clone(), p.clone()))
-            .unwrap_or_default();
         let default_client = cfg
             .as_ref()
             .and_then(|c| c.default_client().map(String::from));
@@ -228,8 +217,6 @@ impl RuntimeConfig {
         Self {
             stage_clients_exact: stage_exact,
             stage_clients_prefix: stage_prefix,
-            task_clients_exact: task_exact,
-            task_clients_prefix: task_prefix,
             default_client,
             base_process_env,
             log_tx: None,
