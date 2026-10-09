@@ -336,10 +336,17 @@ impl Backend for AnthropicBackend {
                 AnthropicClientState::Static(client) => {
                     Some(client.completion(model).erase())
                 }
-                AnthropicClientState::Dynamic { .. } => {
-                    // Dynamic auth backends cannot build a model synchronously
-                    // without a token — task-clients is not supported for them.
-                    None
+                AnthropicClientState::Dynamic {
+                    ref base_url,
+                    ref http_client,
+                    ..
+                } => {
+                    // Build a model builder synchronously — completion()
+                    // only constructs a request template, no token needed.
+                    let client = AnthropicConfig::new("unused")
+                        .with_base_url(base_url)
+                        .connect(http_client.clone());
+                    Some(client.completion(model).erase())
                 }
             }
         } else {

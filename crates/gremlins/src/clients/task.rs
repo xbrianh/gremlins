@@ -20,6 +20,14 @@ pub(crate) fn build_task_selector(
     if exact.is_empty() && prefix.is_empty() {
         return None;
     }
+    // Verify the backend can resolve at least one configured entry.
+    let any_resolvable = exact
+        .values()
+        .chain(prefix.values())
+        .any(|spec| backend.make_model(spec).is_some());
+    if !any_resolvable {
+        return None;
+    }
     let exact = exact.clone();
     let prefix = prefix.clone();
     TaskModelSelector::new(
@@ -212,7 +220,7 @@ fn make_task_runner_at_depth(
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
     prefix: String,
-    parent_model_name: String,
+    _parent_model_name: String,
     idle_timeout: f64,
     max_turns: usize,
     depth: u32,
@@ -229,7 +237,6 @@ fn make_task_runner_at_depth(
         let cancel = cancel.clone();
         let mut child_ctx = ctx.clone();
         let prefix = prefix.clone();
-        let parent_model_name = parent_model_name.clone();
         let id_chain = id_chain.clone();
 
         let task_cwd = ctx.cwd.clone();
@@ -249,11 +256,7 @@ fn make_task_runner_at_depth(
             // Use the model's own id() when available; fall back to the
             // parent model name so that log lines always identify the
             // actual model sent to the API.
-            let model_name = selected_model
-                .id()
-                .map(String::from)
-                .filter(|id| !id.is_empty())
-                .unwrap_or_else(|| parent_model_name.clone());
+            let model_name = selected_model.id().unwrap_or("?").to_string();
 
             let new_chain = child_chain(&id_chain);
             // Build the child prefix: [model_name] goes after the stage

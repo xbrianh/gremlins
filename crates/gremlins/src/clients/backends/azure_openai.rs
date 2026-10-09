@@ -517,10 +517,19 @@ impl Backend for AzureOpenAiBackend {
                 AzureOpenAiClientState::Static(client) => {
                     Some(client.completion(model).erase())
                 }
-                AzureOpenAiClientState::Dynamic { .. } => {
-                    // Dynamic auth backends cannot build a model synchronously
-                    // without a token — task-clients is not supported for them.
-                    None
+                AzureOpenAiClientState::Dynamic {
+                    ref endpoint,
+                    ref api_version,
+                    ref http_client,
+                    ..
+                } => {
+                    // Build a model builder synchronously — completion()
+                    // only constructs a request template, no token needed.
+                    let client = OpenAIConfig::with_alternate_key(&AZURE, "unused")
+                        .with_api_version(api_version)
+                        .with_base_url(endpoint)
+                        .connect(http_client.clone());
+                    Some(client.completion(model).erase())
                 }
             }
         } else {
