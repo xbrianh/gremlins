@@ -1154,12 +1154,18 @@ impl StateStore for FileSystemStateStore {
             // Seed registry from parent, remapping file-backed bindings
             // that point into the parent artifact directory to the
             // corresponding child paths.
+            //
+            // The child directory may already exist from a prior fork
+            // (e.g. on resume). Clear stale entries before seeding so
+            // that artifacts from a completed prior fork don't cause
+            // spurious duplicate-producer errors.
             let child_store = FileSystemStateStore::open(child_gremlin_id)?;
             let parent_registry = self.read_registry_json().await;
             if !parent_registry.is_empty() {
                 let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
                 child_store
                     .locked_write(|data| {
+                        data.clear();
                         for (key, path) in &parent_registry {
                             // If the binding points inside the parent artifact
                             // directory, remap it to the child's artifact

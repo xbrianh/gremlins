@@ -169,21 +169,6 @@ pub(crate) async fn run_parallel(
             )
             .await?;
 
-        // Clean up stale git worktree metadata at the child's workdir
-        // before running fork commands. A prior run may have left a
-        // worktree registered at this path (e.g. after a bail), and
-        // git will refuse to re-create it.
-        if let Some(ref workdir) = child_gremlin.workdir {
-            let path = workdir.path();
-            if path.exists() {
-                let _ = std::process::Command::new("git")
-                    .args(["-C", &gremlin.project_root.to_string_lossy()])
-                    .args(["worktree", "remove", "--force"])
-                    .arg(path)
-                    .output();
-            }
-        }
-
         // Populate the child workspace (fork commands run after fork()
         // completes). On failure the child state has already been
         // persisted as `running` by fork(), so record a terminal failure
@@ -717,6 +702,7 @@ mod tests {
             cancel_token: None,
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
+            clean_cmds: Vec::new(),
         };
         (sandbox, gremlin)
     }
