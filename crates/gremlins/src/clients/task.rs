@@ -75,7 +75,8 @@ impl<M: Clone> TaskModelSelector<M> {
     /// a provider this backend cannot serve.
     ///
     /// Returns `(model, spec_string)` where `spec_string` is the matched
-    /// `task-clients` entry (for logging), or `None` when no entry matched.
+    /// `task-clients` entry (for logging), or `None` when no entry matched or
+    /// the factory could not build a model for the matched spec.
     fn model_for(&self, description: &str, default_model: &M) -> (M, Option<String>)
     where
         M: Clone,
@@ -222,7 +223,8 @@ fn make_task_runner_at_depth(
             // Build the child prefix: [model_name] goes after the stage
             // bracket and before the task-chain segment, e.g.
             //   [stage][gpt-4o][task.a3f1]
-            let child_prefix = task_prefix(&format!("{prefix}[{model_name}]"), &new_chain);
+            let child_prefix =
+                task_prefix(&format!("{}[{model_name}]", prefix.trim_end()), &new_chain);
 
             // Inject a child runner one level deeper so a nested task can
             // recurse again, bounded by MAX_DEPTH along this call chain.
@@ -604,9 +606,11 @@ mod tests {
     mod capture {
         use super::*;
 
-        /// Base prefix of the format tests, so their lines can be told apart
-        /// from any other line that reaches the shared stderr capture.
-        const TEST_BASE: &str = "[task-test] ";
+        /// Filter token for format tests — used to tell which log lines
+        /// belong to this runner. Passed as both the runner's prefix (its trailing
+        /// space is trimmed during model-name insertion) and as a substring filter
+        /// in [`task_prefixes`].
+        const TEST_BASE: &str = "[task-test]";
 
         /// `[task.<chain>]` of every begin line this test's runner logged.
         fn task_prefixes(lines: &[String]) -> Vec<String> {

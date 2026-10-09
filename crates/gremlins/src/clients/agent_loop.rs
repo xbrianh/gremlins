@@ -94,14 +94,6 @@ pub(crate) struct RunContext {
         Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
 }
 
-impl RunContext {
-    pub(crate) fn send_log(&self, msg: &str) {
-        if let Some(ref tx) = self.params.log_tx {
-            let _ = tx.send(format!("{}{}", self.prefix, msg));
-        }
-    }
-}
-
 pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,
@@ -151,10 +143,14 @@ pub(crate) async fn run_agent_loop(
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
-    ctx.send_log(&log_line);
+    send_log(&ctx.params.log_tx, &prefix, &log_line);
 
     if cwd.is_none() {
-        ctx.send_log("warning: no cwd set for worktree enforcement");
+        send_log(
+            &ctx.params.log_tx,
+            &prefix,
+            "warning: no cwd set for worktree enforcement",
+        );
     }
 
     let mut raw = raw_path

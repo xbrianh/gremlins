@@ -201,15 +201,6 @@ async fn run_agent(
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
 
-    send_log(
-        &gremlin.runtime_config.log_tx,
-        format!(
-            "[{name}][{model}] agent: preparing",
-            name = agent.name,
-            model = client.model()
-        ),
-    );
-
     // Compute checkout keys: outputs_map keys + filepath-style interpolation keys.
     // Content interpolation keys are NOT included — they're read once at prepare time.
     //
@@ -347,6 +338,20 @@ async fn run_agent(
         stream_events: gremlin.runtime_config.stream_events.clone(),
     };
 
+    let effective_model = params
+        .model
+        .clone()
+        .unwrap_or_else(|| client.model().to_string());
+    let effective_model: &str = &effective_model;
+    send_log(
+        &gremlin.runtime_config.log_tx,
+        format!(
+            "[{name}][{model}] agent: preparing",
+            name = agent.name,
+            model = effective_model,
+        ),
+    );
+
     // Build interactive session separately from RunParams.
     // Use the pre-created session from launch time if available.
     // The handle's cmd_tx is already paired with this session's
@@ -400,7 +405,7 @@ async fn run_agent(
         format!(
             "[{name}][{model}] agent: completed (turns={turns})",
             name = prepared.name,
-            model = client.model(),
+            model = effective_model,
             turns = completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
         ),
     );
