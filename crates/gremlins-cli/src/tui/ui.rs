@@ -2,126 +2,99 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
     style::{Color, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{Paragraph, Wrap},
     Frame,
 };
 
-use crate::tui::app::App;
-use crate::tui::widgets::DynamicWidget;
+use crate::tui::app::{App, Overlay};
+use crate::tui::overlays::{
+    render_debug_overlay, render_watch_overlay, render_watch_single_overlay,
+};
 
 /// Render the bottom-region TUI layout.
 ///
-/// Always produces four vertical constraints (top-to-bottom):
-/// scrollback (absorbs all free space), widget, input bar, info bar.
-/// Scrollback and widget heights can be zero.
+/// Always produces three vertical constraints (top-to-bottom):
+/// transcript (absorbs all free space), input bar, info bar.
 ///
-/// The scrollback section uses `Constraint::Min(0)` as the first (topmost)
-/// constraint so it absorbs all space not used by widget, input, and info.
-pub fn render(
-    frame: &mut Frame,
-    app: &App,
-    gremlin_count: &str,
-    project_name: &str,
-    term_w: u16,
-    term_h: u16,
-) {
-    let available = term_h.saturating_sub(2); // input bar + info bar
-    let has_widget = app.widget.as_ref().is_some_and(|w| !w.is_empty());
-    let widget_h = if has_widget {
-        app.widget
-            .as_ref()
-            .map_or(0, |w| w.height(term_w, available))
-    } else {
-        0
-    };
-
+/// Widgets are rendered bottom-up. Widgets that don't fit scroll off the
+/// top into the terminal's scrollback buffer.
+pub fn render(frame: &mut Frame, app: &App, gremlin_count: &str, project_name: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0), // scrollback — absorbs all free space
-            Constraint::Length(widget_h),
+            Constraint::Min(0),    // transcript — absorbs all free space
             Constraint::Length(1), // input bar
             Constraint::Length(1), // info bar
         ])
         .split(frame.area());
 
-    // Render scrollback only in the area above widget+input+info.
-    // The Min(0) constraint gives us the full free space; we render
-    // the tail of scrollback_lines into it.
-    if chunks[0].height > 0 && !app.scrollback_lines.is_empty() {
-        render_scrollback(frame, chunks[0], app);
-    }
-    if has_widget {
-        if let Some(widget) = &app.widget {
-            widget.render(frame, chunks[1]);
-        }
-    }
-    render_input_bar(frame, chunks[2], app);
-    render_info_bar(frame, chunks[3], app, gremlin_count, project_name);
+    render_transcript(frame, chunks[0], app);
+    render_input_bar(frame, chunks[1], app);
+    render_info_bar(frame, chunks[2], app, gremlin_count, project_name);
 }
 
-fn render_scrollback(frame: &mut Frame, area: Rect, app: &App) {
-    // Compute wrapped height of all scrollback lines.
-    let area_w = area.width;
-    let scrollback_h = app.scrollback_height(area_w);
+/// Render the transcript area, splitting it when an overlay is active.
+fn render_transcript(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
 
-    // Clamp to available height, then build a sub-rect anchored to the bottom.
-    let render_h = scrollback_h.min(area.height);
-    let render_area = Rect {
-        x: area.x,
-        y: area.bottom().saturating_sub(render_h),
-        width: area.width,
-        height: render_h,
-    };
-
-    // Compute how many lines to skip so the tail is visible when content
-    // exceeds the available area. When overflow falls inside a wrapped
-    // line, also compute the char prefix to trim so the first rendered
-    // line starts at the correct wrapped row.
-    let (skip_lines, prefix_trim_chars) = if scrollback_h > area.height {
-        let wrap_w = (area_w as usize).max(1);
-        let overflow_rows = scrollback_h - area.height;
-        let mut consumed: u16 = 0;
-        let mut skip: usize = 0;
-        let mut trim: usize = 0;
-        for (line, _) in &app.scrollback_lines {
-            let chars = line.chars().count();
-            let rows = if chars == 0 {
-                1
-            } else {
-                chars.div_ceil(wrap_w)
-            } as u16;
-            if consumed + rows > overflow_rows {
-                // Part of this line extends above the viewport.
-                trim = (overflow_rows - consumed) as usize * wrap_w;
-                break;
-            }
-            consumed += rows;
-            skip += 1;
+    match &app.overlay {
+        Some(Overlay::Watch) => {
+            // Reserve the upper portion for the watch table; keep rendering
+            // the transcript below so recent widgets remain visible.
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(45), Constraint::Min(0)])
+                .split(area);
+            render_watch_overlay(frame, split[0], app);
+            render_widgets_bottom_up(frame, split[1], app);
         }
-        (skip, trim)
-    } else {
-        (0, 0)
-    };
+        Some(Overlay::WatchSingle { .. }) => {
+            render_watch_single_overlay(frame, area, app);
+        }
+        Some(Overlay::Debug { .. }) => {
+            render_debug_overlay(frame, area, app);
+        }
+        None => render_widgets_bottom_up(frame, area, app),
+    }
+}
 
-    let lines: Vec<Line> = app
-        .scrollback_lines
-        .iter()
-        .skip(skip_lines)
-        .enumerate()
-        .map(|(i, (s, style))| {
-            let text = if i == 0 && prefix_trim_chars > 0 {
-                s.chars().skip(prefix_trim_chars).collect::<String>()
-            } else {
-                s.clone()
-            };
-            Line::from(Span::styled(text, *style))
-        })
-        .collect();
+/// Render widgets bottom-up. Stop when the transcript area is full.
+///
+/// All widgets produce their styled lines, which are assembled (oldest
+/// first) into a single `Paragraph`. ratatui wraps the lines to the area
+/// width, and the paragraph is scrolled to pin the tail so new content
+/// pushes old content off the top.
+///
+/// Two blank lines of padding are inserted between each pair of widgets.
+fn render_widgets_bottom_up(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
 
-    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, render_area);
+    let width = area.width;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for widget in app.transcript.iter() {
+        let widget_lines = widget.lines(width);
+        if widget_lines.is_empty() {
+            continue;
+        }
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(""));
+        }
+        lines.extend(widget_lines);
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let scroll = paragraph
+        .line_count(width)
+        .saturating_sub(area.height as usize)
+        .min(u16::MAX as usize) as u16;
+    frame.render_widget(paragraph.scroll((scroll, 0)), area);
 }
 
 fn render_info_bar(

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use ratatui::style::Style;
 
-use crate::tui::widgets::SplitWidget;
+use crate::tui::widgets::{SystemWidget, TranscriptWidget, Widget, WidgetEvent};
 
 /// Application state for the TUI.
 ///
@@ -11,27 +11,22 @@ use crate::tui::widgets::SplitWidget;
 ///
 /// ## Rendering model
 ///
-/// The ratatui inline viewport fills the terminal and is split into four
-/// regions:
-/// 1. Scrollback — all transcript content (daemon events, command output,
-///    banner, chat history, frozen prompt + response lines). Rendered as
-///    plain text with `Constraint::Min(0)` so it absorbs all space not used
-///    by the other sections.
-/// 2. Widget area — live streaming content (reasoning + tool results),
-///    rendered by the active [`DynamicWidget`].
-/// 3. Input bar.
-/// 4. Info bar.
+/// The ratatui fullscreen viewport occupies the alternate screen buffer and
+/// is split into three regions:
+/// 1. Transcript — widget list rendered bottom-up. Widgets that don't fit
+///    scroll off the top into the terminal's scrollback buffer.
+/// 2. Input bar.
+/// 3. Info bar.
 ///
-/// Old lines are promoted to terminal scrollback via
-/// `terminal.insert_before()` when the scrollback buffer exceeds
-/// `term_h * 2` lines (accounting for wrapping).
-///
-/// No `EnterAlternateScreen` — raw mode only, in the main terminal buffer.
+/// The alternate screen is entered on startup and left on exit. There is no
+/// terminal scrollback promotion — the transcript grows unbounded within
+/// the viewport, and scrolling through history is handled by the terminal
+/// multiplexer (e.g. tmux copy-mode).
 pub struct App {
     /// Current text in the input bar.
     pub input: String,
-    /// Live gremlin state: id → status ("running", "done", "stopped").
-    pub active_runs: HashMap<String, String>,
+    /// Live gremlin state: id → run details.
+    pub active_runs: HashMap<String, ActiveRun>,
     /// Cached project name for the info bar.
     pub project_name: String,
     /// When Some, the TUI is following a gremlin's log and printing log lines
@@ -45,13 +40,72 @@ pub struct App {
     pub active_request: bool,
     /// The user message for the current in-flight request (committed to history on Done).
     pub pending_user_message: String,
-    /// All transcript content: daemon events, command output, banner, chat
-    /// history, frozen prompt + response lines. Oldest lines are promoted to
-    /// terminal scrollback via `insert_before` when the buffer exceeds the
-    /// promotion threshold.
-    pub scrollback_lines: Vec<(String, Style)>,
-    /// The active streaming widget, if any. None when idle.
-    pub widget: Option<SplitWidget>,
+    /// Transcript widget list. Rendered bottom-up; widgets that don't fit
+    /// scroll off the top into the terminal's scrollback buffer.
+    pub transcript: Vec<Box<dyn Widget>>,
+    /// Active ephemeral overlay, if any.
+    pub overlay: Option<Overlay>,
+    /// Submitted inputs in chronological order (in-memory only).
+    pub input_history: Vec<String>,
+    /// Cursor into `input_history`; `None` means editing a fresh line.
+    pub history_cursor: Option<usize>,
+}
+
+/// One tracked gremlin run.
+#[derive(Debug, Clone)]
+pub struct ActiveRun {
+    /// "running", "done", "failed", or "stopped".
+    pub status: String,
+    /// Most recent stage reported by the daemon.
+    pub stage: String,
+    /// Pipeline name carried by [`gremlins::executor::DaemonEvent::RunStarted`].
+    pub definition: String,
+    /// Project associated with the run.
+    pub project: String,
+}
+
+impl ActiveRun {
+    pub fn new(status: impl Into<String>) -> Self {
+        Self {
+            status: status.into(),
+            stage: String::new(),
+            definition: String::new(),
+            project: String::new(),
+        }
+    }
+}
+
+/// Ephemeral overlay widgets rendered above the transcript.
+#[derive(Debug, Clone)]
+pub enum Overlay {
+    /// Gremlins watch table. Non-blocking; main input bar still works.
+    Watch,
+    /// Single-gremlin log viewer. Blocking overlay with its own log buffer.
+    WatchSingle { id: String, log_lines: Vec<String> },
+    /// Interactive debug session. Blocking overlay with its own prompt.
+    Debug {
+        id: String,
+        input: String,
+        history: Vec<String>,
+        /// Whether the debug socket is open but `ready` has not arrived yet.
+        connecting: bool,
+        /// Whether the debug socket session is still connected.
+        connected: bool,
+    },
+}
+
+impl Overlay {
+    /// Blocking overlays occlude the transcript and disable the main input
+    /// bar (slash commands are still accepted for `WatchSingle`; `Debug` has
+    /// its own prompt).
+    pub fn is_blocking(&self) -> bool {
+        !matches!(self, Overlay::Watch)
+    }
+
+    /// Whether this overlay owns a prompt that should receive keystrokes.
+    pub fn has_prompt(&self) -> bool {
+        matches!(self, Overlay::Debug { .. })
+    }
 }
 
 impl App {
@@ -70,8 +124,10 @@ impl App {
             current_response: String::new(),
             active_request: false,
             pending_user_message: String::new(),
-            scrollback_lines: Vec::new(),
-            widget: None,
+            transcript: Vec::new(),
+            overlay: None,
+            input_history: Vec::new(),
+            history_cursor: None,
         }
     }
 
@@ -80,7 +136,7 @@ impl App {
         let count = self
             .active_runs
             .values()
-            .filter(|s| *s == "running")
+            .filter(|r| r.status == "running")
             .count();
         count.to_string()
     }
@@ -90,73 +146,355 @@ impl App {
         &self.project_name
     }
 
+    /// Insert or merge a run entry from an `ls` response.
+    pub fn upsert_run_from_ls(&mut self, entry: &serde_json::Value) {
+        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
+            return;
+        };
+        let id = id.to_string();
+        let existing = self.active_runs.get(&id).cloned();
+
+        let status = entry
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or(existing.as_ref().map(|r| r.status.as_str()).unwrap_or(""))
+            .to_string();
+        let stage = entry
+            .get("stage")
+            .and_then(|v| v.as_str())
+            .unwrap_or(existing.as_ref().map(|r| r.stage.as_str()).unwrap_or(""))
+            .to_string();
+        let definition = entry
+            .get("definition")
+            .and_then(|v| v.as_str())
+            .unwrap_or(
+                existing
+                    .as_ref()
+                    .map(|r| r.definition.as_str())
+                    .unwrap_or(""),
+            )
+            .to_string();
+        let project = entry
+            .get("project")
+            .and_then(|v| v.as_str())
+            .unwrap_or(existing.as_ref().map(|r| r.project.as_str()).unwrap_or(""))
+            .to_string();
+        let project = if project.is_empty() {
+            self.project_name.clone()
+        } else {
+            project.to_string()
+        };
+
+        self.active_runs.insert(
+            id,
+            ActiveRun {
+                status,
+                stage,
+                definition,
+                project,
+            },
+        );
+    }
+
     /// Update state when a run starts.
-    pub fn on_run_started(&mut self, id: String, _definition: String, _stage: String) {
-        self.active_runs.insert(id, "running".to_string());
+    pub fn on_run_started(&mut self, id: String, definition: String, stage: String) {
+        self.active_runs.insert(
+            id,
+            ActiveRun {
+                status: "running".to_string(),
+                stage,
+                definition,
+                project: self.project_name.clone(),
+            },
+        );
     }
 
     /// Update state when a run completes.
     pub fn on_run_completed(&mut self, id: String) {
-        self.active_runs.insert(id, "done".to_string());
+        self.update_run_status(&id, "done");
     }
 
     /// Update state when a run fails.
     pub fn on_run_failed(&mut self, id: String) {
-        self.active_runs.insert(id, "failed".to_string());
+        self.update_run_status(&id, "failed");
     }
 
     /// Update state when a run is stopped.
     pub fn on_run_stopped(&mut self, id: String) {
-        self.active_runs.insert(id, "stopped".to_string());
+        self.update_run_status(&id, "stopped");
     }
 
-    /// Push a line to scrollback with default style.
-    pub fn push_scrollback(&mut self, line: String) {
-        self.scrollback_lines.push((line, Style::default()));
-    }
-
-    /// Push a line to scrollback with a specific style.
-    pub fn push_scrollback_styled(&mut self, line: String, style: Style) {
-        self.scrollback_lines.push((line, style));
-    }
-
-    /// Extend scrollback with (String, Style) pairs (e.g. from widget freeze).
-    pub fn extend_scrollback(&mut self, lines: Vec<(String, Style)>) {
-        self.scrollback_lines.extend(lines);
-    }
-
-    /// Compute scrollback height accounting for line wrapping at the given width.
-    pub fn scrollback_height(&self, width: u16) -> u16 {
-        if self.scrollback_lines.is_empty() {
-            return 0;
+    /// Update the stage of an existing run in-place.
+    pub fn on_stage_transition(&mut self, id: String, stage: String) {
+        if let Some(run) = self.active_runs.get_mut(&id) {
+            run.stage = stage;
         }
-        let wrap_width = (width as usize).max(1);
-        let mut total: u16 = 0;
-        for (line, _) in &self.scrollback_lines {
-            let chars = line.chars().count();
-            let rows = if chars == 0 {
-                1
-            } else {
-                chars.div_ceil(wrap_width)
-            };
-            total += rows as u16;
-        }
-        total
     }
 
-    /// Compute the number of wrapped rows for a set of lines at the given width.
-    pub fn wrapped_rows(lines: &[(String, Style)], width: u16) -> u16 {
-        let wrap_width = (width as usize).max(1);
-        let mut total: u16 = 0;
-        for (line, _) in lines {
-            let chars = line.chars().count();
-            let rows = if chars == 0 {
-                1
-            } else {
-                chars.div_ceil(wrap_width)
-            };
-            total += rows as u16;
+    fn update_run_status(&mut self, id: &str, status: &str) {
+        match self.active_runs.get_mut(id) {
+            Some(run) => run.status = status.to_string(),
+            None => {
+                self.active_runs
+                    .insert(id.to_string(), ActiveRun::new(status));
+            }
         }
-        total
+    }
+
+    // ── Overlay helpers ────────────────────────────────────────────
+
+    pub fn overlay_is_watch(&self) -> bool {
+        matches!(self.overlay, Some(Overlay::Watch))
+    }
+
+    /// Whether the main input bar should be disabled by the active overlay.
+    #[allow(dead_code)]
+    pub fn overlay_blocks_input(&self) -> bool {
+        self.overlay.as_ref().is_some_and(Overlay::is_blocking)
+    }
+
+    /// Dismiss a blocking overlay. Returns true if one was dismissed.
+    pub fn dismiss_blocking_overlay(&mut self) -> bool {
+        if self.overlay.as_ref().is_some_and(Overlay::is_blocking) {
+            self.overlay = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Dismiss the non-blocking watch table. Returns true if it was dismissed.
+    pub fn dismiss_watch_overlay(&mut self) -> bool {
+        if self.overlay_is_watch() {
+            self.overlay = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn open_watch_single(&mut self, id: String) {
+        self.overlay = Some(Overlay::WatchSingle {
+            id,
+            log_lines: Vec::new(),
+        });
+    }
+
+    pub fn open_debug(&mut self, id: String) {
+        self.overlay = Some(Overlay::Debug {
+            id,
+            input: String::new(),
+            history: Vec::new(),
+            connecting: true,
+            connected: false,
+        });
+    }
+
+    /// Mutable debug-prompt input, when the debug overlay is active.
+    pub fn overlay_prompt_mut(&mut self) -> Option<&mut String> {
+        match self.overlay {
+            Some(Overlay::Debug { ref mut input, .. }) => Some(input),
+            _ => None,
+        }
+    }
+
+    /// Take the debug prompt for submission.
+    pub fn take_overlay_prompt(&mut self) -> Option<String> {
+        match &mut self.overlay {
+            Some(Overlay::Debug { input, .. }) => Some(std::mem::take(input)),
+            _ => None,
+        }
+    }
+
+    /// Append a line to the active single-gremlin log overlay, if visible.
+    pub fn push_overlay_log_line(&mut self, line: String) {
+        if let Some(Overlay::WatchSingle { log_lines, .. }) = &mut self.overlay {
+            log_lines.push(line);
+        }
+    }
+
+    /// Append a line to the debug overlay scrollback, if visible.
+    pub fn push_overlay_debug_output(&mut self, line: String) {
+        if let Some(Overlay::Debug { history, .. }) = &mut self.overlay {
+            history.push(line);
+        }
+    }
+
+    /// Whether the active debug overlay is still connecting (socket open,
+    /// `ready` not yet received).
+    pub fn debug_connecting(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(Overlay::Debug {
+                connecting: true,
+                ..
+            })
+        )
+    }
+
+    /// Whether the active debug overlay is still connected to the daemon.
+    pub fn debug_connected(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(Overlay::Debug {
+                connected: true,
+                ..
+            })
+        )
+    }
+
+    /// Set the connected flag on the active debug overlay. Setting `false`
+    /// also clears the connecting flag so a session that never became ready
+    /// is reported as ended rather than stuck connecting.
+    pub fn set_debug_connected(&mut self, connected: bool) {
+        if let Some(Overlay::Debug {
+            connecting,
+            connected: c,
+            ..
+        }) = &mut self.overlay
+        {
+            *c = connected;
+            if !connected {
+                *connecting = false;
+            }
+        }
+    }
+
+    /// Mark the active debug overlay as connected (clears the connecting flag).
+    pub fn mark_debug_ready(&mut self) {
+        if let Some(Overlay::Debug {
+            connecting,
+            connected,
+            ..
+        }) = &mut self.overlay
+        {
+            *connecting = false;
+            *connected = true;
+        }
+    }
+
+    // ── Input history helpers ───────────────────────────────────────
+
+    /// Append a submitted input to history and reset the cursor.
+    pub fn push_history(&mut self, line: String) {
+        self.input_history.push(line);
+        self.history_cursor = None;
+    }
+
+    /// Move backward through history (older entries). Returns the selected
+    /// entry, or `None` when there is no history.
+    pub fn history_up(&mut self) -> Option<&str> {
+        if self.input_history.is_empty() {
+            return None;
+        }
+        let next = match self.history_cursor {
+            None => self.input_history.len() - 1,
+            Some(0) => 0,
+            Some(n) => n - 1,
+        };
+        self.history_cursor = Some(next);
+        self.input_history.get(next).map(|s| s.as_str())
+    }
+
+    /// Move forward through history (toward a fresh line). Returns the
+    /// selected entry, or `None` when past the newest entry (fresh line).
+    pub fn history_down(&mut self) -> Option<&str> {
+        match self.history_cursor {
+            None => None,
+            Some(n) if n + 1 < self.input_history.len() => {
+                self.history_cursor = Some(n + 1);
+                self.input_history.get(n + 1).map(|s| s.as_str())
+            }
+            Some(_) => {
+                self.history_cursor = None;
+                None
+            }
+        }
+    }
+
+    // ── Transcript helpers ──────────────────────────────────────────
+
+    /// Push a system message (banner, daemon event, command output, error).
+    /// Auto-collapses all existing SystemWidgets above it.
+    /// Inserts before the active widget when a request is in-flight so the
+    /// TranscriptWidget remains the bottom-most widget.
+    pub fn push_system(&mut self, lines: Vec<(String, Style)>) {
+        // Auto-collapse existing SystemWidgets.
+        for w in &mut self.transcript {
+            w.auto_collapse();
+        }
+        let widget: Box<dyn Widget> = Box::new(SystemWidget::new(lines, true));
+        // Insert before the active widget if one is present, so the
+        // TranscriptWidget stays at the bottom.
+        let insert_at = if self.transcript.last().is_some_and(|w| w.is_active()) {
+            self.transcript.len().saturating_sub(1)
+        } else {
+            self.transcript.len()
+        };
+        self.transcript.insert(insert_at, widget);
+    }
+
+    /// Push a single-line system message with default style.
+    pub fn push_system_line(&mut self, line: String) {
+        self.push_system(vec![(line, Style::default())]);
+    }
+
+    /// Push a single-line system message with a specific style.
+    #[allow(dead_code)]
+    pub fn push_system_line_styled(&mut self, line: String, style: Style) {
+        self.push_system(vec![(line, style)]);
+    }
+
+    /// Mutable ref to the bottom-most widget (for streaming), if any.
+    pub fn active_mut(&mut self) -> Option<&mut (dyn Widget + '_)> {
+        match self.transcript.last_mut() {
+            Some(w) => Some(w.as_mut()),
+            None => None,
+        }
+    }
+
+    /// Finish the active (bottom-most) widget in place. Panics if there is
+    /// no active widget.
+    pub fn finish_active(&mut self, events: Vec<WidgetEvent>) {
+        self.transcript
+            .last_mut()
+            .expect("finish_active called with no active widget")
+            .finish(events);
+    }
+
+    /// Push a new TranscriptWidget for a chat turn.
+    /// Auto-collapses all existing SystemWidgets first.
+    pub fn push_active_prompt(&mut self, prompt: String) {
+        for w in &mut self.transcript {
+            w.auto_collapse();
+        }
+        self.transcript
+            .push(Box::new(TranscriptWidget::new(prompt)));
+    }
+
+    /// Toggle expand/collapse for all expandable widgets.
+    /// If any expandable widget is collapsed → expand all.
+    /// If all expandable widgets are already expanded → collapse all.
+    pub fn toggle_expand_all(&mut self) {
+        let any_collapsed = self
+            .transcript
+            .iter()
+            .any(|w| w.is_expandable() && !w.is_expanded());
+
+        for w in &mut self.transcript {
+            if w.is_expandable() {
+                if any_collapsed {
+                    // Expand all: only toggle if currently collapsed.
+                    if !w.is_expanded() {
+                        w.toggle_expand();
+                    }
+                } else {
+                    // Collapse all: only toggle if currently expanded.
+                    if w.is_expanded() {
+                        w.toggle_expand();
+                    }
+                }
+            }
+        }
     }
 }

@@ -15,6 +15,12 @@ pub enum CommandResult {
     ShowHistory,
     /// Truncate conversation history at the given 0-based index.
     TruncateHistory(usize),
+    /// Toggle the non-blocking gremlins watch table.
+    ToggleWatch,
+    /// Open a single-gremlin log viewer overlay.
+    WatchSingle(String),
+    /// Open an interactive debug session overlay.
+    Debug(String),
 }
 
 /// Parse `input` (minus the leading `/`) and dispatch.
@@ -43,6 +49,33 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
             op: "ls".to_string(),
             payload: serde_json::json!({"op": "ls"}),
         }),
+        "launch" => {
+            let definition = args.first().copied().unwrap_or("");
+            if definition.is_empty() {
+                return Some(CommandResult::Lines(vec![
+                    "> /launch".to_string(),
+                    "usage: /launch <definition> [--key value ...]".to_string(),
+                ]));
+            }
+
+            let raw_args: Vec<String> = args[1..].iter().map(|s| s.to_string()).collect();
+            if let Err(e) = validate_launch_args(&raw_args) {
+                return Some(CommandResult::Lines(vec![
+                    "> /launch".to_string(),
+                    "usage: /launch <definition> [--key value ...]".to_string(),
+                    e,
+                ]));
+            }
+
+            Some(CommandResult::SocketOp {
+                op: "launch".to_string(),
+                payload: serde_json::json!({
+                    "op": "launch",
+                    "definition": definition,
+                    "args": raw_args,
+                }),
+            })
+        }
         "info" => {
             let id = args.first().copied().unwrap_or("");
             if id.is_empty() {
@@ -95,6 +128,23 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 payload: serde_json::json!({"op": "log", "id": id, "follow": true}),
             })
         }
+        "watch" => {
+            if let Some(id) = args.first() {
+                Some(CommandResult::WatchSingle(id.to_string()))
+            } else {
+                Some(CommandResult::ToggleWatch)
+            }
+        }
+        "debug" => {
+            let id = args.first().copied().unwrap_or("");
+            if id.is_empty() {
+                return Some(CommandResult::Lines(vec![
+                    "> /debug".to_string(),
+                    "usage: /debug <id>".to_string(),
+                ]));
+            }
+            Some(CommandResult::Debug(id.to_string()))
+        }
         "model" => Some(CommandResult::Lines(vec![format!(
             "default client: {}",
             gremlins::config::global_config()
@@ -120,14 +170,47 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
     }
 }
 
+/// Validate `--key value` pairs using the same syntax as the CLI `launch`
+/// subcommand. The daemon performs full validation against the definition's
+/// bootstrap sources; this only catches malformed argument syntax locally.
+fn validate_launch_args(raw: &[String]) -> Result<(), String> {
+    let mut i = 0;
+    while i < raw.len() {
+        let key = raw[i]
+            .strip_prefix("--")
+            .ok_or_else(|| format!("expected --key value, got {}", raw[i]))?;
+        if key.is_empty() {
+            return Err("-- with no key name".to_string());
+        }
+        i += 1;
+        if i < raw.len() && !raw[i].starts_with("--") {
+            i += 1;
+        } else {
+            return Err(format!(
+                "--{key} requires a value (found {})",
+                if i < raw.len() {
+                    &raw[i]
+                } else {
+                    "end of arguments"
+                }
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn help_text() -> Vec<String> {
     vec![
         "available commands:".to_string(),
         "  /ls              — list gremlins".to_string(),
+        "  /launch <def>    — start a gremlin".to_string(),
         "  /info <id>       — show gremlin info".to_string(),
         "  /stop <id>       — stop a gremlin".to_string(),
         "  /resume <id>     — resume a gremlin".to_string(),
         "  /log <id>        — show gremlin log".to_string(),
+        "  /watch           — toggle the gremlins watch table".to_string(),
+        "  /watch <id>      — open a single-gremlin log viewer".to_string(),
+        "  /debug <id>      — open an interactive debug session".to_string(),
         "  /model           — show default client".to_string(),
         "  /history         — show conversation history".to_string(),
         "  /rollback <n>    — truncate history at turn n".to_string(),
