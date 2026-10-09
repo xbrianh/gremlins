@@ -359,14 +359,11 @@ async fn run_app(
                                         if let Some(handle) = chat_task.take() {
                                             handle.abort();
                                         }
-                                        app.scrollback_lines.clear();
                                         app.conversation_history.clear();
                                         app.current_response.clear();
                                         app.input.clear();
                                         app.active_request = false;
                                         app.pending_user_message.clear();
-                                        let msg = "chat history cleared";
-                                        app.push_scrollback(msg.to_string());
                                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     }
                                     CommandResult::Quit => {
@@ -669,6 +666,9 @@ async fn run_app(
                         // No-op: widget keeps rendering; no state flags to toggle.
                     }
                     ChatEvent::Done { text, .. } => {
+                        if app.widget.is_none() {
+                            continue;
+                        }
                         // If no streamed text was received, route the final text
                         // through the widget so it appears in the response section.
                         if !text.is_empty() && app.current_response.is_empty() {
@@ -682,6 +682,9 @@ async fn run_app(
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Ended { reason } => {
+                        if app.widget.is_none() {
+                            continue;
+                        }
                         freeze_and_commit(&mut app);
                         chat_task = None;
                         let msg = format!("chat ended: {reason}");
@@ -689,6 +692,9 @@ async fn run_app(
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Error(msg) => {
+                        if app.widget.is_none() {
+                            continue;
+                        }
                         freeze_and_commit(&mut app);
                         chat_task = None;
                         let full = format!("chat error: {msg}");
