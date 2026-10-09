@@ -736,27 +736,32 @@ async fn run_agent_loop_core(
                     }
                     last_token = Some(now);
                     // Emit stream deltas via stream_events channel.
+                    // Gate on receiver_count to avoid per-token allocation
+                    // for non-interactive runs with no subscriber.
                     if let Some(ref se) = stream_events {
-                        match &chunk {
-                            Item::Event(StreamEvent::Text { ref text, .. }) => {
-                                let _ =
-                                    se.send(InteractiveEvent::StreamChunk { text: text.clone() });
+                        if se.receiver_count() > 0 {
+                            match &chunk {
+                                Item::Event(StreamEvent::Text { ref text, .. }) => {
+                                    let _ = se
+                                        .send(InteractiveEvent::StreamChunk { text: text.clone() });
+                                }
+                                Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
+                                    let _ = se.send(InteractiveEvent::ReasoningChunk {
+                                        text: text.clone(),
+                                    });
+                                }
+                                Item::Event(StreamEvent::End {
+                                    content: AssistantContent::ToolCall(tc),
+                                    ..
+                                }) => {
+                                    // Emit tool calls as reasoning so they
+                                    // appear in the live thought stream.
+                                    let _ = se.send(InteractiveEvent::ReasoningChunk {
+                                        text: format_tool_call(tc),
+                                    });
+                                }
+                                _ => {}
                             }
-                            Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
-                                let _ = se
-                                    .send(InteractiveEvent::ReasoningChunk { text: text.clone() });
-                            }
-                            Item::Event(StreamEvent::End {
-                                content: AssistantContent::ToolCall(tc),
-                                ..
-                            }) => {
-                                // Emit tool calls as reasoning so they
-                                // appear in the live thought stream.
-                                let _ = se.send(InteractiveEvent::ReasoningChunk {
-                                    text: format_tool_call(tc),
-                                });
-                            }
-                            _ => {}
                         }
                     }
                     apply_chunk(chunk, &mut text, &mut reasoning, &mut tool_calls);
@@ -791,13 +796,16 @@ async fn run_agent_loop_core(
 
         // Emit TurnComplete via stream_events, before text/tool_calls
         // are consumed by the rest of the turn processing.
+        // Gate on receiver_count to avoid allocation when no subscriber.
         if let Some(ref se) = stream_events {
-            log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
-            let _ = se.send(InteractiveEvent::TurnComplete {
-                turn: turn_num,
-                text: text.clone(),
-                tool_calls: tool_calls.iter().map(format_tool_call).collect(),
-            });
+            if se.receiver_count() > 0 {
+                log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
+                let _ = se.send(InteractiveEvent::TurnComplete {
+                    turn: turn_num,
+                    text: text.clone(),
+                    tool_calls: tool_calls.iter().map(format_tool_call).collect(),
+                });
+            }
         }
 
         if !reasoning.is_empty() {
@@ -944,12 +952,16 @@ async fn run_agent_loop_core(
                     );
                 }
                 // Emit Done via stream_events.
+                // Gate on receiver_count so non-interactive runs skip
+                // the allocation.
                 if let Some(ref se) = stream_events {
-                    log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
-                    let _ = se.send(InteractiveEvent::Done {
-                        text: result_text.clone(),
-                        usage: Some(usage.clone()),
-                    });
+                    if se.receiver_count() > 0 {
+                        log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
+                        let _ = se.send(InteractiveEvent::Done {
+                            text: result_text.clone(),
+                            usage: Some(usage.clone()),
+                        });
+                    }
                 }
                 return Ok(completed_run(Some(result_text), captured, usage));
             }
@@ -1194,17 +1206,20 @@ async fn run_agent_loop_core(
                 }
             }
             // Emit tool result via stream_events.
+            // Gate on receiver_count to avoid allocation when no subscriber.
             if let Some(ref se) = stream_events {
-                // For Read, truncate to a reasonable preview.
-                let display = if job.name == "Read" {
-                    trunc(&output, 500)
-                } else {
-                    trunc(&output, 200)
-                };
-                let _ = se.send(InteractiveEvent::ToolResult {
-                    name: job.name.clone(),
-                    output: display,
-                });
+                if se.receiver_count() > 0 {
+                    // For Read, truncate to a reasonable preview.
+                    let display = if job.name == "Read" {
+                        trunc(&output, 500)
+                    } else {
+                        trunc(&output, 200)
+                    };
+                    let _ = se.send(InteractiveEvent::ToolResult {
+                        name: job.name.clone(),
+                        output: display,
+                    });
+                }
             }
             ledger.push(ledger_line(&job.name, &job.key, &output));
             result_msgs.push(Message::tool_result(

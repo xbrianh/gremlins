@@ -1946,6 +1946,13 @@ async fn handle_chat(
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => {
+                        // Channel closed without Done or Ended — the
+                        // agent exited with an error/panic before emitting
+                        // a terminal event. Report it so the TUI shows
+                        // the real failure instead of "disconnect" later.
+                        let payload = serde_json::json!({"type": "error", "message": "agent exited before completing"});
+                        let _ = writer.write_json_line(&payload).await;
+                        // Agent already finished — don't cancel.
                         early_exit = false;
                         break;
                     }
@@ -2346,12 +2353,32 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
         state_tx,
         log_broadcast,
         interactive: interactive_handle,
-        store,
+        store: store.clone(),
         scratch_dir,
     };
     // Insert into RUN_MAP *after* spawning so the JoinHandle is present
     // from the moment the entry exists.
     get_run_map().lock().unwrap().insert(id.clone(), handle);
+
+    // Emit RunStarted so subscribers see the child before its terminal
+    // event (finish already emits RunCompleted/RunFailed).
+    let definition_name = store
+        .state_tree()
+        .get("definition_path")
+        .and_then(|v| v.as_str())
+        .and_then(|s| {
+            std::path::Path::new(s)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "child".to_string());
+    emit_event(DaemonEvent::RunStarted {
+        id: id.clone(),
+        definition: definition_name,
+        stage: "starting".to_string(),
+    });
+
     // Now the entry is visible — let the task proceed.
     let _ = go_tx.send(());
 

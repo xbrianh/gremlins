@@ -135,7 +135,11 @@ impl SplitWidget {
     }
 
     /// Push a styled line to the stream section.
+    ///
+    /// Flushes any pending partial stream text first so tool-result
+    /// lines appear after preceding reasoning fragments, not before.
     pub fn push_stream(&mut self, line: Line<'static>) {
+        self.flush_stream_partial();
         self.stream_lines.push(line);
     }
 

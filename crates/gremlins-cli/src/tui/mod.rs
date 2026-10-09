@@ -6,6 +6,7 @@ pub mod editor;
 pub mod ui;
 pub mod widgets;
 
+use std::collections::HashMap;
 use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::time::Duration;
@@ -255,10 +256,18 @@ async fn run_app(
     // ── Channel for socket-op results ─────────────────────────────
     let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Vec<String>>();
 
+    // ── Channel for run-snapshot refreshes (after event_lagged) ───
+    let (snapshot_tx, mut snapshot_rx) =
+        mpsc::unbounded_channel::<HashMap<String, String>>();
+
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
     // ── Chat task handle (aborted on Esc to stop the agent) ───────
     let mut chat_task: Option<tokio::task::JoinHandle<()>> = None;
+    // Oneshot sender to cancel the socket-reader spawned inside
+    // send_message(). Firing this drops write_half so the daemon
+    // sees EOF and stops the agent immediately.
+    let mut chat_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
     /// Drop-guard that aborts a JoinHandle on drop, ensuring the dedicated
@@ -318,7 +327,13 @@ async fn run_app(
                             app.input.clear();
                             // If a chat request is in-flight, abort it to
                             // stop the agent loop and all tool calls.
+                            // Fire the cancel oneshot first so the inner
+                            // socket-reader drops write_half — the daemon
+                            // sees EOF and stops the agent immediately.
                             if app.active_request {
+                                if let Some(tx) = chat_cancel_tx.take() {
+                                    let _ = tx.send(());
+                                }
                                 if let Some(handle) = chat_task.take() {
                                     handle.abort();
                                 }
@@ -355,7 +370,11 @@ async fn run_app(
                                         if app.widget.is_some() {
                                             freeze_and_commit(&mut app);
                                         }
-                                        // Abort in-flight chat task.
+                                        // Abort in-flight chat task and
+                                        // cancel the inner socket reader.
+                                        if let Some(tx) = chat_cancel_tx.take() {
+                                            let _ = tx.send(());
+                                        }
                                         if let Some(handle) = chat_task.take() {
                                             handle.abort();
                                         }
@@ -492,8 +511,10 @@ async fn run_app(
                                 app.pending_user_message = input.clone();
                                 let history = app.conversation_history.clone();
                                 let chat_tx = chat_tx.clone();
+                                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                                chat_cancel_tx = Some(cancel_tx);
                                 chat_task = Some(tokio::spawn(async move {
-                                    match send_message(&input, &history).await {
+                                    match send_message(&input, &history, cancel_rx).await {
                                         Ok(mut rx) => {
                                             while let Some(event) = rx.recv().await {
                                                 if chat_tx.send(event).is_err() {
@@ -577,7 +598,36 @@ async fn run_app(
 
             // ── Raw lines (non-event JSON from the main socket) ─
             Some(raw) = raw_rx.recv() => {
-                if raw.get("type").and_then(|v| v.as_str()) == Some("error") {
+                if raw.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
+                    // Lifecycle events were dropped — the info-bar run
+                    // count may be stale. Refresh from the daemon.
+                    let c = Arc::clone(&client);
+                    let tx = snapshot_tx.clone();
+                    tokio::spawn(async move {
+                        match c.send_request(serde_json::json!({"op": "ls"})).await {
+                            Ok(resp) => {
+                                let mut runs = HashMap::new();
+                                if let Some(gremlins) =
+                                    resp.get("gremlins").and_then(|v| v.as_array())
+                                {
+                                    for entry in gremlins {
+                                        if let (Some(id), Some(status)) = (
+                                            entry.get("id").and_then(|v| v.as_str()),
+                                            entry.get("status").and_then(|v| v.as_str()),
+                                        ) {
+                                            runs.insert(
+                                                id.to_string(),
+                                                status.to_string(),
+                                            );
+                                        }
+                                    }
+                                }
+                                let _ = tx.send(runs);
+                            }
+                            Err(_) => {}
+                        }
+                    });
+                } else if raw.get("type").and_then(|v| v.as_str()) == Some("error") {
                     let msg = raw
                         .get("message")
                         .and_then(|v| v.as_str())
@@ -586,6 +636,11 @@ async fn run_app(
                     app.push_scrollback(full);
                     promote_scrollback(&mut app, terminal, term_h, term_w)?;
                 }
+            }
+
+            // ── Run-snapshot refresh (after event_lagged) ─────
+            Some(runs) = snapshot_rx.recv() => {
+                app.active_runs = runs;
             }
 
             // ── Log follow lines (from dedicated connection) ──
@@ -683,6 +738,7 @@ async fn run_app(
                         }
                         freeze_and_commit(&mut app);
                         chat_task = None;
+                        chat_cancel_tx = None;
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Ended { reason } => {
@@ -691,6 +747,7 @@ async fn run_app(
                         }
                         freeze_and_commit(&mut app);
                         chat_task = None;
+                        chat_cancel_tx = None;
                         let msg = format!("chat ended: {reason}");
                         app.push_scrollback(msg);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
@@ -701,6 +758,7 @@ async fn run_app(
                         }
                         freeze_and_commit(&mut app);
                         chat_task = None;
+                        chat_cancel_tx = None;
                         let full = format!("chat error: {msg}");
                         app.push_scrollback(full);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;

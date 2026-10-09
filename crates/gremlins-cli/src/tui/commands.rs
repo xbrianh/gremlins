@@ -32,6 +32,9 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
     let args: Vec<&str> = parts.collect();
 
     match cmd {
+        "chat" => Some(CommandResult::Lines(vec![
+            "chat is always active — type your message directly".to_string(),
+        ])),
         "clear" => Some(CommandResult::RestartChat),
         "new" => Some(CommandResult::RestartChat),
         "quit" => Some(CommandResult::Quit),
@@ -128,6 +131,7 @@ fn help_text() -> Vec<String> {
         "  /model           — show default client".to_string(),
         "  /history         — show conversation history".to_string(),
         "  /rollback <n>    — truncate history at turn n".to_string(),
+        "  /chat            — chat is always active (type directly)".to_string(),
         "  /clear, /new     — restart chat".to_string(),
         "  /help            — show this help".to_string(),
         "  /quit            — exit".to_string(),

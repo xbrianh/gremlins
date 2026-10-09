@@ -36,9 +36,14 @@ pub enum ChatEvent {
 ///
 /// Uses a fresh connection per message. The daemon processes each
 /// chat request as an ephemeral stage that runs to completion.
+///
+/// `cancel_rx` is a oneshot that the caller fires to cancel the
+/// socket-reader task. When fired, the reader drops `write_half`
+/// so the daemon sees EOF and stops the agent loop immediately.
 pub async fn send_message(
     text: &str,
     history: &[Value],
+    cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<mpsc::UnboundedReceiver<ChatEvent>, String> {
     let state_root = gremlins::config::state_root();
     let stream = socket::connect_socket(&state_root).await?;
@@ -57,29 +62,42 @@ pub async fn send_message(
     // Keep write_half alive in the spawned task so the daemon does not
     // see EOF and bail out of the stream-forwarding loop before
     // producing any events.
+    //
+    // The reader monitors cancel_rx so the caller (Esc) can force-close
+    // the socket by dropping write_half, stopping the agent immediately.
     tokio::spawn(async move {
+        tokio::pin!(cancel_rx);
         let _write_half = write_half;
         let mut reader = BufReader::new(read_half);
         loop {
-            match socket::read_json_line(&mut reader).await {
-                Ok(Some(value)) => {
-                    if is_daemon_broadcast(&value) {
-                        continue;
-                    }
-                    let event = parse_chat_event(&value);
-                    let is_terminal = matches!(
-                        &event,
-                        ChatEvent::Done { .. } | ChatEvent::Ended { .. } | ChatEvent::Error(_)
-                    );
-                    let _ = event_tx.send(event);
-                    if is_terminal {
-                        break;
+            tokio::select! {
+                result = socket::read_json_line(&mut reader) => {
+                    match result {
+                        Ok(Some(value)) => {
+                            if is_daemon_broadcast(&value) {
+                                continue;
+                            }
+                            let event = parse_chat_event(&value);
+                            let is_terminal = matches!(
+                                &event,
+                                ChatEvent::Done { .. } | ChatEvent::Ended { .. } | ChatEvent::Error(_)
+                            );
+                            let _ = event_tx.send(event);
+                            if is_terminal {
+                                break;
+                            }
+                        }
+                        Ok(None) | Err(_) => {
+                            let _ = event_tx.send(ChatEvent::Ended {
+                                reason: "disconnect".to_string(),
+                            });
+                            break;
+                        }
                     }
                 }
-                Ok(None) | Err(_) => {
-                    let _ = event_tx.send(ChatEvent::Ended {
-                        reason: "disconnect".to_string(),
-                    });
+                _ = &mut cancel_rx => {
+                    // Esc pressed — drop write_half to close the socket
+                    // so the daemon sees EOF and stops the agent loop.
                     break;
                 }
             }
