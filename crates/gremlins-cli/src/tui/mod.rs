@@ -19,7 +19,6 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
     widgets::{Paragraph, Widget},
     Terminal, TerminalOptions, Viewport,
 };
@@ -112,32 +111,21 @@ fn transcript_line(
     })
 }
 
-/// Like [`transcript_line`] but applies a ratatui [`Style`] to the line.
-fn transcript_styled(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    line: &str,
-    style: Style,
-) -> io::Result<()> {
-    let span = Span::styled(line, style);
-    terminal.insert_before(1, |buf| {
-        Paragraph::new(Line::from(span)).render(buf.area, buf);
-    })
-}
-
 // ── Viewport sync ────────────────────────────────────────────────
 
-/// Compute needed viewport height from the active widget and resize if
-/// changed. Height is `2 + widget.height()` (input + info + widget), or
-/// exactly 2 when idle. Capped at terminal height.
+/// Compute needed viewport height from the active widget and scrollback and
+/// resize if changed. Height is `2 + widget.height() + scrollback_height()`,
+/// or exactly 2 when idle. Capped at terminal height.
 fn sync_viewport(
     app: &App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     viewport_height: &mut u16,
     term_h: u16,
+    term_w: u16,
 ) -> io::Result<()> {
     let widget_h = app.widget.as_ref().map_or(0, |w| w.height());
-    let prompt_h = app.prompt_lines();
-    let needed = (2 + widget_h + prompt_h).min(term_h);
+    let scrollback_h = app.scrollback_height(term_w);
+    let needed = (2 + widget_h + scrollback_h).min(term_h);
     if *viewport_height != needed {
         set_viewport_height(terminal, needed)?;
         *viewport_height = needed;
@@ -149,6 +137,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
     let mut app = App::new();
     let mut viewport_height: u16 = 2; // input + info only; expands when streaming
     let term_h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+    let term_w = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
 
     // ── Connect to the daemon socket ──────────────────────────────
     let (client, mut event_rx, mut raw_rx) = match client::connect().await {
@@ -279,22 +268,22 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 }
                                 // Freeze widget content to scrollback.
                                 if let Some(ref mut widget) = app.widget {
-                                    for (line, style) in widget.freeze() {
-                                        transcript_styled(terminal, &line, style)?;
-                                        app.push_line(&line);
+                                    for (line, _style) in widget.freeze() {
+                                        app.scrollback_lines.push(line);
                                     }
                                 }
                                 // Flush any remaining response_stream to scrollback.
                                 if !app.response_stream.is_empty() {
-                                    let response_lines: Vec<String> =
-                                        app.response_stream.lines().map(String::from).collect();
-                                    for line in &response_lines {
-                                        transcript_line(terminal, line)?;
-                                        app.push_line(line);
-                                    }
+                                    let remaining = app.response_stream.clone();
+                                    app.scrollback_lines.push(remaining);
+                                    app.response_stream.clear();
+                                }
+                                // Flush scrollback to terminal.
+                                for line in std::mem::take(&mut app.scrollback_lines) {
+                                    transcript_line(terminal, &line)?;
+                                    app.push_line(&line);
                                 }
                                 app.widget = None;
-                                app.response_stream.clear();
                                 // Commit user+assistant pair to conversation history.
                                 let user_msg = std::mem::take(&mut app.pending_user_message);
                                 if !user_msg.is_empty() {
@@ -305,7 +294,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                     app.conversation_history.push(serde_json::json!({"role": "assistant", "content": response_text}));
                                 }
                                 app.active_request = false;
-                                app.prompt.clear();
+                                app.scrollback_lines.clear();
                                 if viewport_height > 2 {
                                     set_viewport_height(terminal, 2)?;
                                     viewport_height = 2;
@@ -339,18 +328,21 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                     CommandResult::RestartChat => {
                                         // Freeze any active widget.
                                         if let Some(ref mut widget) = app.widget {
-                                            for (line, style) in widget.freeze() {
-                                                transcript_styled(terminal, &line, style)?;
-                                                app.push_line(&line);
+                                            for (line, _style) in widget.freeze() {
+                                                app.scrollback_lines.push(line);
                                             }
                                         }
                                         // Abort in-flight chat task.
                                         if let Some(handle) = chat_task.take() {
                                             handle.abort();
                                         }
+                                        // Flush scrollback to terminal.
+                                        for line in std::mem::take(&mut app.scrollback_lines) {
+                                            transcript_line(terminal, &line)?;
+                                            app.push_line(&line);
+                                        }
                                         app.widget = None;
                                         app.response_stream.clear();
-                                        app.prompt.clear();
                                         app.clear_output();
                                         app.conversation_history.clear();
                                         app.current_response.clear();
@@ -471,11 +463,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 }
                                 // Echo user prompt to scrollback.
                                 let echo = format!("> {input}");
-                                transcript_line(terminal, &echo)?;
-                                app.push_line(&echo);
-
-                                // Store prompt for display in the viewport.
-                                app.prompt = input.clone();
+                                app.scrollback_lines.push(echo);
 
                                 // Create a StreamWidget and push the initial "thinking..." line.
                                 let reason_style = Style::default()
@@ -486,7 +474,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 app.widget = Some(widget);
 
                                 // Expand viewport for the widget.
-                                sync_viewport(&app, terminal, &mut viewport_height, term_h)?;
+                                sync_viewport(&app, terminal, &mut viewport_height, term_h, term_w)?;
                                 // Force an immediate frame so "thinking..."
                                 // appears without waiting for the next event.
                                 terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name))?;
@@ -628,11 +616,15 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         app.response_stream.push_str(&text);
                         app.current_response.push_str(&text);
                         // Flush complete lines (newline-terminated) to scrollback.
+                        let prev_scrollback_h = app.scrollback_height(term_w);
                         while let Some(newline_pos) = app.response_stream.find('\n') {
                             let line = app.response_stream[..newline_pos].to_string();
                             app.response_stream = app.response_stream[newline_pos + 1..].to_string();
-                            transcript_line(terminal, &line)?;
-                            app.push_line(&line);
+                            app.scrollback_lines.push(line);
+                        }
+                        let new_scrollback_h = app.scrollback_height(term_w);
+                        if new_scrollback_h != prev_scrollback_h {
+                            sync_viewport(&app, terminal, &mut viewport_height, term_h, term_w)?;
                         }
                     }
                     ChatEvent::ReasoningChunk(text) => {
@@ -642,7 +634,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         }
                         let new_h = app.widget.as_ref().map_or(0, |w| w.height());
                         if new_h != prev_h {
-                            sync_viewport(&app, terminal, &mut viewport_height, term_h)?;
+                            sync_viewport(&app, terminal, &mut viewport_height, term_h, term_w)?;
                         }
                     }
                     ChatEvent::ToolResult { name, output } => {
@@ -662,36 +654,38 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         }
                         let new_h = app.widget.as_ref().map_or(0, |w| w.height());
                         if new_h != prev_h {
-                            sync_viewport(&app, terminal, &mut viewport_height, term_h)?;
+                            sync_viewport(&app, terminal, &mut viewport_height, term_h, term_w)?;
                         }
                     }
                     ChatEvent::TurnComplete { .. } => {
                         // No-op: widget keeps rendering; no state flags to toggle.
                     }
                     ChatEvent::Done { text, .. } => {
-                        // Freeze widget to scrollback first so reasoning
-                        // lines appear before response text.
+                        // Freeze widget tail lines into scrollback first so
+                        // reasoning lines appear before response text.
                         if let Some(ref mut widget) = app.widget {
-                            for (line, style) in widget.freeze() {
-                                transcript_styled(terminal, &line, style)?;
-                                app.push_line(&line);
+                            for (line, _style) in widget.freeze() {
+                                app.scrollback_lines.push(line);
                             }
                         }
                         app.widget = None;
                         // Flush any remaining partial response_stream line.
                         if !app.response_stream.is_empty() {
                             let remaining = app.response_stream.clone();
-                            transcript_line(terminal, &remaining)?;
-                            app.push_line(&remaining);
+                            app.scrollback_lines.push(remaining);
                             app.response_stream.clear();
                         }
                         // If no streamed text was received, push the final text.
                         if !text.is_empty() && app.current_response.is_empty() {
                             app.current_response.push_str(&text);
                             for line in text.lines() {
-                                transcript_line(terminal, line)?;
-                                app.push_line(line);
+                                app.scrollback_lines.push(line.to_string());
                             }
+                        }
+                        // Flush all scrollback to terminal.
+                        for line in std::mem::take(&mut app.scrollback_lines) {
+                            transcript_line(terminal, &line)?;
+                            app.push_line(&line);
                         }
                         // Commit user+assistant pair to conversation history.
                         let user_msg = std::mem::take(&mut app.pending_user_message);
@@ -703,7 +697,6 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                             app.conversation_history.push(serde_json::json!({"role": "assistant", "content": response_text}));
                         }
                         app.active_request = false;
-                        app.prompt.clear();
                         chat_task = None;
                         // Collapse viewport to 2.
                         if viewport_height > 2 {
@@ -712,26 +705,29 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         }
                     }
                     ChatEvent::Ended { reason } => {
+                        // Freeze any active widget first so reasoning lines
+                        // appear before response text.
+                        if let Some(ref mut widget) = app.widget {
+                            for (line, _style) in widget.freeze() {
+                                app.scrollback_lines.push(line);
+                            }
+                        }
                         // Flush any remaining response_stream to scrollback.
                         if !app.response_stream.is_empty() {
                             let remaining = app.response_stream.clone();
-                            transcript_line(terminal, &remaining)?;
-                            app.push_line(&remaining);
-                        }
-                        // Freeze any active widget.
-                        if let Some(ref mut widget) = app.widget {
-                            for (line, style) in widget.freeze() {
-                                transcript_styled(terminal, &line, style)?;
-                                app.push_line(&line);
-                            }
+                            app.scrollback_lines.push(remaining);
+                            app.response_stream.clear();
                         }
                         app.widget = None;
-                        app.response_stream.clear();
                         app.current_response.clear();
                         app.pending_user_message.clear();
                         app.active_request = false;
-                        app.prompt.clear();
                         chat_task = None;
+                        // Flush scrollback to terminal.
+                        for line in std::mem::take(&mut app.scrollback_lines) {
+                            transcript_line(terminal, &line)?;
+                            app.push_line(&line);
+                        }
                         if viewport_height > 2 {
                             set_viewport_height(terminal, 2)?;
                             viewport_height = 2;
@@ -741,26 +737,29 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         app.push_line(&msg);
                     }
                     ChatEvent::Error(msg) => {
+                        // Freeze any active widget first so reasoning lines
+                        // appear before response text.
+                        if let Some(ref mut widget) = app.widget {
+                            for (line, _style) in widget.freeze() {
+                                app.scrollback_lines.push(line);
+                            }
+                        }
                         // Flush any remaining response_stream to scrollback.
                         if !app.response_stream.is_empty() {
                             let remaining = app.response_stream.clone();
-                            transcript_line(terminal, &remaining)?;
-                            app.push_line(&remaining);
-                        }
-                        // Freeze any active widget.
-                        if let Some(ref mut widget) = app.widget {
-                            for (line, style) in widget.freeze() {
-                                transcript_styled(terminal, &line, style)?;
-                                app.push_line(&line);
-                            }
+                            app.scrollback_lines.push(remaining);
+                            app.response_stream.clear();
                         }
                         app.widget = None;
-                        app.response_stream.clear();
                         app.current_response.clear();
                         app.pending_user_message.clear();
                         app.active_request = false;
-                        app.prompt.clear();
                         chat_task = None;
+                        // Flush scrollback to terminal.
+                        for line in std::mem::take(&mut app.scrollback_lines) {
+                            transcript_line(terminal, &line)?;
+                            app.push_line(&line);
+                        }
                         if viewport_height > 2 {
                             set_viewport_height(terminal, 2)?;
                             viewport_height = 2;

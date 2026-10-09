@@ -14,11 +14,13 @@ use crate::tui::widgets::StreamWidget;
 /// scrollback and tmux copy-mode history. Ratatui is **not** used for the
 /// transcript region.
 ///
-/// The ratatui inline viewport is split into two regions when a turn is
+/// The ratatui inline viewport is split into up to four regions when a turn is
 /// active:
-/// 1. Prompt — the user's message, static at the top.
+/// 1. Scrollback — frozen prompt + response lines, rendered as plain text.
 /// 2. Widget area — live streaming content (reasoning + tool results),
 ///    rendered by the active [`DynamicWidget`].
+/// 3. Input bar.
+/// 4. Info bar.
 ///
 /// When idle only the input bar and info bar are rendered.
 ///
@@ -47,8 +49,10 @@ pub struct App {
     pub active_request: bool,
     /// The user message for the current in-flight request (committed to history on Done).
     pub pending_user_message: String,
-    /// The user's prompt for display in the viewport during streaming.
-    pub prompt: String,
+    /// Frozen content for the current turn: prompt line(s) and partial response
+    /// lines emitted on newline boundaries. Flushed to terminal scrollback at
+    /// turn end.
+    pub scrollback_lines: Vec<String>,
     /// The active streaming widget, if any. None when idle.
     pub widget: Option<StreamWidget>,
     /// Accumulated model response text, flushed to scrollback on newline
@@ -73,7 +77,7 @@ impl App {
             current_response: String::new(),
             active_request: false,
             pending_user_message: String::new(),
-            prompt: String::new(),
+            scrollback_lines: Vec::new(),
             widget: None,
             response_stream: String::new(),
         }
@@ -124,25 +128,22 @@ impl App {
         self.active_runs.insert(id, "stopped".to_string());
     }
 
-    /// Compute prompt line count (wrapping at ~80 cols).
-    pub fn prompt_lines(&self) -> u16 {
-        if self.prompt.is_empty() {
+    /// Compute scrollback height accounting for line wrapping at the given width.
+    pub fn scrollback_height(&self, width: u16) -> u16 {
+        if self.scrollback_lines.is_empty() {
             return 0;
         }
+        let wrap_width = (width as usize).max(1);
         let mut total: u16 = 0;
-        for line in self.prompt.lines() {
+        for line in &self.scrollback_lines {
             let chars = line.chars().count();
-            // Each line gets a "> " prefix on its first wrapped row;
-            // subsequent wrapped rows use a 2-char indent.
-            let first_row_width = 78usize; // 80 - "> "
-            let cont_row_width = 78usize; // 80 - "  "
-            if chars == 0 || chars <= first_row_width {
-                total += 1;
+            let rows = if chars == 0 {
+                1
             } else {
-                let remaining = chars - first_row_width;
-                total += 1 + (remaining.div_ceil(cont_row_width) as u16);
-            }
+                chars.div_ceil(wrap_width)
+            };
+            total += rows as u16;
         }
-        total.max(1)
+        total
     }
 }
