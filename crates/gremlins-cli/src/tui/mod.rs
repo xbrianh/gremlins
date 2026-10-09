@@ -292,16 +292,17 @@ async fn run_app(
                                 if let Some(handle) = chat_task.take() {
                                     handle.abort();
                                 }
-                                // Freeze widget content to scrollback.
-                                if let Some(ref mut widget) = app.widget {
-                                    let frozen = widget.freeze();
-                                    app.extend_scrollback(frozen);
-                                }
-                                // Flush any remaining response_stream to scrollback.
+                                // Flush any remaining response_stream to scrollback first,
+                                // so model text appears contiguously above the frozen widget.
                                 if !app.response_stream.is_empty() {
                                     let remaining = app.response_stream.clone();
                                     app.push_scrollback(remaining);
                                     app.response_stream.clear();
+                                }
+                                // Freeze widget content to scrollback.
+                                if let Some(ref mut widget) = app.widget {
+                                    let frozen = widget.freeze();
+                                    app.extend_scrollback(frozen);
                                 }
                                 app.widget = None;
                                 // Commit user+assistant pair to conversation history.
@@ -650,19 +651,19 @@ async fn run_app(
                         // No-op: widget keeps rendering; no state flags to toggle.
                     }
                     ChatEvent::Done { text, .. } => {
-                        // Freeze widget tail lines into scrollback first so
-                        // reasoning lines appear before response text.
-                        if let Some(ref mut widget) = app.widget {
-                            let frozen = widget.freeze();
-                            app.extend_scrollback(frozen);
-                        }
-                        app.widget = None;
-                        // Flush any remaining partial response_stream line.
+                        // Flush any remaining partial response_stream line first,
+                        // so model text appears contiguously above the frozen widget.
                         if !app.response_stream.is_empty() {
                             let remaining = app.response_stream.clone();
                             app.push_scrollback(remaining);
                             app.response_stream.clear();
                         }
+                        // Freeze widget tail lines into scrollback.
+                        if let Some(ref mut widget) = app.widget {
+                            let frozen = widget.freeze();
+                            app.extend_scrollback(frozen);
+                        }
+                        app.widget = None;
                         // If no streamed text was received, push the final text.
                         if !text.is_empty() && app.current_response.is_empty() {
                             app.current_response.push_str(&text);
@@ -684,17 +685,17 @@ async fn run_app(
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Ended { reason } => {
-                        // Freeze any active widget first so reasoning lines
-                        // appear before response text.
-                        if let Some(ref mut widget) = app.widget {
-                            let frozen = widget.freeze();
-                            app.extend_scrollback(frozen);
-                        }
-                        // Flush any remaining response_stream to scrollback.
+                        // Flush any remaining response_stream to scrollback first,
+                        // so model text appears contiguously above the frozen widget.
                         if !app.response_stream.is_empty() {
                             let remaining = app.response_stream.clone();
                             app.push_scrollback(remaining);
                             app.response_stream.clear();
+                        }
+                        // Freeze any active widget.
+                        if let Some(ref mut widget) = app.widget {
+                            let frozen = widget.freeze();
+                            app.extend_scrollback(frozen);
                         }
                         app.widget = None;
                         app.current_response.clear();
@@ -706,17 +707,17 @@ async fn run_app(
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Error(msg) => {
-                        // Freeze any active widget first so reasoning lines
-                        // appear before response text.
-                        if let Some(ref mut widget) = app.widget {
-                            let frozen = widget.freeze();
-                            app.extend_scrollback(frozen);
-                        }
-                        // Flush any remaining response_stream to scrollback.
+                        // Flush any remaining response_stream to scrollback first,
+                        // so model text appears contiguously above the frozen widget.
                         if !app.response_stream.is_empty() {
                             let remaining = app.response_stream.clone();
                             app.push_scrollback(remaining);
                             app.response_stream.clear();
+                        }
+                        // Freeze any active widget.
+                        if let Some(ref mut widget) = app.widget {
+                            let frozen = widget.freeze();
+                            app.extend_scrollback(frozen);
                         }
                         app.widget = None;
                         app.current_response.clear();
