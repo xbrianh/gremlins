@@ -13,6 +13,7 @@ use crate::clients::agent_loop::{
 };
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
+use crate::clients::lazy_auth_http::LazyBearerHttpClient;
 use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
@@ -32,9 +33,10 @@ const DEFAULT_MAX_TOKENS: u64 = 128_000;
 enum AnthropicClientState {
     Static(Anthropic),
     Dynamic {
-        token_provider: Box<dyn TokenProvider>,
+        token_provider: Arc<dyn TokenProvider>,
         base_url: String,
         http_client: DynHttpClient,
+        auth_scope: String,
     },
 }
 
@@ -141,17 +143,14 @@ impl AnthropicRunState {
                 token_provider,
                 base_url,
                 http_client,
+                auth_scope,
             } => {
                 // Capture errors into a local so execution always flows
                 // through the cancellation-map cleanup below.
                 let dyn_result = async {
-                    let scope = crate::clients::config::azure_auth_scope(
-                        "ANTHROPIC_AUTH_SCOPE",
-                        "anthropic",
-                        "https://cognitiveservices.azure.com/.default",
-                    );
+                    let scope = auth_scope.as_str();
                     let token = token_provider
-                        .get_token(&scope)
+                        .get_token(scope)
                         .await
                         .map_err(|e| ClientError::Runtime {
                             message: format!("Anthropic token acquisition failed: {e}"),
@@ -276,6 +275,14 @@ impl AnthropicBackend {
 
         let http_client = DynHttpClient::new(ReqwestClient::default());
 
+        // Resolve auth_scope once for dynamic auth — avoids re-reading
+        // settings.yaml on every token acquisition attempt.
+        let auth_scope = crate::clients::config::azure_auth_scope(
+            "ANTHROPIC_AUTH_SCOPE",
+            "anthropic",
+            "https://cognitiveservices.azure.com/.default",
+        );
+
         let client_state = match auth_method {
             ProviderAuth::ApiKey(key) => {
                 let client = AnthropicConfig::new(key)
@@ -290,24 +297,28 @@ impl AnthropicBackend {
                 AnthropicClientState::Static(client)
             }
             ProviderAuth::ClientSecret => AnthropicClientState::Dynamic {
-                token_provider: Box::new(token_provider::ClientSecretProvider::new()),
+                token_provider: Arc::new(token_provider::ClientSecretProvider::new()),
                 base_url,
                 http_client: http_client.clone(),
+                auth_scope: auth_scope.clone(),
             },
             ProviderAuth::Cli => AnthropicClientState::Dynamic {
-                token_provider: Box::new(token_provider::AzureCliProvider::new()),
+                token_provider: Arc::new(token_provider::AzureCliProvider::new()),
                 base_url,
                 http_client: http_client.clone(),
+                auth_scope: auth_scope.clone(),
             },
             ProviderAuth::ManagedIdentity => AnthropicClientState::Dynamic {
-                token_provider: Box::new(token_provider::ManagedIdentityProvider::new()),
+                token_provider: Arc::new(token_provider::ManagedIdentityProvider::new()),
                 base_url,
                 http_client: http_client.clone(),
+                auth_scope: auth_scope.clone(),
             },
             ProviderAuth::DefaultAzure => AnthropicClientState::Dynamic {
-                token_provider: Box::new(token_provider::DefaultAzureProvider::new()),
+                token_provider: Arc::new(token_provider::DefaultAzureProvider::new()),
                 base_url,
                 http_client: http_client.clone(),
+                auth_scope: auth_scope.clone(),
             },
         };
 
@@ -339,13 +350,20 @@ impl Backend for AnthropicBackend {
                 AnthropicClientState::Dynamic {
                     ref base_url,
                     ref http_client,
-                    ..
+                    ref token_provider,
+                    ref auth_scope,
                 } => {
-                    // Build a model builder synchronously — completion()
-                    // only constructs a request template, no token needed.
+                    // Wrap the HTTP client so the bearer token is acquired
+                    // lazily on the first request — make_model is synchronous
+                    // and cannot block on token acquisition.
+                    let wrapped = LazyBearerHttpClient::new(
+                        http_client.clone(),
+                        token_provider.clone(),
+                        auth_scope.clone(),
+                    );
                     let client = AnthropicConfig::new("unused")
                         .with_base_url(base_url)
-                        .connect(http_client.clone());
+                        .connect(wrapped);
                     Some(client.completion(model).erase())
                 }
             }
@@ -908,6 +926,57 @@ mod tests {
             "null",
             "explicit cache_control=null must not be overwritten"
         );
+    }
+
+    // ── make_model tests ────────────────────────────────────────────
+
+    /// `make_model` for a Static (API-key) client returns Some.
+    #[test]
+    fn make_model_static_client() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
+        let backend = AnthropicBackend::build_concrete(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        )
+        .unwrap();
+        let model = backend.make_model("anthropic:claude-sonnet-4-6");
+        assert!(model.is_some(), "Static client must produce a model");
+    }
+
+    /// `make_model` for a Dynamic (CLI auth) client returns Some.
+    /// The lazy wrapper holds the same TokenProvider as single_attempt.
+    #[test]
+    fn make_model_dynamic_client() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_AUTH", "cli");
+        let backend = AnthropicBackend::build_concrete(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        )
+        .unwrap();
+        let model = backend.make_model("anthropic:claude-sonnet-4-6");
+        assert!(
+            model.is_some(),
+            "Dynamic client must produce a model (lazy token acquisition)"
+        );
+    }
+
+    /// `make_model` returns None for non-anthropic provider specs.
+    #[test]
+    fn make_model_rejects_other_providers() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
+        let backend = AnthropicBackend::build_concrete(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        )
+        .unwrap();
+        assert!(backend.make_model("openai:gpt-4o").is_none());
+        assert!(backend.make_model("azure-openai:gpt-4o").is_none());
     }
 
     /// Explicit `cache_control` with a custom TTL wins over the default.
