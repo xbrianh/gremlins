@@ -57,17 +57,13 @@ fn set_viewport_height(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     height: u16,
 ) -> io::Result<()> {
-    terminal.clear()?;
-    let _old_backend =
-        std::mem::replace(terminal.backend_mut(), CrosstermBackend::new(io::stdout()));
-    // _old_backend is dropped here, releasing the stdout handle.
-    *terminal = Terminal::with_options(
+    let new_terminal = Terminal::with_options(
         CrosstermBackend::new(io::stdout()),
         TerminalOptions {
             viewport: Viewport::Inline(height),
         },
-    )
-    .expect("failed to recreate terminal");
+    )?;
+    *terminal = new_terminal;
     Ok(())
 }
 
