@@ -73,16 +73,20 @@ impl<M: Clone> TaskModelSelector<M> {
     /// The model for a Task described by `description`, or a clone of
     /// `default_model` when no entry matches or when the matching entry names
     /// a provider this backend cannot serve.
-    fn model_for(&self, description: &str, default_model: &M) -> M
+    ///
+    /// Returns `(model, spec_string)` where `spec_string` is the matched
+    /// `task-clients` entry (for logging), or `None` when no entry matched or
+    /// the factory could not build a model for the matched spec.
+    fn model_for(&self, description: &str, default_model: &M) -> (M, Option<String>)
     where
         M: Clone,
     {
         match self.overrides.spec_for(description) {
             Some(spec) => match (self.factory)(spec) {
-                Some(m) => m,
-                None => default_model.clone(),
+                Some(m) => (m, Some(spec.to_string())),
+                None => (default_model.clone(), None),
             },
-            None => default_model.clone(),
+            None => (default_model.clone(), None),
         }
     }
 }
@@ -142,6 +146,7 @@ pub(crate) fn make_task_runner(
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
     prefix: String,
+    parent_model_name: String,
     idle_timeout: f64,
     max_turns: usize,
     completion_nudge_budget: usize,
@@ -156,6 +161,7 @@ pub(crate) fn make_task_runner(
         cancel,
         ctx,
         prefix,
+        parent_model_name,
         idle_timeout,
         max_turns,
         0,
@@ -175,6 +181,7 @@ fn make_task_runner_at_depth(
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
     prefix: String,
+    parent_model_name: String,
     idle_timeout: f64,
     max_turns: usize,
     depth: u32,
@@ -191,6 +198,7 @@ fn make_task_runner_at_depth(
         let cancel = cancel.clone();
         let mut child_ctx = ctx.clone();
         let prefix = prefix.clone();
+        let parent_model_name = parent_model_name.clone();
         let id_chain = id_chain.clone();
 
         let task_cwd = ctx.cwd.clone();
@@ -203,13 +211,20 @@ fn make_task_runner_at_depth(
 
             // A selector, when configured, may swap in a different model based
             // on this task's own `description`; otherwise the parent's stands.
-            let selected_model = match &task_model_selector {
+            let (selected_model, selected_spec) = match &task_model_selector {
                 Some(selector) => selector.model_for(&description, &model),
-                None => model.clone(),
+                None => (model.clone(), None),
             };
+            // Use the matched spec when available; fall back to the parent
+            // model name so that log lines always identify the actual model.
+            let model_name = selected_spec.as_deref().unwrap_or(&parent_model_name);
 
             let new_chain = child_chain(&id_chain);
-            let child_prefix = task_prefix(&prefix, &new_chain);
+            // Build the child prefix: [model_name] goes after the stage
+            // bracket and before the task-chain segment, e.g.
+            //   [stage][gpt-4o][task.a3f1]
+            let child_prefix =
+                task_prefix(&format!("{}[{model_name}]", prefix.trim_end()), &new_chain);
 
             // Inject a child runner one level deeper so a nested task can
             // recurse again, bounded by MAX_DEPTH along this call chain.
@@ -223,6 +238,7 @@ fn make_task_runner_at_depth(
                 cancel.clone(),
                 child_ctx.clone(),
                 prefix.clone(),
+                model_name.to_string(),
                 idle_timeout,
                 max_turns,
                 depth + 1,
@@ -355,12 +371,15 @@ mod tests {
 
         assert_eq!(
             selector.model_for("Scout", &"default".to_string()),
-            "built:openai:mini"
+            (
+                "built:openai:mini".to_string(),
+                Some("openai:mini".to_string())
+            )
         );
         // No match — the default model stands.
         assert_eq!(
             selector.model_for("review", &"default".to_string()),
-            "default"
+            ("default".to_string(), None)
         );
     }
 
@@ -377,7 +396,7 @@ mod tests {
         // Spec matches but factory returns None — fall back to default.
         assert_eq!(
             selector.model_for("Scout", &"default".to_string()),
-            "default"
+            ("default".to_string(), None)
         );
     }
 
@@ -408,7 +427,7 @@ mod tests {
         // spec, returns None, and we fall back to default.  The lower-priority
         // prefix "s*" must not be exposed.
         let result = selector.model_for("Scout", &"default".to_string());
-        assert_eq!(result, "default");
+        assert_eq!(result, ("default".to_string(), None));
         assert_eq!(
             served.lock().unwrap().as_slice(),
             &["openrouter:gpt-4o-mini"],
@@ -462,6 +481,7 @@ mod tests {
             cancel,
             ctx,
             String::new(),
+            "model".into(),
             5.0,
             10,
             0,
@@ -501,6 +521,7 @@ mod tests {
             cancel,
             ctx,
             String::new(),
+            "model".into(),
             0.2,
             10,
             MAX_DEPTH,
@@ -552,6 +573,7 @@ mod tests {
             cancel,
             ctx,
             String::new(),
+            "model".into(),
             0.2,
             10,
             0,
@@ -584,9 +606,11 @@ mod tests {
     mod capture {
         use super::*;
 
-        /// Base prefix of the format tests, so their lines can be told apart
-        /// from any other line that reaches the shared stderr capture.
-        const TEST_BASE: &str = "[task-test] ";
+        /// Filter token for format tests — used to tell which log lines
+        /// belong to this runner. Passed as both the runner's prefix (its trailing
+        /// space is trimmed during model-name insertion) and as a substring filter
+        /// in [`task_prefixes`].
+        const TEST_BASE: &str = "[task-test]";
 
         /// `[task.<chain>]` of every begin line this test's runner logged.
         fn task_prefixes(lines: &[String]) -> Vec<String> {
@@ -648,6 +672,7 @@ mod tests {
                 super::super::super::agent_loop::CancelToken::new(),
                 depth_test_ctx(),
                 TEST_BASE.to_string(),
+                "model".into(),
                 5.0,
                 10,
                 0,

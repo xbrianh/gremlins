@@ -94,14 +94,6 @@ pub(crate) struct RunContext {
         Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
 }
 
-impl RunContext {
-    pub(crate) fn send_log(&self, msg: &str) {
-        if let Some(ref tx) = self.params.log_tx {
-            let _ = tx.send(format!("{}{}", self.prefix, msg));
-        }
-    }
-}
-
 pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,
@@ -122,7 +114,6 @@ pub(crate) async fn run_agent_loop(
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
     let extra_env = ctx.params.extra_env.clone();
-    let prefix = ctx.prefix.clone();
     let raw_path = ctx.params.raw_path.clone();
     let capture_events = ctx.params.capture_events;
     let idle_timeout = ctx.idle_timeout;
@@ -132,6 +123,10 @@ pub(crate) async fn run_agent_loop(
         .clone()
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| "model".into());
+
+    // Insert model name after the stage bracket so every agent-loop line
+    // identifies which model produced it: [stage][model] …
+    let prefix = format!("{}[{model_name}] ", ctx.prefix.trim_end());
 
     let cwd_display = cwd
         .as_ref()
@@ -144,15 +139,18 @@ pub(crate) async fn run_agent_loop(
         .and_then(|r| r.get("effort"))
         .and_then(|e| e.as_str());
     let log_line = format!(
-        "using client model={} cwd={} reasoning_effort={}",
-        model_name,
+        "using client cwd={} reasoning_effort={}",
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
-    ctx.send_log(&log_line);
+    send_log(&ctx.params.log_tx, &prefix, &log_line);
 
     if cwd.is_none() {
-        ctx.send_log("warning: no cwd set for worktree enforcement");
+        send_log(
+            &ctx.params.log_tx,
+            &prefix,
+            "warning: no cwd set for worktree enforcement",
+        );
     }
 
     let mut raw = raw_path
@@ -202,7 +200,8 @@ pub(crate) async fn run_agent_loop(
         opts.tool_filter.map(|f| f.to_vec()),
         cancel.clone(),
         tool_ctx.clone(),
-        prefix.clone(),
+        ctx.prefix.clone(),
+        model_name.clone(),
         idle_timeout,
         max_turns,
         ctx.completion_nudge_budget,
