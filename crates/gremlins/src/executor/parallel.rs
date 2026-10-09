@@ -73,7 +73,12 @@ pub(crate) async fn run_parallel(
         unreachable!("run_parallel is only called for parallel stages")
     };
 
-    let enclosing_task_clients = task_clients.as_ref().or(enclosing_task_clients);
+    let merged_task_clients = crate::config::merge_task_clients_runtime(
+        None, // global defaults already baked into enclosing
+        enclosing_task_clients,
+        task_clients.as_ref(),
+    );
+    let enclosing_task_clients = merged_task_clients.as_ref();
 
     let total_children = children.len();
 
@@ -670,6 +675,7 @@ mod tests {
             None,
             vec![],
             serde_yaml::Value::Null,
+            None,
         );
         def.convert_stage(stages[0].clone())
     }
@@ -705,6 +711,7 @@ mod tests {
                 None,
                 vec![],
                 serde_yaml::Value::Null,
+                None,
             )),
             workdir: None,
             project_root: sandbox.path().to_path_buf(),

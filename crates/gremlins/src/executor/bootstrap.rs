@@ -674,6 +674,7 @@ mod tests {
                 None,
                 vec![],
                 serde_yaml::Value::Null,
+                None,
             )),
             workdir: Some(WorkDir::Persistent(worktree)),
             project_root: sandbox.path().to_path_buf(),

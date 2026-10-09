@@ -4,6 +4,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use indexmap::IndexMap;
+
 use crate::builders::artifacts::{InterpolationValue, OutputTarget};
 use crate::definition::r#static::expand::key_referenced_in_text;
 use crate::definition::r#static::loader::{self, StageEntry, StageNode};
@@ -407,6 +409,7 @@ pub struct DefinitionBuilder {
     pub(crate) stages: Vec<StageSpec>,
     pub(crate) land: Option<StageSpec>,
     pub(crate) clean_cmds: Vec<String>,
+    pub(crate) default_task_clients: Option<IndexMap<String, String>>,
 }
 
 impl DefinitionBuilder {
@@ -422,6 +425,7 @@ impl DefinitionBuilder {
             stages: Vec::new(),
             land: None,
             clean_cmds: Vec::new(),
+            default_task_clients: None,
         }
     }
 
@@ -470,6 +474,12 @@ impl DefinitionBuilder {
     /// Set the clean commands.
     pub fn clean_cmds(mut self, cmds: Vec<String>) -> Self {
         self.clean_cmds = cmds;
+        self
+    }
+
+    /// Set the global default-task-clients (resolved through profiles).
+    pub fn default_task_clients(mut self, dtc: Option<IndexMap<String, String>>) -> Self {
+        self.default_task_clients = dtc;
         self
     }
 
@@ -532,6 +542,7 @@ impl DefinitionBuilder {
             self.land,
             self.clean_cmds,
             serde_yaml::Value::Null,
+            self.default_task_clients,
         );
 
         // Populate expanded_yaml from the typed tree.

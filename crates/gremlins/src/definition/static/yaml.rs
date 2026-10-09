@@ -59,7 +59,15 @@ impl StaticDefinition {
         let overlay_dir = config::overlay_dir_without_env(&project_root);
         let expanded = expand::parse_definition_file(&path, &project_root, &overlay_dir)?;
 
-        from_expanded_value(expanded, &path, client_override, config_default_client)
+        let settings = config::global_config()
+            .map_err(|e| SchemaError::Generic(format!("failed to load settings.yaml: {e}")))?;
+        from_expanded_value(
+            expanded,
+            &path,
+            client_override,
+            config_default_client,
+            Some(&settings),
+        )
     }
 
     /// Parse already-expanded YAML bytes directly — no file I/O, no
@@ -78,6 +86,7 @@ impl StaticDefinition {
             Path::new("definition.yaml"),
             client_override,
             config_default_client,
+            None,
         )
     }
 
@@ -91,7 +100,7 @@ impl StaticDefinition {
         let data = std::fs::read(path)
             .map_err(|e| SchemaError::Generic(format!("failed to read {}: {e}", path.display())))?;
         let expanded = parse_expanded_yaml(&data)?;
-        from_expanded_value(expanded, path, client_override, config_default_client)
+        from_expanded_value(expanded, path, client_override, config_default_client, None)
     }
 }
 
@@ -121,6 +130,7 @@ fn from_expanded_value(
     path: &Path,
     default_client_override: Option<&str>,
     config_default_client: Option<&str>,
+    settings: Option<&config::Config>,
 ) -> Result<StaticDefinition, SchemaError> {
     let root = expanded
         .as_mapping()
@@ -136,25 +146,60 @@ fn from_expanded_value(
         .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(String::from))
         .unwrap_or_default();
 
-    let yaml_default_client = default_client_from_yaml(root)?;
+    let raw_yaml_default_client = default_client_from_yaml(root)?;
     base_ref_from_yaml(root)?;
 
     let raw_stages = stages_from_yaml(root)?;
 
-    // Bake every stage and default client with the current settings profile.
-    // Profile resolution is a load-time operation; the expanded definition
-    // must contain only concrete `provider:model[:k=v]` strings.
-    let settings = config::global_config()
-        .map_err(|e| SchemaError::Generic(format!("failed to load settings.yaml: {e}")))?;
-    let yaml_default_client = yaml_default_client
-        .map(|c| resolve_client(&c, &settings).map_err(SchemaError::Generic))
-        .transpose()?;
-    let config_default_client = config_default_client
-        .map(|c| resolve_client(c, &settings).map_err(SchemaError::Generic))
-        .transpose()?;
-    let default_client_override = default_client_override
-        .map(|c| resolve_client(c, &settings).map_err(SchemaError::Generic))
-        .transpose()?;
+    // Capture profile names from raw default-client sources before
+    // resolution. These determine which profile's `task-clients`
+    // stages inherit when they don't supply their own client.
+    let yaml_default_profile: Option<String> = raw_yaml_default_client
+        .as_ref()
+        .and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+    let override_default_profile: Option<String> =
+        default_client_override.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+    let config_default_profile: Option<String> =
+        config_default_client.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+
+    // Bake every stage and default client with the current settings profile
+    // (source-definition path only). Expanded definitions from
+    // `from_expanded_bytes` / `from_expanded_yaml_file` pass `None` here:
+    // their values are already concrete `provider:model[:k=v]` strings, so
+    // no profile resolution is needed and a missing/malformed settings.yaml
+    // must not block resuming from a baked definition.
+    let yaml_default_client = match settings {
+        Some(settings) => raw_yaml_default_client
+            .map(|c| resolve_client(&c, settings).map_err(SchemaError::Generic))
+            .transpose()?,
+        None => raw_yaml_default_client,
+    };
+    let config_default_client = match settings {
+        Some(settings) => config_default_client
+            .map(|c| resolve_client(c, settings).map_err(SchemaError::Generic))
+            .transpose()?,
+        None => config_default_client.map(String::from),
+    };
+    let default_client_override = match settings {
+        Some(settings) => default_client_override
+            .map(|c| resolve_client(c, settings).map_err(SchemaError::Generic))
+            .transpose()?,
+        None => default_client_override.map(String::from),
+    };
+
+    // Determine which profile (if any) contributes the effective default
+    // client.  This mirrors resolve_default_client's precedence:
+    // YAML > CLI override > settings.yaml.
+    let effective_profile: Option<&str> = if yaml_default_client.is_some() {
+        yaml_default_profile.as_deref()
+    } else if default_client_override
+        .as_ref()
+        .is_some_and(|s| !s.is_empty())
+    {
+        override_default_profile.as_deref()
+    } else {
+        config_default_profile.as_deref()
+    };
 
     // Parse stages through the per-type YAML→builder dispatch.
     let mut stages: Vec<StageSpec> = Vec::new();
@@ -162,7 +207,7 @@ fn from_expanded_value(
         let mapping = raw
             .as_mapping()
             .ok_or_else(|| SchemaError::Generic("each stage must be a mapping".to_string()))?;
-        stages.push(stage_from_yaml(mapping, &settings)?);
+        stages.push(stage_from_yaml(mapping, settings, effective_profile)?);
     }
 
     // Bootstrap.
@@ -176,7 +221,7 @@ fn from_expanded_value(
         let land_mapping = land_val
             .as_mapping()
             .ok_or_else(|| SchemaError::Generic("'land' must be a mapping".to_string()))?;
-        let (land_stage, clean) = land_from_yaml_builder(land_mapping, &settings)?;
+        let (land_stage, clean) = land_from_yaml_builder(land_mapping, settings)?;
         (Some(land_stage), clean)
     } else {
         (None, Vec::new())
@@ -188,6 +233,14 @@ fn from_expanded_value(
         config_default_client.as_deref(),
     )?;
 
+    // Read or resolve default_task_clients.
+    // If the YAML already contains a `default_task_clients` key (from a
+    // previously expanded definition), use it directly — values are
+    // already resolved.  Otherwise resolve the global
+    // `default-task-clients` through profiles so the expanded output
+    // includes only concrete `provider:model[:k=v]` strings.
+    let default_task_clients = yaml_default_task_clients(root, settings)?;
+
     let builder = DefinitionBuilder {
         name,
         default_client,
@@ -196,6 +249,7 @@ fn from_expanded_value(
         stages,
         land,
         clean_cmds,
+        default_task_clients,
     };
 
     builder.build()
@@ -206,7 +260,11 @@ fn from_expanded_value(
 // ---------------------------------------------------------------------------
 
 /// Dispatch a single stage mapping to the appropriate per-type builder.
-fn stage_from_yaml(mapping: &Mapping, settings: &config::Config) -> Result<StageSpec, SchemaError> {
+fn stage_from_yaml(
+    mapping: &Mapping,
+    settings: Option<&config::Config>,
+    effective_profile: Option<&str>,
+) -> Result<StageSpec, SchemaError> {
     let name = mapping
         .get("name")
         .and_then(Value::as_str)
@@ -221,10 +279,10 @@ fn stage_from_yaml(mapping: &Mapping, settings: &config::Config) -> Result<Stage
     }
 
     match stage_type {
-        "agent" => agent_from_yaml(mapping, &name, settings),
-        "exec" => exec_from_yaml(mapping, &name, settings),
-        "sequence" => sequence_from_yaml(mapping, &name, settings),
-        "parallel" => parallel_from_yaml(mapping, &name, settings),
+        "agent" => agent_from_yaml(mapping, &name, settings, effective_profile),
+        "exec" => exec_from_yaml(mapping, &name, settings, effective_profile),
+        "sequence" => sequence_from_yaml(mapping, &name, settings, effective_profile),
+        "parallel" => parallel_from_yaml(mapping, &name, settings, effective_profile),
         other => Err(SchemaError::Generic(format!(
             "stage {name:?}: unknown type {other:?}"
         ))),
@@ -373,38 +431,56 @@ fn yaml_skip_if_exists(mapping: &Mapping) -> String {
     yaml_str(mapping, "skip_if_exists").unwrap_or_default()
 }
 
-/// Read `client` — None when absent. Values are resolved through profiles.
+/// Read `client` — None when absent. Values are resolved through profiles
+/// when settings are supplied; otherwise they are assumed to already be
+/// concrete `provider:model[:k=v]` strings.
 fn yaml_client(
     mapping: &Mapping,
-    settings: &config::Config,
+    settings: Option<&config::Config>,
 ) -> Result<Option<ClientSpec>, SchemaError> {
-    yaml_str(mapping, "client")
-        .map(|raw| resolve_client(&raw, settings).map(ClientSpec))
-        .transpose()
-        .map_err(SchemaError::Generic)
+    let Some(raw) = yaml_str(mapping, "client") else {
+        return Ok(None);
+    };
+    let resolved = match settings {
+        Some(settings) => resolve_client(&raw, settings).map_err(SchemaError::Generic)?,
+        None => raw,
+    };
+    Ok(Some(ClientSpec(resolved)))
 }
 
 /// Read `task-clients` — an ordered string→string map, resolved through
-/// profiles. Returns `None` when the stage has no `task-clients` key and
-/// its `client` does not reference a profile with task-clients.
+/// profiles when settings are supplied. Returns `None` when the stage has no
+/// `task-clients` key and no profile contributes task-clients.
 /// Global `default-task-clients` are NOT merged here; that happens at
 /// runtime so composite-stage inheritance works correctly.
 ///
 /// When the stage's `client` references a profile (e.g. `profile:foo`),
 /// that profile's `task_clients` are used as a base layer; the stage's own
-/// `task-clients` entries win on key conflict.
+/// `task-clients` entries win on key conflict.  When the stage has no
+/// `client` of its own but `effective_profile` names a profile (because
+/// the definition default-client, CLI --client, or settings.yaml
+/// default-client selected a profile), that profile's `task_clients` also
+/// serve as the base layer.
 fn yaml_task_clients(
     mapping: &Mapping,
-    settings: &config::Config,
+    settings: Option<&config::Config>,
+    effective_profile: Option<&str>,
 ) -> Result<Option<IndexMap<String, String>>, SchemaError> {
     let stage = yaml_string_map_ordered(mapping, "task-clients")?;
 
-    // If the stage's client references a profile, pull in its task-clients
-    // as a base layer.
-    let profile_task_clients: Option<IndexMap<String, String>> = yaml_str(mapping, "client")
+    // Resolve which profile (if any) contributes task-clients as a base.
+    // Priority: the stage's own `client: profile:…` wins; otherwise the
+    // effective default-profile from the definition.
+    let profile_name: Option<String> = yaml_str(mapping, "client")
         .and_then(|raw| raw.strip_prefix("profile:").map(|name| name.to_string()))
-        .and_then(|name| settings.client_profiles().get(&name))
-        .and_then(|profile| profile.task_clients.clone());
+        .or_else(|| effective_profile.map(|s| s.to_string()));
+
+    let profile_task_clients: Option<IndexMap<String, String>> = settings.and_then(|settings| {
+        profile_name
+            .as_ref()
+            .and_then(|name| settings.client_profiles().get(name))
+            .and_then(|profile| profile.task_clients.clone())
+    });
 
     if stage.is_none() && profile_task_clients.is_none() {
         return Ok(None);
@@ -412,20 +488,28 @@ fn yaml_task_clients(
 
     // Merge: profile base + stage overrides (stage wins on conflict).
     let mut resolved = IndexMap::new();
-    if let Some(ref profile_tc) = profile_task_clients {
-        for (key, value) in profile_tc {
-            resolved.insert(
-                key.clone(),
-                config::resolve_client_reference(value, settings).map_err(SchemaError::Generic)?,
-            );
+    if let Some(settings) = settings {
+        if let Some(ref profile_tc) = profile_task_clients {
+            for (key, value) in profile_tc {
+                resolved.insert(
+                    key.clone(),
+                    config::resolve_client_reference(value, settings)
+                        .map_err(SchemaError::Generic)?,
+                );
+            }
         }
-    }
-    if let Some(ref stage_tc) = stage {
+        if let Some(ref stage_tc) = stage {
+            for (key, value) in stage_tc {
+                resolved.insert(
+                    key.clone(),
+                    config::resolve_client_reference(value, settings)
+                        .map_err(SchemaError::Generic)?,
+                );
+            }
+        }
+    } else if let Some(ref stage_tc) = stage {
         for (key, value) in stage_tc {
-            resolved.insert(
-                key.clone(),
-                config::resolve_client_reference(value, settings).map_err(SchemaError::Generic)?,
-            );
+            resolved.insert(key.clone(), value.clone());
         }
     }
     Ok(Some(resolved))
@@ -439,13 +523,14 @@ fn resolve_client(raw: &str, settings: &config::Config) -> Result<String, String
 fn agent_from_yaml(
     mapping: &Mapping,
     name: &str,
-    settings: &config::Config,
+    settings: Option<&config::Config>,
+    effective_profile: Option<&str>,
 ) -> Result<StageSpec, SchemaError> {
     let prompts = yaml_string_list(mapping, "prompt")?;
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
     let client = yaml_client(mapping, settings)?;
-    let task_clients = yaml_task_clients(mapping, settings)?;
+    let task_clients = yaml_task_clients(mapping, settings, effective_profile)?;
 
     let mut builder = AgentBuilder::new(name);
     for p in prompts {
@@ -474,12 +559,13 @@ fn agent_from_yaml(
 fn exec_from_yaml(
     mapping: &Mapping,
     name: &str,
-    settings: &config::Config,
+    settings: Option<&config::Config>,
+    effective_profile: Option<&str>,
 ) -> Result<StageSpec, SchemaError> {
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
     let client = yaml_client(mapping, settings)?;
-    let task_clients = yaml_task_clients(mapping, settings)?;
+    let task_clients = yaml_task_clients(mapping, settings, effective_profile)?;
 
     let mut builder = ExecBuilder::new(name);
     for (k, v) in interpolation_map {
@@ -505,7 +591,8 @@ fn exec_from_yaml(
 fn sequence_from_yaml(
     mapping: &Mapping,
     name: &str,
-    settings: &config::Config,
+    settings: Option<&config::Config>,
+    effective_profile: Option<&str>,
 ) -> Result<StageSpec, SchemaError> {
     let max_iterations = match mapping.get("max-iterations").filter(|v| !v.is_null()) {
         None => 1u32,
@@ -521,7 +608,7 @@ fn sequence_from_yaml(
     };
     let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping, settings)?;
-    let task_clients = yaml_task_clients(mapping, settings)?;
+    let task_clients = yaml_task_clients(mapping, settings, effective_profile)?;
 
     // Interval from top-level key.  Only accepts numbers (YAML integers
     // coerce to f64 via as_f64).  Reject non-numeric values with a
@@ -538,7 +625,7 @@ fn sequence_from_yaml(
         },
     };
 
-    let body = yaml_children(mapping, "body", settings)?;
+    let body = yaml_children(mapping, "body", settings, effective_profile)?;
 
     let mut builder = SequenceBuilder::new(name)
         .max_iterations(max_iterations)
@@ -563,7 +650,8 @@ fn sequence_from_yaml(
 fn parallel_from_yaml(
     mapping: &Mapping,
     name: &str,
-    settings: &config::Config,
+    settings: Option<&config::Config>,
+    effective_profile: Option<&str>,
 ) -> Result<StageSpec, SchemaError> {
     let max_concurrent = match mapping.get("max_concurrent").filter(|v| !v.is_null()) {
         None => None,
@@ -602,9 +690,9 @@ fn parallel_from_yaml(
     };
     let skip_if_exists = yaml_skip_if_exists(mapping);
     let client = yaml_client(mapping, settings)?;
-    let task_clients = yaml_task_clients(mapping, settings)?;
+    let task_clients = yaml_task_clients(mapping, settings, effective_profile)?;
 
-    let body = yaml_children(mapping, "body", settings)?;
+    let body = yaml_children(mapping, "body", settings, effective_profile)?;
 
     // Parse fork and join specs
     let fork = yaml_fork_join(mapping, "fork")?;
@@ -654,7 +742,8 @@ fn yaml_fork_join(mapping: &Mapping, key: &str) -> Result<Option<Vec<String>>, S
 fn yaml_children(
     mapping: &Mapping,
     key: &str,
-    settings: &config::Config,
+    settings: Option<&config::Config>,
+    effective_profile: Option<&str>,
 ) -> Result<Vec<StageSpec>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(Vec::new());
@@ -667,7 +756,7 @@ fn yaml_children(
         let child_map = entry.as_mapping().ok_or_else(|| {
             SchemaError::Generic("each child stage must be a mapping".to_string())
         })?;
-        children.push(stage_from_yaml(child_map, settings)?);
+        children.push(stage_from_yaml(child_map, settings, effective_profile)?);
     }
     fill_builder_names(&mut children);
     Ok(children)
@@ -677,7 +766,7 @@ fn yaml_children(
 /// type=exec through [`LandBuilder`]. Returns the land stage and clean_cmds.
 fn land_from_yaml_builder(
     mapping: &Mapping,
-    settings: &config::Config,
+    settings: Option<&config::Config>,
 ) -> Result<(StageSpec, Vec<String>), SchemaError> {
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
@@ -774,6 +863,64 @@ fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {
     }
 }
 
+/// Read `default_task_clients` from the already-expanded YAML, or resolve
+/// the global `default-task-clients` through profiles.
+///
+/// When the YAML already carries a `default_task_clients` key (round-tripped
+/// from a previous expansion), values are treated as already-resolved
+/// `provider:model[:k=v]` strings and returned as-is.  Otherwise the global
+/// `default-task-clients` map is read from settings.yaml and every value is
+/// resolved through the profile table so the expanded output only contains
+/// concrete client specs.
+fn yaml_default_task_clients(
+    root: &Mapping,
+    settings: Option<&config::Config>,
+) -> Result<Option<IndexMap<String, String>>, SchemaError> {
+    // If the expanded YAML already carries default_task_clients, use them
+    // directly — they were resolved during a previous expansion.
+    if let Some(raw) = root.get("default_task_clients").filter(|v| !v.is_null()) {
+        let map = raw.as_mapping().ok_or_else(|| {
+            SchemaError::Generic("'default_task_clients' must be a mapping".to_string())
+        })?;
+        let mut result = IndexMap::new();
+        for (k, v) in map {
+            let key = k.as_str().ok_or_else(|| {
+                SchemaError::Generic("'default_task_clients' keys must be strings".to_string())
+            })?;
+            let value = v.as_str().ok_or_else(|| {
+                SchemaError::Generic("'default_task_clients' values must be strings".to_string())
+            })?;
+            result.insert(key.to_string(), value.to_string());
+        }
+        if result.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(result));
+    }
+
+    // Otherwise, resolve the global default-task-clients through profiles.
+    let settings = match settings {
+        Some(settings) => settings,
+        None => return Ok(None),
+    };
+    let global = match settings.default_task_clients() {
+        Some(g) => g,
+        None => return Ok(None),
+    };
+    let mut resolved = IndexMap::new();
+    for (key, value) in global {
+        resolved.insert(
+            key.clone(),
+            resolve_client(value, settings).map_err(SchemaError::Generic)?,
+        );
+    }
+    if resolved.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(resolved))
+    }
+}
+
 fn resolve_default_client(
     yaml_default: Option<String>,
     override_client: Option<&str>,
@@ -806,6 +953,7 @@ mod tests {
     use crate::builders::artifacts::output;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
+    use crate::definition::GremlinDefinition;
     use crate::stage_spec::parallel::ErrorPolicy;
 
     // ------------------------------------------------------------------
@@ -820,7 +968,7 @@ mod tests {
         let mapping = yaml_val
             .as_mapping()
             .expect("to_yaml must produce a mapping");
-        let round_tripped = stage_from_yaml(mapping, &settings)
+        let round_tripped = stage_from_yaml(mapping, Some(&settings), None)
             .expect("stage_from_yaml must accept to_yaml output");
         assert_eq!(
             stage,
@@ -940,12 +1088,26 @@ mod tests {
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
         );
         // String interval must produce a SchemaError.
-        let err = stage_from_yaml(&m, &config::Config::default()).unwrap_err();
+        let err = stage_from_yaml(&m, Some(&config::Config::default()), None).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("interval"),
             "error must mention 'interval', got: {msg}"
         );
+    }
+
+    #[test]
+    fn from_expanded_bytes_does_not_load_settings() {
+        // Expanded definitions are already concrete and must deserialize even
+        // when settings.yaml is malformed / unavailable.
+        let _sandbox = crate::test_support::Sandbox::with_config(Some("default-client: [\n"));
+
+        let yaml = "__gremlins_expanded__: true\n\
+                     name: resume-me\n\
+                     default_client: openai:gpt-4\n\
+                     stages: []\n";
+        let def = StaticDefinition::from_expanded_bytes(yaml.as_bytes(), None, None).unwrap();
+        assert_eq!(def.default_client(), "openai:gpt-4");
     }
 
     #[test]
@@ -993,8 +1155,8 @@ mod tests {
             serde_yaml::Value::String("body".into()),
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
         );
-        let stage =
-            stage_from_yaml(&m, &config::Config::default()).expect("numeric interval should parse");
+        let stage = stage_from_yaml(&m, Some(&config::Config::default()), None)
+            .expect("numeric interval should parse");
         let yaml = stage.to_yaml();
         let mapping = yaml.as_mapping().unwrap();
         let interval = mapping.get("interval").and_then(|v| v.as_f64());

@@ -194,11 +194,9 @@ impl Config {
             .filter(|s| !s.is_empty())
             .or_else(env_default_client);
 
-        let stage_clients: Option<IndexMap<String, String>> = cfg_file
+        let stage_clients_raw: Option<IndexMap<String, String>> = cfg_file
             .default_client_by_stage
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
-        let (exact_stage_clients, prefix_stage_clients) =
-            parse_stage_clients(stage_clients.as_ref());
 
         let task_clients: Option<IndexMap<String, String>> = cfg_file
             .default_task_clients
@@ -223,6 +221,35 @@ impl Config {
                 )
             })
             .collect();
+
+        // Resolve profile references in stage client specifiers.
+        let stage_clients: Option<IndexMap<String, String>> = match stage_clients_raw {
+            Some(map) => {
+                let resolved: Result<IndexMap<String, String>, String> = map
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let resolved = if let Some(name) = v.strip_prefix("profile:") {
+                            let profile = client_profiles.get(name).ok_or_else(|| {
+                                format!(
+                                    "unknown client profile {name:?} in default-client-by-stage"
+                                )
+                            })?;
+                            if profile.client.trim().is_empty() {
+                                return Err(format!("client profile {name:?} has no client"));
+                            }
+                            profile.client.clone()
+                        } else {
+                            v
+                        };
+                        Ok((k, resolved))
+                    })
+                    .collect();
+                Some(resolved.map_err(ConfigError::Profile)?)
+            }
+            None => None,
+        };
+        let (exact_stage_clients, prefix_stage_clients) =
+            parse_stage_clients(stage_clients.as_ref());
 
         let path_overrides = cfg_file
             .paths
@@ -407,6 +434,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Yaml(#[from] serde_yaml::Error),
+    #[error("profile error: {0}")]
+    Profile(String),
 }
 
 fn parse_yaml_config(path: &Path) -> Result<ConfigFile, ConfigError> {
@@ -498,6 +527,9 @@ pub fn merge_task_clients(
     let mut merged: IndexMap<String, String> = global.cloned().unwrap_or_default();
     if let Some(stage) = stage {
         for (key, value) in stage {
+            // Remove case-insensitive duplicate so stage wins
+            let key_lower = key.to_lowercase();
+            merged.retain(|k, _| k.to_lowercase() != key_lower);
             merged.insert(key.clone(), value.clone());
         }
     }

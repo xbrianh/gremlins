@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use serde_yaml::{Mapping, Value};
 
 use crate::schemas::bootstrap::Bootstrap;
@@ -50,6 +51,10 @@ pub struct StaticDefinition {
     /// The fully expanded YAML tree, kept for round-tripping via
     /// [`to_expanded_yaml`](StaticDefinition::to_expanded_yaml).
     pub(crate) expanded_yaml: Value,
+    /// Global `default-task-clients` from settings.yaml, resolved through
+    /// profiles at load time. Included in serialized output so child
+    /// processes do not depend on the current config.
+    pub(crate) default_task_clients: Option<IndexMap<String, String>>,
     cursor: usize,
 }
 
@@ -65,6 +70,7 @@ impl StaticDefinition {
         land: Option<StageSpec>,
         clean_cmds: Vec<String>,
         expanded_yaml: Value,
+        default_task_clients: Option<IndexMap<String, String>>,
     ) -> Self {
         StaticDefinition {
             name,
@@ -75,6 +81,7 @@ impl StaticDefinition {
             land,
             clean_cmds,
             expanded_yaml,
+            default_task_clients,
             cursor: 0,
         }
     }
@@ -94,6 +101,7 @@ impl StaticDefinition {
             land: None,
             clean_cmds: Vec::new(),
             expanded_yaml: Value::Null,
+            default_task_clients: None,
             cursor: 0,
         }
     }
@@ -122,6 +130,7 @@ impl StaticDefinition {
             land: None,
             clean_cmds,
             expanded_yaml: Value::Null,
+            default_task_clients: None,
             cursor: 0,
         }
     }
@@ -173,6 +182,21 @@ impl StaticDefinition {
             Value::String("default_client".to_string()),
             Value::String(self.default_client.clone()),
         );
+
+        // default_task_clients — included when present so child processes
+        // do not depend on the current settings.yaml.
+        if let Some(ref dtc) = self.default_task_clients {
+            if !dtc.is_empty() {
+                let mut dtc_map = Mapping::new();
+                for (key, value) in dtc {
+                    dtc_map.insert(Value::String(key.clone()), Value::String(value.clone()));
+                }
+                root.insert(
+                    Value::String("default_task_clients".to_string()),
+                    Value::Mapping(dtc_map),
+                );
+            }
+        }
 
         // bootstrap — omit entirely if all fields are default/empty.
         let bootstrap_yaml = bootstrap_to_yaml(&self.bootstrap);
@@ -545,6 +569,7 @@ mod tests {
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
+            default_task_clients: None,
             cursor: 0,
         };
         let land = def.land().expect("land is populated");
@@ -563,6 +588,7 @@ mod tests {
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
+            default_task_clients: None,
             cursor: 0,
         };
         let boxed: Box<dyn GremlinDefinition> = Box::new(def);
@@ -592,6 +618,7 @@ mod tests {
             land: None,
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
+            default_task_clients: None,
             cursor: 0,
         };
         assert_eq!(def.name(), "test-gremlin");
@@ -791,6 +818,7 @@ mod tests {
             land: None,
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
+            default_task_clients: None,
             cursor: 0,
         }
     }
