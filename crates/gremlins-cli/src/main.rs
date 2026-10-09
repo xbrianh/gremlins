@@ -19,6 +19,7 @@ use gremlins::schemas::bootstrap;
 use serde_json::Value;
 
 mod spawn;
+mod tui;
 
 #[derive(Parser)]
 #[command(name = "gremlins", about = "AI-backed gremlin definition runner")]
@@ -137,8 +138,7 @@ async fn main() {
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::External(args)) => status_external(&args).await,
         None => {
-            let mut cmd = <Cli as clap::CommandFactory>::command();
-            cmd.print_help().unwrap();
+            tui::run().await;
             return;
         }
     };
@@ -152,16 +152,9 @@ async fn main() {
 // Socket helpers
 // ---------------------------------------------------------------------------
 
-/// Ensure an executor is running, becoming one if needed.
-/// Returns a connected stream.
-async fn ensure_executor() -> Result<tokio::net::UnixStream, String> {
-    config::init_global().map_err(|e| e.to_string())?;
-    spawn::bind_or_connect().await
-}
-
 /// Send a request to the executor and return the response.
 async fn executor_request(request: serde_json::Value) -> Result<serde_json::Value, String> {
-    let mut stream = ensure_executor().await?;
+    let mut stream = spawn::ensure_executor().await?;
     spawn::send_request(&mut stream, request).await
 }
 
@@ -811,7 +804,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
         }
     });
 
-    // Wait for debug_ready, but also watch for /quit from stdin.
+    // Wait for ready, but also watch for /quit from stdin.
     // Use a channel-based socket reader so the read future is never
     // dropped when stdin input wins the select — no buffered data is lost.
     let (sock_tx, mut sock_rx) =
@@ -833,7 +826,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
             match sock_rx.recv().await {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => return Err(e),
-                None => return Err("connection closed before debug_ready".to_string()),
+                None => return Err("connection closed before ready".to_string()),
             }
         } else {
             tokio::select! {
@@ -841,7 +834,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                     match sock_result {
                         Some(Ok(v)) => v,
                         Some(Err(e)) => return Err(e),
-                        None => return Err("connection closed before debug_ready".to_string()),
+                        None => return Err("connection closed before ready".to_string()),
                     }
                 }
                 stdin_line = stdin_rx.recv() => {
@@ -884,13 +877,13 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                 log::debug!("debug: received error: {msg}");
                 return Err(msg.to_string());
             }
-            Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("debug_ready") => {
-                log::debug!("debug: received debug_ready for {id}");
+            Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("ready") => {
+                log::debug!("debug: received ready for {id}");
                 eprintln!("debug: connected to gremlin {id}");
                 break;
             }
             Some(ref other) => {
-                if other.get("type").and_then(|v| v.as_str()) == Some("debug_status") {
+                if other.get("type").and_then(|v| v.as_str()) == Some("status") {
                     let stage = other.get("stage").and_then(|v| v.as_str()).unwrap_or("?");
                     eprintln!("debug: daemon status: {stage}");
                     continue;
@@ -899,8 +892,8 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                 continue;
             }
             None => {
-                log::debug!("debug: connection closed before debug_ready");
-                return Err("connection closed before debug_ready".to_string());
+                log::debug!("debug: connection closed before ready");
+                return Err("connection closed before ready".to_string());
             }
         }
     }
@@ -926,7 +919,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
         while let Some(Ok(Some(line))) = sock_rx.recv().await {
             let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match typ {
-                "debug_turn_complete" => {
+                "turn_complete" => {
                     let text = line.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     let tool_calls = line.get("tool_calls").and_then(|v| v.as_array());
                     if !text.is_empty() {
@@ -941,13 +934,17 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                     }
                     eprintln!("debug: turn complete — agent paused");
                 }
-                "debug_done" => {
+                "done" => {
                     eprintln!("debug: agent called Done");
                 }
-                "debug_ended" => {
+                "ended" => {
                     let reason = line.get("reason").and_then(|v| v.as_str()).unwrap_or("");
                     eprintln!("debug: session ended ({reason})");
                     break;
+                }
+                "stream_chunk" => {
+                    // Stream chunks are silently consumed in the debug CLI path;
+                    // the full text arrives in turn_complete.
                 }
                 "error" => {
                     let msg = line.get("message").and_then(|v| v.as_str()).unwrap_or("");

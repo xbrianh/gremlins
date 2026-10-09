@@ -663,3 +663,177 @@ shapes it resists:
 
 These are non-goals on purpose. The system is designed to be boring,
 resumable, and cheap to reason about, in roughly that order.
+
+## 8. TUI
+
+The TUI (no-args `gremlins`) is an interactive chat interface to the daemon.
+It runs in the main terminal buffer — no alternate screen — using a
+fixed-height ratatui inline viewport that fills the terminal. Old content
+is promoted to terminal scrollback via `insert_before` so the user can
+scroll up through history.
+
+### 8.1 Viewport layout
+
+The viewport is split into four vertical constraints, top-to-bottom:
+
+```
+  …earlier turns in terminal scrollback…  ← terminal scrollback (via insert_before)
+╔═ viewport (term_h rows, never resizes) ════════════════════╗
+║                                                              ║  scrollback
+║  (frozen turn content, bottom-aligned)                       ║  Min(0)
+║                                                              ║
+║  ┌─ dual-section widget ──────────────────────────────────┐  ║
+║  │    stream section (reasoning, tool results)    (italic) │  ║  widget
+║  │  response section (model text output)                   │  ║  Length(widget_h)
+║  └────────────────────────────────────────────────────────┘  ║
+║  > ▌                                                          ║  input bar
+║  gremlins tui · 1 gremlin · project: gremlins                ║  info bar
+╚══════════════════════════════════════════════════════════════╝
+```
+
+| # | Constraint | Purpose |
+|---|---|---|
+| 1 | `Min(0)` | Scrollback — absorbs all free space, bottom-aligned. |
+| 2 | `Length(widget_h)` | Dual-section transcript widget. 0 when idle. |
+| 3 | `Length(1)` | Input bar — pinned to bottom. |
+| 4 | `Length(1)` | Info bar — pinned to bottom. |
+
+The input and info bars are always pinned to the last two rows. Scrollback
+absorbs whatever space the widget doesn't use. When the widget is idle
+(height 0), scrollback fills the remaining `term_h − 2` rows.
+
+### 8.2 Dual-section widget (SplitWidget)
+
+During an active turn, a `SplitWidget` occupies the widget area. It has
+two independent internal buffers with fluid, response-priority sizing:
+
+- **Stream section** (top): reasoning chunks and tool result descriptions.
+  Dark gray italic, 2-space indent.
+- **Response section** (bottom): model text output (`StreamChunk` deltas).
+  Plain terminal style, no indent.
+
+The indent and style difference provides the visual distinction — no
+separator line is needed. When only the stream section has content (early
+streaming, before the model produces text), the response area is absent
+(height 0).
+
+**Fluid sizing.** Response gets priority. When only stream content exists,
+stream takes all widget space up to `term_h − 2`. When response arrives,
+response takes as much space as its content needs; stream shrinks to
+accommodate but never goes below `STREAM_MIN = 5` rows. When combined
+content exceeds the available space, both sections scroll internally.
+
+**Wrapping.** The widget accounts for line wrapping at the render width
+using `chars.div_ceil(width)`, matching the formula used by scrollback
+height calculation. Height allocation and scroll offsets use wrapped row
+counts rather than raw line counts.
+
+### 8.3 Content flow per turn
+
+1. User submits text. A prompt line (`> {input}`, cyan) is pushed to
+   scrollback.
+2. A `SplitWidget` is created with an initial `"  thinking..."` stream
+   line. Widget height goes from 0 to 1; scrollback shrinks by 1.
+3. `ReasoningChunk` and `ToolResult` events push styled lines to the
+   stream section.
+4. `StreamChunk` events push text to the response section via an internal
+   partial-line accumulator that splits on `\n`.
+5. On `Done` / `Esc` / `Ended` / `Error`:
+   a. The widget's partial-line buffer is flushed.
+   b. `widget.freeze()` returns `(stream_tail, response_lines)` — the
+      last `FREEZE_STREAM_LINES = 3` stream lines (dark gray italic) and
+      all response lines (plain). Both buffers are cleared.
+   c. Stream tail is pushed to scrollback, then response lines.
+      Frozen order matches the dynamic layout: stream on top, response
+      below.
+   d. Widget clears, collapses to 0 height. Scrollback expands.
+   e. The user+assistant pair is committed to `conversation_history`.
+   f. `active_request` is set to `false`.
+6. If the in-viewport scrollback exceeds `term_h × 2` wrapped rows,
+   `promote_scrollback` drains the oldest lines into terminal scrollback
+   via `insert_before`.
+
+The widget owns all partial-line state. The harness never touches a
+partial line.
+
+### 8.4 Daemon interface
+
+The TUI connects to the executor daemon over a Unix-domain socket in the
+state directory.
+
+**Two connection types.**
+
+- **Persistent connection** — opened at TUI startup and held for the
+  lifetime of the TUI. Carries request/response ops (`ls`, `stop`,
+  `resume`, etc.) and receives unsolicited `DaemonEvent` broadcasts
+  (`RunStarted`, `RunCompleted`, `RunFailed`, `RunStopped`,
+  `StageTransition`, `LogLine`, `Bail`). The daemon processes requests
+  sequentially on a connection; the TUI client serialises request sends
+  under a lock to keep request order aligned with response order on the
+  wire.
+- **Ephemeral connections** — one per chat message. Chat is a streaming
+  op that monopolises a connection, so it gets its own socket. The
+  daemon spawns an ephemeral chat gremlin (a `"chat"` definition with a
+  single agent stage) and forwards `InteractiveEvent` values as JSON-line
+  events until `Done` or `Ended`. A separate ephemeral connection is also
+  used for `log` with `follow: true`.
+
+**Chat protocol.** Each chat message opens a fresh socket and sends:
+
+```json
+{"op": "chat", "text": "<user message>", "history": [{"role": "user"|"assistant", "content": "..."}, ...]}
+```
+
+The daemon builds a single-stage ephemeral gremlin from the chat text and
+conversation history (rendered as a transcript in the system prompt),
+launches it, and forwards stream events as JSON lines:
+
+| Event type | Content |
+|---|---|
+| `stream_chunk` | `{"type": "stream_chunk", "text": "..."}` |
+| `reasoning_chunk` | `{"type": "reasoning_chunk", "text": "..."}` |
+| `tool_result` | `{"type": "tool_result", "name": "...", "output": "..."}` |
+| `turn_complete` | `{"type": "turn_complete", "turn": N, "text": "...", "tool_calls": [...]}` |
+| `done` | `{"type": "done", "text": "...", "usage": {...}}` |
+| `ended` | `{"type": "ended", "reason": "..."}` |
+| `error` | `{"type": "error", "message": "..."}` |
+
+The TUI parses these into `ChatEvent` variants and routes them into the
+`SplitWidget`. `done` and `ended` are terminal events — the TUI freezes
+the widget and closes the ephemeral connection. The chat task is spawned
+as a `tokio::spawn` so the TUI event loop can abort it on `Esc`.
+
+Daemon broadcasts (`run_started`, `run_completed`, etc.) are filtered out
+of the chat stream by `is_daemon_broadcast` and ignored on ephemeral
+connections — they arrive on the persistent connection instead.
+
+**Cancellation.** The TUI holds a `JoinHandle` for the chat task. On `Esc`
+during an active turn, the task is aborted, the widget is frozen, and
+`active_request` is cleared. Pending events already enqueued from the
+aborted task are harmless — the `Done`/`Ended`/`Error` handlers check
+`app.widget.is_none()` and skip when the widget has already been frozen.
+
+### 8.5 App state
+
+The `App` struct in `crates/gremlins-cli/src/tui/app.rs` holds all TUI
+state:
+
+- `scrollback_lines: Vec<(String, Style)>` — the transcript buffer.
+  Everything visible in the viewport scrollback area lives here: the
+  banner, daemon events, command output, frozen chat turns.
+- `widget: Option<SplitWidget>` — the active streaming widget, or `None`
+  when idle.
+- `conversation_history: Vec<Value>` — accumulated `{"role", "content"}`
+  pairs sent to the daemon with each chat request.
+- `current_response: String` — accumulated assistant text for the current
+  turn, committed to `conversation_history` on `Done`.
+- `active_request: bool` — guards against concurrent chat submissions.
+- `pending_user_message: String` — the user's message for the in-flight
+  turn, committed to `conversation_history` on `Done`.
+- `active_runs: HashMap<String, String>` — gremlin ID → status, updated
+  by daemon events for the info bar counter.
+- `input: String` — current text in the input bar.
+
+`/clear` resets conversation state (`conversation_history`,
+`current_response`, `active_request`, `pending_user_message`) but does
+not touch `scrollback_lines` — the transcript persists.

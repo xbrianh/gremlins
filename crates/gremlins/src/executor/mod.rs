@@ -20,6 +20,7 @@ pub mod run;
 pub mod socket;
 pub mod state;
 pub mod supervisor;
+pub use supervisor::DaemonEvent;
 pub mod vars;
 
 /// Why a gremlin run failed.

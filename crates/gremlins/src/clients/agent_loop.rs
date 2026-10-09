@@ -90,6 +90,8 @@ pub(crate) struct RunContext {
     pub(crate) expected_artifact_paths: Vec<PathBuf>,
     pub(crate) reminder_budget: usize,
     pub(crate) completion_nudge_budget: usize,
+    pub(crate) stream_events:
+        Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
 }
 
 impl RunContext {
@@ -229,6 +231,7 @@ pub(crate) async fn run_agent_loop(
         ctx.completion_nudge_budget,
         &ctx.params.log_tx,
         interactive,
+        ctx.stream_events.clone(),
     )
     .await
 }
@@ -284,6 +287,7 @@ pub(crate) async fn run_agent_loop_nested(
         0,
         completion_nudge_budget,
         &log_tx,
+        None,
         None,
     )
     .await;
@@ -460,6 +464,7 @@ async fn run_agent_loop_core(
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     interactive: Option<InteractiveSession>,
+    stream_events: Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
 ) -> Result<CompletedRun, ClientError> {
     // Destructure the interactive session into its components so we can
     // thread them independently through the loop.
@@ -730,6 +735,35 @@ async fn run_agent_loop_core(
                         first_token = Some(now);
                     }
                     last_token = Some(now);
+                    // Emit stream deltas via stream_events channel.
+                    // Gate on receiver_count to avoid per-token allocation
+                    // for non-interactive runs with no subscriber.
+                    if let Some(ref se) = stream_events {
+                        if se.receiver_count() > 0 {
+                            match &chunk {
+                                Item::Event(StreamEvent::Text { ref text, .. }) => {
+                                    let _ = se
+                                        .send(InteractiveEvent::StreamChunk { text: text.clone() });
+                                }
+                                Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
+                                    let _ = se.send(InteractiveEvent::ReasoningChunk {
+                                        text: text.clone(),
+                                    });
+                                }
+                                Item::Event(StreamEvent::End {
+                                    content: AssistantContent::ToolCall(tc),
+                                    ..
+                                }) => {
+                                    // Emit tool calls as reasoning so they
+                                    // appear in the live thought stream.
+                                    let _ = se.send(InteractiveEvent::ReasoningChunk {
+                                        text: format_tool_call(tc),
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     apply_chunk(chunk, &mut text, &mut reasoning, &mut tool_calls);
                 }
             }
@@ -760,18 +794,16 @@ async fn run_agent_loop_core(
             tool_calls.len(),
         );
 
-        // Emit TurnComplete if interactive mode is active, before text/tool_calls
+        // Emit TurnComplete via stream_events, before text/tool_calls
         // are consumed by the rest of the turn processing.
-        if interactive_active {
-            if let Some(ref evt_tx) = evt_tx {
+        // Gate on receiver_count to avoid allocation when no subscriber.
+        if let Some(ref se) = stream_events {
+            if se.receiver_count() > 0 {
                 log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
-                let _ = evt_tx.send(InteractiveEvent::TurnComplete {
+                let _ = se.send(InteractiveEvent::TurnComplete {
                     turn: turn_num,
                     text: text.clone(),
-                    tool_calls: tool_calls
-                        .iter()
-                        .map(|tc| tc.function.name.to_string())
-                        .collect(),
+                    tool_calls: tool_calls.iter().map(format_tool_call).collect(),
                 });
             }
         }
@@ -919,13 +951,17 @@ async fn run_agent_loop_core(
                         log_tx,
                     );
                 }
-                // Emit Done if interactive mode is active.
-                if let Some(ref evt_tx) = evt_tx {
-                    log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
-                    let _ = evt_tx.send(InteractiveEvent::Done {
-                        text: result_text.clone(),
-                        usage: Some(usage.clone()),
-                    });
+                // Emit Done via stream_events.
+                // Gate on receiver_count so non-interactive runs skip
+                // the allocation.
+                if let Some(ref se) = stream_events {
+                    if se.receiver_count() > 0 {
+                        log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
+                        let _ = se.send(InteractiveEvent::Done {
+                            text: result_text.clone(),
+                            usage: Some(usage.clone()),
+                        });
+                    }
                 }
                 return Ok(completed_run(Some(result_text), captured, usage));
             }
@@ -1169,6 +1205,22 @@ async fn run_agent_loop_core(
                     evts.push(result_evt);
                 }
             }
+            // Emit tool result via stream_events.
+            // Gate on receiver_count to avoid allocation when no subscriber.
+            if let Some(ref se) = stream_events {
+                if se.receiver_count() > 0 {
+                    // For Read, truncate to a reasonable preview.
+                    let display = if job.name == "Read" {
+                        trunc(&output, 500)
+                    } else {
+                        trunc(&output, 200)
+                    };
+                    let _ = se.send(InteractiveEvent::ToolResult {
+                        name: job.name.clone(),
+                        output: display,
+                    });
+                }
+            }
             ledger.push(ledger_line(&job.name, &job.key, &output));
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
@@ -1235,6 +1287,58 @@ pub(crate) fn apply_chunk(
         },
         Item::Event(StreamEvent::Reasoning { text: r, .. }) => reasoning.push_str(&r),
         _ => {}
+    }
+}
+
+/// Format a tool call for human display — name plus the key argument.
+pub(crate) fn format_tool_call(tc: &ToolCall) -> String {
+    let name = &tc.function.name;
+    let args = &tc.function.arguments;
+
+    // Extract the primary argument for common tools.
+    let detail: Option<String> = match name.as_str() {
+        "Bash" => args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("command={s:?}")),
+        "Read" => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("path={s:?}")),
+        "Write" => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("path={s:?}")),
+        "Edit" => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("path={s:?}")),
+        "Glob" => args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("pattern={s:?}")),
+        "Grep" => args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("pattern={s:?}")),
+        "WebSearch" => args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("query={s:?}")),
+        "WebFetch" => args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("url={s:?}")),
+        "Task" => args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("description={s:?}")),
+        _ => None,
+    };
+
+    match detail {
+        Some(d) => format!("{name}({d})"),
+        None => name.to_string(),
     }
 }
 
@@ -1680,12 +1784,14 @@ mod tests {
                 task_clients_exact: HashMap::new(),
                 task_clients_prefix: HashMap::new(),
                 cancel_token: None,
+                stream_events: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
             expected_artifact_paths: vec![],
             reminder_budget: 0,
             completion_nudge_budget: 0,
+            stream_events: None,
         }
     }
 
@@ -3220,6 +3326,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let dyn_model = model.erase();
+        let evt_tx_clone = handle.evt_tx.clone();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -3240,6 +3347,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
+                Some(evt_tx_clone),
             )
             .await
         });
@@ -3324,6 +3432,7 @@ mod tests {
             ],
         ]);
         let dyn_model = model.erase();
+        let evt_tx_clone = handle.evt_tx.clone();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -3344,6 +3453,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
+                Some(evt_tx_clone),
             )
             .await
         });
@@ -3415,6 +3525,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let dyn_model = model.erase();
+        let evt_tx_clone = handle.evt_tx.clone();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -3435,6 +3546,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
+                Some(evt_tx_clone),
             )
             .await
         });
@@ -3495,6 +3607,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let dyn_model = model.erase();
+        let evt_tx_clone = handle.evt_tx.clone();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -3515,6 +3628,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
+                Some(evt_tx_clone),
             )
             .await
         });

@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -95,7 +96,7 @@ pub trait StateStore: Send + Sync + Debug {
     fn state_tree(&self) -> Map<String, Value>;
 
     /// Write `data` as `state.json` into the store's directory.
-    fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError>;
+    fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>;
 
     /// Open a named blob in the state directory. Creates parent directories
     /// as needed. The returned handle supports Read + Write + Seek.
@@ -841,7 +842,7 @@ impl StateStore for FileSystemStateStore {
         read_state_json(Some(&self.state_file()))
     }
 
-    fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+    fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError> {
         write_state(self.root.path(), data)
     }
 
@@ -1105,7 +1106,7 @@ impl StateStore for FileSystemStateStore {
                 copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
             }
 
-            let mut child_store = FileSystemStateStore {
+            let child_store = FileSystemStateStore {
                 root: StateRoot::Temp(child_temp),
             };
 
@@ -1153,7 +1154,7 @@ impl StateStore for FileSystemStateStore {
             // Seed registry from parent, remapping file-backed bindings
             // that point into the parent artifact directory to the
             // corresponding child paths.
-            let mut child_store = FileSystemStateStore::open(child_gremlin_id)?;
+            let child_store = FileSystemStateStore::open(child_gremlin_id)?;
             let parent_registry = self.read_registry_json().await;
             if !parent_registry.is_empty() {
                 let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
@@ -1258,7 +1259,7 @@ impl StateStore for ScopedFileSystemStateStore {
         self.inner.state_tree()
     }
 
-    fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+    fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError> {
         self.inner.write_state(data)
     }
 
@@ -1401,7 +1402,7 @@ impl StateStore for ScopedFileSystemStateStore {
 
 pub struct StateData {
     pub gremlin_id: Option<String>,
-    store: Box<dyn StateStore + Send + Sync>,
+    store: Arc<dyn StateStore + Send + Sync>,
 }
 
 impl StateData {
@@ -1411,7 +1412,7 @@ impl StateData {
         initial: &Map<String, Value>,
         ephemeral: bool,
     ) -> Result<Self, StateError> {
-        let store = Box::new(FileSystemStateStore::create(
+        let store = Arc::new(FileSystemStateStore::create(
             gremlin_id, initial, ephemeral,
         )?);
         let gremlin_id = Some(gremlin_id.to_string());
@@ -1420,7 +1421,7 @@ impl StateData {
 
     /// Open an existing state directory. Does NOT write anything.
     pub fn open(gremlin_id: &str) -> Result<Self, StateError> {
-        let store = Box::new(FileSystemStateStore::open(gremlin_id)?);
+        let store = Arc::new(FileSystemStateStore::open(gremlin_id)?);
         Ok(Self {
             gremlin_id: Some(gremlin_id.to_string()),
             store,
@@ -1431,7 +1432,17 @@ impl StateData {
         gremlin_id: Option<String>,
         store: Box<dyn StateStore + Send + Sync>,
     ) -> Self {
-        Self { gremlin_id, store }
+        Self {
+            gremlin_id,
+            store: Arc::from(store),
+        }
+    }
+
+    /// Return a clone of the inner [`StateStore`] [`Arc`] handle so that
+    /// callers (e.g. [`RunHandle`]) can read state without touching the
+    /// filesystem.
+    pub fn store_handle(&self) -> Arc<dyn StateStore + Send + Sync> {
+        Arc::clone(&self.store)
     }
 
     /// Access the inner [`StateStore`] for callers that need the trait object
@@ -1476,7 +1487,7 @@ impl StateData {
         self.store.state_tree()
     }
 
-    pub fn write_state(&mut self, data: &Map<String, Value>) -> Result<(), StateError> {
+    pub fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError> {
         self.store.write_state(data)
     }
 
@@ -1601,7 +1612,7 @@ impl StateData {
         }
         Self {
             gremlin_id: Some("test".into()),
-            store: Box::new(FileSystemStateStore::from_path(state_dir.to_path_buf())),
+            store: Arc::new(FileSystemStateStore::from_path(state_dir.to_path_buf())),
         }
     }
 
@@ -2342,7 +2353,7 @@ mod tests {
     fn write_state_writes_and_tree_reads_it() {
         with_sandbox(None, |sandbox| {
             let _sf = seed(sandbox, "gr-test");
-            let mut d = StateData::open("gr-test").unwrap();
+            let d = StateData::open("gr-test").unwrap();
             let mut data = Map::new();
             data.insert("stage".into(), Value::String("seeded".into()));
             d.write_state(&data).unwrap();
@@ -2841,7 +2852,7 @@ mod tests {
             fn state_tree(&self) -> Map<String, Value> {
                 unimplemented!()
             }
-            fn write_state(&mut self, _data: &Map<String, Value>) -> Result<(), StateError> {
+            fn write_state(&self, _data: &Map<String, Value>) -> Result<(), StateError> {
                 unimplemented!()
             }
             fn open(&self, _name: &str, _mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
