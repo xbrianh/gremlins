@@ -251,6 +251,15 @@ impl AnthropicBackend {
         let tool_filter = openai_protocol::tool_filter(native_block);
         let mut client_params = openai_protocol::string_map(extra_params);
 
+        // Enable prompt caching by default (5-min TTL).
+        // Users can override via cache_control=... or disable with cache_control=null.
+        if !client_params.contains_key("cache_control") {
+            client_params.insert(
+                "cache_control".to_string(),
+                "{\"type\":\"ephemeral\"}".to_string(),
+            );
+        }
+
         // Resolve max_tokens: client-spec override > default 128_000.
         let max_tokens: u64 = match client_params.remove("max_tokens") {
             Some(v) => match v.parse::<u64>() {
