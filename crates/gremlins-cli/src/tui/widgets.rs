@@ -2,7 +2,7 @@ use ratatui::{
     prelude::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 
@@ -20,8 +20,8 @@ pub type FrozenLines = (Vec<(String, Style)>, Vec<(String, Style)>);
 /// the event loop calls `set_viewport_height` to grow or shrink the
 /// inline terminal viewport.
 pub trait DynamicWidget {
-    /// Current height in rows given the available terminal height (0 when empty).
-    fn height(&self, available: u16) -> u16;
+    /// Current height in rows given the terminal width and available height (0 when empty).
+    fn height(&self, width: u16, available: u16) -> u16;
     /// True when there is no content to render.
     fn is_empty(&self) -> bool;
     /// Render into the given area. The widget may use internal scrolling
@@ -56,6 +56,34 @@ pub struct SplitWidget {
     stream_partial: String,
 }
 
+/// Wrapped-row helper: computes total wrapped rows for a buffer of [`Line`]s
+/// plus an optional partial string, at the given width. Uses the same
+/// `chars.div_ceil(width)` formula as [`App::scrollback_height`].
+fn wrapped_rows(lines: &[Line], partial: &str, width: u16) -> u16 {
+    let wrap_width = (width as usize).max(1);
+    let mut total: u16 = 0;
+    for line in lines {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let chars = text.chars().count();
+        let rows = if chars == 0 {
+            1
+        } else {
+            chars.div_ceil(wrap_width)
+        };
+        total = total.saturating_add(rows as u16);
+    }
+    if !partial.is_empty() {
+        let chars = partial.chars().count();
+        let rows = if chars == 0 {
+            1
+        } else {
+            chars.div_ceil(wrap_width)
+        };
+        total = total.saturating_add(rows as u16);
+    }
+    total
+}
+
 impl SplitWidget {
     pub fn new() -> Self {
         Self {
@@ -66,15 +94,13 @@ impl SplitWidget {
         }
     }
 
-    /// Compute (stream_h, response_h) given available height.
+    /// Compute (stream_h, response_h) given terminal width and available height.
     ///
     /// Response gets priority. Stream never goes below `STREAM_MIN` when
     /// response is present. Returns (0, 0) when both buffers are empty.
-    pub fn layout(&self, available: u16) -> (u16, u16) {
-        let stream_content =
-            self.stream_lines.len() as u16 + if self.stream_partial.is_empty() { 0 } else { 1 };
-        let response_content =
-            self.response_lines.len() as u16 + if self.partial.is_empty() { 0 } else { 1 };
+    pub fn layout(&self, width: u16, available: u16) -> (u16, u16) {
+        let stream_content = wrapped_rows(&self.stream_lines, &self.stream_partial, width);
+        let response_content = wrapped_rows(&self.response_lines, &self.partial, width);
 
         if stream_content == 0 && response_content == 0 {
             return (0, 0);
@@ -160,8 +186,8 @@ impl SplitWidget {
 }
 
 impl DynamicWidget for SplitWidget {
-    fn height(&self, available: u16) -> u16 {
-        let (sh, rh) = self.layout(available);
+    fn height(&self, width: u16, available: u16) -> u16 {
+        let (sh, rh) = self.layout(width, available);
         sh + rh
     }
 
@@ -173,7 +199,7 @@ impl DynamicWidget for SplitWidget {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
-        let (stream_h, response_h) = self.layout(area.height);
+        let (stream_h, response_h) = self.layout(area.width, area.height);
 
         if stream_h == 0 && response_h == 0 {
             return;
@@ -199,8 +225,12 @@ impl DynamicWidget for SplitWidget {
                 width: area.width,
                 height: stream_h.min(remaining_h),
             };
-            let scroll = lines.len().saturating_sub(stream_area.height as usize) as u16;
-            let paragraph = Paragraph::new(lines).scroll((scroll, 0));
+            let total_wrapped =
+                wrapped_rows(&self.stream_lines, &self.stream_partial, area.width) as usize;
+            let scroll = total_wrapped.saturating_sub(stream_area.height as usize) as u16;
+            let paragraph = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0));
             frame.render_widget(paragraph, stream_area);
             y += stream_area.height;
             remaining_h = remaining_h.saturating_sub(stream_area.height);
@@ -220,8 +250,12 @@ impl DynamicWidget for SplitWidget {
                 width: area.width,
                 height: response_h.min(remaining_h),
             };
-            let scroll = lines.len().saturating_sub(response_area.height as usize) as u16;
-            let paragraph = Paragraph::new(lines).scroll((scroll, 0));
+            let total_wrapped =
+                wrapped_rows(&self.response_lines, &self.partial, area.width) as usize;
+            let scroll = total_wrapped.saturating_sub(response_area.height as usize) as u16;
+            let paragraph = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0));
             frame.render_widget(paragraph, response_area);
         }
     }

@@ -283,7 +283,8 @@ async fn run_app(
     loop {
         let gremlin_count = app.gremlin_count_str();
         let project_name = app.project_name_str().to_string();
-        terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name, term_h))?;
+        terminal
+            .draw(|frame| render(frame, &app, &gremlin_count, &project_name, term_w, term_h))?;
 
         tokio::select! {
             // ── Crossterm events ──────────────────────────────
@@ -488,7 +489,7 @@ async fn run_app(
 
                                 // Force an immediate frame so "thinking..."
                                 // appears without waiting for the next event.
-                                terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name, term_h))?;
+                                terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name, term_w, term_h))?;
 
                                 app.active_request = true;
                                 app.pending_user_message = input.clone();
