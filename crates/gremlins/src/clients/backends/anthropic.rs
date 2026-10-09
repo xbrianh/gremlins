@@ -251,6 +251,15 @@ impl AnthropicBackend {
         let tool_filter = openai_protocol::tool_filter(native_block);
         let mut client_params = openai_protocol::string_map(extra_params);
 
+        // Enable prompt caching by default (5-min TTL).
+        // Users can override via cache_control=... or disable with cache_control=null.
+        if !client_params.contains_key("cache_control") {
+            client_params.insert(
+                "cache_control".to_string(),
+                "{\"type\":\"ephemeral\"}".to_string(),
+            );
+        }
+
         // Resolve max_tokens: client-spec override > default 128_000.
         let max_tokens: u64 = match client_params.remove("max_tokens") {
             Some(v) => match v.parse::<u64>() {
@@ -819,5 +828,91 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("max_tokens".into(), "4096".into());
         assert!(build_anthropic_extra_params(&params).is_none());
+    }
+
+    // ── cache_control default / override tests ───────────────────────
+
+    /// Absent `cache_control` key → default `{"type":"ephemeral"}` is inserted.
+    #[test]
+    fn cache_control_default_ephemeral_when_absent() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
+
+        let backend = AnthropicBackend::build_concrete(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        )
+        .unwrap();
+
+        let val = backend.state.client_params.get("cache_control");
+        assert!(
+            val.is_some(),
+            "cache_control must be present when not explicitly set"
+        );
+        assert_eq!(
+            val.unwrap(),
+            "{\"type\":\"ephemeral\"}",
+            "default cache_control must be ephemeral"
+        );
+    }
+
+    /// Explicit `cache_control=null` is preserved (not overwritten by the default).
+    #[test]
+    fn cache_control_null_preserved() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
+
+        let mut extra = indexmap::IndexMap::new();
+        extra.insert("cache_control".into(), "null".into());
+
+        let backend = AnthropicBackend::build_concrete(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &extra,
+        )
+        .unwrap();
+
+        let val = backend.state.client_params.get("cache_control");
+        assert!(
+            val.is_some(),
+            "cache_control key must still be present when set to null"
+        );
+        assert_eq!(
+            val.unwrap(),
+            "null",
+            "explicit cache_control=null must not be overwritten"
+        );
+    }
+
+    /// Explicit `cache_control` with a custom TTL wins over the default.
+    #[test]
+    fn cache_control_custom_ttl_wins() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
+
+        let mut extra = indexmap::IndexMap::new();
+        extra.insert(
+            "cache_control".into(),
+            "{\"type\":\"ephemeral\",\"ttl\":\"1h\"}".into(),
+        );
+
+        let backend = AnthropicBackend::build_concrete(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &extra,
+        )
+        .unwrap();
+
+        let val = backend.state.client_params.get("cache_control");
+        assert!(
+            val.is_some(),
+            "cache_control must be present when explicitly set"
+        );
+        assert_eq!(
+            val.unwrap(),
+            "{\"type\":\"ephemeral\",\"ttl\":\"1h\"}",
+            "user-supplied cache_control must not be overwritten"
+        );
     }
 }
