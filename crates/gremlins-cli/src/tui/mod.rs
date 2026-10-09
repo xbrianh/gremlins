@@ -3,6 +3,7 @@ pub mod chat;
 pub mod client;
 pub mod commands;
 pub mod editor;
+pub mod overlays;
 pub mod ui;
 pub mod widgets;
 
@@ -25,7 +26,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
-use app::App;
+use app::{ActiveRun, App, Overlay};
 use chat::{send_message, ChatEvent};
 use commands::{dispatch, CommandResult};
 use editor::open_editor;
@@ -74,6 +75,51 @@ fn has_active_widget(app: &App) -> bool {
     app.transcript.last().is_some_and(|w| !w.is_expandable())
 }
 
+/// Abort the dedicated log-follow task for the single-gremlin overlay.
+fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
+    if let Some(handle) = handle.take() {
+        handle.abort();
+    }
+}
+
+/// Route a submitted line from the debug overlay prompt.
+fn handle_overlay_prompt_submit(app: &mut App) {
+    let Some(input) = app.take_overlay_prompt() else {
+        return;
+    };
+
+    // The daemon debug interface may or may not be connected yet. Mirror
+    // the command in the overlay scrollback and keep the shell usable.
+    app.push_overlay_debug_output(format!("debug> {input}"));
+
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    // Accept both `help` and `/help`, including whitespace-padded input.
+    let normalized: String = trimmed
+        .trim_start_matches('/')
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let normalized = normalized.to_lowercase();
+    match normalized.as_str() {
+        "help" => {
+            app.push_overlay_debug_output(
+                "debug commands: help, exit — full debug session support not yet available"
+                    .to_string(),
+            );
+        }
+        "exit" => app.overlay = None,
+        _ => {
+            app.push_overlay_debug_output(
+                "debug not yet available — placeholder session only".to_string(),
+            );
+        }
+    }
+}
+
 /// Initialise the terminal, run the event loop, and restore on exit.
 pub async fn run() {
     // Refuse to start the TUI when stdout is not a terminal.
@@ -117,12 +163,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
         Ok(resp) => {
             if let Some(gremlins) = resp.get("gremlins").and_then(|v| v.as_array()) {
                 for entry in gremlins {
-                    if let (Some(id), Some(status)) = (
-                        entry.get("id").and_then(|v| v.as_str()),
-                        entry.get("status").and_then(|v| v.as_str()),
-                    ) {
-                        app.active_runs.insert(id.to_string(), status.to_string());
-                    }
+                    app.upsert_run_from_ls(entry);
                 }
             }
         }
@@ -159,10 +200,13 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
     let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Vec<String>>();
 
     // ── Channel for run-snapshot refreshes (after event_lagged) ───
-    let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel::<HashMap<String, String>>();
+    let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel::<HashMap<String, ActiveRun>>();
 
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
+    // Dedicated follow for the single-gremlin log overlay.
+    let mut overlay_log_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut overlay_log_following: Option<String> = None;
     // ── Chat task handle (aborted on Esc to stop the agent) ───────
     let mut chat_task: Option<tokio::task::JoinHandle<()>> = None;
     // Oneshot sender to cancel the socket-reader spawned inside
@@ -207,6 +251,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         KeyCode::Char('d')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
+                            if app.overlay.as_ref().is_some_and(Overlay::has_prompt) {
+                                app.overlay = None;
+                                continue;
+                            }
                             if app.input.is_empty() {
                                 break;
                             }
@@ -228,6 +276,17 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                             app.toggle_expand_all();
                         }
                         KeyCode::Esc => {
+                            // Blocking overlays (single-watch, debug) dismiss first.
+                            if app.dismiss_blocking_overlay() {
+                                abort_overlay_log_follow(&mut overlay_log_handle);
+                                overlay_log_following = None;
+                                continue;
+                            }
+                            // Then the non-blocking watch table.
+                            if app.dismiss_watch_overlay() {
+                                continue;
+                            }
+
                             app.input.clear();
                             // If a chat request is in-flight, abort it to
                             // stop the agent loop and all tool calls.
@@ -242,8 +301,23 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                             }
                         }
                         KeyCode::Enter => {
+                            // Debug overlay owns a prompt: submit into its
+                            // scrollback instead of the main input bar.
+                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                handle_overlay_prompt_submit(&mut app);
+                                continue;
+                            }
+
                             let input = std::mem::take(&mut app.input);
                             if input.is_empty() {
+                                continue;
+                            }
+
+                            // A blocking single-watch overlay only accepts
+                            // slash commands; plain chat text is ignored.
+                            if app.overlay.as_ref().is_some_and(Overlay::is_blocking)
+                                && !input.trim_start().starts_with('/')
+                            {
                                 continue;
                             }
 
@@ -255,6 +329,65 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
 
                             if let Some(result) = dispatch(&input) {
                                 match result {
+                                    CommandResult::ToggleWatch => {
+                                        if app.overlay.as_ref().is_some_and(|o| !matches!(o, Overlay::Watch)) {
+                                            abort_overlay_log_follow(&mut overlay_log_handle);
+                                            overlay_log_following = None;
+                                        }
+                                        match app.overlay {
+                                            Some(Overlay::Watch) => app.overlay = None,
+                                            _ => app.overlay = Some(Overlay::Watch),
+                                        }
+                                    }
+                                    CommandResult::WatchSingle(id) => {
+                                        // Close any existing overlay log follow first.
+                                        abort_overlay_log_follow(&mut overlay_log_handle);
+                                        overlay_log_following = Some(id.clone());
+                                        app.open_watch_single(id.clone());
+                                        let log_tx = log_tx.clone();
+                                        let follow_id = id.clone();
+                                        let follow_task = tokio::spawn(async move {
+                                            match client::follow_log(&follow_id).await {
+                                                Ok((mut rx, handle)) => {
+                                                    let _guard = AbortOnDrop(handle);
+                                                    while let Some(raw) = rx.recv().await {
+                                                        let Some(line) = raw
+                                                            .get("line")
+                                                            .and_then(|v| v.as_str())
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        let tagged = serde_json::json!({
+                                                            "type": "overlay_log",
+                                                            "id": follow_id,
+                                                            "line": line,
+                                                        });
+                                                        if log_tx.send(tagged).is_err() {
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    let _ = log_tx.send(
+                                                        serde_json::json!({
+                                                            "type": "overlay_error",
+                                                            "id": follow_id,
+                                                            "message": e,
+                                                        }),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                        overlay_log_handle = Some(follow_task);
+                                    }
+                                    CommandResult::Debug(id) => {
+                                        abort_overlay_log_follow(&mut overlay_log_handle);
+                                        overlay_log_following = None;
+                                        app.open_debug(id);
+                                        app.push_overlay_debug_output(
+                                            "debug session connected — command support not yet available".to_string(),
+                                        );
+                                    }
                                     CommandResult::Lines(lines) => {
                                         let mut styled: Vec<(String, Style)> = Vec::new();
                                         let prompt_style = Style::default().fg(Color::Cyan);
@@ -413,10 +546,18 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                             }
                         }
                         KeyCode::Backspace => {
-                            app.input.pop();
+                            if let Some(prompt) = app.overlay_prompt_mut() {
+                                prompt.pop();
+                            } else {
+                                app.input.pop();
+                            }
                         }
                         KeyCode::Char(ch) => {
-                            app.input.push(ch);
+                            if let Some(prompt) = app.overlay_prompt_mut() {
+                                prompt.push(ch);
+                            } else {
+                                app.input.push(ch);
+                            }
                         }
                         _ => {}
                     },
@@ -459,10 +600,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
                         let msg = format!("[{id}] stage → {stage}");
                         app.push_system_line(msg);
+                        app.on_stage_transition(id, stage);
                     }
                     gremlins::executor::DaemonEvent::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
-                            app.push_system_line(line);
+                            app.push_system_line(line.clone());
+                        }
+                        if overlay_log_following.as_deref() == Some(&id) {
+                            app.push_overlay_log_line(line);
                         }
                     }
                     gremlins::executor::DaemonEvent::Bail { id, reason } => {
@@ -477,6 +622,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                 if raw.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
                     let c = Arc::clone(&client);
                     let tx = snapshot_tx.clone();
+                    let fallback_project = app.project_name_str().to_string();
                     tokio::spawn(async move {
                         if let Ok(resp) = c.send_request(serde_json::json!({"op": "ls"})).await {
                             let mut runs = HashMap::new();
@@ -484,13 +630,39 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 resp.get("gremlins").and_then(|v| v.as_array())
                             {
                                 for entry in gremlins {
-                                    if let (Some(id), Some(status)) = (
-                                        entry.get("id").and_then(|v| v.as_str()),
-                                        entry.get("status").and_then(|v| v.as_str()),
-                                    ) {
+                                    if let Some(id) =
+                                        entry.get("id").and_then(|v| v.as_str())
+                                    {
+                                        let project = entry
+                                            .get("project")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let project = if project.is_empty() {
+                                            fallback_project.clone()
+                                        } else {
+                                            project
+                                        };
                                         runs.insert(
                                             id.to_string(),
-                                            status.to_string(),
+                                            ActiveRun {
+                                                status: entry
+                                                    .get("status")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                stage: entry
+                                                    .get("stage")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                definition: entry
+                                                    .get("definition")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                project,
+                                            },
                                         );
                                     }
                                 }
@@ -509,26 +681,61 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
             }
 
             // ── Run-snapshot refresh (after event_lagged) ─────
-            Some(runs) = snapshot_rx.recv() => {
+            Some(mut runs) = snapshot_rx.recv() => {
+                for run in runs.values_mut() {
+                    if run.project.is_empty() {
+                        run.project = app.project_name.clone();
+                    }
+                }
                 app.active_runs = runs;
             }
 
-            // ── Log follow lines (from dedicated connection) ──
+            // ── Log follow lines (from dedicated connections) ──
             Some(raw) = log_rx.recv() => {
-                if raw.get("type").and_then(|v| v.as_str()) == Some("log_line") {
-                    if let Some(line) = raw.get("line").and_then(|v| v.as_str()) {
-                        if app.following_log.is_some() {
-                            app.push_system_line(line.to_string());
+                match raw.get("type").and_then(|v| v.as_str()) {
+                    Some("log_line") => {
+                        if let Some(line) = raw.get("line").and_then(|v| v.as_str()) {
+                            if app.following_log.is_some() {
+                                app.push_system_line(line.to_string());
+                            }
                         }
                     }
-                } else if raw.get("type").and_then(|v| v.as_str()) == Some("error") {
-                    let msg = raw
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown error");
-                    let full = format!("error: {msg}");
-                    app.push_system_line(full);
-                    app.following_log = None;
+                    Some("overlay_log") => {
+                        // Scope the line to the currently followed gremlin so
+                        // queued messages from an aborted follow can't leak
+                        // into a newly opened viewer for another id.
+                        if let (Some(id), Some(line)) = (
+                            raw.get("id").and_then(|v| v.as_str()),
+                            raw.get("line").and_then(|v| v.as_str()),
+                        ) {
+                            if overlay_log_following.as_deref() == Some(id) {
+                                app.push_overlay_log_line(line.to_string());
+                            }
+                        }
+                    }
+                    Some("overlay_error") => {
+                        if let (Some(id), Some(message)) = (
+                            raw.get("id").and_then(|v| v.as_str()),
+                            raw.get("message").and_then(|v| v.as_str()),
+                        ) {
+                            if overlay_log_following.as_deref() == Some(id) {
+                                app.push_overlay_log_line(format!("error: {message}"));
+                                overlay_log_following = None;
+                            }
+                        }
+                    }
+                    Some("error") => {
+                        let msg = raw
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown error");
+                        let full = format!("error: {msg}");
+                        if app.following_log.is_some() {
+                            app.push_system_line(full.clone());
+                            app.following_log = None;
+                        }
+                    }
+                    _ => {}
                 }
             }
 

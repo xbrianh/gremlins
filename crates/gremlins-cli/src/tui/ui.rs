@@ -7,7 +7,10 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::App;
+use crate::tui::app::{App, Overlay};
+use crate::tui::overlays::{
+    render_debug_overlay, render_watch_overlay, render_watch_single_overlay,
+};
 
 /// Render the bottom-region TUI layout.
 ///
@@ -31,10 +34,37 @@ pub fn render(frame: &mut Frame, app: &App, gremlin_count: &str, project_name: &
     render_info_bar(frame, chunks[2], app, gremlin_count, project_name);
 }
 
+/// Render the transcript area, splitting it when an overlay is active.
+fn render_transcript(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+
+    match &app.overlay {
+        Some(Overlay::Watch) => {
+            // Reserve the upper portion for the watch table; keep rendering
+            // the transcript below so recent widgets remain visible.
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(45), Constraint::Min(0)])
+                .split(area);
+            render_watch_overlay(frame, split[0], app);
+            render_widgets_bottom_up(frame, split[1], app);
+        }
+        Some(Overlay::WatchSingle { .. }) => {
+            render_watch_single_overlay(frame, area, app);
+        }
+        Some(Overlay::Debug { .. }) => {
+            render_debug_overlay(frame, area, app);
+        }
+        None => render_widgets_bottom_up(frame, area, app),
+    }
+}
+
 /// Render widgets bottom-up. Stop when the transcript area is full.
 /// Widgets taller than the remaining space are still rendered — they get
 /// a clipped area and use internal paragraph scrolling to show content.
-fn render_transcript(frame: &mut Frame, area: Rect, app: &App) {
+fn render_widgets_bottom_up(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }

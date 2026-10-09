@@ -15,6 +15,12 @@ pub enum CommandResult {
     ShowHistory,
     /// Truncate conversation history at the given 0-based index.
     TruncateHistory(usize),
+    /// Toggle the non-blocking gremlins watch table.
+    ToggleWatch,
+    /// Open a single-gremlin log viewer overlay.
+    WatchSingle(String),
+    /// Open an interactive debug session overlay.
+    Debug(String),
 }
 
 /// Parse `input` (minus the leading `/`) and dispatch.
@@ -95,6 +101,23 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 payload: serde_json::json!({"op": "log", "id": id, "follow": true}),
             })
         }
+        "watch" => {
+            if let Some(id) = args.first() {
+                Some(CommandResult::WatchSingle(id.to_string()))
+            } else {
+                Some(CommandResult::ToggleWatch)
+            }
+        }
+        "debug" => {
+            let id = args.first().copied().unwrap_or("");
+            if id.is_empty() {
+                return Some(CommandResult::Lines(vec![
+                    "> /debug".to_string(),
+                    "usage: /debug <id>".to_string(),
+                ]));
+            }
+            Some(CommandResult::Debug(id.to_string()))
+        }
         "model" => Some(CommandResult::Lines(vec![format!(
             "default client: {}",
             gremlins::config::global_config()
@@ -128,6 +151,9 @@ fn help_text() -> Vec<String> {
         "  /stop <id>       — stop a gremlin".to_string(),
         "  /resume <id>     — resume a gremlin".to_string(),
         "  /log <id>        — show gremlin log".to_string(),
+        "  /watch           — toggle the gremlins watch table".to_string(),
+        "  /watch <id>      — open a single-gremlin log viewer".to_string(),
+        "  /debug <id>      — open an interactive debug session".to_string(),
         "  /model           — show default client".to_string(),
         "  /history         — show conversation history".to_string(),
         "  /rollback <n>    — truncate history at turn n".to_string(),

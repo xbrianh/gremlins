@@ -25,8 +25,8 @@ use crate::tui::widgets::{ActivePromptWidget, SystemWidget, Widget, WidgetEvent}
 pub struct App {
     /// Current text in the input bar.
     pub input: String,
-    /// Live gremlin state: id → status ("running", "done", "stopped").
-    pub active_runs: HashMap<String, String>,
+    /// Live gremlin state: id → run details.
+    pub active_runs: HashMap<String, ActiveRun>,
     /// Cached project name for the info bar.
     pub project_name: String,
     /// When Some, the TUI is following a gremlin's log and printing log lines
@@ -43,6 +43,61 @@ pub struct App {
     /// Transcript widget list. Rendered bottom-up; widgets that don't fit
     /// scroll off the top into the terminal's scrollback buffer.
     pub transcript: Vec<Box<dyn Widget>>,
+    /// Active ephemeral overlay, if any.
+    pub overlay: Option<Overlay>,
+}
+
+/// One tracked gremlin run.
+#[derive(Debug, Clone)]
+pub struct ActiveRun {
+    /// "running", "done", "failed", or "stopped".
+    pub status: String,
+    /// Most recent stage reported by the daemon.
+    pub stage: String,
+    /// Pipeline name carried by [`gremlins::executor::DaemonEvent::RunStarted`].
+    pub definition: String,
+    /// Project associated with the run.
+    pub project: String,
+}
+
+impl ActiveRun {
+    pub fn new(status: impl Into<String>) -> Self {
+        Self {
+            status: status.into(),
+            stage: String::new(),
+            definition: String::new(),
+            project: String::new(),
+        }
+    }
+}
+
+/// Ephemeral overlay widgets rendered above the transcript.
+#[derive(Debug, Clone)]
+pub enum Overlay {
+    /// Gremlins watch table. Non-blocking; main input bar still works.
+    Watch,
+    /// Single-gremlin log viewer. Blocking overlay with its own log buffer.
+    WatchSingle { id: String, log_lines: Vec<String> },
+    /// Interactive debug session. Blocking overlay with its own prompt.
+    Debug {
+        id: String,
+        input: String,
+        history: Vec<String>,
+    },
+}
+
+impl Overlay {
+    /// Blocking overlays occlude the transcript and disable the main input
+    /// bar (slash commands are still accepted for `WatchSingle`; `Debug` has
+    /// its own prompt).
+    pub fn is_blocking(&self) -> bool {
+        !matches!(self, Overlay::Watch)
+    }
+
+    /// Whether this overlay owns a prompt that should receive keystrokes.
+    pub fn has_prompt(&self) -> bool {
+        matches!(self, Overlay::Debug { .. })
+    }
 }
 
 impl App {
@@ -62,6 +117,7 @@ impl App {
             active_request: false,
             pending_user_message: String::new(),
             transcript: Vec::new(),
+            overlay: None,
         }
     }
 
@@ -70,7 +126,7 @@ impl App {
         let count = self
             .active_runs
             .values()
-            .filter(|s| *s == "running")
+            .filter(|r| r.status == "running")
             .count();
         count.to_string()
     }
@@ -80,24 +136,176 @@ impl App {
         &self.project_name
     }
 
+    /// Insert or merge a run entry from an `ls` response.
+    pub fn upsert_run_from_ls(&mut self, entry: &serde_json::Value) {
+        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
+            return;
+        };
+        let id = id.to_string();
+        let existing = self.active_runs.get(&id).cloned();
+
+        let status = entry
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or(existing.as_ref().map(|r| r.status.as_str()).unwrap_or(""))
+            .to_string();
+        let stage = entry
+            .get("stage")
+            .and_then(|v| v.as_str())
+            .unwrap_or(existing.as_ref().map(|r| r.stage.as_str()).unwrap_or(""))
+            .to_string();
+        let definition = entry
+            .get("definition")
+            .and_then(|v| v.as_str())
+            .unwrap_or(
+                existing
+                    .as_ref()
+                    .map(|r| r.definition.as_str())
+                    .unwrap_or(""),
+            )
+            .to_string();
+        let project = entry
+            .get("project")
+            .and_then(|v| v.as_str())
+            .unwrap_or(existing.as_ref().map(|r| r.project.as_str()).unwrap_or(""))
+            .to_string();
+        let project = if project.is_empty() {
+            self.project_name.clone()
+        } else {
+            project.to_string()
+        };
+
+        self.active_runs.insert(
+            id,
+            ActiveRun {
+                status,
+                stage,
+                definition,
+                project,
+            },
+        );
+    }
+
     /// Update state when a run starts.
-    pub fn on_run_started(&mut self, id: String, _definition: String, _stage: String) {
-        self.active_runs.insert(id, "running".to_string());
+    pub fn on_run_started(&mut self, id: String, definition: String, stage: String) {
+        self.active_runs.insert(
+            id,
+            ActiveRun {
+                status: "running".to_string(),
+                stage,
+                definition,
+                project: self.project_name.clone(),
+            },
+        );
     }
 
     /// Update state when a run completes.
     pub fn on_run_completed(&mut self, id: String) {
-        self.active_runs.insert(id, "done".to_string());
+        self.update_run_status(&id, "done");
     }
 
     /// Update state when a run fails.
     pub fn on_run_failed(&mut self, id: String) {
-        self.active_runs.insert(id, "failed".to_string());
+        self.update_run_status(&id, "failed");
     }
 
     /// Update state when a run is stopped.
     pub fn on_run_stopped(&mut self, id: String) {
-        self.active_runs.insert(id, "stopped".to_string());
+        self.update_run_status(&id, "stopped");
+    }
+
+    /// Update the stage of an existing run in-place.
+    pub fn on_stage_transition(&mut self, id: String, stage: String) {
+        if let Some(run) = self.active_runs.get_mut(&id) {
+            run.stage = stage;
+        }
+    }
+
+    fn update_run_status(&mut self, id: &str, status: &str) {
+        match self.active_runs.get_mut(id) {
+            Some(run) => run.status = status.to_string(),
+            None => {
+                self.active_runs
+                    .insert(id.to_string(), ActiveRun::new(status));
+            }
+        }
+    }
+
+    // ── Overlay helpers ────────────────────────────────────────────
+
+    pub fn overlay_is_watch(&self) -> bool {
+        matches!(self.overlay, Some(Overlay::Watch))
+    }
+
+    /// Whether the main input bar should be disabled by the active overlay.
+    #[allow(dead_code)]
+    pub fn overlay_blocks_input(&self) -> bool {
+        self.overlay.as_ref().is_some_and(Overlay::is_blocking)
+    }
+
+    /// Dismiss a blocking overlay. Returns true if one was dismissed.
+    pub fn dismiss_blocking_overlay(&mut self) -> bool {
+        if self.overlay.as_ref().is_some_and(Overlay::is_blocking) {
+            self.overlay = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Dismiss the non-blocking watch table. Returns true if it was dismissed.
+    pub fn dismiss_watch_overlay(&mut self) -> bool {
+        if self.overlay_is_watch() {
+            self.overlay = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn open_watch_single(&mut self, id: String) {
+        self.overlay = Some(Overlay::WatchSingle {
+            id,
+            log_lines: Vec::new(),
+        });
+    }
+
+    pub fn open_debug(&mut self, id: String) {
+        self.overlay = Some(Overlay::Debug {
+            id,
+            input: String::new(),
+            history: Vec::new(),
+        });
+    }
+
+    /// Mutable debug-prompt input, when the debug overlay is active.
+    pub fn overlay_prompt_mut(&mut self) -> Option<&mut String> {
+        match self.overlay {
+            Some(Overlay::Debug { ref mut input, .. }) => Some(input),
+            _ => None,
+        }
+    }
+
+    /// Take the debug prompt for submission.
+    pub fn take_overlay_prompt(&mut self) -> Option<String> {
+        match &mut self.overlay {
+            Some(Overlay::Debug { input, .. }) => Some(std::mem::take(input)),
+            _ => None,
+        }
+    }
+
+    /// Append a line to the active single-gremlin log overlay, if visible.
+    pub fn push_overlay_log_line(&mut self, line: String) {
+        if let Some(Overlay::WatchSingle { log_lines, .. }) = &mut self.overlay {
+            log_lines.push(line);
+        }
+    }
+
+    /// Append a line to the debug overlay scrollback, if visible.
+    pub fn push_overlay_debug_output(&mut self, line: String) {
+        if let Some(Overlay::Debug { history, .. }) = &mut self.overlay {
+            history.push(line);
+        }
     }
 
     // ── Transcript helpers ──────────────────────────────────────────
