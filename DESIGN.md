@@ -666,174 +666,423 @@ resumable, and cheap to reason about, in roughly that order.
 
 ## 8. TUI
 
-The TUI (no-args `gremlins`) is an interactive chat interface to the daemon.
-It runs in the main terminal buffer — no alternate screen — using a
-fixed-height ratatui inline viewport that fills the terminal. Old content
-is promoted to terminal scrollback via `insert_before` so the user can
-scroll up through history.
+This is a design document, not an implementation plan. It describes the desired
+visual layout and behavior. No crate names, no module names, no code.
 
-### 8.1 Viewport layout
+### 8.1 Viewport model
 
-The viewport is split into four vertical constraints, top-to-bottom:
+The TUI renders into a single fullscreen viewport (alternate screen). The
+viewport is a **vertical list of widgets**. Two elements are always pinned:
+
+- **Input bar** — always the second-to-last row.
+- **Info bar** — always the last row.
+
+Everything above the input bar is the **transcript area** — a scrollable region
+containing the widget list. Widgets stack vertically in chronological order
+(oldest at top). The transcript area always tail-anchors: the most recent widget
+is at the bottom, just above the input bar.
+
+The user never scrolls within the TUI itself. Terminal multiplexer scrollback
+(tmux copy-mode, etc.) captures everything rendered to the alternate screen.
+
+### 8.2 Widget types
+
+#### 8.2.1 Active transcript widget
+
+Exactly one turn at a time (the in-flight chat request). It has three internal
+sections:
 
 ```
-  …earlier turns in terminal scrollback…  ← terminal scrollback (via insert_before)
-╔═ viewport (term_h rows, never resizes) ════════════════════╗
-║                                                              ║  scrollback
-║  (frozen turn content, bottom-aligned)                       ║  Min(0)
+  > add rate limiting
+  ┌────────────────────────────────────────────────────────┐
+  │  reading auth.rs...                                   │  stream section
+  │  auth.rs: 120 lines                                   │  (italic, dim)
+  │  running cargo test...                                │
+  │────────────────────────────────────────────────────────│  separator
+  │ Here's the rate limiting implementation:              │  output section
+  │                                                        │  (normal weight)
+  │ We'll add a token bucket in the middleware layer...    │
+  │                                                        │
+  └────────────────────────────────────────────────────────┘
+```
+
+| Section | Content | Style |
+|---------|---------|-------|
+| Prompt line | `> {user input}` | Cyan |
+| Stream section | Reasoning chunks, tool result descriptions | Dim italic, 2-space indent |
+| Output section | Model text deltas | Normal weight |
+
+**Sizing.** Output gets priority. Stream takes a minimum floor (5 rows) when
+output is present; otherwise stream fills available space. Both sections scroll
+internally when content exceeds their allocation. The widget grows to fill
+available transcript area but never pushes the input/info bars off screen.
+
+**Lifecycle.** Created on user submission, destroyed on `Done`/`Ended`/`Error`
+/`Esc`. On destruction, it becomes a finished transcript widget at the same
+position — it does not vanish.
+
+#### 8.2.2 Finished transcript widget
+
+A completed turn. In its default collapsed state it shows the prompt and
+full model output:
+
+```
+  > add rate limiting
+  Here's the rate limiting implementation:
+
+  We'll add a token bucket in the middleware layer...
+  The implementation lives in src/middleware/rate.rs
+```
+
+**Expansion.** `Ctrl+O` expands all expandable widgets, adding a stats
+summary line and stream tail above the response:
+
+```
+  > add rate limiting                                     ← prompt
+    5 tools · 2.1K tokens · 78% cache                     ← summary line
+  ┌────────────────────────────────────────────────────────┐
+  │  reading auth.rs...                                   │  ← stream tail
+  │  auth.rs: 120 lines                                   │    (last 3 lines
+  │  running cargo test...                                │     of stream section)
+  │────────────────────────────────────────────────────────│
+  │ Here's the rate limiting implementation:              │  ← full output
+  │                                                        │
+  │ We'll add a token bucket in the middleware layer...    │
+  │ The implementation lives in src/middleware/rate.rs     │
+  │                                                        │
+  └────────────────────────────────────────────────────────┘
+```
+
+The expanded view shows the prompt, summary stats, the last few lines of the
+stream section (context for which tools ran), and the full model output.
+
+`Ctrl+O` again collapses all expandable widgets back to their default
+state (response only, no stats or stream tail).
+
+#### 8.2.3 System widget
+
+Non-chat transcript content: the startup banner, daemon events, command
+output (`/ls`, `/info`, etc.), and errors.
+
+```
+  gremlins tui — type /help for commands, Ctrl+C to exit
+```
+
+**Auto-collapse.** When a new widget is pushed on top of a system widget
+(e.g. a chat turn starts, another command runs), existing system widgets
+collapse to a single summary line. Ctrl+O expands them along with all other
+expandable widgets.
+
+#### 8.2.4 Overlay widgets
+
+Overlays render on top of the transcript area, occluding the widgets beneath.
+They are ephemeral — toggled by commands or keybindings, dismissed with `Esc`.
+Dismissing an overlay returns to the transcript view underneath.
+
+Unlike transcript widgets, overlays have fixed positions and sizes. They do not
+participate in the vertical widget list.
+
+##### 8.2.4.1 Gremlins watch (partial overlay)
+
+```
+  ┌─ gremlins watch ───────────────────────────────────────┐
+  │ ID          STATUS   STAGE        PROJECT               │
+  │ abc123      running  implement    gremlins              │
+  │ def456      running  review-code  gremlins              │
+  │ ghi789      done     —            other-project         │
+  │ jkl012      failed   verify       gremlins              │
+  │                                                        │
+  │ 2 running · 1 done · 1 failed                           │
+  └────────────────────────────────────────────────────────┘
+                                                          │
+  > plan implement review                                 │  transcript
+    3 tools · 1.2K tokens · 85% cache                     │  still visible
+                                                          │  below
+  > ▌                                                     │
+  gremlins tui · 4 gremlins · project: gremlins          │
+```
+
+A dynamically updated table of all gremlins known to the daemon. Occupies the
+upper portion of the screen (roughly 40–50%). The transcript remains visible
+below it. Updated in real time as daemon events arrive.
+
+Toggled via `/watch`. Dismissed with `Esc`.
+
+##### 8.2.4.2 Single gremlin watch (full overlay)
+
+```
+  ┌─ gremlin abc123 — implement ──────── [Esc to dismiss] ─┐
+  │                                                        │
+  │  [plan] reading src/auth.rs...                         │
+  │  [plan] wrote plan.md (12 lines)                       │
+  │  [implement] editing src/auth.rs:42                    │
+  │  [implement] running cargo test...                     │
+  │  [implement] test failed: assertion error              │
+  │  [implement] fixing test...                            │
+  │                                                        │
+  └────────────────────────────────────────────────────────┘
+                                                          │
+                                                          │  transcript
+                                                          │  fully occluded
+  > ▌                                                     │
+  gremlins tui · 3 gremlins · project: gremlins          │
+```
+
+A streaming log view for a single gremlin. Takes the full transcript area (input
+and info bars remain visible). Follows the gremlin's log in real time — each new
+log line appears at the bottom. Stage transitions are shown as section headers.
+
+Opened via `/watch <id>` or by selecting a gremlin from the watch table.
+Dismissed with `Esc`.
+
+##### 8.2.4.3 Debug widget (full overlay)
+
+```
+  ┌─ debug gremlin abc123 ──────────────── [Ctrl+D to exit] ┐
+  │                                                        │
+  │  $ status                                              │
+  │  stage: implement · status: running · uptime: 4m 12s   │
+  │                                                        │
+  │  $ inspect plan.md                                     │
+  │  # Plan: Add rate limiting                             │
+  │  ...                                                   │
+  │                                                        │
+  │  $ ▌                                                   │  debug prompt
+  │                                                        │
+  └────────────────────────────────────────────────────────┘
+                                                          │
+  > ▌                                                     │
+  gremlins tui · 3 gremlins · project: gremlins          │
+```
+
+An interactive debug session with a running gremlin. Takes the full transcript
+area. The user types debug commands into a secondary prompt (inside the overlay,
+not the main input bar). Commands are sent to the daemon's debug interface;
+responses appear inline.
+
+Opened via `/debug <id>`. Exited with `Ctrl+D` or `/exit`.
+
+#### 8.2.5 Future widget possibilities
+
+The overlay model generalizes to any transient UI:
+
+- **Help widget** — `/help` renders the full help text in an overlay instead of
+  dumping it to the transcript.
+- **Config widget** — settings toggles as a settings-list overlay.
+- **Diff widget** — side-by-side or unified diff of a gremlin's working tree
+  changes.
+- **Session log widget** — full scrollable log of the current chat session.
+
+### 8.3 Visual states
+
+Each diagram shows the terminal's alternate screen — the `╔═══╗` box is the
+**viewport** (what's visible on screen). Content above the `─── viewport top ───`
+marker has scrolled off into the terminal's scrollback buffer (accessible via
+tmux copy-mode, terminal scrollback, etc.). The input and info bars are always
+pinned at the viewport bottom.
+
+#### 8.3.1 Idle — several finished turns
+
+```
+                        ~~~ terminal scrollback ~~~
+                        (older turns visible in
+                        tmux copy-mode, etc.)
+  > optimize query performance
+    4 tools · 3.2K tokens · 64% cache
+  > refactor middleware chain
+    2 tools · 550 tokens · 91% cache
+                     ─── viewport top ───
+╔══════════════════════════════════════════════════════════════╗
+║  > plan implement review                                   ║
+║    3 tools · 1.2K tokens · 85% cache                       ║
 ║                                                              ║
-║  ┌─ dual-section widget ──────────────────────────────────┐  ║
-║  │    stream section (reasoning, tool results)    (italic) │  ║  widget
-║  │  response section (model text output)                   │  ║  Length(widget_h)
-║  └────────────────────────────────────────────────────────┘  ║
-║  > ▌                                                          ║  input bar
-║  gremlins tui · 1 gremlin · project: gremlins                ║  info bar
+║  > fix the login bug                                       ║
+║    1 tool · 850 tokens · 92% cache                         ║
+║                                                              ║
+║  > add rate limiting                                       ║
+║    5 tools · 2.1K tokens · 78% cache                       ║
+║                                                              ║
+║                                                              ║
+║                                                              ║
+║  > ▌                                                         ║
+║  gremlins tui · 0 gremlins · project: gremlins              ║
 ╚══════════════════════════════════════════════════════════════╝
+                     ─── viewport bottom ───
 ```
 
-| # | Constraint | Purpose |
-|---|---|---|
-| 1 | `Min(0)` | Scrollback — absorbs all free space, bottom-aligned. |
-| 2 | `Length(widget_h)` | Dual-section transcript widget. 0 when idle. |
-| 3 | `Length(1)` | Input bar — pinned to bottom. |
-| 4 | `Length(1)` | Info bar — pinned to bottom. |
+Each finished turn is a one-line summary with its prompt and stats. Older turns
+scroll off the top into terminal scrollback. The input bar waits for the next
+message.
 
-The input and info bars are always pinned to the last two rows. Scrollback
-absorbs whatever space the widget doesn't use. When the widget is idle
-(height 0), scrollback fills the remaining `term_h − 2` rows.
+#### 8.3.2 Active turn — streaming
 
-### 8.2 Dual-section widget (SplitWidget)
-
-During an active turn, a `SplitWidget` occupies the widget area. It has
-two independent internal buffers with fluid, response-priority sizing:
-
-- **Stream section** (top): reasoning chunks and tool result descriptions.
-  Dark gray italic, 2-space indent.
-- **Response section** (bottom): model text output (`StreamChunk` deltas).
-  Plain terminal style, no indent.
-
-The indent and style difference provides the visual distinction — no
-separator line is needed. When only the stream section has content (early
-streaming, before the model produces text), the response area is absent
-(height 0).
-
-**Fluid sizing.** Response gets priority. When only stream content exists,
-stream takes all widget space up to `term_h − 2`. When response arrives,
-response takes as much space as its content needs; stream shrinks to
-accommodate but never goes below `STREAM_MIN = 5` rows. When combined
-content exceeds the available space, both sections scroll internally.
-
-**Wrapping.** The widget accounts for line wrapping at the render width
-using `chars.div_ceil(width)`, matching the formula used by scrollback
-height calculation. Height allocation and scroll offsets use wrapped row
-counts rather than raw line counts.
-
-### 8.3 Content flow per turn
-
-1. User submits text. A prompt line (`> {input}`, cyan) is pushed to
-   scrollback.
-2. A `SplitWidget` is created with an initial `"  thinking..."` stream
-   line. Widget height goes from 0 to 1; scrollback shrinks by 1.
-3. `ReasoningChunk` and `ToolResult` events push styled lines to the
-   stream section.
-4. `StreamChunk` events push text to the response section via an internal
-   partial-line accumulator that splits on `\n`.
-5. On `Done` / `Esc` / `Ended` / `Error`:
-   a. The widget's partial-line buffer is flushed.
-   b. `widget.freeze()` returns `(stream_tail, response_lines)` — the
-      last `FREEZE_STREAM_LINES = 3` stream lines (dark gray italic) and
-      all response lines (plain). Both buffers are cleared.
-   c. Stream tail is pushed to scrollback, then response lines.
-      Frozen order matches the dynamic layout: stream on top, response
-      below.
-   d. Widget clears, collapses to 0 height. Scrollback expands.
-   e. The user+assistant pair is committed to `conversation_history`.
-   f. `active_request` is set to `false`.
-6. If the in-viewport scrollback exceeds `term_h × 2` wrapped rows,
-   `promote_scrollback` drains the oldest lines into terminal scrollback
-   via `insert_before`.
-
-The widget owns all partial-line state. The harness never touches a
-partial line.
-
-### 8.4 Daemon interface
-
-The TUI connects to the executor daemon over a Unix-domain socket in the
-state directory.
-
-**Two connection types.**
-
-- **Persistent connection** — opened at TUI startup and held for the
-  lifetime of the TUI. Carries request/response ops (`ls`, `stop`,
-  `resume`, etc.) and receives unsolicited `DaemonEvent` broadcasts
-  (`RunStarted`, `RunCompleted`, `RunFailed`, `RunStopped`,
-  `StageTransition`, `LogLine`, `Bail`). The daemon processes requests
-  sequentially on a connection; the TUI client serialises request sends
-  under a lock to keep request order aligned with response order on the
-  wire.
-- **Ephemeral connections** — one per chat message. Chat is a streaming
-  op that monopolises a connection, so it gets its own socket. The
-  daemon spawns an ephemeral chat gremlin (a `"chat"` definition with a
-  single agent stage) and forwards `InteractiveEvent` values as JSON-line
-  events until `Done` or `Ended`. A separate ephemeral connection is also
-  used for `log` with `follow: true`.
-
-**Chat protocol.** Each chat message opens a fresh socket and sends:
-
-```json
-{"op": "chat", "text": "<user message>", "history": [{"role": "user"|"assistant", "content": "..."}, ...]}
+```
+                        ~~~ terminal scrollback ~~~
+                        (older turns visible in
+                        tmux copy-mode, etc.)
+  > optimize query performance
+    4 tools · 3.2K tokens · 64% cache
+                     ─── viewport top ───
+╔══════════════════════════════════════════════════════════════╗
+║  > plan implement review                                   ║
+║    3 tools · 1.2K tokens · 85% cache                       ║
+║                                                              ║
+║  > fix the login bug                                       ║
+║    1 tool · 850 tokens · 92% cache                         ║
+║                                                              ║
+║  > add rate limiting                                       ║
+║  ┌────────────────────────────────────────────────────────┐ ║
+║  │  reading auth.rs...                                    │ ║
+║  │  running cargo test...                                 │ ║
+║  │────────────────────────────────────────────────────────│ ║
+║  │ Here's the rate limiting implementation:               │ ║
+║  │                                                        │ ║
+║  │ We'll add a token bucket in the middleware layer...    │ ║
+║  └────────────────────────────────────────────────────────┘ ║
+║  > ▌                                                         ║
+║  gremlins tui · 0 gremlins · project: gremlins              ║
+╚══════════════════════════════════════════════════════════════╝
+                     ─── viewport bottom ───
 ```
 
-The daemon builds a single-stage ephemeral gremlin from the chat text and
-conversation history (rendered as a transcript in the system prompt),
-launches it, and forwards stream events as JSON lines:
+The active widget sits at the bottom of the transcript area, just above the
+input bar. Finished widgets above it stay collapsed. The widget grows as content
+arrives; older finished widgets scroll off the top of the viewport into terminal
+scrollback.
 
-| Event type | Content |
-|---|---|
-| `stream_chunk` | `{"type": "stream_chunk", "text": "..."}` |
-| `reasoning_chunk` | `{"type": "reasoning_chunk", "text": "..."}` |
-| `tool_result` | `{"type": "tool_result", "name": "...", "output": "..."}` |
-| `turn_complete` | `{"type": "turn_complete", "turn": N, "text": "...", "tool_calls": [...]}` |
-| `done` | `{"type": "done", "text": "...", "usage": {...}}` |
-| `ended` | `{"type": "ended", "reason": "..."}` |
-| `error` | `{"type": "error", "message": "..."}` |
+#### 8.3.3 Expanded finished turn
 
-The TUI parses these into `ChatEvent` variants and routes them into the
-`SplitWidget`. `done` and `ended` are terminal events — the TUI freezes
-the widget and closes the ephemeral connection. The chat task is spawned
-as a `tokio::spawn` so the TUI event loop can abort it on `Esc`.
+```
+                        ~~~ terminal scrollback ~~~
+                        (older turns visible in
+                        tmux copy-mode, etc.)
+  > optimize query performance
+    4 tools · 3.2K tokens · 64% cache
+  > update dependencies
+    1 tool · 320 tokens · 95% cache
+                     ─── viewport top ───
+╔══════════════════════════════════════════════════════════════╗
+║  > plan implement review                                   ║
+║    3 tools · 1.2K tokens · 85% cache                       ║
+║                                                              ║
+║  > fix the login bug                                       ║
+║    1 tool · 850 tokens · 92% cache                         ║
+║                                                              ║
+║  > add rate limiting                                       ║
+║    5 tools · 2.1K tokens · 78% cache                       ║
+║  ┌────────────────────────────────────────────────────────┐ ║
+║  │  reading auth.rs...                                    │ ║
+║  │  running cargo test...                                 │ ║
+║  │────────────────────────────────────────────────────────│ ║
+║  │ Here's the rate limiting implementation:               │ ║
+║  │                                                        │ ║
+║  │ We'll add a token bucket in the middleware layer.      │ ║
+║  │ The implementation lives in src/middleware/rate.rs     │ ║
+║  │                                                        │ ║
+║  └────────────────────────────────────────────────────────┘ ║
+║                                                              ║
+║  > ▌                                                         ║
+║  gremlins tui · 0 gremlins · project: gremlins              ║
+╚══════════════════════════════════════════════════════════════╝
+                     ─── viewport bottom ───
+```
 
-Daemon broadcasts (`run_started`, `run_completed`, etc.) are filtered out
-of the chat stream by `is_daemon_broadcast` and ignored on ephemeral
-connections — they arrive on the persistent connection instead.
+`Ctrl+O` expanded the most recent finished turn. The expanded widget pushes
+everything below it down — older finished widgets may scroll off the top into
+terminal scrollback. The input and info bars stay pinned.
 
-**Cancellation.** The TUI holds a `JoinHandle` for the chat task. On `Esc`
-during an active turn, the task is aborted, the widget is frozen, and
-`active_request` is cleared. Pending events already enqueued from the
-aborted task are harmless — the `Done`/`Ended`/`Error` handlers check
-`app.widget.is_none()` and skip when the widget has already been frozen.
+#### 8.3.4 Gremlins watch overlay
 
-### 8.5 App state
+```
+                        ~~~ terminal scrollback ~~~
+                        (older turns visible in
+                        tmux copy-mode, etc.)
+  > fix the login bug
+    1 tool · 850 tokens · 92% cache
+  > refactor middleware chain
+    2 tools · 550 tokens · 91% cache
+                     ─── viewport top ───
+╔══════════════════════════════════════════════════════════════╗
+║  ┌─ gremlins watch ───────────────────────────────────────┐ ║
+║  │ ID          STATUS   STAGE        PROJECT               │ ║
+║  │ abc123      running  implement    gremlins              │ ║
+║  │ def456      running  review-code  gremlins              │ ║
+║  │ ghi789      done     —            other-project         │ ║
+║  │                                                        │ ║
+║  │ 2 running · 1 done                                     │ ║
+║  └────────────────────────────────────────────────────────┘ ║
+║                                                              ║
+║  > plan implement review                                   ║
+║    3 tools · 1.2K tokens · 85% cache                       ║
+║                                                              ║
+║  > fix the login bug                                       ║
+║    1 tool · 850 tokens · 92% cache                         ║
+║                                                              ║
+║  > ▌                                                         ║
+║  gremlins tui · 3 gremlins · project: gremlins              ║
+╚══════════════════════════════════════════════════════════════╝
+                     ─── viewport bottom ───
+```
 
-The `App` struct in `crates/gremlins-cli/src/tui/app.rs` holds all TUI
-state:
+The watch overlay occupies the upper portion. Transcript widgets flow below it;
+older ones scroll into terminal scrollback. The input bar still accepts chat —
+the overlay is non-blocking.
 
-- `scrollback_lines: Vec<(String, Style)>` — the transcript buffer.
-  Everything visible in the viewport scrollback area lives here: the
-  banner, daemon events, command output, frozen chat turns.
-- `widget: Option<SplitWidget>` — the active streaming widget, or `None`
-  when idle.
-- `conversation_history: Vec<Value>` — accumulated `{"role", "content"}`
-  pairs sent to the daemon with each chat request.
-- `current_response: String` — accumulated assistant text for the current
-  turn, committed to `conversation_history` on `Done`.
-- `active_request: bool` — guards against concurrent chat submissions.
-- `pending_user_message: String` — the user's message for the in-flight
-  turn, committed to `conversation_history` on `Done`.
-- `active_runs: HashMap<String, String>` — gremlin ID → status, updated
-  by daemon events for the info bar counter.
-- `input: String` — current text in the input bar.
+### 8.4 Widget lifecycle
 
-`/clear` resets conversation state (`conversation_history`,
-`current_response`, `active_request`, `pending_user_message`) but does
-not touch `scrollback_lines` — the transcript persists.
+```
+                  user submits message
+                         │
+                         ▼
+              ┌─────────────────────┐
+              │ active transcript   │  stream section + output section
+              │ (streaming)         │  dynamically sized, grows with content
+              └─────────┬───────────┘
+                        │ Done / Ended / Error / Esc
+                        ▼
+              ┌─────────────────────┐
+              │ finished transcript │  collapsed: full response
+              │ (idle)              │  expanded (Ctrl+O): stats + stream tail + response
+              └─────────────────────┘
+                        │
+           session ends / cleared
+                        │
+                        ▼
+                    discarded
+
+  system widgets (banner, events, command output) are pushed directly into
+  the transcript. They auto-collapse when a new widget appears on top of
+  them and are expandable via Ctrl+O alongside finished transcripts.
+```
+
+Overlay widgets exist outside this lifecycle. They are toggled by commands,
+dismissed by `Esc`, and have no persistent state when hidden.
+
+### 8.5 Input routing
+
+The input bar is the primary interaction surface. Key routing rules:
+
+| State | Input bar behavior |
+|-------|-------------------|
+| Idle (no active turn, no overlay) | Accepts chat text and slash commands |
+| Active turn (streaming) | Disabled — input is not accepted |
+| Gremlins watch overlay visible | Accepts chat text and slash commands as normal |
+| Single gremlin watch visible | Accepts slash commands only |
+| Debug widget visible | Input bar disabled; debug prompt inside the overlay accepts debug commands |
+| Detail mode (widgets expanded) | Accepts chat text and slash commands as normal |
+
+`Esc` in order of priority:
+
+1. If a blocking overlay is visible (single watch, debug), dismiss the overlay.
+2. If a non-blocking overlay is visible (gremlins watch), dismiss the overlay.
+3. If in detail mode (widgets expanded), return to collapsed state.
+4. If an active turn is streaming, abort the turn (transition widget to finished, discard partial response).
+5. Otherwise, clear the input bar.
+
+### 8.6 Summary
+
+The TUI is a list of self-contained widgets stacked vertically. The active turn
+is one widget; every completed turn is another. Overlays are transient panels
+that occlude the transcript. The input and info bars are always pinned. The user
+never scrolls within the TUI — tmux and terminal features handle that. Widgets
+describe their own content and lifecycle; the viewport just lays them out.
