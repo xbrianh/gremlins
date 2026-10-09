@@ -15,13 +15,12 @@ use crossterm::{
     cursor,
     event::{Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Widget, Wrap},
     Terminal, TerminalOptions, Viewport,
 };
 use tokio::sync::mpsc;
@@ -39,80 +38,16 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> Self {
         enable_raw_mode().expect("failed to enable raw mode");
-        execute!(io::stdout(), cursor::Hide).ok();
+        execute!(io::stdout(), EnterAlternateScreen, cursor::Hide).ok();
         TerminalGuard
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        execute!(io::stdout(), cursor::Show, LeaveAlternateScreen).ok();
         disable_raw_mode().ok();
-        execute!(io::stdout(), cursor::Show).ok();
-        println!();
     }
-}
-
-/// Promote oldest lines from `app.scrollback_lines` into terminal scrollback
-/// via `terminal.insert_before()`. Called after adding new lines to the
-/// scrollback buffer.
-///
-/// Promotion triggers when the wrapped row count exceeds `term_h * 2`.
-/// Drains down to `term_h` rows so roughly one screenful remains in the
-/// viewport. The promoted row count accounts for line wrapping at the
-/// current terminal width.
-fn promote_scrollback(
-    app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    term_h: u16,
-    term_w: u16,
-) -> io::Result<()> {
-    let threshold = term_h * 2;
-    let current_rows = app.scrollback_height(term_w);
-    if current_rows <= threshold {
-        return Ok(());
-    }
-
-    // Drain down to term_h rows.
-    let target_rows = term_h;
-    let mut rows_to_drain = current_rows - target_rows;
-    let mut drain_count: usize = 0;
-    let wrap_width = (term_w as usize).max(1);
-
-    for (line, _) in &app.scrollback_lines {
-        if rows_to_drain == 0 {
-            break;
-        }
-        let chars = line.chars().count();
-        let line_rows = if chars == 0 {
-            1
-        } else {
-            chars.div_ceil(wrap_width)
-        } as u16;
-        rows_to_drain = rows_to_drain.saturating_sub(line_rows);
-        drain_count += 1;
-    }
-
-    if drain_count == 0 {
-        return Ok(());
-    }
-
-    let drained: Vec<(String, Style)> = app.scrollback_lines.drain(..drain_count).collect();
-    let wrapped_rows = App::wrapped_rows(&drained, term_w) as usize;
-    if wrapped_rows > 0 {
-        let lines: Vec<ratatui::text::Line> = drained
-            .iter()
-            .map(|(s, style)| {
-                ratatui::text::Line::from(ratatui::text::Span::styled(s.as_str(), *style))
-            })
-            .collect();
-        let text = ratatui::text::Text::from(lines);
-        terminal.insert_before(wrapped_rows as u16, |buf| {
-            Paragraph::new(text)
-                .wrap(Wrap { trim: false })
-                .render(buf.area, buf);
-        })?;
-    }
-    Ok(())
 }
 
 /// Freeze the widget, push response lines and stream tail to scrollback,
@@ -153,56 +88,29 @@ pub async fn run() {
 
     let _guard = TerminalGuard::enter();
 
-    let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
-
-    // Create a single fixed-height inline viewport that fills the terminal.
+    // Fullscreen viewport on the alternate screen buffer. The frame area
+    // resizes automatically on terminal resize.
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::with_options(
         backend,
         TerminalOptions {
-            viewport: Viewport::Inline(term_h),
+            viewport: Viewport::Fullscreen,
         },
     )
     .expect("failed to create terminal");
 
-    if let Err(e) = run_app(&mut terminal, term_h, term_w).await {
+    if let Err(e) = run_app(&mut terminal).await {
         eprintln!("tui error: {e}");
     }
 }
 
-async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    mut term_h: u16,
-    mut term_w: u16,
-) -> io::Result<()> {
+async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     let mut app = App::new();
 
     // ── Connect to the daemon socket ──────────────────────────────
     let (client, mut event_rx, mut raw_rx) = match client::connect().await {
         Ok(c) => c,
         Err(e) => {
-            let msg = format!("gremlins: cannot connect to daemon: {e}");
-            app.push_scrollback(msg);
-            app.push_scrollback(String::new());
-            // Direct flush: promote_scrollback won't trigger below the
-            // term_h * 2 threshold, and the early return skips exit flush.
-            let wrapped_rows = App::wrapped_rows(&app.scrollback_lines, term_w) as usize;
-            if wrapped_rows > 0 {
-                let lines: Vec<ratatui::text::Line> = app
-                    .scrollback_lines
-                    .iter()
-                    .map(|(s, style)| {
-                        ratatui::text::Line::from(ratatui::text::Span::styled(s.as_str(), *style))
-                    })
-                    .collect();
-                let text = ratatui::text::Text::from(lines);
-                terminal.insert_before(wrapped_rows as u16, |buf| {
-                    Paragraph::new(text)
-                        .wrap(Wrap { trim: false })
-                        .render(buf.area, buf);
-                })?;
-            }
-            app.scrollback_lines.clear();
             return Err(io::Error::new(io::ErrorKind::NotConnected, e));
         }
     };
@@ -225,14 +133,12 @@ async fn run_app(
         Err(e) => {
             let msg = format!("error fetching initial state: {e}");
             app.push_scrollback(msg);
-            promote_scrollback(&mut app, terminal, term_h, term_w)?;
         }
     }
 
     // ── Crossterm event channel (polling task → async) ─────────
-    // Uses poll + sleep instead of blocking read so that ratatui's
-    // inline-viewport cursor-position query (which also reads stdin)
-    // is never starved by a background reader holding the stdin lock.
+    // Uses poll + sleep instead of blocking read so that the event
+    // loop is never starved by a background reader holding the stdin lock.
     let (ct_tx, mut ct_rx) = mpsc::unbounded_channel::<Event>();
     tokio::spawn(async move {
         loop {
@@ -282,7 +188,6 @@ async fn run_app(
     // ── Startup banner ────────────────────────────────────────────
     let banner = "gremlins tui — type /help for commands, Ctrl+C to exit";
     app.push_scrollback(banner.to_string());
-    promote_scrollback(&mut app, terminal, term_h, term_w)?;
 
     // ── Channel for chat events from the current (or most recent) message.
     let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<ChatEvent>();
@@ -291,8 +196,7 @@ async fn run_app(
     loop {
         let gremlin_count = app.gremlin_count_str();
         let project_name = app.project_name_str().to_string();
-        terminal
-            .draw(|frame| render(frame, &app, &gremlin_count, &project_name, term_w, term_h))?;
+        terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name))?;
 
         tokio::select! {
             // ── Crossterm events ──────────────────────────────
@@ -314,7 +218,7 @@ async fn run_app(
                         KeyCode::Char('l')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
-                            // In inline mode, force a full viewport redraw.
+                            // Force a full viewport redraw.
                             terminal.clear()?;
                         }
                         KeyCode::Char('g')
@@ -337,7 +241,6 @@ async fn run_app(
                                     handle.abort();
                                 }
                                 freeze_and_commit(&mut app);
-                                promote_scrollback(&mut app, terminal, term_h, term_w)?;
                             }
                         }
                         KeyCode::Enter => {
@@ -362,7 +265,6 @@ async fn run_app(
                                         for line in &lines {
                                             app.push_scrollback(line.clone());
                                         }
-                                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     }
                                     CommandResult::RestartChat => {
                                         // Freeze any active widget.
@@ -382,7 +284,6 @@ async fn run_app(
                                         app.input.clear();
                                         app.active_request = false;
                                         app.pending_user_message.clear();
-                                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     }
                                     CommandResult::Quit => {
                                         break;
@@ -412,7 +313,6 @@ async fn run_app(
                                                 app.push_scrollback(line);
                                             }
                                         }
-                                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     }
                                     CommandResult::TruncateHistory(idx) => {
                                         if idx >= app.conversation_history.len() {
@@ -426,7 +326,6 @@ async fn run_app(
                                             let msg = format!("history truncated to {idx} entries");
                                             app.push_scrollback(msg);
                                         }
-                                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     }
                                     CommandResult::SocketOp { op, payload } => {
                                         if op == "log" {
@@ -482,14 +381,12 @@ async fn run_app(
                                 if app.active_request {
                                     let msg = "a request is already in progress — wait for the response";
                                     app.push_scrollback(msg.to_string());
-                                    promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     continue;
                                 }
                                 // Echo user prompt to scrollback.
                                 let echo = format!("> {input}");
                                 let prompt_style = Style::default().fg(Color::Cyan);
                                 app.push_scrollback_styled(echo, prompt_style);
-                                promote_scrollback(&mut app, terminal, term_h, term_w)?;
 
                                 // Create a SplitWidget and push the initial "thinking..." line.
                                 let reason_style = Style::default()
@@ -504,7 +401,7 @@ async fn run_app(
 
                                 // Force an immediate frame so "thinking..."
                                 // appears without waiting for the next event.
-                                terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name, term_w, term_h))?;
+                                terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name))?;
 
                                 app.active_request = true;
                                 app.pending_user_message = input.clone();
@@ -536,9 +433,9 @@ async fn run_app(
                         }
                         _ => {}
                     },
-                    Event::Resize(w, h) => {
-                        term_w = w;
-                        term_h = h;
+                    Event::Resize(_, _) => {
+                        // Fullscreen viewport resizes automatically; no
+                        // state to update.
                     }
                     _ => {}
                 }
@@ -551,13 +448,11 @@ async fn run_app(
                         let msg = format!("[run started] {id} ({definition}) stage={stage}");
                         app.push_scrollback(msg);
                         app.on_run_started(id, definition, stage);
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     gremlins::executor::DaemonEvent::RunCompleted { id, exit_code } => {
                         let msg = format!("[run completed] {id} (exit {exit_code})");
                         app.push_scrollback(msg);
                         app.on_run_completed(id);
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     gremlins::executor::DaemonEvent::RunFailed { id, exit_code, error } => {
                         let err_detail = error.as_deref().unwrap_or("");
@@ -568,29 +463,24 @@ async fn run_app(
                         };
                         app.push_scrollback(msg);
                         app.on_run_failed(id);
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     gremlins::executor::DaemonEvent::RunStopped { id } => {
                         let msg = format!("[run stopped] {id}");
                         app.push_scrollback(msg);
                         app.on_run_stopped(id);
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
                         let msg = format!("[{id}] stage → {stage}");
                         app.push_scrollback(msg);
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     gremlins::executor::DaemonEvent::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
                             app.push_scrollback(line);
-                            promote_scrollback(&mut app, terminal, term_h, term_w)?;
                         }
                     }
                     gremlins::executor::DaemonEvent::Bail { id, reason } => {
                         let msg = format!("[{id}] bail: {reason}");
                         app.push_scrollback(msg);
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                 }
             }
@@ -630,7 +520,6 @@ async fn run_app(
                         .unwrap_or("unknown error");
                     let full = format!("error: {msg}");
                     app.push_scrollback(full);
-                    promote_scrollback(&mut app, terminal, term_h, term_w)?;
                 }
             }
 
@@ -645,7 +534,6 @@ async fn run_app(
                     if let Some(line) = raw.get("line").and_then(|v| v.as_str()) {
                         if app.following_log.is_some() {
                             app.push_scrollback(line.to_string());
-                            promote_scrollback(&mut app, terminal, term_h, term_w)?;
                         }
                     }
                 } else if raw.get("type").and_then(|v| v.as_str()) == Some("error") {
@@ -655,7 +543,6 @@ async fn run_app(
                         .unwrap_or("unknown error");
                     let full = format!("error: {msg}");
                     app.push_scrollback(full);
-                    promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     app.following_log = None;
                 }
             }
@@ -665,7 +552,6 @@ async fn run_app(
                 for line in &lines {
                     app.push_scrollback(line.clone());
                 }
-                promote_scrollback(&mut app, terminal, term_h, term_w)?;
             }
 
             // ── Chat events ────────────────────────────────
@@ -676,7 +562,6 @@ async fn run_app(
                         if let Some(ref mut widget) = app.widget {
                             widget.push_response_text(&text);
                         }
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::ReasoningChunk(text) => {
                         let reason_style = Style::default()
@@ -735,7 +620,6 @@ async fn run_app(
                         freeze_and_commit(&mut app);
                         chat_task = None;
                         chat_cancel_tx = None;
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Ended { reason } => {
                         if app.widget.is_none() {
@@ -746,7 +630,6 @@ async fn run_app(
                         chat_cancel_tx = None;
                         let msg = format!("chat ended: {reason}");
                         app.push_scrollback(msg);
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Error(msg) => {
                         if app.widget.is_none() {
@@ -757,36 +640,17 @@ async fn run_app(
                         chat_cancel_tx = None;
                         let full = format!("chat error: {msg}");
                         app.push_scrollback(full);
-                        promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                 }
             }
         }
     }
 
-    // ── Exit: preserve conversation in terminal scrollback ────────
+    // ── Exit ──────────────────────────────────────────────────────
 
     // Freeze any active widget.
     if app.widget.is_some() {
         freeze_and_commit(&mut app);
-    }
-    // Drain all scrollback_lines into terminal scrollback.
-    if !app.scrollback_lines.is_empty() {
-        let wrapped_rows = App::wrapped_rows(&app.scrollback_lines, term_w) as usize;
-        let lines: Vec<ratatui::text::Line> = app
-            .scrollback_lines
-            .iter()
-            .map(|(s, style)| {
-                ratatui::text::Line::from(ratatui::text::Span::styled(s.as_str(), *style))
-            })
-            .collect();
-        let text = ratatui::text::Text::from(lines);
-        terminal.insert_before(wrapped_rows as u16, |buf| {
-            Paragraph::new(text)
-                .wrap(Wrap { trim: false })
-                .render(buf.area, buf);
-        })?;
-        app.scrollback_lines.clear();
     }
 
     // Abort any lingering log follow on exit.

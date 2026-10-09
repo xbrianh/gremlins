@@ -1,12 +1,12 @@
 # TUI Module — AGENTS.md
 
-Terminal UI for the `gremlins` CLI. Built on **ratatui** (inline viewport, no alternate screen) with **crossterm** for raw-mode input.
+Terminal UI for the `gremlins` CLI. Built on **ratatui** (fullscreen viewport, alternate screen) with **crossterm** for raw-mode input.
 
 ## File Map
 
 | File | Role |
 |------|------|
-| `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, `promote_scrollback()`, `format_socket_response()`. |
+| `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, `freeze_and_commit()`, `format_socket_response()`. |
 | `app.rs` | Pure state (`App`). Scrollback buffer, active runs, conversation history, widget handle. No I/O. |
 | `chat.rs` | Per-message chat client. Sends `{"op":"chat"}` over a fresh socket, parses streaming `ChatEvent` variants. |
 | `client.rs` | Persistent `DaemonClient`. Long-lived socket for request/response + unsolicited `DaemonEvent` broadcast. Also `follow_log()` on a dedicated connection. |
@@ -19,8 +19,8 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** (inline viewport, no al
 
 ```
 run()
- ├─ TerminalGuard (raw mode + cursor hide, restored on drop)
- ├─ Inline viewport = terminal height
+ ├─ TerminalGuard (raw mode + EnterAlternateScreen + cursor hide, restored on drop)
+ ├─ Fullscreen viewport on alternate screen
  └─ run_app()
       ├─ App::new()
       ├─ client::connect() → DaemonClient + event_rx + raw_rx
@@ -33,12 +33,13 @@ run()
       │    4. log_rx     — log-follow lines (dedicated connection)
       │    5. result_rx  — socket-op results
       │    6. chat_rx    — ChatEvent stream
-      └─ Exit: freeze widget, flush response_stream, drain scrollback → terminal.insert_before()
+      └─ Exit: freeze widget, flush response_stream, alternate screen clears
 ```
 
 ## Key Design Decisions
 
-- **Inline viewport, no alternate screen.** Old lines are promoted to terminal scrollback via `terminal.insert_before()` when `scrollback_height > term_h * 2`. This means users can scroll up with their terminal's native scrollback.
+- **Fullscreen viewport on alternate screen.** `TerminalGuard::enter()` executes `EnterAlternateScreen` before hiding the cursor; `Drop` executes `LeaveAlternateScreen` after showing the cursor. On exit the alternate screen vanishes and the terminal returns to its pre-TUI state — nothing lingers in the main screen buffer.
+- **No scrollback promotion.** The scrollback buffer grows unbounded within the viewport. There is no `promote_scrollback`, no `insert_before`, and no `term_h * 2` threshold. Scrolling through history is handled by the terminal multiplexer (tmux copy-mode via `prefix [`).
 - **Scrollback is a `Vec<(String, Style)>`.** Each line carries its own style (cyan for prompts, dark gray italic for reasoning, etc.).
 - **Widget area is fluid.** `SplitWidget` sizes within available terminal height — stream and response sections share the space proportional to content, with a `STREAM_MIN` floor when the response section is present. The layout uses `Constraint::Length(widget_h)` so the scrollback area shrinks/grows accordingly.
 - **Chat uses a fresh socket per message.** The daemon processes chat as an ephemeral stage. The persistent `DaemonClient` stays free for commands during chat.
@@ -49,7 +50,7 @@ run()
 
 ### Slash commands
 `dispatch()` returns `Some(CommandResult)` → event loop match arm handles each variant:
-- `Lines` → push to scrollback, promote
+- `Lines` → push to scrollback
 - `SocketOp` → spawn a task that calls `client.send_request()`, sends result to `result_tx`
 - `RestartChat` → freeze widget, abort chat task, clear scrollback + history
 - `Quit` → break loop
@@ -99,7 +100,7 @@ run()
 ## Dependencies
 
 - `ratatui` 0.30 with `crossterm` feature
-- `crossterm` 0.29 for raw mode, events, cursor control
+- `crossterm` 0.29 for raw mode, events, cursor control, alternate screen
 - `tokio` for async runtime, channels, spawn
 - `serde_json` for daemon protocol (JSON-line socket)
 - `gremlins` (core crate) for config, executor types, socket helpers

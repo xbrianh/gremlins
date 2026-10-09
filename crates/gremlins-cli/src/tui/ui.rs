@@ -18,14 +18,9 @@ use crate::tui::widgets::DynamicWidget;
 ///
 /// The scrollback section uses `Constraint::Min(0)` as the first (topmost)
 /// constraint so it absorbs all space not used by widget, input, and info.
-pub fn render(
-    frame: &mut Frame,
-    app: &App,
-    gremlin_count: &str,
-    project_name: &str,
-    term_w: u16,
-    term_h: u16,
-) {
+pub fn render(frame: &mut Frame, app: &App, gremlin_count: &str, project_name: &str) {
+    let term_h = frame.area().height;
+    let term_w = frame.area().width;
     let available = term_h.saturating_sub(2); // input bar + info bar
     let has_widget = app.widget.as_ref().is_some_and(|w| !w.is_empty());
     let widget_h = if has_widget {

@@ -11,8 +11,8 @@ use crate::tui::widgets::SplitWidget;
 ///
 /// ## Rendering model
 ///
-/// The ratatui inline viewport fills the terminal and is split into four
-/// regions:
+/// The ratatui fullscreen viewport occupies the alternate screen buffer and
+/// is split into four regions:
 /// 1. Scrollback — all transcript content (daemon events, command output,
 ///    banner, chat history, frozen prompt + response lines). Rendered as
 ///    plain text with `Constraint::Min(0)` so it absorbs all space not used
@@ -22,11 +22,10 @@ use crate::tui::widgets::SplitWidget;
 /// 3. Input bar.
 /// 4. Info bar.
 ///
-/// Old lines are promoted to terminal scrollback via
-/// `terminal.insert_before()` when the scrollback buffer exceeds
-/// `term_h * 2` lines (accounting for wrapping).
-///
-/// No `EnterAlternateScreen` — raw mode only, in the main terminal buffer.
+/// The alternate screen is entered on startup and left on exit. There is no
+/// terminal scrollback promotion — the scrollback buffer grows unbounded
+/// within the viewport, and scrolling through history is handled by the
+/// terminal multiplexer (e.g. tmux copy-mode).
 pub struct App {
     /// Current text in the input bar.
     pub input: String,
@@ -46,9 +45,9 @@ pub struct App {
     /// The user message for the current in-flight request (committed to history on Done).
     pub pending_user_message: String,
     /// All transcript content: daemon events, command output, banner, chat
-    /// history, frozen prompt + response lines. Oldest lines are promoted to
-    /// terminal scrollback via `insert_before` when the buffer exceeds the
-    /// promotion threshold.
+    /// history, frozen prompt + response lines. Grows unbounded within the
+    /// alternate-screen viewport; scrolling through history is handled by
+    /// the terminal multiplexer.
     pub scrollback_lines: Vec<(String, Style)>,
     /// The active streaming widget, if any. None when idle.
     pub widget: Option<SplitWidget>,
@@ -133,22 +132,6 @@ impl App {
         let wrap_width = (width as usize).max(1);
         let mut total: u16 = 0;
         for (line, _) in &self.scrollback_lines {
-            let chars = line.chars().count();
-            let rows = if chars == 0 {
-                1
-            } else {
-                chars.div_ceil(wrap_width)
-            };
-            total += rows as u16;
-        }
-        total
-    }
-
-    /// Compute the number of wrapped rows for a set of lines at the given width.
-    pub fn wrapped_rows(lines: &[(String, Style)], width: u16) -> u16 {
-        let wrap_width = (width as usize).max(1);
-        let mut total: u16 = 0;
-        for (line, _) in lines {
             let chars = line.chars().count();
             let rows = if chars == 0 {
                 1
