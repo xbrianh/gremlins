@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use ratatui::style::Style;
 
-use crate::tui::widgets::SplitWidget;
+use crate::tui::widgets::{ActivePromptWidget, SystemWidget, Widget, WidgetEvent};
 
 /// Application state for the TUI.
 ///
@@ -12,20 +12,16 @@ use crate::tui::widgets::SplitWidget;
 /// ## Rendering model
 ///
 /// The ratatui fullscreen viewport occupies the alternate screen buffer and
-/// is split into four regions:
-/// 1. Scrollback — all transcript content (daemon events, command output,
-///    banner, chat history, frozen prompt + response lines). Rendered as
-///    plain text with `Constraint::Min(0)` so it absorbs all space not used
-///    by the other sections.
-/// 2. Widget area — live streaming content (reasoning + tool results),
-///    rendered by the active [`DynamicWidget`].
-/// 3. Input bar.
-/// 4. Info bar.
+/// is split into three regions:
+/// 1. Transcript — widget list rendered bottom-up. Widgets that don't fit
+///    scroll off the top into the terminal's scrollback buffer.
+/// 2. Input bar.
+/// 3. Info bar.
 ///
 /// The alternate screen is entered on startup and left on exit. There is no
-/// terminal scrollback promotion — the scrollback buffer grows unbounded
-/// within the viewport, and scrolling through history is handled by the
-/// terminal multiplexer (e.g. tmux copy-mode).
+/// terminal scrollback promotion — the transcript grows unbounded within
+/// the viewport, and scrolling through history is handled by the terminal
+/// multiplexer (e.g. tmux copy-mode).
 pub struct App {
     /// Current text in the input bar.
     pub input: String,
@@ -44,13 +40,9 @@ pub struct App {
     pub active_request: bool,
     /// The user message for the current in-flight request (committed to history on Done).
     pub pending_user_message: String,
-    /// All transcript content: daemon events, command output, banner, chat
-    /// history, frozen prompt + response lines. Grows unbounded within the
-    /// alternate-screen viewport; scrolling through history is handled by
-    /// the terminal multiplexer.
-    pub scrollback_lines: Vec<(String, Style)>,
-    /// The active streaming widget, if any. None when idle.
-    pub widget: Option<SplitWidget>,
+    /// Transcript widget list. Rendered bottom-up; widgets that don't fit
+    /// scroll off the top into the terminal's scrollback buffer.
+    pub transcript: Vec<Box<dyn Widget>>,
 }
 
 impl App {
@@ -69,8 +61,7 @@ impl App {
             current_response: String::new(),
             active_request: false,
             pending_user_message: String::new(),
-            scrollback_lines: Vec::new(),
-            widget: None,
+            transcript: Vec::new(),
         }
     }
 
@@ -109,37 +100,91 @@ impl App {
         self.active_runs.insert(id, "stopped".to_string());
     }
 
-    /// Push a line to scrollback with default style.
-    pub fn push_scrollback(&mut self, line: String) {
-        self.scrollback_lines.push((line, Style::default()));
-    }
+    // ── Transcript helpers ──────────────────────────────────────────
 
-    /// Push a line to scrollback with a specific style.
-    pub fn push_scrollback_styled(&mut self, line: String, style: Style) {
-        self.scrollback_lines.push((line, style));
-    }
-
-    /// Extend scrollback with (String, Style) pairs (e.g. from widget freeze).
-    pub fn extend_scrollback(&mut self, lines: Vec<(String, Style)>) {
-        self.scrollback_lines.extend(lines);
-    }
-
-    /// Compute scrollback height accounting for line wrapping at the given width.
-    pub fn scrollback_height(&self, width: u16) -> u16 {
-        if self.scrollback_lines.is_empty() {
-            return 0;
+    /// Push a system message (banner, daemon event, command output, error).
+    /// Auto-collapses all existing SystemWidgets above it.
+    /// Inserts before the active widget when a request is in-flight so the
+    /// ActivePromptWidget remains the bottom-most widget.
+    pub fn push_system(&mut self, lines: Vec<(String, Style)>) {
+        // Auto-collapse existing SystemWidgets.
+        for w in &mut self.transcript {
+            w.auto_collapse();
         }
-        let wrap_width = (width as usize).max(1);
-        let mut total: u16 = 0;
-        for (line, _) in &self.scrollback_lines {
-            let chars = line.chars().count();
-            let rows = if chars == 0 {
-                1
-            } else {
-                chars.div_ceil(wrap_width)
-            };
-            total += rows as u16;
+        let widget: Box<dyn Widget> = Box::new(SystemWidget::new(lines, true));
+        // Insert before the active widget if one is present, so the
+        // ActivePromptWidget stays at the bottom.
+        let insert_at = if self.transcript.last().is_some_and(|w| !w.is_expandable()) {
+            self.transcript.len().saturating_sub(1)
+        } else {
+            self.transcript.len()
+        };
+        self.transcript.insert(insert_at, widget);
+    }
+
+    /// Push a single-line system message with default style.
+    pub fn push_system_line(&mut self, line: String) {
+        self.push_system(vec![(line, Style::default())]);
+    }
+
+    /// Push a single-line system message with a specific style.
+    #[allow(dead_code)]
+    pub fn push_system_line_styled(&mut self, line: String, style: Style) {
+        self.push_system(vec![(line, style)]);
+    }
+
+    /// Mutable ref to the bottom-most widget (for streaming), if any.
+    pub fn active_mut(&mut self) -> Option<&mut (dyn Widget + '_)> {
+        match self.transcript.last_mut() {
+            Some(w) => Some(w.as_mut()),
+            None => None,
         }
-        total
+    }
+
+    /// Finish the active (bottom-most) widget, replacing it with the
+    /// returned passive widget. Panics if there is no active widget.
+    pub fn finish_active(&mut self, events: Vec<WidgetEvent>) {
+        let mut active = self
+            .transcript
+            .pop()
+            .expect("finish_active called with no active widget");
+        let finished = active.finish(events);
+        self.transcript.push(finished);
+    }
+
+    /// Push a new ActivePromptWidget for a chat turn.
+    /// Auto-collapses all existing SystemWidgets first.
+    pub fn push_active_prompt(&mut self, prompt: String) {
+        for w in &mut self.transcript {
+            w.auto_collapse();
+        }
+        self.transcript
+            .push(Box::new(ActivePromptWidget::new(prompt)));
+    }
+
+    /// Toggle expand/collapse for all expandable widgets.
+    /// If any expandable widget is collapsed → expand all.
+    /// If all expandable widgets are already expanded → collapse all.
+    pub fn toggle_expand_all(&mut self) {
+        let any_collapsed = self
+            .transcript
+            .iter()
+            .any(|w| w.is_expandable() && !w.is_expanded());
+
+        for w in &mut self.transcript {
+            if w.is_expandable() {
+                if any_collapsed {
+                    // Expand all: only toggle if currently collapsed.
+                    if !w.is_expanded() {
+                        w.toggle_expand();
+                    }
+                } else {
+                    // Collapse all: only toggle if currently expanded.
+                    if w.is_expanded() {
+                        w.toggle_expand();
+                    }
+                }
+            }
+        }
     }
 }
