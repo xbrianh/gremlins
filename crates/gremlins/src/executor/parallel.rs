@@ -77,7 +77,28 @@ pub(crate) async fn run_parallel(
     );
 
     // --- Resumption guard ---
-    let scope = stage_key(&gremlin.loop_iter, group_name);
+    //
+    // Done markers use a resume-stable scope: we strip the per-stage
+    // attempt suffix from loop_iter so that markers written during an
+    // earlier attempt are still visible after the supervisor appends
+    // -resume-XXXX to the attempt on restart.
+    let stable_loop_iter = {
+        // loop_iter is "{base}~{stage_name}-{hex}[-resume-{hex}]*"
+        // Strip the per-stage attempt suffix so done markers are
+        // stable across resume regardless of nesting depth.
+        let attempt = gremlin.state.read_str("attempt");
+        if !attempt.is_empty() {
+            let suffix = format!("~{attempt}");
+            if let Some(pos) = gremlin.loop_iter.rfind(&suffix) {
+                gremlin.loop_iter[..pos].to_string()
+            } else {
+                gremlin.loop_iter.clone()
+            }
+        } else {
+            gremlin.loop_iter.clone()
+        }
+    };
+    let scope = stage_key(&stable_loop_iter, group_name);
     let mut done: HashSet<String> = HashSet::new();
     for child in children {
         let child_name = child.first_stage_name().to_string();
@@ -687,6 +708,7 @@ mod tests {
             cancel_token: None,
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
+            clean_cmds: Vec::new(),
         };
         (sandbox, gremlin)
     }

@@ -270,6 +270,10 @@ pub struct Gremlin {
     pub(crate) interactive_session: Option<InteractiveSession>,
     /// Scratch directory — owned here so TempDir cleanup is automatic.
     pub(crate) scratch_dir: ScratchDir,
+    /// Clean commands inherited from the pipeline definition. Forked children
+    /// carry a copy so that workspace teardown (e.g. git worktree remove)
+    /// runs even though the child's own definition (a StageSpec) has none.
+    pub(crate) clean_cmds: Vec<String>,
 }
 
 impl Gremlin {
@@ -465,6 +469,7 @@ impl Gremlin {
             cancel_token: None,
             interactive_session: None,
             scratch_dir,
+            clean_cmds: Vec::new(),
         };
 
         // 5. Create an empty log file.
@@ -596,6 +601,7 @@ impl Gremlin {
             cancel_token: None,
             interactive_session: None,
             scratch_dir,
+            clean_cmds: Vec::new(),
         })
     }
 
@@ -695,6 +701,15 @@ impl Gremlin {
         self.definition = Box::new(definition);
         self.client = client;
 
+        // Populate clean commands from the definition if not already set
+        // (forked children inherit them from the parent).
+        if self.clean_cmds.is_empty() {
+            let cmds = self.definition.clean_cmds();
+            if !cmds.is_empty() {
+                self.clean_cmds = cmds.to_vec();
+            }
+        }
+
         // The Python launcher sources bootstrap.env before the workspace
         // exists, so GREMLIN_WORKDIR (and any variable the script
         // derives from it) is absent. resolve_env produces the correct map now
@@ -752,9 +767,9 @@ impl Gremlin {
             self.client.clone()
         };
 
-        // Create the child workdir so the child's state.json can
-        // record a `workdir`. The caller populates it afterwards via
-        // [`run_fork_cmds`].
+        // Give each fork a fresh workdir so fork commands never see
+        // stale state from a prior run (e.g. leftover git worktree
+        // metadata after a bail and cleanup).
         let child_workdir = match &self.scratch_dir {
             ScratchDir::Temp(_) => {
                 let temp = tempfile::TempDir::new().map_err(|e| {
@@ -763,7 +778,11 @@ impl Gremlin {
                 WorkDir::Temp(temp)
             }
             _ => {
-                let path = config::work_root().join(child_gremlin_id.as_str());
+                let path = config::work_root().join(format!(
+                    "{}-{}",
+                    child_gremlin_id,
+                    state::token_hex(4)
+                ));
                 std::fs::create_dir_all(&path).map_err(|e| {
                     RunError::Message(format!(
                         "failed to create child workdir {}: {e}",
@@ -870,6 +889,7 @@ impl Gremlin {
             cancel_token: self.cancel_token.clone(),
             interactive_session: None,
             scratch_dir: child_scratch_dir,
+            clean_cmds: self.clean_cmds.clone(),
         })
     }
 
@@ -1052,11 +1072,16 @@ impl Gremlin {
         }
 
         // Run clean commands before removing workspace/scratch.
-        // Only when the definition is loaded (not a stub) and has commands.
-        if !self.definition.is_stub() {
-            let clean_cmds = self.definition.clean_cmds();
-            if !clean_cmds.is_empty() {
-                self.run_clean_cmds(clean_cmds).await;
+        // Forked children inherit the pipeline's clean commands; their own
+        // definition (a StageSpec) has none.
+        // CLI rm / clean paths load commands into the definition but not
+        // the clean_cmds cache — fall back when the cache is empty.
+        if !self.clean_cmds.is_empty() {
+            self.run_clean_cmds(&self.clean_cmds).await;
+        } else {
+            let cmds = self.definition.clean_cmds();
+            if !cmds.is_empty() {
+                self.run_clean_cmds(cmds).await;
             }
         }
 
@@ -1961,6 +1986,7 @@ mod tests {
             cancel_token: None,
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(scratch_dir),
+            clean_cmds: Vec::new(),
         }
     }
 
