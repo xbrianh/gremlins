@@ -204,9 +204,9 @@ async fn run_agent(
     send_log(
         &gremlin.runtime_config.log_tx,
         format!(
-            "[{}] agent: preparing (model={})",
-            agent.name,
-            client.model()
+            "[{name}] [{model}] agent: preparing",
+            name = agent.name,
+            model = client.model()
         ),
     );
 
@@ -398,9 +398,10 @@ async fn run_agent(
     send_log(
         &gremlin.runtime_config.log_tx,
         format!(
-            "[{}] agent: completed (turns={})",
-            prepared.name,
-            completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
+            "[{name}] [{model}] agent: completed (turns={turns})",
+            name = prepared.name,
+            model = client.model(),
+            turns = completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
         ),
     );
 

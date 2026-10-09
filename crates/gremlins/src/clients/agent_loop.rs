@@ -122,7 +122,6 @@ pub(crate) async fn run_agent_loop(
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
     let extra_env = ctx.params.extra_env.clone();
-    let prefix = ctx.prefix.clone();
     let raw_path = ctx.params.raw_path.clone();
     let capture_events = ctx.params.capture_events;
     let idle_timeout = ctx.idle_timeout;
@@ -132,6 +131,10 @@ pub(crate) async fn run_agent_loop(
         .clone()
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| "model".into());
+
+    // Prepend model name to the log prefix so every agent-loop line
+    // identifies which model produced it.
+    let prefix = format!("[{model_name}]{}", ctx.prefix);
 
     let cwd_display = cwd
         .as_ref()
@@ -144,8 +147,7 @@ pub(crate) async fn run_agent_loop(
         .and_then(|r| r.get("effort"))
         .and_then(|e| e.as_str());
     let log_line = format!(
-        "using client model={} cwd={} reasoning_effort={}",
-        model_name,
+        "using client cwd={} reasoning_effort={}",
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
@@ -255,7 +257,9 @@ pub(crate) async fn run_agent_loop_nested(
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
     skip_temperature: bool,
+    model_name: &str,
 ) -> Result<CompletedRun, ClientError> {
+    let prefix = format!("[{model_name}]{prefix}");
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
     }
@@ -277,7 +281,7 @@ pub(crate) async fn run_agent_loop_nested(
         &tool_defs,
         cancel,
         &opts,
-        prefix,
+        &prefix,
         max_turns,
         idle_timeout,
         &mut raw,

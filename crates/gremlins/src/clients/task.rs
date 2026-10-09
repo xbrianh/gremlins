@@ -73,16 +73,19 @@ impl<M: Clone> TaskModelSelector<M> {
     /// The model for a Task described by `description`, or a clone of
     /// `default_model` when no entry matches or when the matching entry names
     /// a provider this backend cannot serve.
-    fn model_for(&self, description: &str, default_model: &M) -> M
+    ///
+    /// Returns `(model, spec_string)` where `spec_string` is the matched
+    /// `task-clients` entry (for logging), or `None` when no entry matched.
+    fn model_for(&self, description: &str, default_model: &M) -> (M, Option<String>)
     where
         M: Clone,
     {
         match self.overrides.spec_for(description) {
             Some(spec) => match (self.factory)(spec) {
-                Some(m) => m,
-                None => default_model.clone(),
+                Some(m) => (m, Some(spec.to_string())),
+                None => (default_model.clone(), None),
             },
-            None => default_model.clone(),
+            None => (default_model.clone(), None),
         }
     }
 }
@@ -203,10 +206,11 @@ fn make_task_runner_at_depth(
 
             // A selector, when configured, may swap in a different model based
             // on this task's own `description`; otherwise the parent's stands.
-            let selected_model = match &task_model_selector {
+            let (selected_model, selected_spec) = match &task_model_selector {
                 Some(selector) => selector.model_for(&description, &model),
-                None => model.clone(),
+                None => (model.clone(), None),
             };
+            let model_name = selected_spec.as_deref().unwrap_or("model");
 
             let new_chain = child_chain(&id_chain);
             let child_prefix = task_prefix(&prefix, &new_chain);
@@ -253,6 +257,7 @@ fn make_task_runner_at_depth(
                 log_tx.clone(),
                 max_tokens,
                 skip_temperature,
+                model_name,
             )
             .await;
 
@@ -355,12 +360,15 @@ mod tests {
 
         assert_eq!(
             selector.model_for("Scout", &"default".to_string()),
-            "built:openai:mini"
+            (
+                "built:openai:mini".to_string(),
+                Some("openai:mini".to_string())
+            )
         );
         // No match — the default model stands.
         assert_eq!(
             selector.model_for("review", &"default".to_string()),
-            "default"
+            ("default".to_string(), None)
         );
     }
 
@@ -377,7 +385,7 @@ mod tests {
         // Spec matches but factory returns None — fall back to default.
         assert_eq!(
             selector.model_for("Scout", &"default".to_string()),
-            "default"
+            ("default".to_string(), None)
         );
     }
 
@@ -408,7 +416,7 @@ mod tests {
         // spec, returns None, and we fall back to default.  The lower-priority
         // prefix "s*" must not be exposed.
         let result = selector.model_for("Scout", &"default".to_string());
-        assert_eq!(result, "default");
+        assert_eq!(result, ("default".to_string(), None));
         assert_eq!(
             served.lock().unwrap().as_slice(),
             &["openrouter:gpt-4o-mini"],
