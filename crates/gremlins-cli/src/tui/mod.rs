@@ -76,7 +76,7 @@ fn promote_scrollback(
     let mut drain_count: usize = 0;
     let wrap_width = (term_w as usize).max(1);
 
-    for line in &app.scrollback_lines {
+    for (line, _) in &app.scrollback_lines {
         if rows_to_drain == 0 {
             break;
         }
@@ -94,12 +94,18 @@ fn promote_scrollback(
         return Ok(());
     }
 
-    let drained: Vec<String> = app.scrollback_lines.drain(..drain_count).collect();
+    let drained: Vec<(String, Style)> = app.scrollback_lines.drain(..drain_count).collect();
     let wrapped_rows = App::wrapped_rows(&drained, term_w) as usize;
     if wrapped_rows > 0 {
-        let text = drained.join("\n");
+        let lines: Vec<ratatui::text::Line> = drained
+            .iter()
+            .map(|(s, style)| {
+                ratatui::text::Line::from(ratatui::text::Span::styled(s.as_str(), *style))
+            })
+            .collect();
+        let text = ratatui::text::Text::from(lines);
         terminal.insert_before(wrapped_rows as u16, |buf| {
-            Paragraph::new(text.as_str())
+            Paragraph::new(text)
                 .wrap(Wrap { trim: false })
                 .render(buf.area, buf);
         })?;
@@ -146,15 +152,22 @@ async fn run_app(
         Ok(c) => c,
         Err(e) => {
             let msg = format!("gremlins: cannot connect to daemon: {e}");
-            app.scrollback_lines.push(msg);
-            app.scrollback_lines.push(String::new());
+            app.push_scrollback(msg);
+            app.push_scrollback(String::new());
             // Direct flush: promote_scrollback won't trigger below the
             // term_h * 2 threshold, and the early return skips exit flush.
             let wrapped_rows = App::wrapped_rows(&app.scrollback_lines, term_w) as usize;
             if wrapped_rows > 0 {
-                let text = app.scrollback_lines.join("\n");
+                let lines: Vec<ratatui::text::Line> = app
+                    .scrollback_lines
+                    .iter()
+                    .map(|(s, style)| {
+                        ratatui::text::Line::from(ratatui::text::Span::styled(s.as_str(), *style))
+                    })
+                    .collect();
+                let text = ratatui::text::Text::from(lines);
                 terminal.insert_before(wrapped_rows as u16, |buf| {
-                    Paragraph::new(text.as_str())
+                    Paragraph::new(text)
                         .wrap(Wrap { trim: false })
                         .render(buf.area, buf);
                 })?;
@@ -181,7 +194,7 @@ async fn run_app(
         }
         Err(e) => {
             let msg = format!("error fetching initial state: {e}");
-            app.scrollback_lines.push(msg);
+            app.push_scrollback(msg);
             promote_scrollback(&mut app, terminal, term_h, term_w)?;
         }
     }
@@ -231,7 +244,7 @@ async fn run_app(
 
     // ── Startup banner ────────────────────────────────────────────
     let banner = "gremlins tui — type /help for commands, Ctrl+C to exit";
-    app.scrollback_lines.push(banner.to_string());
+    app.push_scrollback(banner.to_string());
     promote_scrollback(&mut app, terminal, term_h, term_w)?;
 
     // ── Channel for chat events from the current (or most recent) message.
@@ -281,14 +294,13 @@ async fn run_app(
                                 }
                                 // Freeze widget content to scrollback.
                                 if let Some(ref mut widget) = app.widget {
-                                    for (line, _style) in widget.freeze() {
-                                        app.scrollback_lines.push(line);
-                                    }
+                                    let frozen = widget.freeze();
+                                    app.extend_scrollback(frozen);
                                 }
                                 // Flush any remaining response_stream to scrollback.
                                 if !app.response_stream.is_empty() {
                                     let remaining = app.response_stream.clone();
-                                    app.scrollback_lines.push(remaining);
+                                    app.push_scrollback(remaining);
                                     app.response_stream.clear();
                                 }
                                 app.widget = None;
@@ -319,21 +331,21 @@ async fn run_app(
 
                             if let Some(result) = dispatch(&input) {
                                 let echo = format!("> {input}");
-                                app.scrollback_lines.push(echo);
+                                let prompt_style = Style::default().fg(Color::Cyan);
+                                app.push_scrollback_styled(echo, prompt_style);
 
                                 match result {
                                     CommandResult::Lines(lines) => {
                                         for line in &lines {
-                                            app.scrollback_lines.push(line.clone());
+                                            app.push_scrollback(line.clone());
                                         }
                                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     }
                                     CommandResult::RestartChat => {
                                         // Freeze any active widget.
                                         if let Some(ref mut widget) = app.widget {
-                                            for (line, _style) in widget.freeze() {
-                                                app.scrollback_lines.push(line);
-                                            }
+                                            let frozen = widget.freeze();
+                                            app.extend_scrollback(frozen);
                                         }
                                         // Abort in-flight chat task.
                                         if let Some(handle) = chat_task.take() {
@@ -348,7 +360,7 @@ async fn run_app(
                                         app.active_request = false;
                                         app.pending_user_message.clear();
                                         let msg = "chat history cleared";
-                                        app.scrollback_lines.push(msg.to_string());
+                                        app.push_scrollback(msg.to_string());
                                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     }
                                     CommandResult::Quit => {
@@ -356,8 +368,9 @@ async fn run_app(
                                     }
                                     CommandResult::ShowHistory => {
                                         if app.conversation_history.is_empty() {
-                                            app.scrollback_lines.push("(no history)".to_string());
+                                            app.push_scrollback("(no history)".to_string());
                                         } else {
+                                            let mut history_lines: Vec<String> = Vec::new();
                                             for (i, entry) in app.conversation_history.iter().enumerate() {
                                                 let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("");
                                                 let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -372,7 +385,10 @@ async fn run_app(
                                                     content.to_string()
                                                 };
                                                 let line = format!("  [{i}] {role}: {preview}");
-                                                app.scrollback_lines.push(line);
+                                                history_lines.push(line);
+                                            }
+                                            for line in history_lines {
+                                                app.push_scrollback(line);
                                             }
                                         }
                                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
@@ -383,11 +399,11 @@ async fn run_app(
                                                 "invalid index {idx} — history has {} entries",
                                                 app.conversation_history.len()
                                             );
-                                            app.scrollback_lines.push(msg);
+                                            app.push_scrollback(msg);
                                         } else {
                                             app.conversation_history.truncate(idx);
                                             let msg = format!("history truncated to {idx} entries");
-                                            app.scrollback_lines.push(msg);
+                                            app.push_scrollback(msg);
                                         }
                                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     }
@@ -444,13 +460,14 @@ async fn run_app(
                                 // Guard against concurrent requests.
                                 if app.active_request {
                                     let msg = "a request is already in progress — wait for the response";
-                                    app.scrollback_lines.push(msg.to_string());
+                                    app.push_scrollback(msg.to_string());
                                     promote_scrollback(&mut app, terminal, term_h, term_w)?;
                                     continue;
                                 }
                                 // Echo user prompt to scrollback.
                                 let echo = format!("> {input}");
-                                app.scrollback_lines.push(echo);
+                                let prompt_style = Style::default().fg(Color::Cyan);
+                                app.push_scrollback_styled(echo, prompt_style);
                                 promote_scrollback(&mut app, terminal, term_h, term_w)?;
 
                                 // Create a StreamWidget and push the initial "thinking..." line.
@@ -458,7 +475,7 @@ async fn run_app(
                                     .fg(Color::DarkGray)
                                     .add_modifier(Modifier::ITALIC);
                                 let mut widget = StreamWidget::new(reason_style);
-                                widget.push("  thinking...");
+                                widget.push("thinking...");
                                 app.widget = Some(widget);
 
                                 // Force an immediate frame so "thinking..."
@@ -506,13 +523,13 @@ async fn run_app(
                 match event {
                     gremlins::executor::DaemonEvent::RunStarted { id, definition, stage } => {
                         let msg = format!("[run started] {id} ({definition}) stage={stage}");
-                        app.scrollback_lines.push(msg);
+                        app.push_scrollback(msg);
                         app.on_run_started(id, definition, stage);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     gremlins::executor::DaemonEvent::RunCompleted { id, exit_code } => {
                         let msg = format!("[run completed] {id} (exit {exit_code})");
-                        app.scrollback_lines.push(msg);
+                        app.push_scrollback(msg);
                         app.on_run_completed(id);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
@@ -523,30 +540,30 @@ async fn run_app(
                         } else {
                             format!("[run failed] {id} (exit {exit_code}): {err_detail}")
                         };
-                        app.scrollback_lines.push(msg);
+                        app.push_scrollback(msg);
                         app.on_run_failed(id);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     gremlins::executor::DaemonEvent::RunStopped { id } => {
                         let msg = format!("[run stopped] {id}");
-                        app.scrollback_lines.push(msg);
+                        app.push_scrollback(msg);
                         app.on_run_stopped(id);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
                         let msg = format!("[{id}] stage → {stage}");
-                        app.scrollback_lines.push(msg);
+                        app.push_scrollback(msg);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     gremlins::executor::DaemonEvent::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
-                            app.scrollback_lines.push(line);
+                            app.push_scrollback(line);
                             promote_scrollback(&mut app, terminal, term_h, term_w)?;
                         }
                     }
                     gremlins::executor::DaemonEvent::Bail { id, reason } => {
                         let msg = format!("[{id}] bail: {reason}");
-                        app.scrollback_lines.push(msg);
+                        app.push_scrollback(msg);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                 }
@@ -560,7 +577,7 @@ async fn run_app(
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown error");
                     let full = format!("error: {msg}");
-                    app.scrollback_lines.push(full);
+                    app.push_scrollback(full);
                     promote_scrollback(&mut app, terminal, term_h, term_w)?;
                 }
             }
@@ -570,7 +587,7 @@ async fn run_app(
                 if raw.get("type").and_then(|v| v.as_str()) == Some("log_line") {
                     if let Some(line) = raw.get("line").and_then(|v| v.as_str()) {
                         if app.following_log.is_some() {
-                            app.scrollback_lines.push(line.to_string());
+                            app.push_scrollback(line.to_string());
                             promote_scrollback(&mut app, terminal, term_h, term_w)?;
                         }
                     }
@@ -580,7 +597,7 @@ async fn run_app(
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown error");
                     let full = format!("error: {msg}");
-                    app.scrollback_lines.push(full);
+                    app.push_scrollback(full);
                     promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     app.following_log = None;
                 }
@@ -589,7 +606,7 @@ async fn run_app(
             // ── Socket-op results ─────────────────────────────
             Some(lines) = result_rx.recv() => {
                 for line in &lines {
-                    app.scrollback_lines.push(line.clone());
+                    app.push_scrollback(line.clone());
                 }
                 promote_scrollback(&mut app, terminal, term_h, term_w)?;
             }
@@ -605,7 +622,7 @@ async fn run_app(
                         while let Some(newline_pos) = app.response_stream.find('\n') {
                             let line = app.response_stream[..newline_pos].to_string();
                             app.response_stream = app.response_stream[newline_pos + 1..].to_string();
-                            app.scrollback_lines.push(line);
+                            app.push_scrollback(line);
                         }
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
@@ -636,22 +653,21 @@ async fn run_app(
                         // Freeze widget tail lines into scrollback first so
                         // reasoning lines appear before response text.
                         if let Some(ref mut widget) = app.widget {
-                            for (line, _style) in widget.freeze() {
-                                app.scrollback_lines.push(line);
-                            }
+                            let frozen = widget.freeze();
+                            app.extend_scrollback(frozen);
                         }
                         app.widget = None;
                         // Flush any remaining partial response_stream line.
                         if !app.response_stream.is_empty() {
                             let remaining = app.response_stream.clone();
-                            app.scrollback_lines.push(remaining);
+                            app.push_scrollback(remaining);
                             app.response_stream.clear();
                         }
                         // If no streamed text was received, push the final text.
                         if !text.is_empty() && app.current_response.is_empty() {
                             app.current_response.push_str(&text);
                             for line in text.lines() {
-                                app.scrollback_lines.push(line.to_string());
+                                app.push_scrollback(line.to_string());
                             }
                         }
                         // Commit user+assistant pair to conversation history.
@@ -671,14 +687,13 @@ async fn run_app(
                         // Freeze any active widget first so reasoning lines
                         // appear before response text.
                         if let Some(ref mut widget) = app.widget {
-                            for (line, _style) in widget.freeze() {
-                                app.scrollback_lines.push(line);
-                            }
+                            let frozen = widget.freeze();
+                            app.extend_scrollback(frozen);
                         }
                         // Flush any remaining response_stream to scrollback.
                         if !app.response_stream.is_empty() {
                             let remaining = app.response_stream.clone();
-                            app.scrollback_lines.push(remaining);
+                            app.push_scrollback(remaining);
                             app.response_stream.clear();
                         }
                         app.widget = None;
@@ -687,21 +702,20 @@ async fn run_app(
                         app.active_request = false;
                         chat_task = None;
                         let msg = format!("chat ended: {reason}");
-                        app.scrollback_lines.push(msg);
+                        app.push_scrollback(msg);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                     ChatEvent::Error(msg) => {
                         // Freeze any active widget first so reasoning lines
                         // appear before response text.
                         if let Some(ref mut widget) = app.widget {
-                            for (line, _style) in widget.freeze() {
-                                app.scrollback_lines.push(line);
-                            }
+                            let frozen = widget.freeze();
+                            app.extend_scrollback(frozen);
                         }
                         // Flush any remaining response_stream to scrollback.
                         if !app.response_stream.is_empty() {
                             let remaining = app.response_stream.clone();
-                            app.scrollback_lines.push(remaining);
+                            app.push_scrollback(remaining);
                             app.response_stream.clear();
                         }
                         app.widget = None;
@@ -710,7 +724,7 @@ async fn run_app(
                         app.active_request = false;
                         chat_task = None;
                         let full = format!("chat error: {msg}");
-                        app.scrollback_lines.push(full);
+                        app.push_scrollback(full);
                         promote_scrollback(&mut app, terminal, term_h, term_w)?;
                     }
                 }
@@ -722,22 +736,28 @@ async fn run_app(
 
     // Freeze any active widget.
     if let Some(ref mut widget) = app.widget {
-        for (line, _style) in widget.freeze() {
-            app.scrollback_lines.push(line);
-        }
+        let frozen = widget.freeze();
+        app.extend_scrollback(frozen);
     }
     // Flush remaining response_stream.
     if !app.response_stream.is_empty() {
         let remaining = app.response_stream.clone();
-        app.scrollback_lines.push(remaining);
+        app.push_scrollback(remaining);
         app.response_stream.clear();
     }
     // Drain all scrollback_lines into terminal scrollback.
     if !app.scrollback_lines.is_empty() {
         let wrapped_rows = App::wrapped_rows(&app.scrollback_lines, term_w) as usize;
-        let text = app.scrollback_lines.join("\n");
+        let lines: Vec<ratatui::text::Line> = app
+            .scrollback_lines
+            .iter()
+            .map(|(s, style)| {
+                ratatui::text::Line::from(ratatui::text::Span::styled(s.as_str(), *style))
+            })
+            .collect();
+        let text = ratatui::text::Text::from(lines);
         terminal.insert_before(wrapped_rows as u16, |buf| {
-            Paragraph::new(text.as_str())
+            Paragraph::new(text)
                 .wrap(Wrap { trim: false })
                 .render(buf.area, buf);
         })?;

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use ratatui::style::Style;
+
 use crate::tui::widgets::StreamWidget;
 
 /// Application state for the TUI.
@@ -47,7 +49,7 @@ pub struct App {
     /// history, frozen prompt + response lines. Oldest lines are promoted to
     /// terminal scrollback via `insert_before` when the buffer exceeds the
     /// promotion threshold.
-    pub scrollback_lines: Vec<String>,
+    pub scrollback_lines: Vec<(String, Style)>,
     /// The active streaming widget, if any. None when idle.
     pub widget: Option<StreamWidget>,
     /// Accumulated model response text, flushed to scrollback on newline
@@ -112,6 +114,21 @@ impl App {
         self.active_runs.insert(id, "stopped".to_string());
     }
 
+    /// Push a line to scrollback with default style.
+    pub fn push_scrollback(&mut self, line: String) {
+        self.scrollback_lines.push((line, Style::default()));
+    }
+
+    /// Push a line to scrollback with a specific style.
+    pub fn push_scrollback_styled(&mut self, line: String, style: Style) {
+        self.scrollback_lines.push((line, style));
+    }
+
+    /// Extend scrollback with (String, Style) pairs (e.g. from widget freeze).
+    pub fn extend_scrollback(&mut self, lines: Vec<(String, Style)>) {
+        self.scrollback_lines.extend(lines);
+    }
+
     /// Compute scrollback height accounting for line wrapping at the given width.
     pub fn scrollback_height(&self, width: u16) -> u16 {
         if self.scrollback_lines.is_empty() {
@@ -119,7 +136,7 @@ impl App {
         }
         let wrap_width = (width as usize).max(1);
         let mut total: u16 = 0;
-        for line in &self.scrollback_lines {
+        for (line, _) in &self.scrollback_lines {
             let chars = line.chars().count();
             let rows = if chars == 0 {
                 1
@@ -132,10 +149,10 @@ impl App {
     }
 
     /// Compute the number of wrapped rows for a set of lines at the given width.
-    pub fn wrapped_rows(lines: &[String], width: u16) -> u16 {
+    pub fn wrapped_rows(lines: &[(String, Style)], width: u16) -> u16 {
         let wrap_width = (width as usize).max(1);
         let mut total: u16 = 0;
-        for line in lines {
+        for (line, _) in lines {
             let chars = line.chars().count();
             let rows = if chars == 0 {
                 1

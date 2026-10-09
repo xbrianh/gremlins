@@ -101,10 +101,12 @@ impl DynamicWidget for StreamWidget {
     fn render(&self, frame: &mut Frame, area: Rect) {
         let mut rat_lines: Vec<Line> = Vec::new();
         for line in &self.lines {
-            rat_lines.push(Line::from(Span::styled(line.clone(), self.style)));
+            let indented = format!("  {line}");
+            rat_lines.push(Line::from(Span::styled(indented, self.style)));
         }
         if !self.partial.is_empty() {
-            rat_lines.push(Line::from(Span::styled(self.partial.clone(), self.style)));
+            let indented = format!("  {}", self.partial);
+            rat_lines.push(Line::from(Span::styled(indented, self.style)));
         }
         let line_count = rat_lines.len().max(1);
         let scroll = line_count.saturating_sub(area.height as usize) as u16;
@@ -118,7 +120,7 @@ impl DynamicWidget for StreamWidget {
         let start = self.lines.len() - take_count;
         let result: Vec<(String, Style)> = self.lines[start..]
             .iter()
-            .map(|l| (l.clone(), self.style))
+            .map(|l| (format!("  {l}"), self.style))
             .collect();
         self.lines.clear();
         result

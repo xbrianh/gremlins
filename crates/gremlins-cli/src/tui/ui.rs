@@ -52,18 +52,26 @@ pub fn render(frame: &mut Frame, app: &App, gremlin_count: &str, project_name: &
 }
 
 fn render_scrollback(frame: &mut Frame, area: Rect, app: &App) {
-    let prompt_style = Style::default().fg(Color::Cyan);
-    let default_style = Style::default();
-
-    // Compute how many lines to skip so the tail is visible when the
-    // scrollback content exceeds the available area.
+    // Compute wrapped height of all scrollback lines.
     let area_w = area.width;
     let scrollback_h = app.scrollback_height(area_w);
+
+    // Clamp to available height, then build a sub-rect anchored to the bottom.
+    let render_h = scrollback_h.min(area.height);
+    let render_area = Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(render_h),
+        width: area.width,
+        height: render_h,
+    };
+
+    // Compute how many lines to skip so the tail is visible when content
+    // exceeds the available area.
     let skip_lines = if scrollback_h > area.height {
         let mut h: u16 = 0;
         let wrap_w = (area_w as usize).max(1);
         let mut skip: usize = 0;
-        for line in &app.scrollback_lines {
+        for (line, _) in &app.scrollback_lines {
             let chars = line.chars().count();
             let rows = if chars == 0 {
                 1
@@ -85,17 +93,11 @@ fn render_scrollback(frame: &mut Frame, area: Rect, app: &App) {
         .scrollback_lines
         .iter()
         .skip(skip_lines)
-        .map(|s| {
-            if s.starts_with("> ") {
-                Line::from(Span::styled(s.as_str(), prompt_style))
-            } else {
-                Line::from(Span::styled(s.as_str(), default_style))
-            }
-        })
+        .map(|(s, style)| Line::from(Span::styled(s.as_str(), *style)))
         .collect();
 
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, render_area);
 }
 
 fn render_info_bar(
