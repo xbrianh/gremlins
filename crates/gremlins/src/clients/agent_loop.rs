@@ -109,7 +109,6 @@ pub(crate) async fn run_agent_loop(
     ctx: RunContext,
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
-    task_model_selector: Option<super::task::TaskModelSelector<DynModel<Completion>>>,
     interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
@@ -196,7 +195,7 @@ pub(crate) async fn run_agent_loop(
     // Wire up the Task runner before entering the turn loop.
     let runner = super::task::make_task_runner(
         model.clone(),
-        task_model_selector,
+        ctx.params.task_clients.clone(),
         opts.tool_filter.map(|f| f.to_vec()),
         cancel.clone(),
         tool_ctx.clone(),
@@ -1780,8 +1779,7 @@ mod tests {
                 gremlin_id: None,
                 log_tx: None,
                 base_env: None,
-                task_clients_exact: HashMap::new(),
-                task_clients_prefix: HashMap::new(),
+                task_clients: None,
                 cancel_token: None,
                 stream_events: None,
             },
@@ -1819,17 +1817,9 @@ mod tests {
             PendingTransport,
         )
         .erase();
-        let err = run_agent_loop(
-            model,
-            "hi",
-            ctx.clone(),
-            cancel,
-            loop_opts(None),
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
+        let err = run_agent_loop(model, "hi", ctx.clone(), cancel, loop_opts(None), None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, ClientError::Timeout { .. }),
             "expected ClientError::Timeout, got {err:?}"
@@ -1880,7 +1870,6 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
             None,
         )
         .await
@@ -1943,7 +1932,6 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
             None,
         )
         .await
@@ -2013,7 +2001,6 @@ mod tests {
             cancel,
             loop_opts(Some(&filter)),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -2081,7 +2068,6 @@ mod tests {
             cancel,
             loop_opts(None),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -2143,7 +2129,6 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
             None,
         )
         .await
@@ -2231,7 +2216,6 @@ mod tests {
             cancel,
             loop_opts(None),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -2311,7 +2295,6 @@ mod tests {
             cancel,
             loop_opts(None),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -2359,7 +2342,6 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
             None,
         )
         .await
@@ -2422,7 +2404,6 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
             None,
         )
         .await
@@ -2505,7 +2486,6 @@ mod tests {
             CancelToken::new(),
             loop_opts(None),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -2584,7 +2564,6 @@ mod tests {
             cancel,
             loop_opts(None),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -2634,7 +2613,6 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
             None,
         )
         .await
@@ -2686,7 +2664,6 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
             None,
         )
         .await
@@ -2776,7 +2753,6 @@ mod tests {
             cancel,
             loop_opts(None),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -2839,7 +2815,6 @@ mod tests {
             cancel,
             loop_opts(None),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -2897,7 +2872,6 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
             None,
         )
         .await
@@ -2988,6 +2962,7 @@ mod tests {
         let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
+        ctx.params.task_clients = Some(selector);
 
         run_agent_loop(
             parent.clone().erase(),
@@ -2995,7 +2970,6 @@ mod tests {
             ctx.clone(),
             CancelToken::new(),
             loop_opts(None),
-            Some(selector),
             None,
         )
         .await
@@ -3080,7 +3054,7 @@ mod tests {
         let cancel = CancelToken::new();
         let mut opts = loop_opts(None);
         opts.max_tokens = Some(8192);
-        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None, None)
+        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None)
             .await
             .unwrap();
 
@@ -3121,7 +3095,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let opts = loop_opts(None); // max_tokens: None
-        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None, None)
+        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None)
             .await
             .unwrap();
 
@@ -3181,6 +3155,7 @@ mod tests {
         let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
+        ctx.params.task_clients = Some(selector);
         let mut opts = loop_opts(None);
         opts.max_tokens = Some(8192);
 
@@ -3190,7 +3165,6 @@ mod tests {
             ctx,
             CancelToken::new(),
             opts,
-            Some(selector),
             None,
         )
         .await
@@ -3704,7 +3678,6 @@ mod tests {
                 ctx,
                 cancel,
                 loop_opts(None),
-                None,
                 Some(session),
             )
             .await

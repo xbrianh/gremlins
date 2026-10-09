@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 use rig_core::providers::openai::wire::AZURE;
+use rig_core::driver::DynModel;
 use rig_core::http_client::DynHttpClient;
+use rig_core::operation::Completion;
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
@@ -128,7 +130,6 @@ impl AzureOpenAiRunState {
                         max_tokens: None,
                         skip_temperature: false,
                     },
-                    None,
                     interactive,
                 )
                 .await
@@ -167,7 +168,6 @@ impl AzureOpenAiRunState {
                             max_tokens: None,
                             skip_temperature: false,
                         },
-                        None,
                         interactive,
                     )
                     .await
@@ -507,6 +507,24 @@ impl Backend for AzureOpenAiBackend {
             for token in &tokens {
                 token.cancel();
             }
+        }
+    }
+
+    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+        let (provider, model) = openai_protocol::provider_and_model(spec)?;
+        if provider == "azure-openai" {
+            match &self.state.client_state {
+                AzureOpenAiClientState::Static(client) => {
+                    Some(client.completion(model).erase())
+                }
+                AzureOpenAiClientState::Dynamic { .. } => {
+                    // Dynamic auth backends cannot build a model synchronously
+                    // without a token — task-clients is not supported for them.
+                    None
+                }
+            }
+        } else {
+            None
         }
     }
 

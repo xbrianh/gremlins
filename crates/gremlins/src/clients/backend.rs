@@ -3,10 +3,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 use super::agent_loop::CancelToken;
 use super::interactive::{InteractiveEvent, InteractiveSession};
 use super::protocol::CompletedRun;
+use super::task::TaskModelSelector;
 
 #[derive(Debug)]
 pub struct RunParams {
@@ -29,10 +32,11 @@ pub struct RunParams {
     /// Base process environment for tool sandboxing.
     /// When set, replaces `std::env::vars()` as the base for bash tool env.
     pub base_env: Option<HashMap<String, String>>,
-    /// Task-client override maps from config (exact + prefix).
-    /// When both are empty, task_model_selector returns None.
-    pub task_clients_exact: HashMap<String, String>,
-    pub task_clients_prefix: HashMap<String, String>,
+    /// Task-client selector, pre-built by the executor from
+    /// `settings.yaml` `task-clients` entries. `None` when no
+    /// entries are configured or when the backend cannot serve
+    /// any of them (e.g. `cmd`).
+    pub task_clients: Option<TaskModelSelector<DynModel<Completion>>>,
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
     pub cancel_token: Option<Arc<CancelToken>>,
@@ -60,8 +64,7 @@ impl Clone for RunParams {
             gremlin_id: self.gremlin_id.clone(),
             log_tx: self.log_tx.clone(),
             base_env: self.base_env.clone(),
-            task_clients_exact: self.task_clients_exact.clone(),
-            task_clients_prefix: self.task_clients_prefix.clone(),
+            task_clients: self.task_clients.clone(),
             cancel_token: self.cancel_token.clone(),
             stream_events: self.stream_events.clone(),
         }
@@ -96,6 +99,13 @@ pub trait Backend: Send + Sync {
         params: RunParams,
         interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError>;
+
+    /// Build a [`DynModel`] from a `provider:model` spec, or `None` when
+    /// the spec names a different provider or the model cannot be built.
+    ///
+    /// Called by the executor to pre-build the `task-clients` selector
+    /// before the agent loop starts.
+    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>>;
 
     async fn resume(&self) -> Result<CompletedRun, ClientError>;
 

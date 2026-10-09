@@ -15,7 +15,6 @@ use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
-use crate::clients::task::TaskModelSelector;
 
 const PROVIDER_NAME: &str = "copilot";
 const DEFAULT_MODEL: &str = "gpt-4o";
@@ -142,40 +141,17 @@ impl CopilotBackend {
     }
 }
 
-/// Build a `TaskModelSelector` for the Copilot backend, or `None` when
-/// `settings.yaml` declares no `task-clients` entries this backend can serve.
-fn copilot_task_model_selector(
-    client: &Copilot,
-    task_clients_exact: &HashMap<String, String>,
-    task_clients_prefix: &HashMap<String, String>,
-) -> Option<TaskModelSelector<DynModel<Completion>>> {
-    if task_clients_exact.is_empty() && task_clients_prefix.is_empty() {
-        return None;
-    }
-
-    let exact = task_clients_exact.clone();
-    let prefix = task_clients_prefix.clone();
-    let client = client.clone();
-    TaskModelSelector::new(
-        exact,
-        prefix,
-        Arc::new(move |spec: &str| {
-            let (provider, model) = openai_protocol::provider_and_model(spec)?;
-            if provider == PROVIDER_NAME {
-                Some(client.completion(model).erase())
-            } else {
-                log::warn!(
-                    "task-clients entry spec {spec:?} names provider {provider:?}, but this \
-                     backend serves {PROVIDER_NAME:?} — falling back to parent model"
-                );
-                None
-            }
-        }),
-    )
-}
-
 #[async_trait]
 impl Backend for CopilotBackend {
+    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+        let (provider, model) = openai_protocol::provider_and_model(spec)?;
+        if provider == PROVIDER_NAME {
+            Some(self.state.client.completion(model).erase())
+        } else {
+            None
+        }
+    }
+
     async fn run(
         &self,
         params: RunParams,
@@ -208,12 +184,6 @@ impl Backend for CopilotBackend {
 
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
 
-        let task_selector = copilot_task_model_selector(
-            &self.state.client,
-            &ctx.params.task_clients_exact,
-            &ctx.params.task_clients_prefix,
-        );
-
         retry::with_retry(
             backoff,
             |e: &ClientError| {
@@ -245,7 +215,6 @@ impl Backend for CopilotBackend {
                 let p = prompt.lock().unwrap().clone();
                 let ctx = ctx.clone();
                 let cancel = cancel.clone();
-                let task_selector = task_selector.clone();
                 // Move interactive on first attempt; subsequent retries get None.
                 let interactive = interactive.take();
                 async move {
@@ -278,7 +247,6 @@ impl Backend for CopilotBackend {
                             max_tokens: None,
                             skip_temperature: false,
                         },
-                        task_selector,
                         interactive,
                     )
                     .await;

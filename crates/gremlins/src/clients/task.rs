@@ -7,6 +7,28 @@ use rig_core::operation::Completion;
 
 use super::tools::{self, ToolContext};
 
+/// Build a [`TaskModelSelector`] from the raw `task-clients` config maps and
+/// a backend that can resolve `provider:model` specs into live models.
+///
+/// Returns `None` when both maps are empty (the common case) or when the
+/// backend cannot serve any of the configured entries.
+pub(crate) fn build_task_selector(
+    backend: std::sync::Arc<dyn crate::clients::backend::Backend>,
+    exact: &HashMap<String, String>,
+    prefix: &HashMap<String, String>,
+) -> Option<TaskModelSelector<DynModel<Completion>>> {
+    if exact.is_empty() && prefix.is_empty() {
+        return None;
+    }
+    let exact = exact.clone();
+    let prefix = prefix.clone();
+    TaskModelSelector::new(
+        exact,
+        prefix,
+        Arc::new(move |spec: &str| backend.make_model(spec)),
+    )
+}
+
 const MAX_DEPTH: u32 = 3;
 
 /// Builds the model named by a matching `task-clients` entry, for use by one
@@ -18,6 +40,7 @@ pub(crate) type TaskModelFactory<M = DynModel<Completion>> =
 /// Lookup maps for `task-clients`, already lowercased at parse time. Shared
 /// behind an `Arc` so a Task fan-out clones one pointer per invocation rather
 /// than the whole map.
+#[derive(Debug)]
 struct TaskClientOverrides {
     exact: HashMap<String, String>,
     prefix: HashMap<String, String>,
@@ -48,9 +71,17 @@ impl TaskClientOverrides {
 /// keeps the parent's model. Cloning a selector is O(1) — both halves sit behind
 /// an `Arc` — which matters because a Task fan-out clones one per invocation.
 #[derive(Clone)]
-pub(crate) struct TaskModelSelector<M = DynModel<Completion>> {
+pub struct TaskModelSelector<M = DynModel<Completion>> {
     overrides: Arc<TaskClientOverrides>,
     factory: TaskModelFactory<M>,
+}
+
+impl<M> std::fmt::Debug for TaskModelSelector<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskModelSelector")
+            .field("overrides", &self.overrides)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<M: Clone> TaskModelSelector<M> {
@@ -211,13 +242,18 @@ fn make_task_runner_at_depth(
 
             // A selector, when configured, may swap in a different model based
             // on this task's own `description`; otherwise the parent's stands.
-            let (selected_model, selected_spec) = match &task_model_selector {
+            let (selected_model, _selected_spec) = match &task_model_selector {
                 Some(selector) => selector.model_for(&description, &model),
                 None => (model.clone(), None),
             };
-            // Use the matched spec when available; fall back to the parent
-            // model name so that log lines always identify the actual model.
-            let model_name = selected_spec.as_deref().unwrap_or(&parent_model_name);
+            // Use the model's own id() when available; fall back to the
+            // parent model name so that log lines always identify the
+            // actual model sent to the API.
+            let model_name = selected_model
+                .id()
+                .map(String::from)
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| parent_model_name.clone());
 
             let new_chain = child_chain(&id_chain);
             // Build the child prefix: [model_name] goes after the stage
@@ -238,7 +274,7 @@ fn make_task_runner_at_depth(
                 cancel.clone(),
                 child_ctx.clone(),
                 prefix.clone(),
-                model_name.to_string(),
+                model_name.clone(),
                 idle_timeout,
                 max_turns,
                 depth + 1,

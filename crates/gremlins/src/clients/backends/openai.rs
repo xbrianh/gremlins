@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 use rig_core::providers::openai::{OpenAI, wire};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
@@ -95,6 +97,15 @@ impl Backend for OpenAiBackend {
 
     fn total_cost_usd(&self) -> Option<f64> {
         None
+    }
+
+    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+        let (provider, model) = openai_protocol::provider_and_model(spec)?;
+        if provider == PROVIDER_NAME {
+            Some(self.state.client.completion(model).erase())
+        } else {
+            None
+        }
     }
 }
 
