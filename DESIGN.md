@@ -666,7 +666,7 @@ resumable, and cheap to reason about, in roughly that order.
 
 ## 8. TUI
 
-The TUI (`gremlins tui`) is an interactive chat interface to the daemon.
+The TUI (no-args `gremlins`) is an interactive chat interface to the daemon.
 It runs in the main terminal buffer — no alternate screen — using a
 fixed-height ratatui inline viewport that fills the terminal. Old content
 is promoted to terminal scrollback via `insert_before` so the user can

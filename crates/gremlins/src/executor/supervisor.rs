@@ -2100,7 +2100,10 @@ fn create_chat_gremlin(
     let client = Client::parse(default_client)
         .map_err(|e| format!("invalid default client '{default_client}': {e}"))?;
 
-    let scratch_dir = ScratchDir::Persistent(config::scratch_root(Some(gremlin_id.as_str())));
+    let scratch_dir = ScratchDir::Temp(
+        tempfile::TempDir::new()
+            .map_err(|e| format!("failed to create temp scratch dir: {e}"))?,
+    );
 
     Ok(Gremlin {
         id: gremlin_id,

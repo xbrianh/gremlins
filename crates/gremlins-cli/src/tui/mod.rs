@@ -123,8 +123,8 @@ fn freeze_and_commit(app: &mut App) {
     if let Some(ref mut widget) = app.widget {
         widget.flush_partial();
         let (response_lines, stream_tail) = widget.freeze();
-        app.extend_scrollback(response_lines);
         app.extend_scrollback(stream_tail);
+        app.extend_scrollback(response_lines);
     }
     app.widget = None;
 

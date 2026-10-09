@@ -76,11 +76,15 @@ fn render_scrollback(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     // Compute how many lines to skip so the tail is visible when content
-    // exceeds the available area.
-    let skip_lines = if scrollback_h > area.height {
-        let mut h: u16 = 0;
+    // exceeds the available area. When overflow falls inside a wrapped
+    // line, also compute the char prefix to trim so the first rendered
+    // line starts at the correct wrapped row.
+    let (skip_lines, prefix_trim_chars) = if scrollback_h > area.height {
         let wrap_w = (area_w as usize).max(1);
+        let overflow_rows = scrollback_h - area.height;
+        let mut consumed: u16 = 0;
         let mut skip: usize = 0;
+        let mut trim: usize = 0;
         for (line, _) in &app.scrollback_lines {
             let chars = line.chars().count();
             let rows = if chars == 0 {
@@ -88,22 +92,32 @@ fn render_scrollback(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 chars.div_ceil(wrap_w)
             } as u16;
-            if h + rows > scrollback_h - area.height {
+            if consumed + rows > overflow_rows {
+                // Part of this line extends above the viewport.
+                trim = (overflow_rows - consumed) as usize * wrap_w;
                 break;
             }
-            h += rows;
+            consumed += rows;
             skip += 1;
         }
-        skip
+        (skip, trim)
     } else {
-        0
+        (0, 0)
     };
 
     let lines: Vec<Line> = app
         .scrollback_lines
         .iter()
         .skip(skip_lines)
-        .map(|(s, style)| Line::from(Span::styled(s.as_str(), *style)))
+        .enumerate()
+        .map(|(i, (s, style))| {
+            let text = if i == 0 && prefix_trim_chars > 0 {
+                s.chars().skip(prefix_trim_chars).collect::<String>()
+            } else {
+                s.clone()
+            };
+            Line::from(Span::styled(text, *style))
+        })
         .collect();
 
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
