@@ -202,6 +202,23 @@ fn resolve_client(
 // Agent
 // ---------------------------------------------------------------------------
 
+/// Resolve the effective task-client lookup maps for an agent stage, merging
+/// the three runtime layers (global defaults, enclosing composite, stage-local)
+/// and parsing the result into exact/prefix `HashMap`s.
+///
+/// These are the maps handed to [`build_task_selector`]; they describe
+/// task-description → model-spec entries, *not* the stage-name → client-spec
+/// entries held in `RuntimeConfig::stage_clients_*`. Keeping the two apart is
+/// what this helper exists to make testable.
+fn resolve_task_clients(
+    global: Option<&IndexMap<String, String>>,
+    enclosing: Option<&IndexMap<String, String>>,
+    stage: Option<&IndexMap<String, String>>,
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let effective = config::merge_task_clients_runtime(global, enclosing, stage);
+    config::parse_task_clients_map(effective.as_ref())
+}
+
 async fn run_agent(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
@@ -217,13 +234,11 @@ async fn run_agent(
         unreachable!("run_agent is only called for agent stages")
     };
 
-    let effective_task_clients = config::merge_task_clients_runtime(
+    let (task_clients_exact, task_clients_prefix) = resolve_task_clients(
         gremlin.runtime_config.default_task_clients.as_ref(),
         enclosing_task_clients,
         stage_task_clients.as_ref(),
     );
-    let (task_clients_exact, task_clients_prefix) =
-        config::parse_task_clients_map(effective_task_clients.as_ref());
 
     let client = resolve_client(node, gremlin, enclosing_client)?;
     let framework_subs = gremlin.framework_subs(&agent.name);
@@ -1141,6 +1156,47 @@ mod tests {
     }
 
     // --- agent ---
+
+    /// The wiring regression: `run_agent` must hand `build_task_selector` the
+    /// *task*-client maps (task-description → model-spec), never the
+    /// `RuntimeConfig::stage_clients_*` fields (stage-name → client-spec). The
+    /// two have the same `HashMap<String, String>` type, so a swapped argument
+    /// compiles cleanly — this boundary test pins the source of the maps.
+    #[test]
+    fn resolve_task_clients_uses_task_maps_not_stage_maps() {
+        let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd:true");
+
+        // A stage-client entry keyed by the *stage name* — the wrong map.
+        gremlin
+            .runtime_config
+            .stage_clients_exact
+            .insert("writer".to_string(), "cmd:stage-client".to_string());
+        gremlin
+            .runtime_config
+            .stage_clients_prefix
+            .insert("wri".to_string(), "cmd:stage-prefix".to_string());
+
+        // A task-client entry keyed by a *task description* — the right map.
+        let global = IndexMap::from([("scout".to_string(), "openai:mini".to_string())]);
+        gremlin.runtime_config.default_task_clients = Some(global);
+
+        let (exact, prefix) = resolve_task_clients(
+            gremlin.runtime_config.default_task_clients.as_ref(),
+            None,
+            None,
+        );
+
+        // The task-description key survives; the stage-name keys do not leak in.
+        assert_eq!(
+            exact.get("scout"),
+            Some(&"openai:mini".to_string()),
+            "the task-client entry must be present"
+        );
+        assert!(
+            !exact.contains_key("writer") && !prefix.contains_key("wri"),
+            "stage-client entries must not appear in the task-client maps"
+        );
+    }
 
     #[tokio::test]
     async fn agent_skips_when_the_guard_artifact_is_live() {
