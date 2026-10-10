@@ -222,7 +222,7 @@ async fn run_agent(
         enclosing_task_clients,
         stage_task_clients.as_ref(),
     );
-    let (_task_clients_exact, _task_clients_prefix) =
+    let (task_clients_exact, task_clients_prefix) =
         config::parse_task_clients_map(effective_task_clients.as_ref());
 
     let client = resolve_client(node, gremlin, enclosing_client)?;
@@ -341,8 +341,8 @@ async fn run_agent(
             })?;
         crate::clients::task::build_task_selector(
             backend,
-            &gremlin.runtime_config.stage_clients_exact,
-            &gremlin.runtime_config.stage_clients_prefix,
+            &task_clients_exact,
+            &task_clients_prefix,
         )
     };
 
