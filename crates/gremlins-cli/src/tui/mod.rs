@@ -516,7 +516,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 if let Some(handle) = chat_task.take() {
                                     handle.abort();
                                 }
-                                finish_and_commit(&mut app, Vec::new());
+                                // Visual-only finish: convert the active
+                                // widget to finished, but discard the
+                                // pending user message and partial response
+                                // without committing them to history.
+                                app.finish_active(Vec::new());
+                                std::mem::take(&mut app.pending_user_message);
+                                std::mem::take(&mut app.current_response);
+                                app.active_request = false;
                             }
                         }
                         KeyCode::Enter => {
