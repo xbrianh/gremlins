@@ -2103,6 +2103,7 @@ fn create_chat_gremlin(
         interactive_session: None,
         scratch_dir,
         clean_cmds: Vec::new(),
+        enclosing_task_clients: None,
     })
 }
 

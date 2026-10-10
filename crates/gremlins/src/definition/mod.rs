@@ -11,6 +11,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use thiserror::Error;
 
 use crate::schemas::bootstrap::Bootstrap;
@@ -51,6 +52,7 @@ pub struct Sequence {
     pub scope: Option<String>,
     pub skip_if_exists: String,
     pub client: Option<ClientSpec>,
+    pub task_clients: Option<IndexMap<String, String>>,
     pub max_iterations: u32,
     pub interval: Option<f64>,
 }
@@ -67,11 +69,13 @@ pub enum ExecutorStage {
     Agent {
         stage: Agent,
         client: Option<ClientSpec>,
+        task_clients: Option<IndexMap<String, String>>,
     },
     /// Run an exec stage.
     Exec {
         stage: Exec,
         client: Option<ClientSpec>,
+        task_clients: Option<IndexMap<String, String>>,
     },
     /// Run a sequence of stages in order.
     Sequence(Sequence),
@@ -82,6 +86,7 @@ pub enum ExecutorStage {
         cancel_on_error: bool,
         error_policy: ErrorPolicy,
         client: Option<ClientSpec>,
+        task_clients: Option<IndexMap<String, String>>,
         children: Vec<Box<dyn GremlinDefinition>>,
         skip_if_exists: String,
         fork: Option<ForkSpec>,
@@ -121,6 +126,17 @@ impl ExecutorStage {
             | ExecutorStage::Exec { client, .. }
             | ExecutorStage::Parallel { client, .. } => client.as_ref(),
             ExecutorStage::Sequence(seq) => seq.client.as_ref(),
+            ExecutorStage::Done => None,
+        }
+    }
+
+    /// The stage's own task-client overrides, if any.
+    pub fn task_clients(&self) -> Option<&IndexMap<String, String>> {
+        match self {
+            ExecutorStage::Agent { task_clients, .. }
+            | ExecutorStage::Exec { task_clients, .. }
+            | ExecutorStage::Parallel { task_clients, .. } => task_clients.as_ref(),
+            ExecutorStage::Sequence(seq) => seq.task_clients.as_ref(),
             ExecutorStage::Done => None,
         }
     }

@@ -31,6 +31,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
 use crate::artifacts::uri::Uri;
@@ -171,12 +172,10 @@ pub(crate) struct RuntimeConfig {
     pub stage_clients_exact: HashMap<String, String>,
     /// Prefix-match stage→client mappings from config.
     pub stage_clients_prefix: HashMap<String, String>,
-    /// Exact-match task→client mappings from config.
-    pub task_clients_exact: HashMap<String, String>,
-    /// Prefix-match task→client mappings from config.
-    pub task_clients_prefix: HashMap<String, String>,
     /// The default client from settings.yaml, if any.
     pub default_client: Option<String>,
+    /// The default task-clients from settings.yaml, if any.
+    pub default_task_clients: Option<IndexMap<String, String>>,
     /// The base process environment captured at startup, before any
     /// bootstrap or system vars are layered on.
     pub base_process_env: HashMap<String, String>,
@@ -196,9 +195,8 @@ impl Clone for RuntimeConfig {
         Self {
             stage_clients_exact: self.stage_clients_exact.clone(),
             stage_clients_prefix: self.stage_clients_prefix.clone(),
-            task_clients_exact: self.task_clients_exact.clone(),
-            task_clients_prefix: self.task_clients_prefix.clone(),
             default_client: self.default_client.clone(),
+            default_task_clients: self.default_task_clients.clone(),
             base_process_env: self.base_process_env.clone(),
             log_tx: self.log_tx.clone(),
             interactive: self.interactive.clone(),
@@ -216,21 +214,16 @@ impl RuntimeConfig {
             .map(|c| c.default_client_by_stage())
             .map(|(e, p)| (e.clone(), p.clone()))
             .unwrap_or_default();
-        let (task_exact, task_prefix) = cfg
-            .as_ref()
-            .map(|c| c.task_clients())
-            .map(|(e, p)| (e.clone(), p.clone()))
-            .unwrap_or_default();
         let default_client = cfg
             .as_ref()
             .and_then(|c| c.default_client().map(String::from));
+        let default_task_clients = cfg.as_ref().and_then(|c| c.default_task_clients().cloned());
         let base_process_env: HashMap<String, String> = std::env::vars().collect();
         Self {
             stage_clients_exact: stage_exact,
             stage_clients_prefix: stage_prefix,
-            task_clients_exact: task_exact,
-            task_clients_prefix: task_prefix,
             default_client,
+            default_task_clients,
             base_process_env,
             log_tx: None,
             interactive: None,
@@ -274,6 +267,10 @@ pub struct Gremlin {
     /// carry a copy so that workspace teardown (e.g. git worktree remove)
     /// runs even though the child's own definition (a StageSpec) has none.
     pub(crate) clean_cmds: Vec<String>,
+    /// Task-client overrides inherited from an enclosing composite stage
+    /// (sequence or parallel). Set during fork; used by run_stage_scoped
+    /// when no explicit enclosing_task_clients is passed.
+    pub(crate) enclosing_task_clients: Option<IndexMap<String, String>>,
 }
 
 impl Gremlin {
@@ -470,6 +467,7 @@ impl Gremlin {
             interactive_session: None,
             scratch_dir,
             clean_cmds: Vec::new(),
+            enclosing_task_clients: None,
         };
 
         // 5. Create an empty log file.
@@ -602,6 +600,7 @@ impl Gremlin {
             interactive_session: None,
             scratch_dir,
             clean_cmds: Vec::new(),
+            enclosing_task_clients: None,
         })
     }
 
@@ -890,6 +889,7 @@ impl Gremlin {
             interactive_session: None,
             scratch_dir: child_scratch_dir,
             clean_cmds: self.clean_cmds.clone(),
+            enclosing_task_clients: self.enclosing_task_clients.clone(),
         })
     }
 
@@ -1987,6 +1987,7 @@ mod tests {
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(scratch_dir),
             clean_cmds: Vec::new(),
+            enclosing_task_clients: None,
         }
     }
 

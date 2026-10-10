@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use serde_yaml::{Mapping, Value};
 
 use crate::schemas::bootstrap::Bootstrap;
@@ -50,6 +51,10 @@ pub struct StaticDefinition {
     /// The fully expanded YAML tree, kept for round-tripping via
     /// [`to_expanded_yaml`](StaticDefinition::to_expanded_yaml).
     pub(crate) expanded_yaml: Value,
+    /// Global `default-task-clients` from settings.yaml, resolved through
+    /// profiles at load time. Included in serialized output so child
+    /// processes do not depend on the current config.
+    pub(crate) default_task_clients: Option<IndexMap<String, String>>,
     cursor: usize,
 }
 
@@ -65,6 +70,7 @@ impl StaticDefinition {
         land: Option<StageSpec>,
         clean_cmds: Vec<String>,
         expanded_yaml: Value,
+        default_task_clients: Option<IndexMap<String, String>>,
     ) -> Self {
         StaticDefinition {
             name,
@@ -75,6 +81,7 @@ impl StaticDefinition {
             land,
             clean_cmds,
             expanded_yaml,
+            default_task_clients,
             cursor: 0,
         }
     }
@@ -94,6 +101,7 @@ impl StaticDefinition {
             land: None,
             clean_cmds: Vec::new(),
             expanded_yaml: Value::Null,
+            default_task_clients: None,
             cursor: 0,
         }
     }
@@ -122,6 +130,7 @@ impl StaticDefinition {
             land: None,
             clean_cmds,
             expanded_yaml: Value::Null,
+            default_task_clients: None,
             cursor: 0,
         }
     }
@@ -173,6 +182,21 @@ impl StaticDefinition {
             Value::String("default_client".to_string()),
             Value::String(self.default_client.clone()),
         );
+
+        // default_task_clients — included when present so child processes
+        // do not depend on the current settings.yaml.
+        if let Some(ref dtc) = self.default_task_clients {
+            if !dtc.is_empty() {
+                let mut dtc_map = Mapping::new();
+                for (key, value) in dtc {
+                    dtc_map.insert(Value::String(key.clone()), Value::String(value.clone()));
+                }
+                root.insert(
+                    Value::String("default_task_clients".to_string()),
+                    Value::Mapping(dtc_map),
+                );
+            }
+        }
 
         // bootstrap — omit entirely if all fields are default/empty.
         let bootstrap_yaml = bootstrap_to_yaml(&self.bootstrap);
@@ -260,13 +284,30 @@ impl StaticDefinition {
     /// Recursively convert one [`StageSpec`] into an [`ExecutorStage`].
     pub(crate) fn convert_stage(&self, stage: StageSpec) -> ExecutorStage {
         match stage {
-            StageSpec::Agent { stage, client } => ExecutorStage::Agent { stage, client },
-            StageSpec::Exec { stage, client } => ExecutorStage::Exec { stage, client },
+            StageSpec::Agent {
+                stage,
+                client,
+                task_clients,
+            } => ExecutorStage::Agent {
+                stage,
+                client,
+                task_clients,
+            },
+            StageSpec::Exec {
+                stage,
+                client,
+                task_clients,
+            } => ExecutorStage::Exec {
+                stage,
+                client,
+                task_clients,
+            },
             StageSpec::Sequence {
                 attrs,
                 max_iterations,
                 interval,
                 client: seq_client,
+                task_clients,
                 body,
             } => {
                 let stages: Vec<ExecutorStage> =
@@ -277,6 +318,7 @@ impl StaticDefinition {
                     scope: None,
                     skip_if_exists: attrs.skip_if_exists,
                     client: seq_client,
+                    task_clients,
                     max_iterations,
                     interval,
                 })
@@ -287,6 +329,7 @@ impl StaticDefinition {
                 cancel_on_error,
                 error_policy,
                 client,
+                task_clients,
                 body,
                 fork,
                 join,
@@ -303,6 +346,7 @@ impl StaticDefinition {
                     cancel_on_error,
                     error_policy,
                     client,
+                    task_clients,
                     children,
                     skip_if_exists: attrs.skip_if_exists,
                     fork,
@@ -525,6 +569,7 @@ mod tests {
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
+            default_task_clients: None,
             cursor: 0,
         };
         let land = def.land().expect("land is populated");
@@ -543,6 +588,7 @@ mod tests {
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
+            default_task_clients: None,
             cursor: 0,
         };
         let boxed: Box<dyn GremlinDefinition> = Box::new(def);
@@ -572,6 +618,7 @@ mod tests {
             land: None,
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
+            default_task_clients: None,
             cursor: 0,
         };
         assert_eq!(def.name(), "test-gremlin");
@@ -591,6 +638,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: None,
+            task_clients: None,
         }
     }
 
@@ -603,6 +651,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: None,
+            task_clients: None,
         }
     }
 
@@ -632,6 +681,7 @@ mod tests {
             scope: None,
             skip_if_exists: String::new(),
             client: None,
+            task_clients: None,
             max_iterations: 1,
             interval: None,
         });
@@ -648,6 +698,7 @@ mod tests {
             scope: None,
             skip_if_exists: String::new(),
             client: None,
+            task_clients: None,
             max_iterations: 1,
             interval: None,
         });
@@ -662,6 +713,7 @@ mod tests {
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
             client: None,
+            task_clients: None,
             children: vec![],
             skip_if_exists: "artifact://reviews".into(),
             fork: None,
@@ -692,6 +744,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: Some(ClientSpec("xai:grok-5".into())),
+            task_clients: None,
         };
         assert_eq!(stage.client(), Some(&ClientSpec("xai:grok-5".into())));
     }
@@ -704,6 +757,7 @@ mod tests {
             scope: None,
             skip_if_exists: "artifact://guard".into(),
             client: None,
+            task_clients: None,
             max_iterations: 1,
             interval: None,
         });
@@ -735,6 +789,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: None,
+            task_clients: None,
         }
     }
 
@@ -748,6 +803,7 @@ mod tests {
                 outputs_map: std::collections::HashMap::new(),
             },
             client: None,
+            task_clients: None,
         }
     }
 
@@ -762,6 +818,7 @@ mod tests {
             land: None,
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
+            default_task_clients: None,
             cursor: 0,
         }
     }
@@ -860,6 +917,7 @@ mod tests {
             max_iterations: 1,
             interval: None,
             client: None,
+            task_clients: None,
             body: vec![parsed_agent("inner-a"), parsed_exec("inner-b")],
         };
         let def = definition_with(vec![seq]);
@@ -891,6 +949,7 @@ mod tests {
             max_iterations: 5,
             interval: Some(20.0),
             client: Some(ClientSpec("xai:grok".into())),
+            task_clients: None,
             body: vec![parsed_agent("loop-child")],
         };
         let def = definition_with(vec![seq]);
@@ -921,6 +980,7 @@ mod tests {
             cancel_on_error: true,
             error_policy: ErrorPolicy::All,
             client: Some(ClientSpec("openai:gpt-5".into())),
+            task_clients: None,
             body: vec![parsed_agent("rev-a"), parsed_agent("rev-b")],
             fork: None,
             join: None,
@@ -963,6 +1023,7 @@ mod tests {
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
             client: None,
+            task_clients: None,
             body: vec![parsed_agent("sole-child")],
             fork: None,
             join: None,

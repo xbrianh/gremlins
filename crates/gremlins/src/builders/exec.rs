@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use indexmap::IndexMap;
+
 use crate::builders::artifacts::{InterpolationValue, OutputTarget};
 use crate::definition::r#static::expand::key_referenced_in_text;
 use crate::definition::ClientSpec;
@@ -33,6 +35,7 @@ pub struct ExecBuilder {
     interpolation_map: HashMap<String, String>,
     outputs_map: HashMap<String, String>,
     client: Option<ClientSpec>,
+    task_clients: Option<IndexMap<String, String>>,
 }
 
 impl ExecBuilder {
@@ -44,6 +47,7 @@ impl ExecBuilder {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             client: None,
+            task_clients: None,
         }
     }
 
@@ -130,6 +134,12 @@ impl ExecBuilder {
     /// Set the stage's own client spec.
     pub fn client(mut self, client: impl Into<String>) -> Self {
         self.client = Some(ClientSpec(client.into()));
+        self
+    }
+
+    /// Set the stage's own task-client overrides.
+    pub fn task_clients(mut self, task_clients: IndexMap<String, String>) -> Self {
+        self.task_clients = Some(task_clients);
         self
     }
 
@@ -232,6 +242,7 @@ impl ExecBuilder {
         Ok(StageSpec::Exec {
             stage,
             client: self.client,
+            task_clients: self.task_clients,
         })
     }
 }
