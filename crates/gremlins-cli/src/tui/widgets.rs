@@ -9,6 +9,9 @@ use ratatui::{
 /// Number of stream lines to keep when freezing.
 const FREEZE_STREAM_LINES: usize = 3;
 
+/// Minimum rows allocated to the stream section when output is present.
+const STREAM_MIN: u16 = 5;
+
 // ── WidgetEvent ──────────────────────────────────────────────────────────
 
 /// Events captured during streaming for statistics display.
@@ -53,6 +56,13 @@ pub trait Widget {
     /// above input/info bars). Future use; defaults to false.
     #[allow(dead_code)]
     fn is_takeover(&self) -> bool {
+        false
+    }
+
+    /// Whether this widget should absorb all remaining transcript space
+    /// rather than using its natural [`height`](Widget::height). Only
+    /// [`ActivePromptWidget`] is greedy. Defaults to false.
+    fn is_greedy(&self) -> bool {
         false
     }
 
@@ -121,95 +131,43 @@ impl Widget for ActivePromptWidget {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+
         let width = area.width;
-        let stream_content = wrapped_rows(&self.stream_lines, &self.stream_partial, width);
-        let response_content = wrapped_rows(&self.response_lines, &self.response_partial, width);
-        let sep_h = if stream_content > 0 && response_content > 0 {
+        let stream_nat = wrapped_rows(&self.stream_lines, &self.stream_partial, width);
+        let output_nat = wrapped_rows(&self.response_lines, &self.response_partial, width);
+        let sep_h = if stream_nat > 0 && output_nat > 0 {
             1
         } else {
             0
         };
 
-        let mut y = area.bottom();
+        // Reserve 1 row for the prompt at the top.
+        let prompt_h = 1u16.min(area.height);
+        let available = area.height.saturating_sub(prompt_h);
 
-        // Response section (bottom)
-        if response_content > 0 && y > area.y {
-            let h = response_content.min(y - area.y);
-            y = y.saturating_sub(h);
-            let mut lines = self.response_lines.clone();
-            if !self.response_partial.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    self.response_partial.as_str(),
-                    Style::default(),
-                )));
-            }
-            let total = wrapped_rows(&self.response_lines, &self.response_partial, width) as usize;
-            let scroll = total.saturating_sub(h as usize) as u16;
-            let p = Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0));
-            frame.render_widget(
-                p,
-                Rect {
-                    x: area.x,
-                    y,
-                    width,
-                    height: h,
-                },
-            );
-        }
+        // Allocate rows below the prompt.
+        //
+        // Output gets priority up to its natural height, but when stream
+        // content is present it keeps a minimum floor of STREAM_MIN rows
+        // (plus the separator row when both sections are shown). With no
+        // output, the stream fills all remaining space.
+        let stream_floor = if stream_nat > 0 { STREAM_MIN } else { 0 };
+        let (stream_h, output_h) = if output_nat > 0 {
+            let reserve = (stream_floor + sep_h).min(available);
+            let output_h = output_nat.min(available.saturating_sub(reserve));
+            let stream_h = available.saturating_sub(output_h).saturating_sub(sep_h);
+            (stream_h, output_h)
+        } else {
+            (available, 0)
+        };
 
-        // Separator
-        if sep_h > 0 && y > area.y {
-            y = y.saturating_sub(1);
-            let sep = Paragraph::new(Line::from(Span::styled(
-                "─".repeat(width as usize),
-                Style::default().fg(Color::DarkGray),
-            )));
-            frame.render_widget(
-                sep,
-                Rect {
-                    x: area.x,
-                    y,
-                    width,
-                    height: 1,
-                },
-            );
-        }
+        let mut y = area.y;
 
-        // Stream section
-        if stream_content > 0 && y > area.y {
-            let h = stream_content.min(y - area.y);
-            y = y.saturating_sub(h);
-            let mut lines = self.stream_lines.clone();
-            if !self.stream_partial.is_empty() {
-                let style = Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC);
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", self.stream_partial),
-                    style,
-                )));
-            }
-            let total = wrapped_rows(&self.stream_lines, &self.stream_partial, width) as usize;
-            let scroll = total.saturating_sub(h as usize) as u16;
-            let p = Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0));
-            frame.render_widget(
-                p,
-                Rect {
-                    x: area.x,
-                    y,
-                    width,
-                    height: h,
-                },
-            );
-        }
-
-        // Prompt (top)
-        if y > area.y {
-            y = y.saturating_sub(1);
+        // Prompt (top).
+        if prompt_h > 0 {
             let prompt_style = Style::default().fg(Color::Cyan);
             let p = Paragraph::new(Line::from(Span::styled(
                 format!("> {}", self.prompt),
@@ -224,11 +182,86 @@ impl Widget for ActivePromptWidget {
                     height: 1,
                 },
             );
+            y += 1;
+        }
+
+        // Stream section.
+        if stream_h > 0 {
+            let mut lines = self.stream_lines.clone();
+            if !self.stream_partial.is_empty() {
+                let style = Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC);
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", self.stream_partial),
+                    style,
+                )));
+            }
+            let scroll = stream_nat.saturating_sub(stream_h);
+            let p = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0));
+            frame.render_widget(
+                p,
+                Rect {
+                    x: area.x,
+                    y,
+                    width,
+                    height: stream_h,
+                },
+            );
+            y += stream_h;
+        }
+
+        // Separator.
+        if sep_h > 0 && stream_h > 0 && output_h > 0 && y < area.bottom() {
+            let sep = Paragraph::new(Line::from(Span::styled(
+                "─".repeat(width as usize),
+                Style::default().fg(Color::DarkGray),
+            )));
+            frame.render_widget(
+                sep,
+                Rect {
+                    x: area.x,
+                    y,
+                    width,
+                    height: 1,
+                },
+            );
+            y += 1;
+        }
+
+        // Response section (bottom).
+        if output_h > 0 {
+            let mut lines = self.response_lines.clone();
+            if !self.response_partial.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    self.response_partial.as_str(),
+                    Style::default(),
+                )));
+            }
+            let scroll = output_nat.saturating_sub(output_h);
+            let p = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0));
+            frame.render_widget(
+                p,
+                Rect {
+                    x: area.x,
+                    y,
+                    width,
+                    height: output_h,
+                },
+            );
         }
     }
 
     fn is_expandable(&self) -> bool {
         false
+    }
+
+    fn is_greedy(&self) -> bool {
+        true
     }
 
     fn toggle_expand(&mut self) {

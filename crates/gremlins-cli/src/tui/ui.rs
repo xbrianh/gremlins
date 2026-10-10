@@ -64,14 +64,32 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &App) {
 /// Render widgets bottom-up. Stop when the transcript area is full.
 /// Widgets taller than the remaining space are still rendered — they get
 /// a clipped area and use internal paragraph scrolling to show content.
+///
+/// Layout is two-pass: non-greedy widgets (finished turns, system messages)
+/// are placed first at their natural heights, then the greedy widget (the
+/// active turn) absorbs the leftover rows so it fills slack without erasing
+/// history.
 fn render_widgets_bottom_up(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
 
     let width = area.width;
-    let mut y = area.bottom();
 
+    // Pass 1: measure the total natural height of non-greedy widgets.
+    let mut non_greedy_h = 0u16;
+    for widget in app.transcript.iter().rev() {
+        if widget.is_greedy() {
+            break;
+        }
+        non_greedy_h = non_greedy_h.saturating_add(widget.height(width));
+    }
+
+    // The greedy widget gets everything not claimed by non-greedy widgets,
+    // bounded by the transcript area.
+    let greedy_h = area.height.saturating_sub(non_greedy_h);
+
+    let mut y = area.bottom();
     for widget in app.transcript.iter().rev() {
         let h = widget.height(width);
         if h == 0 {
@@ -81,8 +99,14 @@ fn render_widgets_bottom_up(frame: &mut Frame, area: Rect, app: &App) {
             // No space left at all.
             break;
         }
-        // Allocate whatever space remains, even if the widget is taller.
-        let visible_h = h.min(y - area.y);
+        // A greedy widget (the active turn) absorbs the leftover space
+        // instead of its natural height. Non-greedy widgets use their
+        // natural height, clipped to whatever space remains.
+        let visible_h = if widget.is_greedy() {
+            greedy_h.min(y - area.y)
+        } else {
+            h.min(y - area.y)
+        };
         y = y.saturating_sub(visible_h);
         let widget_area = Rect {
             x: area.x,
