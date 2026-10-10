@@ -177,7 +177,9 @@ impl Widget for ActivePromptWidget {
                 ),
                 Span::styled(
                     self.prompt.as_str(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]);
             let p = Paragraph::new(prompt);
@@ -534,7 +536,9 @@ impl Widget for FinishedPromptWidget {
                 ),
                 Span::styled(
                     self.prompt.as_str(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]);
             let p = Paragraph::new(prompt);
