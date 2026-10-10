@@ -11,19 +11,13 @@ pub enum ChatEvent {
     ReasoningChunk(String),
     ToolResult {
         name: String,
-        output: String,
     },
     TurnComplete {
-        #[allow(dead_code)]
-        turn: usize,
-        #[allow(dead_code)]
         text: String,
-        #[allow(dead_code)]
         tool_calls: Vec<String>,
     },
     Done {
         text: String,
-        #[allow(dead_code)]
         usage: Option<Value>,
     },
     Ended {
@@ -129,14 +123,8 @@ fn parse_chat_event(value: &Value) -> ChatEvent {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            output: value
-                .get("output")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
         },
         Some("turn_complete") => ChatEvent::TurnComplete {
-            turn: value.get("turn").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
             text: value
                 .get("text")
                 .and_then(|v| v.as_str())

@@ -5,6 +5,8 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use crate::tui::buffer::{BoundedBuffer, LineOrigin, ScrollableBuffer};
+
 /// Application state for the TUI.
 ///
 /// Pure state, no I/O. Owned by the event loop and passed mutably to the
@@ -12,13 +14,15 @@ use ratatui::{
 ///
 /// ## Transcript model
 ///
-/// Completed turns are flattened into [`transcript_lines`]. The current
-/// turn lives in separate fields ([`current_prompt`], [`reasoning`],
-/// [`tools`], [`response_text`]) and is rendered below the transcript.
+/// Completed turns are flattened into [`scrollable`](Self::scrollable). The
+/// current turn lives in separate fields ([`current_prompt`](Self::current_prompt),
+/// [`reasoning`](Self::reasoning), [`tools`](Self::tools),
+/// [`response_text`](Self::response_text)) and is rendered below the transcript.
 ///
-/// Ephemeral regions (reasoning, tools) are bounded (max 5 lines each)
+/// Ephemeral regions (reasoning, tools) are bounded (max 5 visible rows each)
 /// and are never committed to terminal scrollback. Only
-/// [`transcript_lines`] and [`response_text`] can overflow.
+/// [`scrollable`](Self::scrollable) and [`response_text`](Self::response_text)
+/// can overflow.
 pub struct App {
     /// Current text in the input bar.
     pub input: String,
@@ -48,25 +52,22 @@ pub struct App {
     //
     /// Completed turns flattened as styled lines (oldest first),
     /// interleaved with blank-line padding. Banner and system messages
-    /// are appended here.
-    pub transcript_lines: Vec<Line<'static>>,
-    /// Number of [`transcript_lines`] entries already committed to
-    /// terminal scrollback.
-    pub transcript_committed: usize,
+    /// are appended here. Scrolled-off content is dropped internally.
+    pub scrollable: ScrollableBuffer,
     /// Current-turn prompt (without `> ` prefix — the renderer adds it).
     pub current_prompt: Option<String>,
-    /// Current-turn reasoning lines (bounded to last 5, newest last).
-    pub reasoning: Vec<Line<'static>>,
+    /// Current-turn reasoning lines (bounded to 5 visible rows).
+    pub reasoning: BoundedBuffer,
     /// Un-flushed reasoning text (accumulated across chunks, flushed
     /// on newline or by [`flush_reasoning`]).
     pub reasoning_partial: String,
-    /// Current-turn active tool names (bounded to 5).
-    pub tools: Vec<String>,
+    /// Current-turn active tool names (bounded to 5 visible rows).
+    pub tools: BoundedBuffer,
     /// Current-turn streaming response text (raw markdown). Parsed into
     /// styled [`Line`]s at render time.
     pub response_text: String,
-    /// Number of response-text lines already committed to scrollback.
-    pub response_committed: usize,
+    /// Terminal width cached for buffer trimming. Updated before each frame.
+    pub width: u16,
 }
 
 /// One tracked gremlin run.
@@ -99,10 +100,11 @@ pub enum Overlay {
     /// Gremlins watch table. Non-blocking; main input bar still works.
     Watch,
     /// Single-gremlin log viewer. Blocking overlay with its own log buffer.
-    WatchSingle { id: String, log_lines: Vec<String> },
+    WatchSingle {
+        log_lines: Vec<String>,
+    },
     /// Interactive debug session. Blocking overlay with its own prompt.
     Debug {
-        id: String,
         input: String,
         history: Vec<String>,
         /// Whether the debug socket is open but `ready` has not arrived yet.
@@ -145,14 +147,13 @@ impl App {
             overlay: None,
             input_history: Vec::new(),
             history_cursor: None,
-            transcript_lines: Vec::new(),
-            transcript_committed: 0,
+            scrollable: ScrollableBuffer::new(),
             current_prompt: None,
-            reasoning: Vec::new(),
+            reasoning: BoundedBuffer::new(5),
             reasoning_partial: String::new(),
-            tools: Vec::new(),
+            tools: BoundedBuffer::new(5),
             response_text: String::new(),
-            response_committed: 0,
+            width: 80,
         }
     }
 
@@ -272,12 +273,6 @@ impl App {
         matches!(self.overlay, Some(Overlay::Watch))
     }
 
-    /// Whether the main input bar should be disabled by the active overlay.
-    #[allow(dead_code)]
-    pub fn overlay_blocks_input(&self) -> bool {
-        self.overlay.as_ref().is_some_and(Overlay::is_blocking)
-    }
-
     /// Dismiss a blocking overlay. Returns true if one was dismissed.
     pub fn dismiss_blocking_overlay(&mut self) -> bool {
         if self.overlay.as_ref().is_some_and(Overlay::is_blocking) {
@@ -298,16 +293,14 @@ impl App {
         }
     }
 
-    pub fn open_watch_single(&mut self, id: String) {
+    pub fn open_watch_single(&mut self, _id: String) {
         self.overlay = Some(Overlay::WatchSingle {
-            id,
             log_lines: Vec::new(),
         });
     }
 
-    pub fn open_debug(&mut self, id: String) {
+    pub fn open_debug(&mut self, _id: String) {
         self.overlay = Some(Overlay::Debug {
-            id,
             input: String::new(),
             history: Vec::new(),
             connecting: true,
@@ -439,15 +432,17 @@ impl App {
 
     // ── LiveArea region helpers ───────────────────────────────────
 
-    /// Flatten the current turn into [`transcript_lines`] and start a new
-    /// turn with the given prompt.
+    /// Flatten the current turn into [`scrollable`](Self::scrollable) and
+    /// start a new turn with the given prompt.
     ///
     /// The previous turn's prompt, reasoning, tools, and response are
-    /// flattened with blank-line padding and appended. All current-turn
-    /// fields are then cleared and `current_prompt` is set.
+    /// flattened with blank-line padding and appended.  Only the tail of
+    /// each ephemeral buffer (the portion actually displayed) is preserved;
+    /// the head is permanently dropped.  All current-turn fields are then
+    /// cleared and `current_prompt` is set.
     pub fn submit_prompt(&mut self, prompt: String) {
         // Flatten the previous turn if there was one.
-        if let Some(ref prev_prompt) = self.current_prompt {
+        if let Some(prev_prompt) = self.current_prompt.take() {
             let prompt_style = Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD);
@@ -455,63 +450,55 @@ impl App {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD);
 
-            if !self.transcript_lines.is_empty() {
-                self.transcript_lines.push(Line::from(""));
-                self.transcript_lines.push(Line::from(""));
+            let width = self.width;
+
+            if !self.scrollable.is_empty() {
+                self.scrollable.push(Line::from(""), LineOrigin::Separator);
+                self.scrollable.push(Line::from(""), LineOrigin::Separator);
             }
 
             // Prompt.
-            self.transcript_lines.push(Line::from(vec![
+            self.scrollable.push(Line::from(vec![
                 Span::styled("> ", marker_style),
-                Span::styled(prev_prompt.clone(), prompt_style),
-            ]));
+                Span::styled(prev_prompt, prompt_style),
+            ]), LineOrigin::FlattenedPrompt);
 
-            // Reasoning.
-            let reasoning_style = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC);
-            if !self.reasoning.is_empty() {
-                self.transcript_lines.push(Line::from(""));
-                for line in &self.reasoning {
-                    self.transcript_lines.push(line.clone());
+            // Reasoning — only the visible tail.
+            let reasoning_tail = self.reasoning.lines(width);
+            if !reasoning_tail.is_empty() {
+                self.scrollable.push(Line::from(""), LineOrigin::Separator);
+                for line in reasoning_tail {
+                    self.scrollable.push(line, LineOrigin::FlattenedReasoning);
                 }
             }
 
-            // Tools.
-            let tool_style = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC);
-            if !self.tools.is_empty() {
-                self.transcript_lines.push(Line::from(""));
-                for name in &self.tools {
-                    self.transcript_lines
-                        .push(Line::from(Span::styled(
-                            format!("  {name}"),
-                            tool_style,
-                        )));
+            // Tools — only the visible tail.
+            let tools_tail = self.tools.lines(width);
+            if !tools_tail.is_empty() {
+                self.scrollable.push(Line::from(""), LineOrigin::Separator);
+                for line in tools_tail {
+                    self.scrollable.push(line, LineOrigin::FlattenedTools);
                 }
             }
 
             // Response.
             if !self.response_text.is_empty() {
-                self.transcript_lines.push(Line::from(""));
+                self.scrollable.push(Line::from(""), LineOrigin::Separator);
                 for line_str in self.response_text.lines() {
-                    self.transcript_lines
-                        .push(Line::from(Span::styled(
-                            line_str.to_string(),
-                            Style::default(),
-                        )));
+                    self.scrollable.push(Line::from(Span::styled(
+                        line_str.to_string(),
+                        Style::default(),
+                    )), LineOrigin::FlattenedResponse);
                 }
             }
         }
 
         // Clear current-turn fields.
         self.current_prompt = Some(prompt);
-        self.reasoning.clear();
+        self.reasoning = BoundedBuffer::new(5);
         self.reasoning_partial.clear();
-        self.tools.clear();
+        self.tools = BoundedBuffer::new(5);
         self.response_text.clear();
-        self.response_committed = 0;
     }
 
     /// Flush the reasoning partial buffer (if any) into a completed
@@ -524,9 +511,6 @@ impl App {
                 .add_modifier(Modifier::ITALIC);
             self.reasoning
                 .push(Line::from(Span::styled(format!("  {remaining}"), style)));
-            while self.reasoning.len() > 5 {
-                self.reasoning.remove(0);
-            }
         }
     }
 
@@ -542,19 +526,17 @@ impl App {
             self.reasoning_partial = self.reasoning_partial[newline_pos + 1..].into();
             self.reasoning
                 .push(Line::from(Span::styled(format!("  {line}"), style)));
-            while self.reasoning.len() > 5 {
-                self.reasoning.remove(0);
-            }
         }
     }
 
     /// Record a tool call. Oldest entries are discarded once the region
-    /// exceeds 5 entries.
+    /// exceeds its visible-row bound.
     pub fn push_tool(&mut self, name: &str) {
-        self.tools.push(name.to_string());
-        while self.tools.len() > 5 {
-            self.tools.remove(0);
-        }
+        let style = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC);
+        self.tools
+            .push(Line::from(Span::styled(format!("  {name}"), style)));
     }
 
     /// Append streaming response text.
@@ -573,14 +555,14 @@ impl App {
         self.current_prompt.is_some()
     }
 
-    /// Append a system message to [`transcript_lines`] with default
-    /// style and blank-line padding from the previous entry.
+    /// Append a system message to [`scrollable`](Self::scrollable) with
+    /// default style and blank-line padding from the previous entry.
     pub fn push_transcript_line(&mut self, line: String) {
-        if !self.transcript_lines.is_empty() {
-            self.transcript_lines.push(Line::from(""));
-            self.transcript_lines.push(Line::from(""));
+        if !self.scrollable.is_empty() {
+            self.scrollable.push(Line::from(""), LineOrigin::Separator);
+            self.scrollable.push(Line::from(""), LineOrigin::Separator);
         }
-        self.transcript_lines
-            .push(Line::from(Span::styled(line, Style::default())));
+        self.scrollable
+            .push(Line::from(Span::styled(line, Style::default())), LineOrigin::Transcript);
     }
 }

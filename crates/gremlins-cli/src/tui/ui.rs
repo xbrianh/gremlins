@@ -7,29 +7,31 @@ use ratatui::{
 };
 
 use crate::tui::app::App;
+use crate::tui::buffer::wrapped_height;
 
 /// Render the TUI using the LiveArea region model.
 ///
 /// Content is laid out bottom-up from the input bar:
-///   info bar → input bar → response → tools → reasoning → prompt →
-///   transcript.
+///   info bar → input bar → tools → reasoning → scrollable (transcript +
+///   prompt + response).
 ///
-/// Ephemeral regions (reasoning, tools) are bounded to 5 lines each
-/// and are rendered between the prompt and response. They are excluded
-/// from the scrollable line count so they never reach terminal
-/// scrollback.
+/// All scrollable content lives in the FIFO ([`ScrollableBuffer`]). When its
+/// wrapped height exceeds available rows, the FIFO head is extracted and
+/// returned as overflow lines to be committed to terminal scrollback via
+/// [`LiveArea::commit_scrollback`].
 ///
-/// Returns `(scrollable_lines, total_lines)` where `scrollable_lines`
-/// is the count of lines that may be committed to scrollback
-/// (transcript + prompt + response) and `total_lines` is all rendered
-/// lines including ephemeral regions.
+/// Ephemeral regions (reasoning, tools) are bounded to 5 visible rows each
+/// and never reach scrollback.
+///
+/// Returns overflow lines (empty if nothing overflowed). The caller must
+/// commit them via `LiveArea::commit_scrollback`.
 pub fn render_livearea(
     buf: &mut Buffer,
     area: Rect,
-    app: &App,
+    app: &mut App,
     gremlin_count: &str,
     project_name: &str,
-) -> (u16, u16) {
+) -> Vec<Line<'static>> {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -44,22 +46,21 @@ pub fn render_livearea(
     render_info_bar(buf, chunks[2], app, gremlin_count, project_name);
 
     if content_area.height == 0 {
-        return (0, 0);
+        return Vec::new();
     }
 
+    let width = content_area.width;
+
     log::debug!(
-        "render transcript_lines={} prompt={:?} reasoning={} tools={} response_len={} content_h={} active={}",
-        app.transcript_lines.len(),
+        "render scrollable_vis={} prompt={:?} reasoning={} tools={} response_len={} content_h={} active={}",
+        app.scrollable.visible_lines().len(),
         app.current_prompt.as_deref(),
-        app.reasoning.len(),
-        app.tools.len(),
+        app.reasoning.visible_lines(width).len(),
+        app.tools.visible_lines(width).len(),
         app.response_text.len(),
         content_area.height,
         app.active_request,
     );
-    if !app.response_text.is_empty() {
-        log::debug!("render response_text={:?}", app.response_text);
-    }
 
     // Styles.
     let prompt_marker = Style::default()
@@ -71,85 +72,122 @@ pub fn render_livearea(
     let reason_style = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::ITALIC);
-    let tool_style = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC);
 
-    // ── Build content lines top-to-bottom ─────────────────────
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut scrollable: u16 = 0;
-
-    // 1. Transcript (visible portion).
-    let tx_start = app.transcript_committed;
-    for line in &app.transcript_lines[tx_start..] {
-        lines.push(line.clone());
-        scrollable += 1;
-    }
-
-    // 2. Current prompt.
-    if let Some(ref prompt) = app.current_prompt {
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
-            scrollable += 1;
-        }
-        let prompt_line = Line::from(vec![
+    // ── Current-turn scrollable lines (prompt + response) ─────
+    let prompt_lines: Vec<Line<'static>> = match &app.current_prompt {
+        Some(prompt) => vec![Line::from(vec![
             Span::styled("> ", prompt_marker),
             Span::styled(prompt.clone(), prompt_text),
-        ]);
-        lines.push(prompt_line);
-        scrollable += 1;
+        ])],
+        None => Vec::new(),
+    };
+    let prompt_height = wrapped_height(&prompt_lines, width) as u16;
+
+    let response_lines: Vec<Line<'static>> = if app.response_text.is_empty() {
+        Vec::new()
+    } else {
+        app.response_text
+            .lines()
+            .map(|s| Line::from(Span::styled(s.to_string(), Style::default())))
+            .collect()
+    };
+    let response_height = wrapped_height(&response_lines, width) as u16;
+
+    // ── Ephemeral lines (reasoning + partial, tools), bounded ──
+    let reasoning_extra: Vec<Line<'static>> = if app.reasoning_partial.is_empty() {
+        Vec::new()
+    } else {
+        vec![Line::from(Span::styled(
+            format!("  {}", app.reasoning_partial),
+            reason_style,
+        ))]
+    };
+    let reasoning_lines = app
+        .reasoning
+        .visible_lines_with_extra(&reasoning_extra, width);
+    let reasoning_height = wrapped_height(&reasoning_lines, width) as u16;
+
+    let tools_lines = app.tools.visible_lines(width);
+    let tools_height = wrapped_height(&tools_lines, width) as u16;
+
+    // ── Scrollable budget ─────────────────────────────────────
+    let ephemeral = reasoning_height.saturating_add(tools_height);
+    let available = content_area.height.saturating_sub(ephemeral);
+
+    // Blank separators.
+    let sep_tp_est = if !app.scrollable.is_empty() && !prompt_lines.is_empty() {
+        1u16
+    } else {
+        0
+    };
+    let sep_pr = if !prompt_lines.is_empty() && !response_lines.is_empty() {
+        1u16
+    } else {
+        0
+    };
+
+    // Fixed (non-transcript) scrollable height.
+    let fixed = prompt_height
+        .saturating_add(response_height)
+        .saturating_add(sep_tp_est)
+        .saturating_add(sep_pr);
+
+    // ── Overflow: split the FIFO head ─────────────────────────
+    let transcript_available = available.saturating_sub(fixed);
+    let (split_idx, _overflow_rows) = app.scrollable.overflow_split(transcript_available, width);
+
+    let overflow_lines: Vec<Line<'static>> = if split_idx > 0 {
+        let head: Vec<Line<'static>> =
+            app.scrollable.visible_lines()[..split_idx].to_vec();
+        app.scrollable.drain_head(split_idx);
+        head
+    } else {
+        Vec::new()
+    };
+
+    // ── Build combined scrollable lines (post-drain) ──────────
+    let mut combined: Vec<Line<'static>> = app.scrollable.visible_lines().to_vec();
+    let sep_tp = if !combined.is_empty() && !prompt_lines.is_empty() {
+        1u16
+    } else {
+        0
+    };
+    if sep_tp > 0 {
+        combined.push(Line::from(""));
+    }
+    combined.extend(prompt_lines.iter().cloned());
+    if sep_pr > 0 {
+        combined.push(Line::from(""));
+    }
+    combined.extend(response_lines.iter().cloned());
+
+    // ── Allocate regions bottom-up ────────────────────────────
+    let content_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(available),        // scrollable
+            Constraint::Length(reasoning_height), // reasoning
+            Constraint::Length(tools_height),     // tools
+        ])
+        .split(content_area);
+
+    // ── Render each region ────────────────────────────────────
+    if !combined.is_empty() {
+        let paragraph = Paragraph::new(combined).wrap(Wrap { trim: false });
+        paragraph.render(content_chunks[0], buf);
     }
 
-    // 3. Reasoning (ephemeral, bounded last 5).
-    if !app.reasoning.is_empty() || !app.reasoning_partial.is_empty() {
-        lines.push(Line::from(""));
-        for line in app.reasoning.iter().rev().take(5).rev() {
-            lines.push(line.clone());
-        }
-        if !app.reasoning_partial.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", app.reasoning_partial),
-                reason_style,
-            )));
-        }
+    if !reasoning_lines.is_empty() {
+        let paragraph = Paragraph::new(reasoning_lines).wrap(Wrap { trim: false });
+        paragraph.render(content_chunks[1], buf);
     }
 
-    // 4. Tools (ephemeral, bounded last 5).
-    if !app.tools.is_empty() {
-        lines.push(Line::from(""));
-        for name in app.tools.iter().rev().take(5).rev() {
-            lines.push(Line::from(Span::styled(
-                format!("  {name}"),
-                tool_style,
-            )));
-        }
+    if !tools_lines.is_empty() {
+        let paragraph = Paragraph::new(tools_lines).wrap(Wrap { trim: false });
+        paragraph.render(content_chunks[2], buf);
     }
 
-    // 5. Response text (scrollable).
-    if !app.response_text.is_empty() {
-        lines.push(Line::from(""));
-        for line_str in app.response_text.lines() {
-            lines.push(Line::from(Span::styled(
-                line_str.to_string(),
-                Style::default(),
-            )));
-            scrollable += 1;
-        }
-        // Preserve trailing newline (undisplayed partial line).
-        if app.response_text.ends_with('\n') {
-            // no-op — the final newline doesn't produce a line.
-        }
-    }
-
-    // ── Render tail-pinned ────────────────────────────────────
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let line_count = paragraph.line_count(content_area.width);
-    let scroll = line_count
-        .saturating_sub(content_area.height as usize)
-        .min(u16::MAX as usize) as u16;
-    paragraph.scroll((scroll, 0)).render(content_area, buf);
-
-    (scrollable, line_count.min(u16::MAX as usize) as u16)
+    overflow_lines
 }
 
 fn render_info_bar(
@@ -193,8 +231,6 @@ fn render_info_bar(
 fn render_input_bar(buf: &mut Buffer, area: Rect, app: &App) {
     let prompt = Span::styled("> ", Style::default().fg(Color::Cyan));
 
-    // Block cursor rendered as an inverted space *after* the input text,
-    // showing where the next character will be inserted.
     let text = Line::from(vec![
         prompt,
         Span::raw(app.input.as_str()),
@@ -238,8 +274,9 @@ mod tests {
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
 
-        app.push_transcript_line("gremlins tui — type /help for commands, Ctrl+C to exit".to_string());
-        app.push_transcript_line("[run started] chat-0000 (chat) stage=starting".to_string());
+        app.push_transcript_line(
+            "gremlins tui — type /help for commands, Ctrl+C to exit".to_string(),
+        );
         app.submit_prompt("hi".to_string());
         app.push_reasoning_text("thinking...");
         app.flush_reasoning();
@@ -248,11 +285,12 @@ mod tests {
         app.push_tool("Done");
         app.replace_response("Greeted the user; no task was requested yet.");
         app.current_response = "Greeted the user; no task was requested yet.".to_string();
-        app.push_transcript_line("[run completed] chat-0000 (exit 0)".to_string());
 
-        live_area
-            .draw(|buf| render_livearea(buf, area, &app, "0", "gremlins"))
-            .unwrap();
+        let overflow = render_livearea(live_area.curr_mut(), area, &mut app, "0", "gremlins");
+        // In a 24-row terminal, this content should not overflow.
+        assert!(overflow.is_empty());
+
+        live_area.draw(|_| {}).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
@@ -276,36 +314,35 @@ mod tests {
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
 
-        let frame = |live_area: &mut LiveArea<TestBackend>, app: &App| {
-            live_area
-                .draw(|buf| render_livearea(buf, area, app, "0", "gremlins"))
-                .unwrap();
+        let frame = |live_area: &mut LiveArea<TestBackend>, app: &mut App| {
+            let overflow = render_livearea(live_area.curr_mut(), area, app, "0", "gremlins");
+            if !overflow.is_empty() {
+                live_area.commit_scrollback(&overflow, cols).unwrap();
+            }
+            live_area.draw(|_| {}).unwrap();
         };
 
-        app.push_transcript_line("gremlins tui — type /help for commands, Ctrl+C to exit".to_string());
-        app.push_transcript_line("[run started] chat-0000 (chat) stage=starting".to_string());
-        frame(&mut live_area, &app);
+        app.push_transcript_line(
+            "gremlins tui — type /help for commands, Ctrl+C to exit".to_string(),
+        );
 
         app.submit_prompt("hi".to_string());
         app.push_reasoning_text("thinking...");
         app.flush_reasoning();
-        frame(&mut live_area, &app);
+        frame(&mut live_area, &mut app);
 
         app.push_reasoning_text("The user just said hi.");
         app.flush_reasoning();
-        frame(&mut live_area, &app);
+        frame(&mut live_area, &mut app);
 
         app.push_reasoning_text("I should respond briefly.");
         app.flush_reasoning();
         app.push_tool("Done");
-        frame(&mut live_area, &app);
+        frame(&mut live_area, &mut app);
 
         app.replace_response("Greeted the user; no task was requested yet.");
         app.current_response = "Greeted the user; no task was requested yet.".to_string();
-        frame(&mut live_area, &app);
-
-        app.push_transcript_line("[run completed] chat-0000 (exit 0)".to_string());
-        frame(&mut live_area, &app);
+        frame(&mut live_area, &mut app);
 
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(

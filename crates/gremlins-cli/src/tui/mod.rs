@@ -1,9 +1,9 @@
 pub mod app;
+pub mod buffer;
 pub mod chat;
 pub mod client;
 pub mod commands;
 pub mod editor;
-pub mod overlays;
 pub mod screen;
 pub mod ui;
 
@@ -82,8 +82,6 @@ enum DebugEvent {
         id: String,
     },
     TurnComplete {
-        #[allow(dead_code)]
-        turn: usize,
         text: String,
         tool_calls: Vec<String>,
     },
@@ -118,7 +116,6 @@ fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
                 .to_string(),
         },
         Some("turn_complete") => DebugEvent::TurnComplete {
-            turn: value.get("turn").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
             text: value
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -406,8 +403,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
         let gremlin_count = app.gremlin_count_str();
         let project_name = app.project_name_str().to_string();
         let (cols, rows) = live_area.size();
+        app.width = cols;
         let area = Rect::new(0, 0, cols, rows);
-        live_area.draw(|buf| render_livearea(buf, area, &app, &gremlin_count, &project_name))?;
+        let overflow =
+            render_livearea(live_area.curr_mut(), area, &mut app, &gremlin_count, &project_name);
+        if !overflow.is_empty() {
+            live_area.commit_scrollback(&overflow, cols)?;
+        }
+        live_area.draw(|_| {})?;
 
         tokio::select! {
             // ── Crossterm events ──────────────────────────────
@@ -720,9 +723,17 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 // appears without waiting for the next event.
                                 let (cols, rows) = live_area.size();
                                 let area = Rect::new(0, 0, cols, rows);
-                                live_area.draw(|buf| {
-                                    render_livearea(buf, area, &app, &gremlin_count, &project_name)
-                                })?;
+                                let overflow = render_livearea(
+                                    live_area.curr_mut(),
+                                    area,
+                                    &mut app,
+                                    &gremlin_count,
+                                    &project_name,
+                                );
+                                if !overflow.is_empty() {
+                                    live_area.commit_scrollback(&overflow, cols)?;
+                                }
+                                live_area.draw(|_| {})?;
 
                                 app.active_request = true;
                                 app.pending_user_message = input.clone();
@@ -789,33 +800,28 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             Some(event) = event_rx.recv() => {
                 match event {
                     gremlins::executor::DaemonEvent::RunStarted { id, definition, stage } => {
-                        let msg = format!("[run started] {id} ({definition}) stage={stage}");
-                        app.push_transcript_line(msg);
+                        log::info!("[run started] {id} ({definition}) stage={stage}");
                         app.on_run_started(id, definition, stage);
                     }
                     gremlins::executor::DaemonEvent::RunCompleted { id, exit_code } => {
-                        let msg = format!("[run completed] {id} (exit {exit_code})");
-                        app.push_transcript_line(msg);
+                        log::info!("[run completed] {id} (exit {exit_code})");
                         app.on_run_completed(id);
                     }
                     gremlins::executor::DaemonEvent::RunFailed { id, exit_code, error } => {
                         let err_detail = error.as_deref().unwrap_or("");
-                        let msg = if err_detail.is_empty() {
-                            format!("[run failed] {id} (exit {exit_code})")
+                        if err_detail.is_empty() {
+                            log::info!("[run failed] {id} (exit {exit_code})");
                         } else {
-                            format!("[run failed] {id} (exit {exit_code}): {err_detail}")
-                        };
-                        app.push_transcript_line(msg);
+                            log::info!("[run failed] {id} (exit {exit_code}): {err_detail}");
+                        }
                         app.on_run_failed(id);
                     }
                     gremlins::executor::DaemonEvent::RunStopped { id } => {
-                        let msg = format!("[run stopped] {id}");
-                        app.push_transcript_line(msg);
+                        log::info!("[run stopped] {id}");
                         app.on_run_stopped(id);
                     }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
-                        let msg = format!("[{id}] stage → {stage}");
-                        app.push_transcript_line(msg);
+                        log::info!("[{id}] stage → {stage}");
                         app.on_stage_transition(id, stage);
                     }
                     gremlins::executor::DaemonEvent::LogLine { id, line } => {
@@ -827,8 +833,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
                     }
                     gremlins::executor::DaemonEvent::Bail { id, reason } => {
-                        let msg = format!("[{id}] bail: {reason}");
-                        app.push_transcript_line(msg);
+                        log::info!("[{id}] bail: {reason}");
                     }
                 }
             }
@@ -974,7 +979,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         log::debug!("ReasoningChunk len={}", text.len());
                         app.push_reasoning_text(&text);
                     }
-                    ChatEvent::ToolResult { name, output: _ } => {
+                    ChatEvent::ToolResult { name } => {
                         log::debug!("ToolResult name={name}");
                         app.push_tool(&name);
                     }
