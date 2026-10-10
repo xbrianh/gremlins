@@ -303,6 +303,20 @@ async fn run_agent(
 
     let stage_env = gremlin.env.clone();
 
+    let task_clients = {
+        let backend = client
+            .get_or_build_backend()
+            .map_err(|message| RunError::StageFailed {
+                stage: agent.name.clone(),
+                message,
+            })?;
+        crate::clients::task::build_task_selector(
+            backend,
+            &gremlin.runtime_config.task_clients_exact,
+            &gremlin.runtime_config.task_clients_prefix,
+        )
+    };
+
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
@@ -332,8 +346,7 @@ async fn run_agent(
         gremlin_id: Some(gremlin.id.to_string()),
         log_tx: gremlin.runtime_config.log_tx.clone(),
         base_env: Some(gremlin.env.clone()),
-        task_clients_exact: gremlin.runtime_config.task_clients_exact.clone(),
-        task_clients_prefix: gremlin.runtime_config.task_clients_prefix.clone(),
+        task_clients,
         cancel_token: gremlin.cancel_token.clone(),
         stream_events: gremlin.runtime_config.stream_events.clone(),
     };

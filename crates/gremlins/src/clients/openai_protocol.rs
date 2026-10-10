@@ -3,9 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use indexmap::IndexMap;
-use rig_core::driver::DynModel;
 use rig_core::http_client::DynHttpClient;
-use rig_core::operation::Completion;
 use rig_core::providers::openai::wire::Dialect;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
@@ -14,10 +12,6 @@ use super::backend::{ClientError, RunParams};
 use super::interactive::InteractiveSession;
 use super::protocol::CompletedRun;
 use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
-use super::task::TaskModelSelector;
-
-/// The completion model type shared by every OpenAI-compatible backend.
-pub(crate) type OpenAiModel = DynModel<Completion>;
 
 /// Shared state for OpenAI-protocol backends.
 ///
@@ -82,7 +76,7 @@ pub(crate) async fn run_openai_compat(
     params: RunParams,
     mut interactive: Option<InteractiveSession>,
     classify_error: Option<ErrorClassifier>,
-    provider_name: &str,
+    _provider_name: &str, // kept for logging; unused after task-clients moved to Backend trait
 ) -> Result<CompletedRun, ClientError> {
     validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
 
@@ -163,12 +157,6 @@ pub(crate) async fn run_openai_compat(
                     state.extra_params(),
                     state.tool_filter.as_deref(),
                     classify_error,
-                    task_model_selector(
-                        &state.client,
-                        provider_name,
-                        &ctx.params.task_clients_exact,
-                        &ctx.params.task_clients_prefix,
-                    ),
                     interactive,
                 )
                 .await;
@@ -289,7 +277,6 @@ pub(crate) async fn run_with_agent_loop(
     extra: Option<serde_json::Value>,
     tool_filter: Option<&[String]>,
     classify_error: Option<ErrorClassifier>,
-    task_model_selector: Option<TaskModelSelector<OpenAiModel>>,
     interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
     let model = client.completion(model_name).erase();
@@ -308,48 +295,9 @@ pub(crate) async fn run_with_agent_loop(
             max_tokens: None,
             skip_temperature: false,
         },
-        task_model_selector,
         interactive,
     )
     .await
-}
-
-/// Build the `task-clients` selector for an OpenAI-compatible client, or `None`
-/// when `settings.yaml` declares no entries this backend can serve.
-///
-/// The config is read once per run; the returned selector is shared behind an
-/// `Arc`, so each Task clones a pointer rather than the maps themselves. When
-/// nothing is configured the selector is `None` and the common path is free.
-pub(super) fn task_model_selector(
-    client: &OpenAI,
-    provider_name: &str,
-    task_clients_exact: &HashMap<String, String>,
-    task_clients_prefix: &HashMap<String, String>,
-) -> Option<TaskModelSelector<OpenAiModel>> {
-    if task_clients_exact.is_empty() && task_clients_prefix.is_empty() {
-        return None;
-    }
-
-    let exact = task_clients_exact.clone();
-    let prefix = task_clients_prefix.clone();
-    let client = client.clone();
-    let provider_name = provider_name.to_string();
-    TaskModelSelector::new(
-        exact,
-        prefix,
-        Arc::new(move |spec: &str| {
-            let (provider, model) = provider_and_model(spec)?;
-            if provider == provider_name {
-                Some(client.completion(model).erase())
-            } else {
-                log::warn!(
-                    "task-clients entry spec {spec:?} names provider {provider:?}, but this \
-                     backend serves {provider_name:?} — falling back to parent model"
-                );
-                None
-            }
-        }),
-    )
 }
 
 /// Split a client specifier into `(provider, model)`, or `None` when the

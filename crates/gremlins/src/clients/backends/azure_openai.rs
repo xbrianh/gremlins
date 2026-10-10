@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 use rig_core::providers::openai::wire::AZURE;
+use rig_core::driver::DynModel;
 use rig_core::http_client::DynHttpClient;
+use rig_core::operation::Completion;
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
@@ -26,7 +28,7 @@ use rig_reqwest::ReqwestClient;
 enum AzureOpenAiClientState {
     Static(Box<OpenAI>),
     Dynamic {
-        token_provider: Box<dyn TokenProvider>,
+        token_provider: Arc<dyn TokenProvider>,
         endpoint: String,
         api_version: String,
         http_client: DynHttpClient,
@@ -128,7 +130,6 @@ impl AzureOpenAiRunState {
                         max_tokens: None,
                         skip_temperature: false,
                     },
-                    None,
                     interactive,
                 )
                 .await
@@ -167,7 +168,6 @@ impl AzureOpenAiRunState {
                             max_tokens: None,
                             skip_temperature: false,
                         },
-                        None,
                         interactive,
                     )
                     .await
@@ -373,7 +373,7 @@ impl AzureOpenAiBackend {
                 AzureOpenAiClientState::Static(Box::new(client))
             }
             ProviderAuth::ClientSecret => AzureOpenAiClientState::Dynamic {
-                token_provider: Box::new(
+                token_provider: Arc::new(
                     crate::clients::token_provider::ClientSecretProvider::new(),
                 ),
                 endpoint,
@@ -382,7 +382,7 @@ impl AzureOpenAiBackend {
                 auth_scope: auth_scope.clone(),
             },
             ProviderAuth::Cli => AzureOpenAiClientState::Dynamic {
-                token_provider: Box::new(
+                token_provider: Arc::new(
                     crate::clients::token_provider::AzureCliProvider::new(),
                 ),
                 endpoint,
@@ -391,7 +391,7 @@ impl AzureOpenAiBackend {
                 auth_scope: auth_scope.clone(),
             },
             ProviderAuth::ManagedIdentity => AzureOpenAiClientState::Dynamic {
-                token_provider: Box::new(
+                token_provider: Arc::new(
                     crate::clients::token_provider::ManagedIdentityProvider::new(),
                 ),
                 endpoint,
@@ -400,7 +400,7 @@ impl AzureOpenAiBackend {
                 auth_scope: auth_scope.clone(),
             },
             ProviderAuth::DefaultAzure => AzureOpenAiClientState::Dynamic {
-                token_provider: Box::new(
+                token_provider: Arc::new(
                     crate::clients::token_provider::DefaultAzureProvider::new(),
                 ),
                 endpoint,
@@ -507,6 +507,40 @@ impl Backend for AzureOpenAiBackend {
             for token in &tokens {
                 token.cancel();
             }
+        }
+    }
+
+    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+        let (provider, model) = openai_protocol::provider_and_model(spec)?;
+        if provider == "azure-openai" {
+            match &self.state.client_state {
+                AzureOpenAiClientState::Static(client) => {
+                    Some(client.completion(model).erase())
+                }
+                AzureOpenAiClientState::Dynamic {
+                    ref endpoint,
+                    ref api_version,
+                    ref http_client,
+                    ref token_provider,
+                    ref auth_scope,
+                } => {
+                    // Wrap the HTTP client so the api-key header is
+                    // populated lazily on the first request — make_model
+                    // is synchronous and cannot block on token acquisition.
+                    let wrapped = crate::clients::lazy_auth_http::LazyApiKeyHttpClient::new(
+                        http_client.clone(),
+                        token_provider.clone(),
+                        auth_scope.clone(),
+                    );
+                    let client = OpenAIConfig::with_alternate_key(&AZURE, "unused")
+                        .with_api_version(api_version)
+                        .with_base_url(endpoint)
+                        .connect(wrapped);
+                    Some(client.completion(model).erase())
+                }
+            }
+        } else {
+            None
         }
     }
 
@@ -883,5 +917,59 @@ mod tests {
             &indexmap::IndexMap::new(),
         );
         assert!(result.is_ok());
+    }
+
+    // ── make_model tests ────────────────────────────────────────────
+
+    /// `make_model` for a Static (API-key) client returns Some.
+    #[test]
+    fn make_model_static_client() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_OPENAI_API_KEY", "fake-key");
+        let backend = AzureOpenAiBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        )
+        .unwrap();
+        let model = backend.make_model("azure-openai:gpt-4o");
+        assert!(model.is_some(), "Static client must produce a model");
+    }
+
+    /// `make_model` for a Dynamic (CLI auth) client returns Some.
+    /// The lazy wrapper holds the same TokenProvider as single_attempt.
+    #[test]
+    fn make_model_dynamic_client() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_OPENAI_AUTH", "cli");
+        let backend = AzureOpenAiBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        )
+        .unwrap();
+        let model = backend.make_model("azure-openai:gpt-4o");
+        assert!(
+            model.is_some(),
+            "Dynamic client must produce a model (lazy token acquisition)"
+        );
+    }
+
+    /// `make_model` returns None for non-azure provider specs.
+    #[test]
+    fn make_model_rejects_other_providers() {
+        let mut guard = isolated_env();
+        guard.set("GREMLINS_AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
+        guard.set("GREMLINS_AZURE_OPENAI_API_KEY", "fake-key");
+        let backend = AzureOpenAiBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        )
+        .unwrap();
+        assert!(backend.make_model("openai:gpt-4o").is_none());
+        assert!(backend.make_model("anthropic:claude-sonnet-4-6").is_none());
     }
 }

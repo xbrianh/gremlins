@@ -14,6 +14,8 @@ use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::retry::{validate_max_retries, with_retry, STREAM_IDLE_BACKOFF};
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 use crate::clients::stream_json::{self, StreamState};
 
 fn footer_re() -> &'static Regex {
@@ -647,6 +649,10 @@ impl Backend for CmdBackend {
                 libc::killpg(pid as i32, libc::SIGKILL);
             }
         }
+    }
+
+    fn make_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
+        None
     }
 
     fn total_cost_usd(&self) -> Option<f64> {

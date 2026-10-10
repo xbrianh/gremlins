@@ -1049,7 +1049,7 @@ mod tests {
 
     #[test]
     fn test_global_singleton() {
-        let _env = EnvGuard::lock();
+        let _sandbox = Sandbox::new();
         assert!(get_global().is_none());
         init_global().unwrap();
         assert!(get_global().is_some());
