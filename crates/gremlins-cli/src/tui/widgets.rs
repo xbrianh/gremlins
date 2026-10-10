@@ -168,11 +168,19 @@ impl Widget for ActivePromptWidget {
 
         // Prompt (top).
         if prompt_h > 0 {
-            let prompt_style = Style::default().fg(Color::Cyan);
-            let p = Paragraph::new(Line::from(Span::styled(
-                format!("> {}", self.prompt),
-                prompt_style,
-            )));
+            let prompt = Line::from(vec![
+                Span::styled(
+                    "● ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    self.prompt.as_str(),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            let p = Paragraph::new(prompt);
             frame.render_widget(
                 p,
                 Rect {
@@ -420,7 +428,6 @@ impl Widget for FinishedPromptWidget {
 
     fn render(&self, frame: &mut Frame, area: Rect) {
         let width = area.width;
-        let prompt_style = Style::default().fg(Color::Cyan);
 
         let mut y = area.bottom();
 
@@ -518,10 +525,19 @@ impl Widget for FinishedPromptWidget {
         // Prompt (top)
         if y > area.y {
             y = y.saturating_sub(1);
-            let p = Paragraph::new(Line::from(Span::styled(
-                format!("> {}", self.prompt),
-                prompt_style,
-            )));
+            let prompt = Line::from(vec![
+                Span::styled(
+                    "● ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    self.prompt.as_str(),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            let p = Paragraph::new(prompt);
             frame.render_widget(
                 p,
                 Rect {
