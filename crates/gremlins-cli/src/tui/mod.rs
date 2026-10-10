@@ -4,6 +4,7 @@ pub mod client;
 pub mod commands;
 pub mod editor;
 pub mod overlays;
+pub mod screen;
 pub mod ui;
 pub mod widgets;
 
