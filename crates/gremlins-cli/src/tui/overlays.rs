@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use ratatui::{
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Cell, Paragraph, Row, Table},
-    Frame,
+    widgets::{Cell, Paragraph, Row, Table, Widget},
 };
 
 use crate::tui::app::{App, Overlay};
@@ -13,7 +13,7 @@ use crate::tui::app::{App, Overlay};
 const WATCH_COLUMNS: [&str; 4] = ["ID", "STATUS", "STAGE", "PROJECT"];
 
 /// Render the gremlins watch table in the upper portion of the transcript.
-pub fn render_watch_overlay(frame: &mut Frame, area: Rect, app: &App) {
+pub fn render_watch_overlay(buf: &mut Buffer, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
@@ -28,12 +28,12 @@ pub fn render_watch_overlay(frame: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
 
-    render_watch_title(frame, chunks[0], app);
-    render_watch_table(frame, chunks[1], app);
-    render_watch_footer(frame, chunks[2], app);
+    render_watch_title(buf, chunks[0], app);
+    render_watch_table(buf, chunks[1], app);
+    render_watch_footer(buf, chunks[2], app);
 }
 
-fn render_watch_title(frame: &mut Frame, area: Rect, app: &App) {
+fn render_watch_title(buf: &mut Buffer, area: Rect, app: &App) {
     let title = Line::from(vec![
         Span::styled(
             "gremlins watch",
@@ -48,16 +48,16 @@ fn render_watch_title(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Span::raw("  Esc to dismiss"),
     ]);
-    frame.render_widget(Paragraph::new(title), area);
+    Paragraph::new(title).render(area, buf);
 }
 
-fn render_watch_table(frame: &mut Frame, area: Rect, app: &App) {
+fn render_watch_table(buf: &mut Buffer, area: Rect, app: &App) {
     if app.active_runs.is_empty() {
         let paragraph = Paragraph::new(Span::styled(
             "(no gremlins)",
             Style::default().fg(Color::DarkGray),
         ));
-        frame.render_widget(paragraph, area);
+        paragraph.render(area, buf);
         return;
     }
 
@@ -77,7 +77,7 @@ fn render_watch_table(frame: &mut Frame, area: Rect, app: &App) {
     ];
 
     let table = Table::new(rows, widths).header(header).column_spacing(2);
-    frame.render_widget(table, area);
+    table.render(area, buf);
 }
 
 fn build_watch_rows(app: &App) -> Vec<Row<'static>> {
@@ -106,7 +106,7 @@ fn status_style(status: &str) -> Style {
     }
 }
 
-fn render_watch_footer(frame: &mut Frame, area: Rect, app: &App) {
+fn render_watch_footer(buf: &mut Buffer, area: Rect, app: &App) {
     let counts = status_counts(app);
     let text = format!(
         "{} total · {} running · {} done · {} failed · {} stopped",
@@ -116,10 +116,9 @@ fn render_watch_footer(frame: &mut Frame, area: Rect, app: &App) {
         counts.get("failed").copied().unwrap_or(0),
         counts.get("stopped").copied().unwrap_or(0),
     );
-    frame.render_widget(
-        Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
+    Paragraph::new(text)
+        .style(Style::default().fg(Color::DarkGray))
+        .render(area, buf);
 }
 
 /// Return the trailing window of `lines` that fits in `height` rows.
@@ -150,7 +149,7 @@ fn status_counts(app: &App) -> HashMap<&'static str, usize> {
 }
 
 /// Render the single-gremlin log viewer (full transcript occlusion).
-pub fn render_watch_single_overlay(frame: &mut Frame, area: Rect, app: &App) {
+pub fn render_watch_single_overlay(buf: &mut Buffer, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
@@ -185,16 +184,16 @@ pub fn render_watch_single_overlay(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Span::raw("  Esc to dismiss"),
     ]);
-    frame.render_widget(Paragraph::new(title), chunks[0]);
+    Paragraph::new(title).render(chunks[0], buf);
 
     // Render only the trailing `height` lines so the view stays anchored to
     // the newest output without allocating a join of the full buffer.
     let body = tail_text(log_lines, chunks[1].height, "(no log lines yet)");
-    frame.render_widget(Paragraph::new(body), chunks[1]);
+    Paragraph::new(body).render(chunks[1], buf);
 }
 
 /// Render the interactive debug session (full transcript occlusion).
-pub fn render_debug_overlay(frame: &mut Frame, area: Rect, app: &App) {
+pub fn render_debug_overlay(buf: &mut Buffer, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
@@ -224,7 +223,7 @@ pub fn render_debug_overlay(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Span::raw("  Esc to dismiss · Ctrl+D or /exit to leave"),
     ]);
-    frame.render_widget(Paragraph::new(title), chunks[0]);
+    Paragraph::new(title).render(chunks[0], buf);
 
     // Keep the scrollback anchored to the latest command output without
     // joining the entire history buffer on every frame.
@@ -233,12 +232,12 @@ pub fn render_debug_overlay(frame: &mut Frame, area: Rect, app: &App) {
         chunks[1].height,
         "(debug session not yet available)",
     );
-    frame.render_widget(Paragraph::new(body), chunks[1]);
+    Paragraph::new(body).render(chunks[1], buf);
 
     let prompt = Line::from(vec![
         Span::styled("debug> ", Style::default().fg(Color::Cyan)),
         Span::raw(input.as_str()),
         Span::styled(" ", Style::default().bg(Color::White)),
     ]);
-    frame.render_widget(Paragraph::new(prompt), chunks[2]);
+    Paragraph::new(prompt).render(chunks[2], buf);
 }

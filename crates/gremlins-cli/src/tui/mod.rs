@@ -6,25 +6,14 @@ pub mod editor;
 pub mod overlays;
 pub mod screen;
 pub mod ui;
-pub mod widgets;
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::{
-    cursor,
-    event::{Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ratatui::{
-    backend::CrosstermBackend,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    Terminal, TerminalOptions, Viewport,
-};
+use crossterm::event::{Event, KeyCode, KeyEventKind};
+use ratatui::layout::Rect;
 use tokio::io::BufReader;
 use tokio::sync::mpsc;
 
@@ -33,50 +22,8 @@ use chat::{send_message, ChatEvent};
 use commands::{dispatch, CommandResult};
 use editor::open_editor;
 use gremlins::executor::socket;
-use ui::render;
-use widgets::WidgetEvent;
-
-/// RAII guard that restores terminal state on drop.
-struct TerminalGuard;
-
-impl TerminalGuard {
-    fn enter() -> Self {
-        enable_raw_mode().expect("failed to enable raw mode");
-        execute!(io::stdout(), EnterAlternateScreen, cursor::Hide).ok();
-        TerminalGuard
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        execute!(io::stdout(), cursor::Show, LeaveAlternateScreen).ok();
-        disable_raw_mode().ok();
-    }
-}
-
-/// Finish the active widget, commit user+assistant pair to conversation
-/// history, and clear active-request state.
-fn finish_and_commit(app: &mut App, events: Vec<WidgetEvent>) {
-    app.finish_active(events);
-
-    // Commit user+assistant pair to conversation history.
-    let user_msg = std::mem::take(&mut app.pending_user_message);
-    if !user_msg.is_empty() {
-        app.conversation_history
-            .push(serde_json::json!({"role": "user", "content": user_msg}));
-    }
-    let response_text = std::mem::take(&mut app.current_response);
-    if !response_text.is_empty() {
-        app.conversation_history
-            .push(serde_json::json!({"role": "assistant", "content": response_text}));
-    }
-    app.active_request = false;
-}
-
-/// Check whether there is an active (streaming) widget in the transcript.
-fn has_active_widget(app: &App) -> bool {
-    app.transcript.last().is_some_and(|w| !w.is_expandable())
-}
+use screen::LiveArea;
+use ui::render_livearea;
 
 /// Abort the dedicated log-follow task for the single-gremlin overlay.
 fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
@@ -334,25 +281,33 @@ pub async fn run() {
         return;
     }
 
-    let _guard = TerminalGuard::enter();
+    // Redirect stderr to tui.log so debug logs persist next to executor.log.
+    let log_path = gremlins::config::state_root().join("tui.log");
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use std::os::fd::IntoRawFd;
+        let fd = file.into_raw_fd();
+        unsafe { libc::dup2(fd, 2) };
+        unsafe { libc::close(fd) };
+    }
 
-    // Fullscreen viewport on the alternate screen buffer. The frame area
-    // resizes automatically on terminal resize.
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Fullscreen,
-        },
-    )
-    .expect("failed to create terminal");
+    let mut live_area = match LiveArea::new() {
+        Ok(area) => area,
+        Err(e) => {
+            log::error!("tui: {e}");
+            return;
+        }
+    };
 
-    if let Err(e) = run_app(&mut terminal).await {
-        eprintln!("tui error: {e}");
+    if let Err(e) = run_app(&mut live_area).await {
+        log::error!("tui: {e}");
     }
 }
 
-async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut app = App::new();
 
     // ── Connect to the daemon socket ──────────────────────────────
@@ -375,7 +330,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
         }
         Err(e) => {
             let msg = format!("error fetching initial state: {e}");
-            app.push_system_line(msg);
+            app.push_transcript_line(msg);
         }
     }
 
@@ -441,7 +396,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
 
     // ── Startup banner ────────────────────────────────────────────
     let banner = "gremlins tui — type /help for commands, Ctrl+C to exit";
-    app.push_system_line(banner.to_string());
+    app.push_transcript_line(banner.to_string());
 
     // ── Channel for chat events from the current (or most recent) message.
     let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<ChatEvent>();
@@ -450,7 +405,9 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
     loop {
         let gremlin_count = app.gremlin_count_str();
         let project_name = app.project_name_str().to_string();
-        terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name))?;
+        let (cols, rows) = live_area.size();
+        let area = Rect::new(0, 0, cols, rows);
+        live_area.draw(|buf| render_livearea(buf, area, &app, &gremlin_count, &project_name))?;
 
         tokio::select! {
             // ── Crossterm events ──────────────────────────────
@@ -476,19 +433,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         KeyCode::Char('l')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
-                            // Force a full viewport redraw.
-                            terminal.clear()?;
+                            live_area.invalidate();
                         }
                         KeyCode::Char('g')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
                             open_editor(&mut app);
                         }
-                        KeyCode::Char('o')
-                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-                        {
-                            app.toggle_expand_all();
-                        }
+
                         KeyCode::Esc => {
                             // Blocking overlays (single-watch, debug) dismiss first.
                             if app.dismiss_blocking_overlay() {
@@ -517,13 +469,15 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 if let Some(handle) = chat_task.take() {
                                     handle.abort();
                                 }
-                                // Visual-only finish: convert the active
-                                // widget to finished, but discard the
-                                // pending user message and partial response
-                                // without committing them to history.
-                                app.finish_active(Vec::new());
+                                // Discard the current turn without
+                                // committing to history.
+                                app.current_prompt = None;
+                                app.reasoning.clear();
+                                app.reasoning_partial.clear();
+                                app.tools.clear();
+                                app.response_text.clear();
+                                app.current_response.clear();
                                 std::mem::take(&mut app.pending_user_message);
-                                std::mem::take(&mut app.current_response);
                                 app.active_request = false;
                             }
                         }
@@ -635,19 +589,18 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                         }
                                     }
                                     CommandResult::Lines(lines) => {
-                                        let mut styled: Vec<(String, Style)> = Vec::new();
-                                        let prompt_style = Style::default().fg(Color::Cyan);
-                                        styled.push((format!("> {input}"), prompt_style));
+                                        app.push_transcript_line(format!("> {input}"));
                                         for line in &lines {
-                                            styled.push((line.clone(), Style::default()));
+                                            app.push_transcript_line(line.clone());
                                         }
-                                        app.push_system(styled);
                                     }
                                     CommandResult::RestartChat => {
-                                        // Finish any active widget.
-                                        if has_active_widget(&app) {
-                                            finish_and_commit(&mut app, Vec::new());
-                                        }
+                                        // Clear current turn.
+                                        app.current_prompt = None;
+                                        app.reasoning.clear();
+                                        app.reasoning_partial.clear();
+                                        app.tools.clear();
+                                        app.response_text.clear();
                                         // Abort in-flight chat task.
                                         if let Some(tx) = chat_cancel_tx.take() {
                                             let _ = tx.send(());
@@ -666,23 +619,28 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                     }
                                     CommandResult::ShowHistory => {
                                         if app.conversation_history.is_empty() {
-                                            app.push_system_line("(no history)".to_string());
+                                            app.push_transcript_line("(no history)".to_string());
                                         } else {
-                                            let mut styled: Vec<(String, Style)> = Vec::new();
-                                            for (i, entry) in app.conversation_history.iter().enumerate() {
-                                                let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                                                let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                                                let preview: String = if content.chars().count() > 60 {
-                                                    let truncated: String =
-                                                        content.chars().take(57).collect();
-                                                    format!("{truncated}...")
-                                                } else {
-                                                    content.to_string()
-                                                };
-                                                let line = format!("  [{i}] {role}: {preview}");
-                                                styled.push((line, Style::default()));
+                                            let lines: Vec<String> = app
+                                                .conversation_history
+                                                .iter()
+                                                .enumerate()
+                                                .map(|(i, entry)| {
+                                                    let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                                                    let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                                                    let preview: String = if content.chars().count() > 60 {
+                                                        let truncated: String =
+                                                            content.chars().take(57).collect();
+                                                        format!("{truncated}...")
+                                                    } else {
+                                                        content.to_string()
+                                                    };
+                                                    format!("  [{i}] {role}: {preview}")
+                                                })
+                                                .collect();
+                                            for line in lines {
+                                                app.push_transcript_line(line);
                                             }
-                                            app.push_system(styled);
                                         }
                                     }
                                     CommandResult::TruncateHistory(idx) => {
@@ -691,11 +649,11 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                                 "invalid index {idx} — history has {} entries",
                                                 app.conversation_history.len()
                                             );
-                                            app.push_system_line(msg);
+                                            app.push_transcript_line(msg);
                                         } else {
                                             app.conversation_history.truncate(idx);
                                             let msg = format!("history truncated to {idx} entries");
-                                            app.push_system_line(msg);
+                                            app.push_transcript_line(msg);
                                         }
                                     }
                                     CommandResult::SocketOp { op, payload } => {
@@ -747,27 +705,24 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 // Plain text — send to chat agent.
                                 if app.active_request {
                                     let msg = "a request is already in progress — wait for the response";
-                                    app.push_system_line(msg.to_string());
+                                    app.push_transcript_line(msg.to_string());
                                     continue;
                                 }
 
-                                // Push TranscriptWidget with the prompt.
-                                app.push_active_prompt(input.clone());
+                                // Start a new turn with the prompt.
+                                app.submit_prompt(input.clone());
 
                                 // Push initial "thinking..." line.
-                                let reason_style = Style::default()
-                                    .fg(Color::DarkGray)
-                                    .add_modifier(Modifier::ITALIC);
-                                if let Some(w) = app.active_mut() {
-                                    w.push_stream_line(Line::from(Span::styled(
-                                        "  thinking...",
-                                        reason_style,
-                                    )));
-                                }
+                                app.push_reasoning_text("thinking...");
+                                app.flush_reasoning();
 
                                 // Force an immediate frame so "thinking..."
                                 // appears without waiting for the next event.
-                                terminal.draw(|frame| render(frame, &app, &gremlin_count, &project_name))?;
+                                let (cols, rows) = live_area.size();
+                                let area = Rect::new(0, 0, cols, rows);
+                                live_area.draw(|buf| {
+                                    render_livearea(buf, area, &app, &gremlin_count, &project_name)
+                                })?;
 
                                 app.active_request = true;
                                 app.pending_user_message = input.clone();
@@ -823,9 +778,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                             }
                         _ => {}
                     },
-                    Event::Resize(_, _) => {
-                        // Fullscreen viewport resizes automatically; no
-                        // state to update.
+                    Event::Resize(cols, rows) => {
+                        live_area.resize(cols, rows)?;
                     }
                     _ => {}
                 }
@@ -836,12 +790,12 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                 match event {
                     gremlins::executor::DaemonEvent::RunStarted { id, definition, stage } => {
                         let msg = format!("[run started] {id} ({definition}) stage={stage}");
-                        app.push_system_line(msg);
+                        app.push_transcript_line(msg);
                         app.on_run_started(id, definition, stage);
                     }
                     gremlins::executor::DaemonEvent::RunCompleted { id, exit_code } => {
                         let msg = format!("[run completed] {id} (exit {exit_code})");
-                        app.push_system_line(msg);
+                        app.push_transcript_line(msg);
                         app.on_run_completed(id);
                     }
                     gremlins::executor::DaemonEvent::RunFailed { id, exit_code, error } => {
@@ -851,22 +805,22 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         } else {
                             format!("[run failed] {id} (exit {exit_code}): {err_detail}")
                         };
-                        app.push_system_line(msg);
+                        app.push_transcript_line(msg);
                         app.on_run_failed(id);
                     }
                     gremlins::executor::DaemonEvent::RunStopped { id } => {
                         let msg = format!("[run stopped] {id}");
-                        app.push_system_line(msg);
+                        app.push_transcript_line(msg);
                         app.on_run_stopped(id);
                     }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
                         let msg = format!("[{id}] stage → {stage}");
-                        app.push_system_line(msg);
+                        app.push_transcript_line(msg);
                         app.on_stage_transition(id, stage);
                     }
                     gremlins::executor::DaemonEvent::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
-                            app.push_system_line(line.clone());
+                            app.push_transcript_line(line.clone());
                         }
                         if overlay_log_following.as_deref() == Some(&id) {
                             app.push_overlay_log_line(line);
@@ -874,7 +828,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                     }
                     gremlins::executor::DaemonEvent::Bail { id, reason } => {
                         let msg = format!("[{id}] bail: {reason}");
-                        app.push_system_line(msg);
+                        app.push_transcript_line(msg);
                     }
                 }
             }
@@ -938,7 +892,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown error");
                     let full = format!("error: {msg}");
-                    app.push_system_line(full);
+                    app.push_transcript_line(full);
                 }
             }
 
@@ -958,7 +912,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                     Some("log_line") => {
                         if let Some(line) = raw.get("line").and_then(|v| v.as_str()) {
                             if app.following_log.is_some() {
-                                app.push_system_line(line.to_string());
+                                app.push_transcript_line(line.to_string());
                             }
                         }
                     }
@@ -993,7 +947,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                             .unwrap_or("unknown error");
                         let full = format!("error: {msg}");
                         if app.following_log.is_some() {
-                            app.push_system_line(full.clone());
+                            app.push_transcript_line(full.clone());
                             app.following_log = None;
                         }
                     }
@@ -1003,52 +957,51 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
 
             // ── Socket-op results ─────────────────────────────
             Some(lines) = result_rx.recv() => {
-                let styled: Vec<(String, Style)> = lines
-                    .into_iter()
-                    .map(|s| (s, Style::default()))
-                    .collect();
-                app.push_system(styled);
+                for line in lines {
+                    app.push_transcript_line(line);
+                }
             }
 
             // ── Chat events ────────────────────────────────
             Some(event) = chat_rx.recv() => {
                 match event {
                     ChatEvent::StreamChunk(text) => {
+                        log::debug!("StreamChunk len={}", text.len());
+                        app.push_response(&text);
                         app.current_response.push_str(&text);
-                        if let Some(w) = app.active_mut() {
-                            w.push_response_text(&text);
-                        }
                     }
                     ChatEvent::ReasoningChunk(text) => {
-                        let reason_style = Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::ITALIC);
-                        if let Some(w) = app.active_mut() {
-                            w.push_stream_text(&text, reason_style);
-                        }
+                        log::debug!("ReasoningChunk len={}", text.len());
+                        app.push_reasoning_text(&text);
                     }
-                    ChatEvent::ToolResult { name, output } => {
-                        if let Some(w) = app.active_mut() {
-                            w.push_tool_result(&name, &output);
-                        }
+                    ChatEvent::ToolResult { name, output: _ } => {
+                        log::debug!("ToolResult name={name}");
+                        app.push_tool(&name);
                     }
-                    ChatEvent::TurnComplete { .. } => {
-                        // No-op.
+                    ChatEvent::TurnComplete { text, tool_calls, .. } => {
+                        log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
                     }
                     ChatEvent::Done { text, usage } => {
-                        if !has_active_widget(&app) {
+                        log::debug!("Done text_len={} current_response_len={} has_current_turn={}",
+                            text.len(), app.current_response.len(), app.has_current_turn());
+                        if !app.has_current_turn() {
+                            log::debug!("Done SKIPPED — no current turn");
                             continue;
                         }
-                        // Reconcile accumulated stream with canonical text.
-                        if !text.is_empty()
-                            && app.current_response != text
-                        {
+                        // The Done text is the Done-tool summary — gremlin
+                        // machinery. Only use it when the model produced no
+                        // streamed text (e.g. called Done without saying
+                        // anything). Otherwise the StreamChunk text IS the
+                        // response.
+                        if app.current_response.is_empty() && !text.is_empty() {
+                            log::debug!("Done using summary (no streamed text)");
                             app.current_response = text.clone();
-                            if let Some(w) = app.active_mut() {
-                                w.replace_response(&text);
-                            }
+                            app.replace_response(&text);
+                        } else {
+                            log::debug!("Done — keeping streamed response");
                         }
-                        let mut events = Vec::new();
+
+                        // Build usage summary line.
                         if let Some(usage) = usage {
                             if let (Some(prompt), Some(completion)) = (
                                 usage.get("input_tokens").and_then(|v| v.as_u64()),
@@ -1058,36 +1011,79 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                     .get("cache_read_input_tokens")
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0);
-                                events.push(WidgetEvent::TokenUsage {
-                                    prompt: prompt as usize,
-                                    completion: completion as usize,
-                                    cache_read: cache_read as usize,
-                                });
+                                let pct = if prompt > 0 {
+                                    format!("{:.0}% cached",
+                                        (cache_read as f64 / prompt as f64) * 100.0)
+                                } else {
+                                    String::new()
+                                };
+                                let summary = format!(
+                                    "{} tokens · {pct}",
+                                    prompt + completion
+                                );
+                                app.push_transcript_line(summary);
                             }
                         }
-                        finish_and_commit(&mut app, events);
+
+                        // Commit turn to history.
+                        let user_msg =
+                            std::mem::take(&mut app.pending_user_message);
+                        if !user_msg.is_empty() {
+                            app.conversation_history.push(serde_json::json!({
+                                "role": "user", "content": user_msg
+                            }));
+                        }
+                        let resp = app.current_response.clone();
+                        if !resp.is_empty() {
+                            app.conversation_history.push(serde_json::json!({
+                                "role": "assistant", "content": resp
+                            }));
+                        }
+                        app.active_request = false;
                         chat_task = None;
                         chat_cancel_tx = None;
                     }
                     ChatEvent::Ended { reason } => {
-                        if !has_active_widget(&app) {
+                        if !app.has_current_turn() {
                             continue;
                         }
-                        finish_and_commit(&mut app, Vec::new());
+                        // Commit current turn to history.
+                        let user_msg =
+                            std::mem::take(&mut app.pending_user_message);
+                        if !user_msg.is_empty() {
+                            app.conversation_history.push(serde_json::json!({
+                                "role": "user", "content": user_msg
+                            }));
+                        }
+                        let resp = app.current_response.clone();
+                        if !resp.is_empty() {
+                            app.conversation_history.push(serde_json::json!({
+                                "role": "assistant", "content": resp
+                            }));
+                        }
+                        app.active_request = false;
                         chat_task = None;
                         chat_cancel_tx = None;
                         let msg = format!("chat ended: {reason}");
-                        app.push_system_line(msg);
+                        app.push_transcript_line(msg);
                     }
                     ChatEvent::Error(msg) => {
-                        if !has_active_widget(&app) {
+                        if !app.has_current_turn() {
                             continue;
                         }
-                        finish_and_commit(&mut app, Vec::new());
+                        // Commit current turn to history.
+                        let user_msg =
+                            std::mem::take(&mut app.pending_user_message);
+                        if !user_msg.is_empty() {
+                            app.conversation_history.push(serde_json::json!({
+                                "role": "user", "content": user_msg
+                            }));
+                        }
+                        app.active_request = false;
                         chat_task = None;
                         chat_cancel_tx = None;
                         let full = format!("chat error: {msg}");
-                        app.push_system_line(full);
+                        app.push_transcript_line(full);
                     }
                 }
             }
@@ -1153,9 +1149,19 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
 
     // ── Exit ──────────────────────────────────────────────────────
 
-    // Finish any active widget.
-    if has_active_widget(&app) {
-        finish_and_commit(&mut app, Vec::new());
+    // Finish current turn if active.
+    if app.has_current_turn() {
+        let user_msg = std::mem::take(&mut app.pending_user_message);
+        if !user_msg.is_empty() {
+            app.conversation_history
+                .push(serde_json::json!({"role": "user", "content": user_msg}));
+        }
+        let resp = app.current_response.clone();
+        if !resp.is_empty() {
+            app.conversation_history
+                .push(serde_json::json!({"role": "assistant", "content": resp}));
+        }
+        app.active_request = false;
     }
 
     // Abort any lingering log follow on exit.

@@ -1,27 +1,24 @@
 use std::collections::HashMap;
 
-use ratatui::style::Style;
-
-use crate::tui::widgets::{SystemWidget, TranscriptWidget, Widget, WidgetEvent};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
 
 /// Application state for the TUI.
 ///
 /// Pure state, no I/O. Owned by the event loop and passed mutably to the
 /// renderer on each frame.
 ///
-/// ## Rendering model
+/// ## Transcript model
 ///
-/// The ratatui fullscreen viewport occupies the alternate screen buffer and
-/// is split into three regions:
-/// 1. Transcript — widget list rendered bottom-up. Widgets that don't fit
-///    scroll off the top into the terminal's scrollback buffer.
-/// 2. Input bar.
-/// 3. Info bar.
+/// Completed turns are flattened into [`transcript_lines`]. The current
+/// turn lives in separate fields ([`current_prompt`], [`reasoning`],
+/// [`tools`], [`response_text`]) and is rendered below the transcript.
 ///
-/// The alternate screen is entered on startup and left on exit. There is no
-/// terminal scrollback promotion — the transcript grows unbounded within
-/// the viewport, and scrolling through history is handled by the terminal
-/// multiplexer (e.g. tmux copy-mode).
+/// Ephemeral regions (reasoning, tools) are bounded (max 5 lines each)
+/// and are never committed to terminal scrollback. Only
+/// [`transcript_lines`] and [`response_text`] can overflow.
 pub struct App {
     /// Current text in the input bar.
     pub input: String,
@@ -40,15 +37,36 @@ pub struct App {
     pub active_request: bool,
     /// The user message for the current in-flight request (committed to history on Done).
     pub pending_user_message: String,
-    /// Transcript widget list. Rendered bottom-up; widgets that don't fit
-    /// scroll off the top into the terminal's scrollback buffer.
-    pub transcript: Vec<Box<dyn Widget>>,
     /// Active ephemeral overlay, if any.
     pub overlay: Option<Overlay>,
     /// Submitted inputs in chronological order (in-memory only).
     pub input_history: Vec<String>,
     /// Cursor into `input_history`; `None` means editing a fresh line.
     pub history_cursor: Option<usize>,
+
+    // ── LiveArea region model ─────────────────────────────────────
+    //
+    /// Completed turns flattened as styled lines (oldest first),
+    /// interleaved with blank-line padding. Banner and system messages
+    /// are appended here.
+    pub transcript_lines: Vec<Line<'static>>,
+    /// Number of [`transcript_lines`] entries already committed to
+    /// terminal scrollback.
+    pub transcript_committed: usize,
+    /// Current-turn prompt (without `> ` prefix — the renderer adds it).
+    pub current_prompt: Option<String>,
+    /// Current-turn reasoning lines (bounded to last 5, newest last).
+    pub reasoning: Vec<Line<'static>>,
+    /// Un-flushed reasoning text (accumulated across chunks, flushed
+    /// on newline or by [`flush_reasoning`]).
+    pub reasoning_partial: String,
+    /// Current-turn active tool names (bounded to 5).
+    pub tools: Vec<String>,
+    /// Current-turn streaming response text (raw markdown). Parsed into
+    /// styled [`Line`]s at render time.
+    pub response_text: String,
+    /// Number of response-text lines already committed to scrollback.
+    pub response_committed: usize,
 }
 
 /// One tracked gremlin run.
@@ -124,10 +142,17 @@ impl App {
             current_response: String::new(),
             active_request: false,
             pending_user_message: String::new(),
-            transcript: Vec::new(),
             overlay: None,
             input_history: Vec::new(),
             history_cursor: None,
+            transcript_lines: Vec::new(),
+            transcript_committed: 0,
+            current_prompt: None,
+            reasoning: Vec::new(),
+            reasoning_partial: String::new(),
+            tools: Vec::new(),
+            response_text: String::new(),
+            response_committed: 0,
         }
     }
 
@@ -412,89 +437,150 @@ impl App {
         }
     }
 
-    // ── Transcript helpers ──────────────────────────────────────────
+    // ── LiveArea region helpers ───────────────────────────────────
 
-    /// Push a system message (banner, daemon event, command output, error).
-    /// Auto-collapses all existing SystemWidgets above it.
-    /// Inserts before the active widget when a request is in-flight so the
-    /// TranscriptWidget remains the bottom-most widget.
-    pub fn push_system(&mut self, lines: Vec<(String, Style)>) {
-        // Auto-collapse existing SystemWidgets.
-        for w in &mut self.transcript {
-            w.auto_collapse();
-        }
-        let widget: Box<dyn Widget> = Box::new(SystemWidget::new(lines, true));
-        // Insert before the active widget if one is present, so the
-        // TranscriptWidget stays at the bottom.
-        let insert_at = if self.transcript.last().is_some_and(|w| w.is_active()) {
-            self.transcript.len().saturating_sub(1)
-        } else {
-            self.transcript.len()
-        };
-        self.transcript.insert(insert_at, widget);
-    }
+    /// Flatten the current turn into [`transcript_lines`] and start a new
+    /// turn with the given prompt.
+    ///
+    /// The previous turn's prompt, reasoning, tools, and response are
+    /// flattened with blank-line padding and appended. All current-turn
+    /// fields are then cleared and `current_prompt` is set.
+    pub fn submit_prompt(&mut self, prompt: String) {
+        // Flatten the previous turn if there was one.
+        if let Some(ref prev_prompt) = self.current_prompt {
+            let prompt_style = Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD);
+            let marker_style = Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD);
 
-    /// Push a single-line system message with default style.
-    pub fn push_system_line(&mut self, line: String) {
-        self.push_system(vec![(line, Style::default())]);
-    }
+            if !self.transcript_lines.is_empty() {
+                self.transcript_lines.push(Line::from(""));
+                self.transcript_lines.push(Line::from(""));
+            }
 
-    /// Push a single-line system message with a specific style.
-    #[allow(dead_code)]
-    pub fn push_system_line_styled(&mut self, line: String, style: Style) {
-        self.push_system(vec![(line, style)]);
-    }
+            // Prompt.
+            self.transcript_lines.push(Line::from(vec![
+                Span::styled("> ", marker_style),
+                Span::styled(prev_prompt.clone(), prompt_style),
+            ]));
 
-    /// Mutable ref to the bottom-most widget (for streaming), if any.
-    pub fn active_mut(&mut self) -> Option<&mut (dyn Widget + '_)> {
-        match self.transcript.last_mut() {
-            Some(w) => Some(w.as_mut()),
-            None => None,
-        }
-    }
+            // Reasoning.
+            let reasoning_style = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC);
+            if !self.reasoning.is_empty() {
+                self.transcript_lines.push(Line::from(""));
+                for line in &self.reasoning {
+                    self.transcript_lines.push(line.clone());
+                }
+            }
 
-    /// Finish the active (bottom-most) widget in place. Panics if there is
-    /// no active widget.
-    pub fn finish_active(&mut self, events: Vec<WidgetEvent>) {
-        self.transcript
-            .last_mut()
-            .expect("finish_active called with no active widget")
-            .finish(events);
-    }
+            // Tools.
+            let tool_style = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC);
+            if !self.tools.is_empty() {
+                self.transcript_lines.push(Line::from(""));
+                for name in &self.tools {
+                    self.transcript_lines
+                        .push(Line::from(Span::styled(
+                            format!("  {name}"),
+                            tool_style,
+                        )));
+                }
+            }
 
-    /// Push a new TranscriptWidget for a chat turn.
-    /// Auto-collapses all existing SystemWidgets first.
-    pub fn push_active_prompt(&mut self, prompt: String) {
-        for w in &mut self.transcript {
-            w.auto_collapse();
-        }
-        self.transcript
-            .push(Box::new(TranscriptWidget::new(prompt)));
-    }
-
-    /// Toggle expand/collapse for all expandable widgets.
-    /// If any expandable widget is collapsed → expand all.
-    /// If all expandable widgets are already expanded → collapse all.
-    pub fn toggle_expand_all(&mut self) {
-        let any_collapsed = self
-            .transcript
-            .iter()
-            .any(|w| w.is_expandable() && !w.is_expanded());
-
-        for w in &mut self.transcript {
-            if w.is_expandable() {
-                if any_collapsed {
-                    // Expand all: only toggle if currently collapsed.
-                    if !w.is_expanded() {
-                        w.toggle_expand();
-                    }
-                } else {
-                    // Collapse all: only toggle if currently expanded.
-                    if w.is_expanded() {
-                        w.toggle_expand();
-                    }
+            // Response.
+            if !self.response_text.is_empty() {
+                self.transcript_lines.push(Line::from(""));
+                for line_str in self.response_text.lines() {
+                    self.transcript_lines
+                        .push(Line::from(Span::styled(
+                            line_str.to_string(),
+                            Style::default(),
+                        )));
                 }
             }
         }
+
+        // Clear current-turn fields.
+        self.current_prompt = Some(prompt);
+        self.reasoning.clear();
+        self.reasoning_partial.clear();
+        self.tools.clear();
+        self.response_text.clear();
+        self.response_committed = 0;
+    }
+
+    /// Flush the reasoning partial buffer (if any) into a completed
+    /// reasoning line.
+    pub fn flush_reasoning(&mut self) {
+        if !self.reasoning_partial.is_empty() {
+            let remaining = std::mem::take(&mut self.reasoning_partial);
+            let style = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC);
+            self.reasoning
+                .push(Line::from(Span::styled(format!("  {remaining}"), style)));
+            while self.reasoning.len() > 5 {
+                self.reasoning.remove(0);
+            }
+        }
+    }
+
+    /// Append reasoning text (may be a partial chunk). Text is accumulated
+    /// and flushed to a reasoning line only when a newline is encountered.
+    pub fn push_reasoning_text(&mut self, text: &str) {
+        let style = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC);
+        self.reasoning_partial.push_str(text);
+        while let Some(newline_pos) = self.reasoning_partial.find('\n') {
+            let line: String = self.reasoning_partial[..newline_pos].into();
+            self.reasoning_partial = self.reasoning_partial[newline_pos + 1..].into();
+            self.reasoning
+                .push(Line::from(Span::styled(format!("  {line}"), style)));
+            while self.reasoning.len() > 5 {
+                self.reasoning.remove(0);
+            }
+        }
+    }
+
+    /// Record a tool call. Oldest entries are discarded once the region
+    /// exceeds 5 entries.
+    pub fn push_tool(&mut self, name: &str) {
+        self.tools.push(name.to_string());
+        while self.tools.len() > 5 {
+            self.tools.remove(0);
+        }
+    }
+
+    /// Append streaming response text.
+    pub fn push_response(&mut self, text: &str) {
+        self.response_text.push_str(text);
+    }
+
+    /// Replace the entire response text (used for Done reconciliation).
+    pub fn replace_response(&mut self, text: &str) {
+        self.response_text.clear();
+        self.response_text.push_str(text);
+    }
+
+    /// Whether the current turn has any content.
+    pub fn has_current_turn(&self) -> bool {
+        self.current_prompt.is_some()
+    }
+
+    /// Append a system message to [`transcript_lines`] with default
+    /// style and blank-line padding from the previous entry.
+    pub fn push_transcript_line(&mut self, line: String) {
+        if !self.transcript_lines.is_empty() {
+            self.transcript_lines.push(Line::from(""));
+            self.transcript_lines.push(Line::from(""));
+        }
+        self.transcript_lines
+            .push(Line::from(Span::styled(line, Style::default())));
     }
 }
