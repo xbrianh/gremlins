@@ -67,8 +67,8 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &App) {
 ///
 /// Layout is two-pass: non-greedy widgets (finished turns, system messages)
 /// are placed first at their natural heights, then the greedy widget (the
-/// active turn) absorbs the leftover rows so it fills slack without erasing
-/// history.
+/// active turn) is placed at its natural height, expanding only as far as
+/// the leftover rows allow when its content overflows.
 fn render_widgets_bottom_up(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
@@ -99,11 +99,12 @@ fn render_widgets_bottom_up(frame: &mut Frame, area: Rect, app: &App) {
             // No space left at all.
             break;
         }
-        // A greedy widget (the active turn) absorbs the leftover space
-        // instead of its natural height. Non-greedy widgets use their
+        // A greedy widget (the active turn) uses its natural height, capped
+        // by the leftover allocation; only when its content overflows does it
+        // expand into all remaining space. Non-greedy widgets use their
         // natural height, clipped to whatever space remains.
         let visible_h = if widget.is_greedy() {
-            greedy_h.min(y - area.y)
+            h.min(greedy_h).min(y - area.y)
         } else {
             h.min(y - area.y)
         };
