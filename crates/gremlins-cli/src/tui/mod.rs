@@ -24,12 +24,14 @@ use ratatui::{
     text::{Line, Span},
     Terminal, TerminalOptions, Viewport,
 };
+use tokio::io::BufReader;
 use tokio::sync::mpsc;
 
 use app::{ActiveRun, App, Overlay};
 use chat::{send_message, ChatEvent};
 use commands::{dispatch, CommandResult};
 use editor::open_editor;
+use gremlins::executor::socket;
 use ui::render;
 use widgets::WidgetEvent;
 
@@ -83,40 +85,243 @@ fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
 }
 
 /// Route a submitted line from the debug overlay prompt.
-fn handle_overlay_prompt_submit(app: &mut App) {
+///
+/// The debug socket is opened when `/debug <id>` is dispatched; this
+/// function only forwards subsequent prompt submissions to the daemon
+/// over the already-established session.
+fn handle_overlay_prompt_submit(app: &mut App, cmd_tx: &mpsc::UnboundedSender<serde_json::Value>) {
     let Some(input) = app.take_overlay_prompt() else {
         return;
     };
-
-    // The daemon debug interface may or may not be connected yet. Mirror
-    // the command in the overlay scrollback and keep the shell usable.
-    app.push_overlay_debug_output(format!("debug> {input}"));
 
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return;
     }
 
-    // Accept both `help` and `/help`, including whitespace-padded input.
-    let normalized: String = trimmed
-        .trim_start_matches('/')
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    let normalized = normalized.to_lowercase();
-    match normalized.as_str() {
-        "help" => {
-            app.push_overlay_debug_output(
-                "debug commands: help, exit — full debug session support not yet available"
-                    .to_string(),
-            );
+    // Echo the command in the overlay scrollback.
+    app.push_overlay_debug_output(format!("debug> {trimmed}"));
+
+    // Reject submissions while the socket is still coming up.
+    if app.debug_connecting() {
+        app.push_overlay_debug_output("debug: session not ready yet".to_string());
+        return;
+    }
+
+    // Reject further submissions once the session has ended.
+    if !app.debug_connected() {
+        app.push_overlay_debug_output("(session ended)".to_string());
+        return;
+    }
+
+    // Map the input to a daemon debug op.
+    let cmd = if trimmed == "/exit" || trimmed == "/continue" {
+        serde_json::json!({"op": "quit"})
+    } else if let Some(rest) = trimmed.strip_prefix("/quit ") {
+        serde_json::json!({"op": "bail", "reason": rest.trim()})
+    } else if trimmed == "/quit" {
+        serde_json::json!({"op": "bail", "reason": "operator stopped"})
+    } else {
+        serde_json::json!({"op": "talk", "text": trimmed})
+    };
+
+    let _ = cmd_tx.send(cmd);
+}
+
+/// Events received from the daemon over a debug session socket.
+enum DebugEvent {
+    Ready {
+        id: String,
+    },
+    TurnComplete {
+        #[allow(dead_code)]
+        turn: usize,
+        text: String,
+        tool_calls: Vec<String>,
+    },
+    Done {
+        text: String,
+    },
+    Ended {
+        reason: String,
+    },
+    StreamChunk {
+        text: String,
+    },
+    ReasoningChunk {
+        text: String,
+    },
+    ToolResult {
+        name: String,
+        output: String,
+    },
+    Error(String),
+    Disconnected,
+}
+
+/// Parse a daemon debug-protocol JSON line into a [`DebugEvent`].
+fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
+    match value.get("type").and_then(|v| v.as_str()) {
+        Some("ready") => DebugEvent::Ready {
+            id: value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        Some("turn_complete") => DebugEvent::TurnComplete {
+            turn: value.get("turn").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            text: value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            tool_calls: value
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        Some("done") => DebugEvent::Done {
+            text: value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        Some("ended") => DebugEvent::Ended {
+            reason: value
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        Some("stream_chunk") => DebugEvent::StreamChunk {
+            text: value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        Some("reasoning_chunk") => DebugEvent::ReasoningChunk {
+            text: value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        Some("tool_result") => DebugEvent::ToolResult {
+            name: value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            output: value
+                .get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        Some("error") => DebugEvent::Error(
+            value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error")
+                .to_string(),
+        ),
+        _ => DebugEvent::Error(format!("unexpected event: {value}")),
+    }
+}
+
+/// Daemon broadcast events (run lifecycle, log lines, etc.) are forwarded
+/// to every connection, including the debug socket. They are not part of
+/// the debug protocol and are filtered out.
+fn is_daemon_broadcast(value: &serde_json::Value) -> bool {
+    match value.get("type").and_then(|v| v.as_str()) {
+        Some(t) if t.starts_with("run_") => true,
+        Some("event") | Some("stage_transition") | Some("log_line") | Some("bail") => true,
+        _ => false,
+    }
+}
+
+/// Open a fresh debug session socket for `id` and spawn a reader task.
+///
+/// Returns a sender for forwarding commands (`talk`/`quit`/`bail`/`continue`)
+/// to the daemon, a receiver for incoming [`DebugEvent`] values, and the
+/// task handle (abort it to drop the write half and close the socket).
+async fn start_debug_session(
+    id: String,
+) -> Result<
+    (
+        mpsc::UnboundedSender<serde_json::Value>,
+        mpsc::UnboundedReceiver<DebugEvent>,
+        tokio::task::JoinHandle<()>,
+    ),
+    String,
+> {
+    let state_root = gremlins::config::state_root();
+    let stream = socket::connect_socket(&state_root).await?;
+    let (read_half, mut write_half) = stream.into_split();
+
+    let request = serde_json::json!({ "op": "debug", "id": id });
+    socket::write_json_line(&mut write_half, &request).await?;
+
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<serde_json::Value>();
+    let (evt_tx, evt_rx) = mpsc::unbounded_channel::<DebugEvent>();
+
+    let handle = tokio::spawn(async move {
+        let mut reader = BufReader::new(read_half);
+        loop {
+            tokio::select! {
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        Some(cmd) => {
+                            if socket::write_json_line(&mut write_half, &cmd).await.is_err() {
+                                let _ = evt_tx.send(DebugEvent::Disconnected);
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                result = socket::read_json_line(&mut reader) => {
+                    match result {
+                        Ok(Some(value)) => {
+                            if is_daemon_broadcast(&value) {
+                                continue;
+                            }
+                            let evt = parse_debug_event(&value);
+                            let is_terminal = matches!(
+                                &evt,
+                                DebugEvent::Done { .. } | DebugEvent::Ended { .. }
+                            );
+                            let _ = evt_tx.send(evt);
+                            if is_terminal {
+                                break;
+                            }
+                        }
+                        Ok(None) | Err(_) => {
+                            let _ = evt_tx.send(DebugEvent::Disconnected);
+                            break;
+                        }
+                    }
+                }
+            }
         }
-        "exit" => app.overlay = None,
-        _ => {
-            app.push_overlay_debug_output(
-                "debug not yet available — placeholder session only".to_string(),
-            );
-        }
+    });
+
+    Ok((cmd_tx, evt_rx, handle))
+}
+
+/// Await the next debug event, pending forever when no session is active.
+async fn recv_debug(rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>) -> Option<DebugEvent> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -215,6 +420,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
     let mut chat_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
+    // ── Debug session state ────────────────────────────────────────
+    // Command sender for the active debug socket (talk/quit/bail/continue).
+    let mut debug_cmd_tx: Option<mpsc::UnboundedSender<serde_json::Value>> = None;
+    // Incoming debug events from the socket reader task.
+    let mut debug_evt_rx: Option<mpsc::UnboundedReceiver<DebugEvent>> = None;
+    // Handle for the debug socket reader task (aborted on Esc).
+    let mut debug_task: Option<tokio::task::JoinHandle<()>> = None;
+
     /// Drop-guard that aborts a JoinHandle on drop, ensuring the dedicated
     /// log-follow socket is closed even when the outer forwarding task is
     /// cancelled via `abort()`.
@@ -280,6 +493,12 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                             if app.dismiss_blocking_overlay() {
                                 abort_overlay_log_follow(&mut overlay_log_handle);
                                 overlay_log_following = None;
+                                // Drop the debug socket so the daemon sees EOF.
+                                if let Some(handle) = debug_task.take() {
+                                    handle.abort();
+                                }
+                                debug_cmd_tx = None;
+                                debug_evt_rx = None;
                                 continue;
                             }
                             // Then the non-blocking watch table.
@@ -304,7 +523,15 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                             // Debug overlay owns a prompt: submit into its
                             // scrollback instead of the main input bar.
                             if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
-                                handle_overlay_prompt_submit(&mut app);
+                                if let Some(cmd_tx) = &debug_cmd_tx {
+                                    handle_overlay_prompt_submit(&mut app, cmd_tx);
+                                } else {
+                                    // Consume the prompt so it doesn't linger.
+                                    let _ = app.take_overlay_prompt();
+                                    app.push_overlay_debug_output(
+                                        "(session ended)".to_string(),
+                                    );
+                                }
                                 continue;
                             }
 
@@ -320,6 +547,9 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                             {
                                 continue;
                             }
+
+                            // Record the submission for Up/Down history.
+                            app.push_history(input.clone());
 
                             // Stop log following on any new command.
                             if let Some(handle) = log_follow_handle.take() {
@@ -383,10 +613,18 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                     CommandResult::Debug(id) => {
                                         abort_overlay_log_follow(&mut overlay_log_handle);
                                         overlay_log_following = None;
-                                        app.open_debug(id);
-                                        app.push_overlay_debug_output(
-                                            "debug session connected — command support not yet available".to_string(),
-                                        );
+                                        app.open_debug(id.clone());
+                                        // Open a fresh socket and spawn the reader.
+                                        match start_debug_session(id.clone()).await {
+                                            Ok((cmd_tx, evt_rx, handle)) => {
+                                                debug_cmd_tx = Some(cmd_tx);
+                                                debug_evt_rx = Some(evt_rx);
+                                                debug_task = Some(handle);
+                                            }
+                                            Err(e) => {
+                                                app.push_overlay_debug_output(format!("error: {e}"));
+                                            }
+                                        }
                                     }
                                     CommandResult::Lines(lines) => {
                                         let mut styled: Vec<(String, Style)> = Vec::new();
@@ -557,8 +795,24 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                                 prompt.push(ch);
                             } else {
                                 app.input.push(ch);
+                                // Typing a fresh character resets history navigation.
+                                app.history_cursor = None;
                             }
                         }
+                        KeyCode::Up => {
+                            // History navigation only applies to the main input bar.
+                            if !app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                if let Some(entry) = app.history_up().map(|s| s.to_string()) {
+                                    app.input = entry;
+                                }
+                            }
+                        }
+                        KeyCode::Down if !app.overlay.as_ref().is_some_and(|o| o.has_prompt())
+                            // Only replace the buffer when navigating; when the
+                            // cursor is already `None` (fresh line), leave it.
+                            && app.history_cursor.is_some() => {
+                                app.input = app.history_down().unwrap_or("").to_string();
+                            }
                         _ => {}
                     },
                     Event::Resize(_, _) => {
@@ -829,6 +1083,63 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
                     }
                 }
             }
+
+            // ── Debug session events ──────────────────────────
+            Some(event) = recv_debug(&mut debug_evt_rx) => {
+                match event {
+                    DebugEvent::Ready { id } => {
+                        app.mark_debug_ready();
+                        app.push_overlay_debug_output(format!("connected to gremlin {id}"));
+                    }
+                    DebugEvent::TurnComplete { text, tool_calls, .. } => {
+                        if !text.is_empty() {
+                            app.push_overlay_debug_output(text);
+                        }
+                        for tc in &tool_calls {
+                            app.push_overlay_debug_output(format!("  [tool: {tc}]"));
+                        }
+                        app.push_overlay_debug_output(
+                            "debug: turn complete — agent paused".to_string(),
+                        );
+                    }
+                    DebugEvent::Done { text } => {
+                        if !text.is_empty() {
+                            app.push_overlay_debug_output(text);
+                        }
+                        app.push_overlay_debug_output("debug: agent called Done".to_string());
+                        app.set_debug_connected(false);
+                        debug_task = None;
+                        debug_cmd_tx = None;
+                        debug_evt_rx = None;
+                    }
+                    DebugEvent::Ended { reason } => {
+                        app.push_overlay_debug_output(format!("debug: session ended ({reason})"));
+                        app.set_debug_connected(false);
+                        debug_task = None;
+                        debug_cmd_tx = None;
+                        debug_evt_rx = None;
+                    }
+                    DebugEvent::StreamChunk { text } => {
+                        app.push_overlay_debug_output(text);
+                    }
+                    DebugEvent::ReasoningChunk { text } => {
+                        app.push_overlay_debug_output(text);
+                    }
+                    DebugEvent::ToolResult { name, output } => {
+                        app.push_overlay_debug_output(format!("[tool: {name}] {output}"));
+                    }
+                    DebugEvent::Error(msg) => {
+                        app.push_overlay_debug_output(format!("debug: error: {msg}"));
+                    }
+                    DebugEvent::Disconnected => {
+                        app.push_overlay_debug_output("debug: disconnected".to_string());
+                        app.set_debug_connected(false);
+                        debug_task = None;
+                        debug_cmd_tx = None;
+                        debug_evt_rx = None;
+                    }
+                }
+            }
         }
     }
 
@@ -841,6 +1152,11 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::R
 
     // Abort any lingering log follow on exit.
     if let Some(handle) = log_follow_handle.take() {
+        handle.abort();
+    }
+
+    // Abort any lingering debug session on exit.
+    if let Some(handle) = debug_task.take() {
         handle.abort();
     }
 

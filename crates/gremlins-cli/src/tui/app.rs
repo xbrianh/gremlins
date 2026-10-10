@@ -45,6 +45,10 @@ pub struct App {
     pub transcript: Vec<Box<dyn Widget>>,
     /// Active ephemeral overlay, if any.
     pub overlay: Option<Overlay>,
+    /// Submitted inputs in chronological order (in-memory only).
+    pub input_history: Vec<String>,
+    /// Cursor into `input_history`; `None` means editing a fresh line.
+    pub history_cursor: Option<usize>,
 }
 
 /// One tracked gremlin run.
@@ -83,6 +87,10 @@ pub enum Overlay {
         id: String,
         input: String,
         history: Vec<String>,
+        /// Whether the debug socket is open but `ready` has not arrived yet.
+        connecting: bool,
+        /// Whether the debug socket session is still connected.
+        connected: bool,
     },
 }
 
@@ -118,6 +126,8 @@ impl App {
             pending_user_message: String::new(),
             transcript: Vec::new(),
             overlay: None,
+            input_history: Vec::new(),
+            history_cursor: None,
         }
     }
 
@@ -275,6 +285,8 @@ impl App {
             id,
             input: String::new(),
             history: Vec::new(),
+            connecting: true,
+            connected: false,
         });
     }
 
@@ -305,6 +317,98 @@ impl App {
     pub fn push_overlay_debug_output(&mut self, line: String) {
         if let Some(Overlay::Debug { history, .. }) = &mut self.overlay {
             history.push(line);
+        }
+    }
+
+    /// Whether the active debug overlay is still connecting (socket open,
+    /// `ready` not yet received).
+    pub fn debug_connecting(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(Overlay::Debug {
+                connecting: true,
+                ..
+            })
+        )
+    }
+
+    /// Whether the active debug overlay is still connected to the daemon.
+    pub fn debug_connected(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(Overlay::Debug {
+                connected: true,
+                ..
+            })
+        )
+    }
+
+    /// Set the connected flag on the active debug overlay. Setting `false`
+    /// also clears the connecting flag so a session that never became ready
+    /// is reported as ended rather than stuck connecting.
+    pub fn set_debug_connected(&mut self, connected: bool) {
+        if let Some(Overlay::Debug {
+            connecting,
+            connected: c,
+            ..
+        }) = &mut self.overlay
+        {
+            *c = connected;
+            if !connected {
+                *connecting = false;
+            }
+        }
+    }
+
+    /// Mark the active debug overlay as connected (clears the connecting flag).
+    pub fn mark_debug_ready(&mut self) {
+        if let Some(Overlay::Debug {
+            connecting,
+            connected,
+            ..
+        }) = &mut self.overlay
+        {
+            *connecting = false;
+            *connected = true;
+        }
+    }
+
+    // ── Input history helpers ───────────────────────────────────────
+
+    /// Append a submitted input to history and reset the cursor.
+    pub fn push_history(&mut self, line: String) {
+        self.input_history.push(line);
+        self.history_cursor = None;
+    }
+
+    /// Move backward through history (older entries). Returns the selected
+    /// entry, or `None` when there is no history.
+    pub fn history_up(&mut self) -> Option<&str> {
+        if self.input_history.is_empty() {
+            return None;
+        }
+        let next = match self.history_cursor {
+            None => self.input_history.len() - 1,
+            Some(0) => 0,
+            Some(n) => n - 1,
+        };
+        self.history_cursor = Some(next);
+        self.input_history.get(next).map(|s| s.as_str())
+    }
+
+    /// Move forward through history (toward a fresh line). Returns the
+    /// selected entry, or `None` when past the newest entry (fresh line).
+    pub fn history_down(&mut self) -> Option<&str> {
+        match self.history_cursor {
+            None => None,
+            Some(n) if n + 1 < self.input_history.len() => {
+                self.history_cursor = Some(n + 1);
+                self.input_history.get(n + 1).map(|s| s.as_str())
+            }
+            Some(_) => {
+                self.history_cursor = None;
+                None
+            }
         }
     }
 

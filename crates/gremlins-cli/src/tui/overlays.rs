@@ -200,7 +200,9 @@ pub fn render_debug_overlay(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let (id, input, history) = match &app.overlay {
-        Some(Overlay::Debug { id, input, history }) => (id, input, history),
+        Some(Overlay::Debug {
+            id, input, history, ..
+        }) => (id, input, history),
         _ => return,
     };
 
