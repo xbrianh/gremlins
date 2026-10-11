@@ -32,8 +32,8 @@ use ratatui::{
 use crate::tui::app::App;
 use crate::tui::buffer::LineOrigin;
 use crate::tui::widgets::{
-    InfoBarWidget, InputBarWidget, LiveAreaWidget, ReasoningWidget, RenderContext, ToolsWidget,
-    TranscriptWidget,
+    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, ReasoningWidget, RenderContext,
+    ToolsWidget, TranscriptWidget, WatchSingleWidget,
 };
 
 /// Number of rows reserved at the bottom of the screen for input and
@@ -53,16 +53,10 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     scrollback_log: Vec<String>,
     /// Whether [`Drop`] should restore the terminal (raw mode, cursor).
     needs_terminal_cleanup: bool,
-    /// Scrollable transcript (completed turns + current prompt + response).
-    transcript: TranscriptWidget,
-    /// Current-turn reasoning region (bounded to 5 visible rows).
-    reasoning: ReasoningWidget,
-    /// Current-turn active-tools region (bounded to 5 visible rows).
-    tools: ToolsWidget,
-    /// Input bar (stateless).
-    input_bar: InputBarWidget,
-    /// Info bar (stateless).
-    info_bar: InfoBarWidget,
+    /// Ordered widget stack, top-to-bottom. The initial stack is transcript,
+    /// reasoning, tools, input bar, info bar. Overlays are pushed/popped at
+    /// the top of the stack.
+    widgets: Vec<Box<dyn LiveAreaWidget>>,
 }
 
 impl<B: Backend> LiveArea<B> {
@@ -80,11 +74,13 @@ impl<B: Backend> LiveArea<B> {
             rows,
             scrollback_log: Vec::new(),
             needs_terminal_cleanup: false,
-            transcript: TranscriptWidget::new(),
-            reasoning: ReasoningWidget::new(),
-            tools: ToolsWidget::new(),
-            input_bar: InputBarWidget,
-            info_bar: InfoBarWidget,
+            widgets: vec![
+                Box::new(TranscriptWidget::new()),
+                Box::new(ReasoningWidget::new()),
+                Box::new(ToolsWidget::new()),
+                Box::new(InputBarWidget),
+                Box::new(InfoBarWidget),
+            ],
         }
     }
 
@@ -233,11 +229,13 @@ impl<B: Backend> LiveArea<B> {
 
     /// Compose and paint a full frame.
     ///
-    /// Reserves the bottom [`RESERVED_ROWS`] for the input and info bars,
-    /// lays the content widgets (transcript, reasoning, tools) out in the
-    /// remaining area by their height constraints, renders each into the
-    /// current buffer, commits any transcript overflow to terminal
-    /// scrollback, and diff-paints the frame.
+    /// Reserves the bottom [`RESERVED_ROWS`] for the input and info bars
+    /// (the last two widgets in the stack), then lays the remaining content
+    /// widgets out top-to-bottom in a single ratatui layout pass using each
+    /// widget's `height_constraint`. Only the transcript widget may return
+    /// overflow; overlay widgets always return an empty overflow `Vec`.
+    /// Collapsed (zero-height) chunks are skipped so a blocking overlay or
+    /// a short viewport never commits transcript overflow.
     pub fn compose(&mut self, app: &App) -> io::Result<()> {
         let gremlin_count = app.gremlin_count_str();
         let ctx = RenderContext {
@@ -245,15 +243,19 @@ impl<B: Backend> LiveArea<B> {
             following_log: app.following_log.as_deref(),
             gremlin_count: &gremlin_count,
             project_name: app.project_name_str(),
+            overlay: app.overlay.as_ref(),
+            active_runs: &app.active_runs,
+            content_height: self.scrollable_rows(),
         };
 
         let width = self.cols;
         let area = Rect::new(0, 0, self.cols, self.rows);
 
-        // Reserve the two fixed bars first, exactly as the original
-        // two-phase split did. The content widgets are laid out only within
-        // the remaining rect, so their `Length` constraints can never
-        // compress or drop the bars.
+        // Reserve the bottom two rows for the fixed input/info bars first,
+        // so their `Length(1)` constraints can never be compressed by the
+        // variable-height content widgets above them. `commit_scrollback`
+        // scrolls everything above `RESERVED_ROWS`, so the bars must always
+        // land in those unscrolled rows.
         let bar_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -262,30 +264,33 @@ impl<B: Backend> LiveArea<B> {
                 Constraint::Length(1),
             ])
             .split(area);
-
         let content_area = bar_chunks[0];
-        let input_bar_area = bar_chunks[1];
-        let info_bar_area = bar_chunks[2];
 
-        // Render the bars unconditionally.
-        self.input_bar.render(input_bar_area, &mut self.curr, &ctx);
-        self.info_bar.render(info_bar_area, &mut self.curr, &ctx);
+        // The input and info bars are the last two widgets in the stack.
+        let split = self.widgets.len() - 2;
+        let (content_widgets, bar_widgets) = self.widgets.split_at_mut(split);
+
+        // Lay out the content widgets within the remaining rect.
+        let constraints: Vec<Constraint> = content_widgets
+            .iter()
+            .map(|w| w.height_constraint(width, &ctx))
+            .collect();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(content_area);
 
         let mut overflow = Vec::new();
-        if content_area.height > 0 {
-            let mut widgets: Vec<&mut dyn LiveAreaWidget> =
-                vec![&mut self.transcript, &mut self.reasoning, &mut self.tools];
-
-            let constraints: Vec<Constraint> =
-                widgets.iter().map(|w| w.height_constraint(width)).collect();
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(constraints)
-                .split(content_area);
-
-            for (widget, chunk) in widgets.iter_mut().zip(chunks.iter()) {
-                overflow.extend(widget.render(*chunk, &mut self.curr, &ctx));
+        for (widget, chunk) in content_widgets.iter_mut().zip(chunks.iter()) {
+            if chunk.height == 0 {
+                continue;
             }
+            overflow.extend(widget.render(*chunk, &mut self.curr, &ctx));
+        }
+
+        // Render the fixed bars unconditionally.
+        for (widget, chunk) in bar_widgets.iter_mut().zip(bar_chunks[1..].iter()) {
+            widget.render(*chunk, &mut self.curr, &ctx);
         }
 
         if !overflow.is_empty() {
@@ -295,12 +300,77 @@ impl<B: Backend> LiveArea<B> {
         self.draw(|_| {})
     }
 
+    // ── Overlay push/pop ─────────────────────────────────────────
+
+    /// Push an overlay widget at the top of the stack (above the content
+    /// widgets, below nothing — it becomes the first widget).
+    pub fn push_overlay(&mut self, widget: Box<dyn LiveAreaWidget>) {
+        self.widgets.insert(0, widget);
+    }
+
+    /// Remove the most recently added overlay widget, if any. The initial
+    /// content widgets are never popped.
+    pub fn pop_overlay(&mut self) -> Option<Box<dyn LiveAreaWidget>> {
+        // The first five widgets are the fixed content stack; only pop
+        // widgets pushed on top of them.
+        if self.widgets.len() > 5 {
+            Some(self.widgets.remove(0))
+        } else {
+            None
+        }
+    }
+
+    // ── Widget accessors ─────────────────────────────────────────
+
+    fn transcript_mut(&mut self) -> &mut TranscriptWidget {
+        self.widgets
+            .iter_mut()
+            .find_map(|w| w.as_any_mut().downcast_mut::<TranscriptWidget>())
+            .expect("transcript widget present")
+    }
+
+    fn reasoning_mut(&mut self) -> &mut ReasoningWidget {
+        self.widgets
+            .iter_mut()
+            .find_map(|w| w.as_any_mut().downcast_mut::<ReasoningWidget>())
+            .expect("reasoning widget present")
+    }
+
+    fn tools_mut(&mut self) -> &mut ToolsWidget {
+        self.widgets
+            .iter_mut()
+            .find_map(|w| w.as_any_mut().downcast_mut::<ToolsWidget>())
+            .expect("tools widget present")
+    }
+
+    fn watch_single_mut(&mut self) -> Option<&mut WatchSingleWidget> {
+        self.widgets
+            .iter_mut()
+            .find_map(|w| w.as_any_mut().downcast_mut::<WatchSingleWidget>())
+    }
+
+    fn debug_mut(&mut self) -> Option<&mut DebugWidget> {
+        self.widgets
+            .iter_mut()
+            .find_map(|w| w.as_any_mut().downcast_mut::<DebugWidget>())
+    }
+
     // ── Widget mutation (moved from `App`) ───────────────────────
 
     /// Flatten the current turn into the transcript and start a new turn
     /// with the given prompt.
     pub fn submit_prompt(&mut self, prompt: String) {
-        if let Some(prev_prompt) = self.transcript.take_prompt() {
+        let width = self.cols;
+
+        // Gather the ephemeral tails first (they borrow `self` independently
+        // of the transcript), so we can then mutate the transcript alone.
+        let prev_prompt = self.transcript_mut().take_prompt();
+        self.reasoning_mut().flush();
+        let reasoning_tail = self.reasoning_mut().take_tail(width);
+        let tools_tail = self.tools_mut().take_tail(width);
+
+        let transcript = self.transcript_mut();
+        if let Some(prev_prompt) = prev_prompt {
             let prompt_style = Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD);
@@ -308,14 +378,12 @@ impl<B: Backend> LiveArea<B> {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD);
 
-            let width = self.cols;
-
-            if !self.transcript.is_empty() {
-                self.transcript.push_separator();
-                self.transcript.push_separator();
+            if !transcript.is_empty() {
+                transcript.push_separator();
+                transcript.push_separator();
             }
 
-            self.transcript.push_line(
+            transcript.push_line(
                 Line::from(vec![
                     Span::styled("> ", marker_style),
                     Span::styled(prev_prompt, prompt_style),
@@ -323,34 +391,29 @@ impl<B: Backend> LiveArea<B> {
                 LineOrigin::FlattenedPrompt,
             );
 
-            self.reasoning.flush();
-            let reasoning_tail = self.reasoning.take_tail(width);
             if !reasoning_tail.is_empty() {
-                self.transcript.push_separator();
+                transcript.push_separator();
                 for line in reasoning_tail {
-                    self.transcript
-                        .push_line(line, LineOrigin::FlattenedReasoning);
+                    transcript.push_line(line, LineOrigin::FlattenedReasoning);
                 }
             }
 
-            let tools_tail = self.tools.take_tail(width);
             if !tools_tail.is_empty() {
-                self.transcript.push_separator();
+                transcript.push_separator();
                 for line in tools_tail {
-                    self.transcript.push_line(line, LineOrigin::FlattenedTools);
+                    transcript.push_line(line, LineOrigin::FlattenedTools);
                 }
             }
 
-            if !self.transcript.response_is_empty() {
-                self.transcript.push_separator();
-                let response_lines: Vec<String> = self
-                    .transcript
+            if !transcript.response_is_empty() {
+                transcript.push_separator();
+                let response_lines: Vec<String> = transcript
                     .response_text()
                     .lines()
                     .map(|s| s.to_string())
                     .collect();
                 for line_str in response_lines {
-                    self.transcript.push_line(
+                    transcript.push_line(
                         Line::from(Span::styled(line_str, Style::default())),
                         LineOrigin::FlattenedResponse,
                     );
@@ -358,71 +421,135 @@ impl<B: Backend> LiveArea<B> {
             }
         }
 
-        self.transcript.set_prompt(prompt);
-        self.reasoning.clear();
-        self.tools.clear();
-        self.transcript.clear_response();
+        transcript.set_prompt(prompt);
+        transcript.clear_response();
+        self.reasoning_mut().clear();
+        self.tools_mut().clear();
     }
 
     /// Flush the reasoning partial buffer (if any) into a completed
     /// reasoning line.
     pub fn flush_reasoning(&mut self) {
-        self.reasoning.flush();
+        self.reasoning_mut().flush();
     }
 
     /// Append reasoning text (may be a partial chunk).
     pub fn push_reasoning_text(&mut self, text: &str) {
-        self.reasoning.push_text(text);
+        self.reasoning_mut().push_text(text);
     }
 
     /// Record a tool call.
     pub fn push_tool(&mut self, name: &str) {
-        self.tools.push(name);
+        self.tools_mut().push(name);
     }
 
     /// Append streaming response text.
     pub fn push_response(&mut self, text: &str) {
-        self.transcript.push_response(text);
+        self.transcript_mut().push_response(text);
     }
 
     /// Replace the entire response text (used for Done reconciliation).
     pub fn replace_response(&mut self, text: &str) {
-        self.transcript.replace_response(text);
+        self.transcript_mut().replace_response(text);
     }
 
     /// Reconcile the current turn's streamed response against the
     /// authoritative full text from `TurnComplete`.
     pub fn reconcile_response(&mut self, text: &str) {
-        self.transcript.reconcile_response(text);
+        self.transcript_mut().reconcile_response(text);
     }
 
     /// Whether the current turn has any content.
     pub fn has_current_turn(&self) -> bool {
-        self.transcript.has_prompt()
+        self.widgets
+            .iter()
+            .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
+            .expect("transcript widget present")
+            .has_prompt()
     }
 
     /// Whether the current turn's streaming response is empty.
     pub fn response_is_empty(&self) -> bool {
-        self.transcript.response_is_empty()
+        self.widgets
+            .iter()
+            .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
+            .expect("transcript widget present")
+            .response_is_empty()
     }
 
     /// Discard the current turn without committing it to the transcript.
     pub fn clear_current_turn(&mut self) {
-        self.transcript.clear_prompt();
-        self.reasoning.clear();
-        self.tools.clear();
-        self.transcript.clear_response();
+        self.transcript_mut().clear_prompt();
+        self.transcript_mut().clear_response();
+        self.reasoning_mut().clear();
+        self.tools_mut().clear();
     }
 
     /// Clear the transcript/scrollback.
     pub fn clear_transcript(&mut self) {
-        self.transcript.clear_scrollable();
+        self.transcript_mut().clear_scrollable();
     }
 
     /// Append a system message to the transcript with default style and
     /// blank-line padding from the previous entry.
     pub fn push_transcript_line(&mut self, line: String) {
-        self.transcript.push_transcript_line(line);
+        self.transcript_mut().push_transcript_line(line);
+    }
+
+    // ── Overlay mutation ─────────────────────────────────────────
+
+    /// Push a log line into the watch-single widget, if present.
+    pub fn push_watch_single_line(&mut self, line: String) {
+        if let Some(w) = self.watch_single_mut() {
+            w.push_line(line);
+        }
+    }
+
+    /// Append output to the debug widget, if present.
+    pub fn push_debug_output(&mut self, line: String) {
+        if let Some(w) = self.debug_mut() {
+            w.push_output(line);
+        }
+    }
+
+    /// Borrow the debug prompt, if the debug widget is present.
+    pub fn debug_prompt_mut(&mut self) -> Option<&mut String> {
+        self.debug_mut().map(|w| w.prompt_mut())
+    }
+
+    /// Take the debug prompt for submission, if the debug widget is present.
+    pub fn take_debug_prompt(&mut self) -> Option<String> {
+        self.debug_mut().map(|w| w.take_prompt())
+    }
+
+    /// Whether the debug widget is still connecting.
+    pub fn debug_connecting(&self) -> bool {
+        self.widgets
+            .iter()
+            .find_map(|w| w.as_any().downcast_ref::<DebugWidget>())
+            .is_some_and(|w| w.connecting())
+    }
+
+    /// Whether the debug widget is still connected.
+    pub fn debug_connected(&self) -> bool {
+        self.widgets
+            .iter()
+            .find_map(|w| w.as_any().downcast_ref::<DebugWidget>())
+            .is_some_and(|w| w.connected())
+    }
+
+    /// Set the connected flag on the debug widget.
+    pub fn set_debug_connected(&mut self, connected: bool) {
+        if let Some(w) = self.debug_mut() {
+            w.set_connected(connected);
+        }
+    }
+
+    /// Mark the debug widget as connected.
+    pub fn mark_debug_ready(&mut self) {
+        if let Some(w) = self.debug_mut() {
+            w.mark_ready();
+        }
     }
 }
 
@@ -514,7 +641,7 @@ impl<B: Backend> Drop for LiveArea<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::App;
+    use crate::tui::app::{ActiveRun, App, Overlay};
     use ratatui::{backend::TestBackend, buffer::Buffer, style::Style, text::Line as TuiLine};
 
     /// Helper: write a single text line at a given row.
@@ -898,6 +1025,209 @@ mod tests {
         assert_eq!(
             occurrences, 1,
             "Reasoning should be committed exactly once, no duplicate.\nBuffer:\n{visible}"
+        );
+    }
+
+    // ── Dynamic widget stack / overlay tests ────────────────────
+
+    #[test]
+    fn push_and_pop_overlay_widgets() {
+        use crate::tui::widgets::{DebugWidget, WatchTableWidget};
+
+        let mut live = new_live(80, 24);
+        assert_eq!(live.widgets.len(), 5);
+
+        // Popping with no overlay is a no-op.
+        assert!(live.pop_overlay().is_none());
+
+        live.push_overlay(Box::new(WatchTableWidget::new()));
+        assert_eq!(live.widgets.len(), 6);
+
+        live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
+        assert_eq!(live.widgets.len(), 7);
+
+        // Pop removes the most recently added (debug) first.
+        let popped = live.pop_overlay().unwrap();
+        assert!(popped.as_any().downcast_ref::<DebugWidget>().is_some());
+        assert_eq!(live.widgets.len(), 6);
+
+        let popped = live.pop_overlay().unwrap();
+        assert!(popped.as_any().downcast_ref::<WatchTableWidget>().is_some());
+        assert_eq!(live.widgets.len(), 5);
+
+        // Cannot pop the fixed content stack.
+        assert!(live.pop_overlay().is_none());
+        assert_eq!(live.widgets.len(), 5);
+    }
+
+    #[test]
+    fn blocking_overlay_occludes_content_but_keeps_bars() {
+        use crate::tui::widgets::DebugWidget;
+
+        let mut live = new_live(80, 24);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live.push_transcript_line("some transcript line".to_string());
+        live.submit_prompt("hi".to_string());
+        live.replace_response("a response");
+
+        // Push a blocking debug overlay.
+        app.overlay = Some(Overlay::Debug);
+        live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        // The debug header is visible.
+        assert!(
+            visible.contains("debug: g1"),
+            "Debug header should be visible.\nBuffer:\n{visible}"
+        );
+        // The transcript content is occluded.
+        assert!(
+            !visible.contains("a response"),
+            "Transcript response should be occluded.\nBuffer:\n{visible}"
+        );
+        // The fixed bars remain visible.
+        assert!(
+            visible.contains("gremlins tui"),
+            "Info bar should remain visible.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains(">"),
+            "Input bar should remain visible.\nBuffer:\n{visible}"
+        );
+
+        // Popping restores the transcript.
+        app.overlay = None;
+        live.pop_overlay();
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("a response"),
+            "Transcript should be restored after pop.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn watch_table_is_non_blocking_and_leaves_content_visible() {
+        use crate::tui::widgets::WatchTableWidget;
+
+        let mut live = new_live(80, 24);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "running".to_string(),
+                stage: "build".to_string(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+            },
+        );
+
+        live.push_transcript_line("some transcript line".to_string());
+        live.submit_prompt("hi".to_string());
+        live.replace_response("a response");
+
+        app.overlay = Some(Overlay::Watch);
+        live.push_overlay(Box::new(WatchTableWidget::new()));
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        // Watch table shows the run.
+        assert!(
+            visible.contains("g1"),
+            "Watch table should show the run id.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("running"),
+            "Watch table should show the status.\nBuffer:\n{visible}"
+        );
+        // Transcript content stays visible below.
+        assert!(
+            visible.contains("a response"),
+            "Transcript should stay visible under the watch table.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn overlay_mutation_methods_feed_widgets() {
+        use crate::tui::widgets::{DebugWidget, WatchSingleWidget};
+
+        let mut live = new_live(80, 24);
+
+        // Watch-single log lines.
+        live.push_overlay(Box::new(WatchSingleWidget::new("g1".to_string())));
+        live.push_watch_single_line("log line one".to_string());
+        live.push_watch_single_line("log line two".to_string());
+
+        // Debug widget.
+        live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
+        assert!(live.debug_connecting());
+        assert!(!live.debug_connected());
+
+        live.push_debug_output("hello".to_string());
+        live.mark_debug_ready();
+        assert!(!live.debug_connecting());
+        assert!(live.debug_connected());
+
+        // Prompt mutation.
+        live.debug_prompt_mut().unwrap().push_str("abc");
+        assert_eq!(live.take_debug_prompt().as_deref(), Some("abc"));
+        assert_eq!(live.take_debug_prompt().as_deref(), Some(""));
+
+        // Connection state transitions.
+        live.set_debug_connected(false);
+        assert!(!live.debug_connected());
+        assert!(!live.debug_connecting());
+    }
+
+    #[test]
+    fn short_viewport_with_overlay_does_not_panic() {
+        use crate::tui::widgets::WatchTableWidget;
+
+        let mut live = new_live(80, 2);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.overlay = Some(Overlay::Watch);
+        live.push_overlay(Box::new(WatchTableWidget::new()));
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("gremlins tui"),
+            "Info bar should render even with an overlay on a 2-row viewport.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn content_mutation_targets_transcript_after_overlay_push() {
+        use crate::tui::widgets::WatchTableWidget;
+
+        let mut live = new_live(80, 24);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        // Push a non-blocking overlay first, then mutate the transcript.
+        app.overlay = Some(Overlay::Watch);
+        live.push_overlay(Box::new(WatchTableWidget::new()));
+
+        live.push_transcript_line("after overlay".to_string());
+        live.submit_prompt("hi".to_string());
+        live.replace_response("response after overlay");
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("response after overlay"),
+            "Transcript mutation should target the transcript even with an overlay pushed.\nBuffer:\n{visible}"
         );
     }
 }

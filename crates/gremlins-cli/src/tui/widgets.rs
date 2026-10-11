@@ -12,6 +12,8 @@
 //! never commit scrollback themselves — that remains the caller's
 //! responsibility.
 
+use std::collections::HashMap;
+
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Rect},
@@ -20,12 +22,15 @@ use ratatui::{
     widgets::{Paragraph, Widget, Wrap},
 };
 
+use crate::tui::app::{ActiveRun, Overlay};
 use crate::tui::buffer::{wrapped_height, BoundedBuffer, LineOrigin, ScrollableBuffer};
 
-/// Shared read-only state handed to each widget's [`LiveAreaWidget::render`].
+/// Shared read-only state handed to each widget's [`LiveAreaWidget::render`]
+/// and [`LiveAreaWidget::height_constraint`].
 ///
 /// Stateless widgets (input bar, info bar) read their content from here
-/// rather than owning buffers of their own.
+/// rather than owning buffers of their own. Overlay widgets observe what is
+/// on screen (the active overlay mode and the daemon-derived run table).
 pub struct RenderContext<'a> {
     /// Current input-bar text.
     pub input: &'a str,
@@ -35,6 +40,22 @@ pub struct RenderContext<'a> {
     pub gremlin_count: &'a str,
     /// Cached project name.
     pub project_name: &'a str,
+    /// The active overlay mode, if any. Overlay widgets read this to decide
+    /// whether they are occluded by a blocking overlay.
+    pub overlay: Option<&'a Overlay>,
+    /// The daemon-derived run table (source of truth for the watch widget).
+    pub active_runs: &'a HashMap<String, ActiveRun>,
+    /// Height of the content region (viewport minus the fixed bars).
+    pub content_height: u16,
+}
+
+impl<'a> RenderContext<'a> {
+    /// Whether a blocking overlay is currently active. When true, the
+    /// content widgets (transcript, reasoning, tools) collapse to zero
+    /// height so the blocking overlay occupies the whole content region.
+    pub fn blocking_overlay(&self) -> bool {
+        self.overlay.as_ref().is_some_and(|o| o.is_blocking())
+    }
 }
 
 /// A single LiveArea rendering region.
@@ -44,12 +65,33 @@ pub struct RenderContext<'a> {
 /// [`height_constraint`](Self::height_constraint) and paints itself into the
 /// region it is assigned by [`render`](Self::render).
 pub trait LiveAreaWidget {
-    /// The layout constraint for this widget's region at the given width.
-    fn height_constraint(&self, width: u16) -> Constraint;
+    /// The layout constraint for this widget's region at the given width,
+    /// given the current render context.
+    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint;
 
     /// Render this widget into `area`, returning any overflow lines that
     /// must be committed to terminal scrollback by the caller.
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) -> Vec<Line<'static>>;
+
+    /// Downcast helper for locating a concrete widget in the stack.
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Mutable downcast helper.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+/// Emit the `as_any`/`as_any_mut` trait method bodies for a widget impl.
+/// Place inside an `impl LiveAreaWidget for X { ... }` block.
+macro_rules! as_any_methods {
+    () => {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    };
 }
 
 /// The scrollable transcript region: completed turns, the current prompt,
@@ -184,7 +226,13 @@ impl Default for TranscriptWidget {
 }
 
 impl LiveAreaWidget for TranscriptWidget {
-    fn height_constraint(&self, _width: u16) -> Constraint {
+    as_any_methods!();
+    fn height_constraint(&self, _width: u16, ctx: &RenderContext) -> Constraint {
+        // When a blocking overlay is active, collapse to zero so the overlay
+        // occupies the whole content region.
+        if ctx.blocking_overlay() {
+            return Constraint::Length(0);
+        }
         // Fills whatever remains after the fixed-height widgets below it.
         Constraint::Min(0)
     }
@@ -371,7 +419,11 @@ impl Default for ReasoningWidget {
 }
 
 impl LiveAreaWidget for ReasoningWidget {
-    fn height_constraint(&self, width: u16) -> Constraint {
+    as_any_methods!();
+    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
+        if ctx.blocking_overlay() {
+            return Constraint::Length(0);
+        }
         let extra = self.extra_lines();
         let lines = self.reasoning.visible_lines_with_extra(&extra, width);
         Constraint::Length(wrapped_height(&lines, width) as u16)
@@ -432,7 +484,11 @@ impl Default for ToolsWidget {
 }
 
 impl LiveAreaWidget for ToolsWidget {
-    fn height_constraint(&self, width: u16) -> Constraint {
+    as_any_methods!();
+    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
+        if ctx.blocking_overlay() {
+            return Constraint::Length(0);
+        }
         let lines = self.tools.visible_lines(width);
         Constraint::Length(wrapped_height(&lines, width) as u16)
     }
@@ -454,7 +510,8 @@ impl LiveAreaWidget for ToolsWidget {
 pub struct InputBarWidget;
 
 impl LiveAreaWidget for InputBarWidget {
-    fn height_constraint(&self, _width: u16) -> Constraint {
+    as_any_methods!();
+    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
         Constraint::Length(1)
     }
 
@@ -478,7 +535,8 @@ impl LiveAreaWidget for InputBarWidget {
 pub struct InfoBarWidget;
 
 impl LiveAreaWidget for InfoBarWidget {
-    fn height_constraint(&self, _width: u16) -> Constraint {
+    as_any_methods!();
+    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
         Constraint::Length(1)
     }
 
@@ -512,6 +570,300 @@ impl LiveAreaWidget for InfoBarWidget {
 
         let paragraph = Paragraph::new(Line::from(spans));
         paragraph.render(area, buf);
+
+        Vec::new()
+    }
+}
+
+/// The non-blocking gremlins watch table overlay.
+///
+/// Renders a table of active gremlin runs (id, status, stage, definition,
+/// project) plus a status-count footer. It owns no mutable buffers — all
+/// data is read from the render context. Its constraint reserves an upper
+/// portion of the layout and it returns no overflow.
+pub struct WatchTableWidget;
+
+impl WatchTableWidget {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Desired height: the table header + one row per run + footer, capped
+    /// at half the content region so the transcript below stays visible.
+    fn desired_height(&self, ctx: &RenderContext) -> u16 {
+        let rows = ctx.active_runs.len().max(1) as u16;
+        // header + rows + footer, capped at half the content region.
+        let half = ctx.content_height / 2;
+        (rows + 2).min(half.max(1))
+    }
+}
+
+impl Default for WatchTableWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveAreaWidget for WatchTableWidget {
+    as_any_methods!();
+    fn height_constraint(&self, _width: u16, ctx: &RenderContext) -> Constraint {
+        if ctx.blocking_overlay() {
+            return Constraint::Length(0);
+        }
+        Constraint::Length(self.desired_height(ctx))
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        let header_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        lines.push(Line::from(Span::styled(
+            "  ID        STATUS    STAGE       DEFINITION",
+            header_style,
+        )));
+
+        let mut runs: Vec<(&String, &ActiveRun)> = ctx.active_runs.iter().collect();
+        runs.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (id, run) in runs {
+            let status_style = match run.status.as_str() {
+                "running" => Style::default().fg(Color::Green),
+                "failed" => Style::default().fg(Color::Red),
+                "stopped" => Style::default().fg(Color::Yellow),
+                _ => Style::default().fg(Color::DarkGray),
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(id.clone(), Style::default().fg(Color::White)),
+                Span::raw("  "),
+                Span::styled(run.status.clone(), status_style),
+                Span::raw("  "),
+                Span::styled(run.stage.clone(), Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(run.definition.clone(), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+
+        let running = ctx
+            .active_runs
+            .values()
+            .filter(|r| r.status == "running")
+            .count();
+        let total = ctx.active_runs.len();
+        lines.push(Line::from(Span::styled(
+            format!("  {running} running · {total} total"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        if !lines.is_empty() {
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            paragraph.render(area, buf);
+        }
+
+        Vec::new()
+    }
+}
+
+/// The blocking single-gremlin log viewer overlay.
+///
+/// Owns the target gremlin id and its log-line buffer. Renders a header and
+/// a tail-anchored log view. Its constraint fills the content area above the
+/// fixed input/info bars and it returns no overflow.
+pub struct WatchSingleWidget {
+    id: String,
+    log_lines: Vec<String>,
+}
+
+impl WatchSingleWidget {
+    pub fn new(id: String) -> Self {
+        Self {
+            id,
+            log_lines: Vec::new(),
+        }
+    }
+
+    /// Append a log line.
+    pub fn push_line(&mut self, line: String) {
+        self.log_lines.push(line);
+    }
+}
+
+impl LiveAreaWidget for WatchSingleWidget {
+    as_any_methods!();
+    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
+        // Fills the entire content area above the fixed bars.
+        Constraint::Min(0)
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) -> Vec<Line<'static>> {
+        let header = Line::from(vec![
+            Span::styled(
+                "following: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                self.id.clone(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]);
+
+        let mut lines: Vec<Line<'static>> = vec![header];
+        lines.push(Line::from(""));
+
+        // Tail-anchored: keep only the last `area.height - 2` lines.
+        let body_rows = area.height.saturating_sub(2) as usize;
+        let start = self.log_lines.len().saturating_sub(body_rows);
+        for line in &self.log_lines[start..] {
+            lines.push(Line::from(Span::styled(
+                line.clone(),
+                Style::default().fg(Color::White),
+            )));
+        }
+
+        if !lines.is_empty() {
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            paragraph.render(area, buf);
+        }
+
+        Vec::new()
+    }
+}
+
+/// The blocking interactive debug session overlay.
+///
+/// Owns the target id, prompt text, output scrollback, and connection state
+/// (`connecting`/`connected`). Renders a header, output scrollback, and the
+/// debug prompt above the fixed input/info bars. It returns no overflow.
+pub struct DebugWidget {
+    id: String,
+    input: String,
+    history: Vec<String>,
+    connecting: bool,
+    connected: bool,
+}
+
+impl DebugWidget {
+    pub fn new(id: String) -> Self {
+        Self {
+            id,
+            input: String::new(),
+            history: Vec::new(),
+            connecting: true,
+            connected: false,
+        }
+    }
+
+    /// Mutable debug-prompt input.
+    pub fn prompt_mut(&mut self) -> &mut String {
+        &mut self.input
+    }
+
+    /// Take the debug prompt for submission.
+    pub fn take_prompt(&mut self) -> String {
+        std::mem::take(&mut self.input)
+    }
+
+    /// Append a line to the debug output scrollback.
+    pub fn push_output(&mut self, line: String) {
+        self.history.push(line);
+    }
+
+    /// Whether the debug socket is open but `ready` has not arrived yet.
+    pub fn connecting(&self) -> bool {
+        self.connecting
+    }
+
+    /// Whether the debug socket session is still connected.
+    pub fn connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Set the connected flag. Setting `false` also clears the connecting
+    /// flag so a session that never became ready is reported as ended.
+    pub fn set_connected(&mut self, connected: bool) {
+        self.connected = connected;
+        if !connected {
+            self.connecting = false;
+        }
+    }
+
+    /// Mark the session as connected (clears the connecting flag).
+    pub fn mark_ready(&mut self) {
+        self.connecting = false;
+        self.connected = true;
+    }
+}
+
+impl LiveAreaWidget for DebugWidget {
+    as_any_methods!();
+    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
+        // Fills the entire content area above the fixed bars.
+        Constraint::Min(0)
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) -> Vec<Line<'static>> {
+        let status = if self.connecting {
+            "connecting…"
+        } else if self.connected {
+            "connected"
+        } else {
+            "ended"
+        };
+        let status_style = if self.connecting {
+            Style::default().fg(Color::Yellow)
+        } else if self.connected {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+
+        let header = Line::from(vec![
+            Span::styled(
+                "debug: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                self.id.clone(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(status, status_style),
+        ]);
+
+        let mut lines: Vec<Line<'static>> = vec![header];
+        lines.push(Line::from(""));
+
+        // Output scrollback, tail-anchored. Reserve 2 rows for the prompt
+        // line at the bottom.
+        let prompt_rows = 2u16;
+        let body_rows = area.height.saturating_sub(2 + prompt_rows) as usize;
+        let start = self.history.len().saturating_sub(body_rows);
+        for line in &self.history[start..] {
+            lines.push(Line::from(Span::styled(
+                line.clone(),
+                Style::default().fg(Color::White),
+            )));
+        }
+
+        // Debug prompt line.
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("debug> ", Style::default().fg(Color::Cyan)),
+            Span::styled(self.input.clone(), Style::default().fg(Color::White)),
+        ]));
+
+        if !lines.is_empty() {
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            paragraph.render(area, buf);
+        }
 
         Vec::new()
     }
@@ -578,6 +930,9 @@ mod tests {
             following_log: None,
             gremlin_count: "0",
             project_name: "",
+            overlay: None,
+            active_runs: &HashMap::new(),
+            content_height: rows,
         };
         transcript.render(area, &mut buf, &ctx);
         (0..rows)

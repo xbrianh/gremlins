@@ -56,22 +56,18 @@ impl ActiveRun {
     }
 }
 
-/// Ephemeral overlay widgets rendered above the transcript.
+/// Ephemeral overlay mode. A pure marker used only for input routing and
+/// dismissal. Overlay-local state (log lines, debug prompt/history,
+/// connection flags) lives in the corresponding overlay widgets in
+/// `LiveArea`.
 #[derive(Debug, Clone)]
 pub enum Overlay {
     /// Gremlins watch table. Non-blocking; main input bar still works.
     Watch,
-    /// Single-gremlin log viewer. Blocking overlay with its own log buffer.
-    WatchSingle { log_lines: Vec<String> },
+    /// Single-gremlin log viewer. Blocking overlay.
+    WatchSingle,
     /// Interactive debug session. Blocking overlay with its own prompt.
-    Debug {
-        input: String,
-        history: Vec<String>,
-        /// Whether the debug socket is open but `ready` has not arrived yet.
-        connecting: bool,
-        /// Whether the debug socket session is still connected.
-        connected: bool,
-    },
+    Debug,
 }
 
 impl Overlay {
@@ -84,7 +80,7 @@ impl Overlay {
 
     /// Whether this overlay owns a prompt that should receive keystrokes.
     pub fn has_prompt(&self) -> bool {
-        matches!(self, Overlay::Debug { .. })
+        matches!(self, Overlay::Debug)
     }
 }
 
@@ -245,102 +241,12 @@ impl App {
         }
     }
 
-    pub fn open_watch_single(&mut self, _id: String) {
-        self.overlay = Some(Overlay::WatchSingle {
-            log_lines: Vec::new(),
-        });
+    pub fn open_watch_single(&mut self) {
+        self.overlay = Some(Overlay::WatchSingle);
     }
 
-    pub fn open_debug(&mut self, _id: String) {
-        self.overlay = Some(Overlay::Debug {
-            input: String::new(),
-            history: Vec::new(),
-            connecting: true,
-            connected: false,
-        });
-    }
-
-    /// Mutable debug-prompt input, when the debug overlay is active.
-    pub fn overlay_prompt_mut(&mut self) -> Option<&mut String> {
-        match self.overlay {
-            Some(Overlay::Debug { ref mut input, .. }) => Some(input),
-            _ => None,
-        }
-    }
-
-    /// Take the debug prompt for submission.
-    pub fn take_overlay_prompt(&mut self) -> Option<String> {
-        match &mut self.overlay {
-            Some(Overlay::Debug { input, .. }) => Some(std::mem::take(input)),
-            _ => None,
-        }
-    }
-
-    /// Append a line to the active single-gremlin log overlay, if visible.
-    pub fn push_overlay_log_line(&mut self, line: String) {
-        if let Some(Overlay::WatchSingle { log_lines, .. }) = &mut self.overlay {
-            log_lines.push(line);
-        }
-    }
-
-    /// Append a line to the debug overlay scrollback, if visible.
-    pub fn push_overlay_debug_output(&mut self, line: String) {
-        if let Some(Overlay::Debug { history, .. }) = &mut self.overlay {
-            history.push(line);
-        }
-    }
-
-    /// Whether the active debug overlay is still connecting (socket open,
-    /// `ready` not yet received).
-    pub fn debug_connecting(&self) -> bool {
-        matches!(
-            self.overlay,
-            Some(Overlay::Debug {
-                connecting: true,
-                ..
-            })
-        )
-    }
-
-    /// Whether the active debug overlay is still connected to the daemon.
-    pub fn debug_connected(&self) -> bool {
-        matches!(
-            self.overlay,
-            Some(Overlay::Debug {
-                connected: true,
-                ..
-            })
-        )
-    }
-
-    /// Set the connected flag on the active debug overlay. Setting `false`
-    /// also clears the connecting flag so a session that never became ready
-    /// is reported as ended rather than stuck connecting.
-    pub fn set_debug_connected(&mut self, connected: bool) {
-        if let Some(Overlay::Debug {
-            connecting,
-            connected: c,
-            ..
-        }) = &mut self.overlay
-        {
-            *c = connected;
-            if !connected {
-                *connecting = false;
-            }
-        }
-    }
-
-    /// Mark the active debug overlay as connected (clears the connecting flag).
-    pub fn mark_debug_ready(&mut self) {
-        if let Some(Overlay::Debug {
-            connecting,
-            connected,
-            ..
-        }) = &mut self.overlay
-        {
-            *connecting = false;
-            *connected = true;
-        }
+    pub fn open_debug(&mut self) {
+        self.overlay = Some(Overlay::Debug);
     }
 
     // ── Input history helpers ───────────────────────────────────────

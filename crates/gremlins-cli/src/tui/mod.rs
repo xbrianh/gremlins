@@ -22,6 +22,7 @@ use commands::{dispatch, CommandResult};
 use editor::open_editor;
 use gremlins::executor::socket;
 use screen::LiveArea;
+use widgets::{DebugWidget, WatchSingleWidget, WatchTableWidget};
 
 /// Abort the dedicated log-follow task for the single-gremlin overlay.
 fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
@@ -35,8 +36,11 @@ fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
 /// The debug socket is opened when `/debug <id>` is dispatched; this
 /// function only forwards subsequent prompt submissions to the daemon
 /// over the already-established session.
-fn handle_overlay_prompt_submit(app: &mut App, cmd_tx: &mpsc::UnboundedSender<serde_json::Value>) {
-    let Some(input) = app.take_overlay_prompt() else {
+fn handle_overlay_prompt_submit(
+    live_area: &mut LiveArea,
+    cmd_tx: &mpsc::UnboundedSender<serde_json::Value>,
+) {
+    let Some(input) = live_area.take_debug_prompt() else {
         return;
     };
 
@@ -46,17 +50,17 @@ fn handle_overlay_prompt_submit(app: &mut App, cmd_tx: &mpsc::UnboundedSender<se
     }
 
     // Echo the command in the overlay scrollback.
-    app.push_overlay_debug_output(format!("debug> {trimmed}"));
+    live_area.push_debug_output(format!("debug> {trimmed}"));
 
     // Reject submissions while the socket is still coming up.
-    if app.debug_connecting() {
-        app.push_overlay_debug_output("debug: session not ready yet".to_string());
+    if live_area.debug_connecting() {
+        live_area.push_debug_output("debug: session not ready yet".to_string());
         return;
     }
 
     // Reject further submissions once the session has ended.
-    if !app.debug_connected() {
-        app.push_overlay_debug_output("(session ended)".to_string());
+    if !live_area.debug_connected() {
+        live_area.push_debug_output("(session ended)".to_string());
         return;
     }
 
@@ -417,6 +421,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         {
                             if app.overlay.as_ref().is_some_and(Overlay::has_prompt) {
                                 app.overlay = None;
+                                live_area.pop_overlay();
                                 continue;
                             }
                             if app.input.is_empty() {
@@ -437,6 +442,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Esc => {
                             // Blocking overlays (single-watch, debug) dismiss first.
                             if app.dismiss_blocking_overlay() {
+                                live_area.pop_overlay();
                                 abort_overlay_log_follow(&mut overlay_log_handle);
                                 overlay_log_following = None;
                                 // Drop the debug socket so the daemon sees EOF.
@@ -449,6 +455,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                             // Then the non-blocking watch table.
                             if app.dismiss_watch_overlay() {
+                                live_area.pop_overlay();
                                 continue;
                             }
 
@@ -481,11 +488,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             // scrollback instead of the main input bar.
                             if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
                                 if let Some(cmd_tx) = &debug_cmd_tx {
-                                    handle_overlay_prompt_submit(&mut app, cmd_tx);
+                                    handle_overlay_prompt_submit(live_area, cmd_tx);
                                 } else {
                                     // Consume the prompt so it doesn't linger.
-                                    let _ = app.take_overlay_prompt();
-                                    app.push_overlay_debug_output(
+                                    let _ = live_area.take_debug_prompt();
+                                    live_area.push_debug_output(
                                         "(session ended)".to_string(),
                                     );
                                 }
@@ -522,15 +529,24 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             overlay_log_following = None;
                                         }
                                         match app.overlay {
-                                            Some(Overlay::Watch) => app.overlay = None,
-                                            _ => app.overlay = Some(Overlay::Watch),
+                                            Some(Overlay::Watch) => {
+                                                app.overlay = None;
+                                                live_area.pop_overlay();
+                                            }
+                                            _ => {
+                                                app.overlay = Some(Overlay::Watch);
+                                                live_area.pop_overlay();
+                                                live_area.push_overlay(Box::new(WatchTableWidget::new()));
+                                            }
                                         }
                                     }
                                     CommandResult::WatchSingle(id) => {
                                         // Close any existing overlay log follow first.
                                         abort_overlay_log_follow(&mut overlay_log_handle);
                                         overlay_log_following = Some(id.clone());
-                                        app.open_watch_single(id.clone());
+                                        app.open_watch_single();
+                                        live_area.pop_overlay();
+                                        live_area.push_overlay(Box::new(WatchSingleWidget::new(id.clone())));
                                         let log_tx = log_tx.clone();
                                         let follow_id = id.clone();
                                         let follow_task = tokio::spawn(async move {
@@ -570,7 +586,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     CommandResult::Debug(id) => {
                                         abort_overlay_log_follow(&mut overlay_log_handle);
                                         overlay_log_following = None;
-                                        app.open_debug(id.clone());
+                                        app.open_debug();
+                                        live_area.pop_overlay();
+                                        live_area.push_overlay(Box::new(DebugWidget::new(id.clone())));
                                         // Open a fresh socket and spawn the reader.
                                         match start_debug_session(id.clone()).await {
                                             Ok((cmd_tx, evt_rx, handle)) => {
@@ -579,7 +597,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                                 debug_task = Some(handle);
                                             }
                                             Err(e) => {
-                                                app.push_overlay_debug_output(format!("error: {e}"));
+                                                live_area.push_debug_output(format!("error: {e}"));
                                             }
                                         }
                                     }
@@ -750,14 +768,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Backspace => {
-                            if let Some(prompt) = app.overlay_prompt_mut() {
+                            if let Some(prompt) = live_area.debug_prompt_mut() {
                                 prompt.pop();
                             } else {
                                 app.input.pop();
                             }
                         }
                         KeyCode::Char(ch) => {
-                            if let Some(prompt) = app.overlay_prompt_mut() {
+                            if let Some(prompt) = live_area.debug_prompt_mut() {
                                 prompt.push(ch);
                             } else {
                                 app.input.push(ch);
@@ -821,7 +839,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             live_area.push_transcript_line(line.clone());
                         }
                         if overlay_log_following.as_deref() == Some(&id) {
-                            app.push_overlay_log_line(line);
+                            live_area.push_watch_single_line(line);
                         }
                     }
                     gremlins::executor::DaemonEvent::Bail { id, reason } => {
@@ -922,7 +940,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             raw.get("line").and_then(|v| v.as_str()),
                         ) {
                             if overlay_log_following.as_deref() == Some(id) {
-                                app.push_overlay_log_line(line.to_string());
+                                live_area.push_watch_single_line(line.to_string());
                             }
                         }
                     }
@@ -932,7 +950,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             raw.get("message").and_then(|v| v.as_str()),
                         ) {
                             if overlay_log_following.as_deref() == Some(id) {
-                                app.push_overlay_log_line(format!("error: {message}"));
+                                live_area.push_watch_single_line(format!("error: {message}"));
                                 overlay_log_following = None;
                             }
                         }
@@ -1091,52 +1109,52 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             Some(event) = recv_debug(&mut debug_evt_rx) => {
                 match event {
                     DebugEvent::Ready { id } => {
-                        app.mark_debug_ready();
-                        app.push_overlay_debug_output(format!("connected to gremlin {id}"));
+                        live_area.mark_debug_ready();
+                        live_area.push_debug_output(format!("connected to gremlin {id}"));
                     }
                     DebugEvent::TurnComplete { text, tool_calls, .. } => {
                         if !text.is_empty() {
-                            app.push_overlay_debug_output(text);
+                            live_area.push_debug_output(text);
                         }
                         for tc in &tool_calls {
-                            app.push_overlay_debug_output(format!("  [tool: {tc}]"));
+                            live_area.push_debug_output(format!("  [tool: {tc}]"));
                         }
-                        app.push_overlay_debug_output(
+                        live_area.push_debug_output(
                             "debug: turn complete — agent paused".to_string(),
                         );
                     }
                     DebugEvent::Done { text } => {
                         if !text.is_empty() {
-                            app.push_overlay_debug_output(text);
+                            live_area.push_debug_output(text);
                         }
-                        app.push_overlay_debug_output("debug: agent called Done".to_string());
-                        app.set_debug_connected(false);
+                        live_area.push_debug_output("debug: agent called Done".to_string());
+                        live_area.set_debug_connected(false);
                         debug_task = None;
                         debug_cmd_tx = None;
                         debug_evt_rx = None;
                     }
                     DebugEvent::Ended { reason } => {
-                        app.push_overlay_debug_output(format!("debug: session ended ({reason})"));
-                        app.set_debug_connected(false);
+                        live_area.push_debug_output(format!("debug: session ended ({reason})"));
+                        live_area.set_debug_connected(false);
                         debug_task = None;
                         debug_cmd_tx = None;
                         debug_evt_rx = None;
                     }
                     DebugEvent::StreamChunk { text } => {
-                        app.push_overlay_debug_output(text);
+                        live_area.push_debug_output(text);
                     }
                     DebugEvent::ReasoningChunk { text } => {
-                        app.push_overlay_debug_output(text);
+                        live_area.push_debug_output(text);
                     }
                     DebugEvent::ToolResult { name, output } => {
-                        app.push_overlay_debug_output(format!("[tool: {name}] {output}"));
+                        live_area.push_debug_output(format!("[tool: {name}] {output}"));
                     }
                     DebugEvent::Error(msg) => {
-                        app.push_overlay_debug_output(format!("debug: error: {msg}"));
+                        live_area.push_debug_output(format!("debug: error: {msg}"));
                     }
                     DebugEvent::Disconnected => {
-                        app.push_overlay_debug_output("debug: disconnected".to_string());
-                        app.set_debug_connected(false);
+                        live_area.push_debug_output("debug: disconnected".to_string());
+                        live_area.set_debug_connected(false);
                         debug_task = None;
                         debug_cmd_tx = None;
                         debug_evt_rx = None;

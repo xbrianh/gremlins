@@ -7,9 +7,10 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 | File | Role |
 |------|------|
 | `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, debug-session plumbing (`DebugEvent`, `start_debug_session`), `format_socket_response()`. |
-| `app.rs` | Pure state (`App`). Transcript/region model, active runs, conversation history, overlay state, input history. No I/O. |
+| `app.rs` | Pure state (`App`). Active runs, conversation history, overlay mode marker, input history. No I/O, no widget ownership. |
 | `buffer.rs` | Display buffers: `BoundedBuffer` (fixed visible-row cap, no scrollback) and `ScrollableBuffer` (FIFO that overflows into terminal scrollback). Plus `wrapped_height` helpers and `LineOrigin` provenance tags. |
-| `screen.rs` | `LiveArea` — owns the main terminal screen, diff-driven double buffering, `commit_scrollback()` (renders overflow + `scroll_region_up`), raw-mode/cursor lifecycle. |
+| `screen.rs` | `LiveArea` — owns the main terminal screen, the dynamic widget stack (`Vec<Box<dyn LiveAreaWidget>>`), diff-driven double buffering, `commit_scrollback()` (renders overflow + `scroll_region_up`), raw-mode/cursor lifecycle. |
+| `widgets.rs` | `LiveAreaWidget` trait + concrete widgets: transcript, reasoning, tools, input bar, info bar, and the three overlay widgets (watch table, watch single, debug). |
 | `chat.rs` | Per-message chat client. Sends `{"op":"chat"}` over a fresh socket, parses streaming `ChatEvent` variants. |
 | `client.rs` | Persistent `DaemonClient`. Long-lived socket for request/response + unsolicited `DaemonEvent` broadcast. Also `follow_log()` on a dedicated connection. |
 | `commands.rs` | Slash-command dispatch. Returns `CommandResult` — the event loop handles each variant. |
@@ -46,7 +47,8 @@ run()
 - **Diff-driven double buffering.** `LiveArea` keeps `curr`/`prev` screen-sized `Buffer`s and flushes only changed cells each frame (`prev.diff_iter(&curr)`). `invalidate()` forces a full repaint.
 - **Terminal scrollback promotion.** When the `ScrollableBuffer` FIFO exceeds available rows, `overflow_split()` reports the head prefix; the caller drains it and `commit_scrollback()` renders it and calls `scroll_region_up` to push it into terminal scrollback. The bottom `RESERVED_ROWS` (2: input + info bars) are excluded from the scroll region.
 - **Region model (bottom-up).** Layout: info bar → input bar → tools → reasoning → scrollable (transcript + prompt + response). Ephemeral regions (reasoning, tools) are `BoundedBuffer`s capped at 5 visible rows each and never reach scrollback. Only the `ScrollableBuffer` and the current response can overflow.
-- **No `widgets.rs` / `SplitWidget`.** The old dual-section streaming widget was replaced by the region model in `buffer.rs` + `ui.rs`.
+- **Dynamic widget stack.** `LiveArea` owns an ordered `Vec<Box<dyn LiveAreaWidget>>`. The initial stack (top-to-bottom) is transcript → reasoning → tools → input bar → info bar. Overlays are pushed/popped at the top of the stack via `push_overlay`/`pop_overlay`. `compose()` lays every widget out in a single ratatui layout pass using each widget's `height_constraint(width, ctx)`.
+- **Overlay widgets.** Three overlay widgets implement `LiveAreaWidget`: `WatchTableWidget` (non-blocking, reads the run table from the render context), `WatchSingleWidget` (blocking log viewer owning its log buffer), and `DebugWidget` (blocking debug session owning prompt/history/connection state). Blocking overlays collapse transcript/reasoning/tools to zero height so they occupy the whole content region while the fixed input/info bars stay visible. Overlay-local state is cleared when the widget is popped.
 - **Chat uses a fresh socket per message.** The daemon processes chat as an ephemeral stage. The persistent `DaemonClient` stays free for commands during chat.
 - **Log follow uses a dedicated socket.** The `log` op with `follow:true` monopolizes its connection, so it gets its own (`client::follow_log`).
 - **Debug sessions use a dedicated socket.** `/debug <id>` opens a fresh socket with its own reader task and command channel (`talk`/`quit`/`bail`/`continue`).
@@ -85,13 +87,15 @@ run()
 
 ### Debug sessions
 `DebugEvent` variants arrive on `debug_evt_rx` (via `recv_debug`, which pends forever when no session is active):
-- `Ready` → `mark_debug_ready()`
-- `TurnComplete` / `Done` / `Ended` / `StreamChunk` / `ReasoningChunk` / `ToolResult` / `Error` / `Disconnected` → push to overlay debug output, update connection state
+- `Ready` → `live_area.mark_debug_ready()`
+- `TurnComplete` / `Done` / `Ended` / `StreamChunk` / `ReasoningChunk` / `ToolResult` / `Error` / `Disconnected` → `live_area.push_debug_output()`, update connection state via `live_area.set_debug_connected()`
 
 ## Rendering
 
-`LiveArea::compose(&app)` reserves the bottom two rows for the fixed bars,
-then lays the content widgets out top-to-bottom in the remaining area:
+`LiveArea::compose(&app)` lays every widget in the stack out top-to-bottom
+in a single ratatui layout pass. The bottom two rows are the input and info
+bars (the last two widgets, each `Length(1)`), excluded from the scroll
+region:
 1. `Length(1)` — input bar: `> ` prompt + input text + block cursor (inverted space)
 2. `Length(1)` — info bar: gremlin count, project name, log-follow indicator, key hints
 
@@ -101,8 +105,14 @@ top-to-bottom: transcript → reasoning → tools. The transcript fills
 visible line counts. The scrollable budget is `content_height -
 reasoning_height - tools_height - fixed(prompt+response+separators)`.
 Overflow is computed via `ScrollableBuffer::overflow_split()`, drained, and
-returned as lines for `LiveArea::commit_scrollback()`. When the content area
-has zero height, content widgets are skipped and no overflow is produced.
+returned as lines for `LiveArea::commit_scrollback()`. Only the transcript
+may return overflow; overlay widgets always return an empty `Vec`.
+
+When a blocking overlay is active, the content widgets collapse to zero
+height (their `height_constraint` returns `Length(0)` when
+`ctx.blocking_overlay()`), so the overlay fills the whole content region
+while the input/info bars remain visible. The non-blocking watch table
+reserves an upper portion and leaves the content widgets below it visible.
 
 ## Adding a New Slash Command
 
