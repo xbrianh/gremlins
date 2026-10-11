@@ -137,8 +137,7 @@ pub fn render_livearea(
     let (split_idx, _overflow_rows) = app.scrollable.overflow_split(transcript_available, width);
 
     let overflow_lines: Vec<Line<'static>> = if split_idx > 0 {
-        let head: Vec<Line<'static>> =
-            app.scrollable.visible_lines()[..split_idx].to_vec();
+        let head: Vec<Line<'static>> = app.scrollable.visible_lines()[..split_idx].to_vec();
         app.scrollable.drain_head(split_idx);
         head
     } else {
@@ -284,7 +283,6 @@ mod tests {
         app.flush_reasoning();
         app.push_tool("Done");
         app.replace_response("Greeted the user; no task was requested yet.");
-        app.current_response = "Greeted the user; no task was requested yet.".to_string();
 
         let overflow = render_livearea(live_area.curr_mut(), area, &mut app, "0", "gremlins");
         // In a 24-row terminal, this content should not overflow.
@@ -341,7 +339,6 @@ mod tests {
         frame(&mut live_area, &mut app);
 
         app.replace_response("Greeted the user; no task was requested yet.");
-        app.current_response = "Greeted the user; no task was requested yet.".to_string();
         frame(&mut live_area, &mut app);
 
         let visible = dump_buffer(live_area.backend().buffer());

@@ -92,6 +92,8 @@ pub(crate) struct RunContext {
     pub(crate) completion_nudge_budget: usize,
     pub(crate) stream_events:
         Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
+    /// Pre-populated message history carried into the loop's internal history.
+    pub(crate) prepopulated_messages: Option<Vec<Message>>,
 }
 
 pub(crate) struct LoopOpts<'a> {
@@ -230,6 +232,7 @@ pub(crate) async fn run_agent_loop(
         &ctx.params.log_tx,
         interactive,
         ctx.stream_events.clone(),
+        ctx.prepopulated_messages.clone(),
     )
     .await
 }
@@ -285,6 +288,7 @@ pub(crate) async fn run_agent_loop_nested(
         0,
         completion_nudge_budget,
         &log_tx,
+        None,
         None,
         None,
     )
@@ -410,6 +414,7 @@ fn completed_run(
     text: Option<String>,
     events: &Option<Vec<serde_json::Value>>,
     usage: UsageStats,
+    messages: Option<Vec<Message>>,
 ) -> CompletedRun {
     CompletedRun {
         exit_code: 0,
@@ -417,6 +422,7 @@ fn completed_run(
         events: events.clone(),
         cost_usd: None,
         token_usage: Some(usage),
+        messages,
     }
 }
 
@@ -463,6 +469,7 @@ async fn run_agent_loop_core(
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     interactive: Option<InteractiveSession>,
     stream_events: Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
+    prepopulated_messages: Option<Vec<Message>>,
 ) -> Result<CompletedRun, ClientError> {
     // Destructure the interactive session into its components so we can
     // thread them independently through the loop.
@@ -475,7 +482,7 @@ async fn run_agent_loop_core(
 
     let original_system_prompt = system_prompt.clone();
     let mut system_prompt = system_prompt;
-    let mut history: Vec<Message> = Vec::new();
+    let mut history: Vec<Message> = prepopulated_messages.unwrap_or_default();
     let mut next_prompt = Message::user(prompt.to_string());
     let mut turns: usize = 0;
     let mut turn_num: usize = 0;
@@ -909,7 +916,7 @@ async fn run_agent_loop_core(
                         }
                         // Budget exhausted — accept anyway. Python
                         // verify_produced catches missing files.
-                        history.push(next_prompt);
+                        history.push(next_prompt.clone());
                         history.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
                     }
                 }
@@ -961,7 +968,18 @@ async fn run_agent_loop_core(
                         });
                     }
                 }
-                return Ok(completed_run(Some(result_text), captured, usage));
+                // Capture the full message history (prior turns + this final
+                // user prompt + assistant message) so the chat gremlin can
+                // persist complete model context between stages.
+                let mut messages = history.clone();
+                messages.push(next_prompt.clone());
+                messages.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                return Ok(completed_run(
+                    Some(result_text),
+                    captured,
+                    usage,
+                    Some(messages),
+                ));
             }
             _ => {}
         }
@@ -1070,7 +1088,18 @@ async fn run_agent_loop_core(
                     log_tx,
                 );
             }
-            return Ok(completed_run(Some(final_text), captured, usage));
+            // Capture the full message history (prior turns + this final
+            // user prompt + assistant text) so the chat gremlin persists
+            // complete model context even on the exhausted path.
+            let mut messages = history.clone();
+            messages.push(next_prompt.clone());
+            messages.push(assistant_tool_message(&text, &[]));
+            return Ok(completed_run(
+                Some(final_text),
+                captured,
+                usage,
+                Some(messages),
+            ));
         }
 
         history.push(next_prompt.clone());
@@ -1782,6 +1811,7 @@ mod tests {
                 task_clients: None,
                 cancel_token: None,
                 stream_events: None,
+                prepopulated_messages: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -1789,6 +1819,7 @@ mod tests {
             reminder_budget: 0,
             completion_nudge_budget: 0,
             stream_events: None,
+            prepopulated_messages: None,
         }
     }
 
@@ -3321,6 +3352,7 @@ mod tests {
                 &None,
                 Some(session),
                 Some(evt_tx_clone),
+                None,
             )
             .await
         });
@@ -3427,6 +3459,7 @@ mod tests {
                 &None,
                 Some(session),
                 Some(evt_tx_clone),
+                None,
             )
             .await
         });
@@ -3520,6 +3553,7 @@ mod tests {
                 &None,
                 Some(session),
                 Some(evt_tx_clone),
+                None,
             )
             .await
         });
@@ -3602,6 +3636,7 @@ mod tests {
                 &None,
                 Some(session),
                 Some(evt_tx_clone),
+                None,
             )
             .await
         });

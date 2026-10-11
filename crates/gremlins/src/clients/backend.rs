@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rig_core::completion::Message;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
@@ -43,6 +44,11 @@ pub struct RunParams {
     /// Broadcast sender for stream events. When Some, the agent loop emits
     /// every stream event (reasoning, text, tool results, turn complete, done).
     pub stream_events: Option<tokio::sync::broadcast::Sender<InteractiveEvent>>,
+    /// Pre-populated message history. When set, the agent loop starts with
+    /// these messages already in its internal history (carrying their original
+    /// roles) instead of building from a bare system-prompt + user-prompt pair.
+    /// The user prompt is still appended as the next user message.
+    pub prepopulated_messages: Option<Vec<Message>>,
 }
 
 impl Clone for RunParams {
@@ -67,6 +73,7 @@ impl Clone for RunParams {
             task_clients: self.task_clients.clone(),
             cancel_token: self.cancel_token.clone(),
             stream_events: self.stream_events.clone(),
+            prepopulated_messages: self.prepopulated_messages.clone(),
         }
     }
 }

@@ -11,10 +11,6 @@ pub enum CommandResult {
         op: String,
         payload: serde_json::Value,
     },
-    /// Show conversation history (handled by event loop with App state).
-    ShowHistory,
-    /// Truncate conversation history at the given 0-based index.
-    TruncateHistory(usize),
     /// Toggle the non-blocking gremlins watch table.
     ToggleWatch,
     /// Open a single-gremlin log viewer overlay.
@@ -152,18 +148,6 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 .and_then(|c| c.default_client().map(String::from))
                 .unwrap_or_else(|| "(not configured)".to_string())
         )])),
-        "history" => Some(CommandResult::ShowHistory),
-        "rollback" => {
-            let idx: usize = match args.first().and_then(|s| s.parse().ok()) {
-                Some(n) => n,
-                None => {
-                    return Some(CommandResult::Lines(vec![
-                        "usage: /rollback <n> — truncate history at turn n".to_string(),
-                    ]));
-                }
-            };
-            Some(CommandResult::TruncateHistory(idx))
-        }
         _ => Some(CommandResult::Lines(vec![format!(
             "unknown command: /{cmd} — type /help for available commands"
         )])),
@@ -212,8 +196,6 @@ fn help_text() -> Vec<String> {
         "  /watch <id>      — open a single-gremlin log viewer".to_string(),
         "  /debug <id>      — open an interactive debug session".to_string(),
         "  /model           — show default client".to_string(),
-        "  /history         — show conversation history".to_string(),
-        "  /rollback <n>    — truncate history at turn n".to_string(),
         "  /chat            — chat is always active (type directly)".to_string(),
         "  /clear, /new     — restart chat".to_string(),
         "  /help            — show this help".to_string(),

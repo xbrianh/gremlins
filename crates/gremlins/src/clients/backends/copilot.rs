@@ -175,6 +175,7 @@ impl Backend for CopilotBackend {
             reminder_budget: crate::config::artifact_reminder_budget(),
             completion_nudge_budget: crate::config::completion_nudge_budget(),
             stream_events: params.stream_events.clone(),
+            prepopulated_messages: params.prepopulated_messages.clone(),
         };
         *self.state.last_ctx.lock().unwrap() = Some(ctx.clone());
 

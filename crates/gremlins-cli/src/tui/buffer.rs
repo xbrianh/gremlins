@@ -262,6 +262,12 @@ impl ScrollableBuffer {
         self.lines.drain(..count);
         self.origins.drain(..count);
     }
+
+    /// Drop all lines and origin tags, resetting to an empty buffer.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.origins.clear();
+    }
 }
 
 impl Default for ScrollableBuffer {
@@ -397,10 +403,7 @@ mod tests {
     #[test]
     fn scrollable_overflow_split_wrapping() {
         let mut buf = ScrollableBuffer::new();
-        buf.push(
-            plain("abcdefghijklmnopqrstuvwxyz"),
-            LineOrigin::Transcript,
-        ); // 26 chars → 3 rows at width 10
+        buf.push(plain("abcdefghijklmnopqrstuvwxyz"), LineOrigin::Transcript); // 26 chars → 3 rows at width 10
         let (split_idx, overflow_rows) = buf.overflow_split(2, 10);
         assert_eq!(overflow_rows, 3);
         assert_eq!(split_idx, 1);

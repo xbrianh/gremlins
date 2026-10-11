@@ -19,36 +19,50 @@ pub enum ChatEvent {
     Done {
         text: String,
         usage: Option<Value>,
+        /// The gremlin id, carried so the TUI can capture it on the first
+        /// turn and reuse it for subsequent messages.
+        id: Option<String>,
     },
     Ended {
         reason: String,
+        /// The gremlin id, carried on terminal payloads so the TUI can
+        /// capture it even when the first turn ends abnormally.
+        id: Option<String>,
     },
-    Error(String),
+    Error {
+        message: String,
+        /// The gremlin id, carried on terminal payloads so the TUI can
+        /// capture it even when the first turn fails.
+        id: Option<String>,
+    },
 }
 
 /// Send a chat message and receive stream events until Done.
 ///
-/// Uses a fresh connection per message. The daemon processes each
-/// chat request as an ephemeral stage that runs to completion.
+/// Uses a fresh connection per message. The daemon owns the conversation
+/// history; the client sends only the gremlin id (absent on first contact)
+/// and the user text.
 ///
 /// `cancel_rx` is a oneshot that the caller fires to cancel the
 /// socket-reader task. When fired, the reader drops `write_half`
 /// so the daemon sees EOF and stops the agent loop immediately.
 pub async fn send_message(
+    chat_id: Option<&str>,
     text: &str,
-    history: &[Value],
     cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<mpsc::UnboundedReceiver<ChatEvent>, String> {
     let state_root = gremlins::config::state_root();
     let stream = socket::connect_socket(&state_root).await?;
     let (read_half, mut write_half) = stream.into_split();
 
-    // Send the chat request
-    let request = serde_json::json!({
+    // Send the chat request — only the gremlin id and text.
+    let mut request = serde_json::json!({
         "op": "chat",
         "text": text,
-        "history": history,
     });
+    if let Some(id) = chat_id {
+        request["id"] = serde_json::Value::String(id.to_string());
+    }
     socket::write_json_line(&mut write_half, &request).await?;
 
     let (event_tx, event_rx) = mpsc::unbounded_channel::<ChatEvent>();
@@ -74,7 +88,7 @@ pub async fn send_message(
                             let event = parse_chat_event(&value);
                             let is_terminal = matches!(
                                 &event,
-                                ChatEvent::Done { .. } | ChatEvent::Ended { .. } | ChatEvent::Error(_)
+                                ChatEvent::Done { .. } | ChatEvent::Ended { .. } | ChatEvent::Error { .. }
                             );
                             let _ = event_tx.send(event);
                             if is_terminal {
@@ -84,6 +98,7 @@ pub async fn send_message(
                         Ok(None) | Err(_) => {
                             let _ = event_tx.send(ChatEvent::Ended {
                                 reason: "disconnect".to_string(),
+                                id: None,
                             });
                             break;
                         }
@@ -147,6 +162,7 @@ fn parse_chat_event(value: &Value) -> ChatEvent {
                 .unwrap_or("")
                 .to_string(),
             usage: value.get("usage").cloned(),
+            id: value.get("id").and_then(|v| v.as_str()).map(String::from),
         },
         Some("ended") => ChatEvent::Ended {
             reason: value
@@ -154,15 +170,20 @@ fn parse_chat_event(value: &Value) -> ChatEvent {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            id: value.get("id").and_then(|v| v.as_str()).map(String::from),
         },
-        Some("error") => ChatEvent::Error(
-            value
+        Some("error") => ChatEvent::Error {
+            message: value
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error")
                 .to_string(),
-        ),
-        _ => ChatEvent::Error(format!("unexpected event: {value}")),
+            id: value.get("id").and_then(|v| v.as_str()).map(String::from),
+        },
+        _ => ChatEvent::Error {
+            message: format!("unexpected event: {value}"),
+            id: None,
+        },
     }
 }
 

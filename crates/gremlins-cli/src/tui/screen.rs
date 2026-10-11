@@ -92,7 +92,10 @@ impl<B: Backend> LiveArea<B> {
             h.min(self.scrollable_rows() as usize) as u16
         };
 
-        log::debug!("LiveArea::commit_scrollback rows={height} lines={}", lines.len());
+        log::debug!(
+            "LiveArea::commit_scrollback rows={height} lines={}",
+            lines.len()
+        );
 
         // Render the overflow content into a temporary buffer.
         let area = Rect::new(0, 0, width, height);
@@ -105,9 +108,7 @@ impl<B: Backend> LiveArea<B> {
         {
             let fingerprints: Vec<String> = (0..height)
                 .map(|y| {
-                    let row: String = (0..width)
-                        .map(|x| tmp[(x, y)].symbol())
-                        .collect();
+                    let row: String = (0..width).map(|x| tmp[(x, y)].symbol()).collect();
                     let trimmed = row.trim_end();
                     let preview: String = trimmed.chars().take(40).collect();
                     if trimmed.len() > 40 {
@@ -303,12 +304,7 @@ impl<B: Backend> Drop for LiveArea<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{
-        backend::TestBackend,
-        buffer::Buffer,
-        style::Style,
-        text::Line as TuiLine,
-    };
+    use ratatui::{backend::TestBackend, buffer::Buffer, style::Style, text::Line as TuiLine};
 
     /// Helper: write a single text line at a given row.
     fn put_line(buf: &mut Buffer, y: u16, text: &str) {
@@ -419,7 +415,10 @@ mod tests {
 
         // Scrollback should contain "line 0" exactly once.
         let count = la_sb.iter().filter(|r| r.contains("line 0")).count();
-        assert_eq!(count, 1, "line 0 should appear once in scrollback: {la_sb:?}");
+        assert_eq!(
+            count, 1,
+            "line 0 should appear once in scrollback: {la_sb:?}"
+        );
 
         // Visible frame should show lines 1-4.
         let buf = live.backend().buffer();
@@ -433,7 +432,10 @@ mod tests {
             })
             .collect();
         assert!(visible.iter().any(|r| r.contains("line 4")));
-        assert!(!visible.iter().any(|r| r.contains("line 0")), "line 0 should not be visible");
+        assert!(
+            !visible.iter().any(|r| r.contains("line 0")),
+            "line 0 should not be visible"
+        );
         assert_eq!(la_sb, be_sb, "scrollback must agree");
     }
 
@@ -458,8 +460,14 @@ mod tests {
 
         let la_sb = live.scrollback();
         for line in la_sb {
-            assert!(!line.contains("input bar"), "INPUT BAR LEAKED TO SCROLLBACK: {line:?}");
-            assert!(!line.contains("info bar"), "INFO BAR LEAKED TO SCROLLBACK: {line:?}");
+            assert!(
+                !line.contains("input bar"),
+                "INPUT BAR LEAKED TO SCROLLBACK: {line:?}"
+            );
+            assert!(
+                !line.contains("info bar"),
+                "INFO BAR LEAKED TO SCROLLBACK: {line:?}"
+            );
         }
     }
 

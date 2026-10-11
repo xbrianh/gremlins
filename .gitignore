@@ -11,5 +11,7 @@ plans/completed/
 *.so
 *.dylib
 *.dSYM/
+*.crate
+rig-core-extracted/
 
 /.gremlins/env

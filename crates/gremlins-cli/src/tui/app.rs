@@ -33,14 +33,11 @@ pub struct App {
     /// When Some, the TUI is following a gremlin's log and printing log lines
     /// to the transcript as they arrive.
     pub following_log: Option<String>,
-    /// Ordered conversation history: each entry is {"role": "user"|"assistant", "content": "..."}
-    pub conversation_history: Vec<serde_json::Value>,
-    /// Accumulated assistant response text for the current turn (committed to history on Done).
-    pub current_response: String,
+    /// The persistent chat gremlin id, captured from the first `Done` event
+    /// and sent with subsequent chat requests. Cleared on `/clear`/`/new`.
+    pub chat_id: Option<String>,
     /// Whether a chat request is currently in-flight (guards against concurrent submissions).
     pub active_request: bool,
-    /// The user message for the current in-flight request (committed to history on Done).
-    pub pending_user_message: String,
     /// Active ephemeral overlay, if any.
     pub overlay: Option<Overlay>,
     /// Submitted inputs in chronological order (in-memory only).
@@ -100,9 +97,7 @@ pub enum Overlay {
     /// Gremlins watch table. Non-blocking; main input bar still works.
     Watch,
     /// Single-gremlin log viewer. Blocking overlay with its own log buffer.
-    WatchSingle {
-        log_lines: Vec<String>,
-    },
+    WatchSingle { log_lines: Vec<String> },
     /// Interactive debug session. Blocking overlay with its own prompt.
     Debug {
         input: String,
@@ -140,10 +135,8 @@ impl App {
             active_runs: HashMap::new(),
             project_name,
             following_log: None,
-            conversation_history: Vec::new(),
-            current_response: String::new(),
+            chat_id: None,
             active_request: false,
-            pending_user_message: String::new(),
             overlay: None,
             input_history: Vec::new(),
             history_cursor: None,
@@ -458,10 +451,13 @@ impl App {
             }
 
             // Prompt.
-            self.scrollable.push(Line::from(vec![
-                Span::styled("> ", marker_style),
-                Span::styled(prev_prompt, prompt_style),
-            ]), LineOrigin::FlattenedPrompt);
+            self.scrollable.push(
+                Line::from(vec![
+                    Span::styled("> ", marker_style),
+                    Span::styled(prev_prompt, prompt_style),
+                ]),
+                LineOrigin::FlattenedPrompt,
+            );
 
             // Reasoning — only the visible tail.
             let reasoning_tail = self.reasoning.lines(width);
@@ -485,10 +481,10 @@ impl App {
             if !self.response_text.is_empty() {
                 self.scrollable.push(Line::from(""), LineOrigin::Separator);
                 for line_str in self.response_text.lines() {
-                    self.scrollable.push(Line::from(Span::styled(
-                        line_str.to_string(),
-                        Style::default(),
-                    )), LineOrigin::FlattenedResponse);
+                    self.scrollable.push(
+                        Line::from(Span::styled(line_str.to_string(), Style::default())),
+                        LineOrigin::FlattenedResponse,
+                    );
                 }
             }
         }
@@ -562,7 +558,9 @@ impl App {
             self.scrollable.push(Line::from(""), LineOrigin::Separator);
             self.scrollable.push(Line::from(""), LineOrigin::Separator);
         }
-        self.scrollable
-            .push(Line::from(Span::styled(line, Style::default())), LineOrigin::Transcript);
+        self.scrollable.push(
+            Line::from(Span::styled(line, Style::default())),
+            LineOrigin::Transcript,
+        );
     }
 }

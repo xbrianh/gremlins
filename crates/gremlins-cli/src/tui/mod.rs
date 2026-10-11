@@ -405,8 +405,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
         let (cols, rows) = live_area.size();
         app.width = cols;
         let area = Rect::new(0, 0, cols, rows);
-        let overflow =
-            render_livearea(live_area.curr_mut(), area, &mut app, &gremlin_count, &project_name);
+        let overflow = render_livearea(
+            live_area.curr_mut(),
+            area,
+            &mut app,
+            &gremlin_count,
+            &project_name,
+        );
         if !overflow.is_empty() {
             live_area.commit_scrollback(&overflow, cols)?;
         }
@@ -479,8 +484,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.reasoning_partial.clear();
                                 app.tools.clear();
                                 app.response_text.clear();
-                                app.current_response.clear();
-                                std::mem::take(&mut app.pending_user_message);
                                 app.active_request = false;
                             }
                         }
@@ -604,6 +607,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         app.reasoning_partial.clear();
                                         app.tools.clear();
                                         app.response_text.clear();
+                                        // Clear the transcript/scrollback so the
+                                        // UI no longer shows the old conversation
+                                        // after the daemon has discarded it.
+                                        app.scrollable.clear();
                                         // Abort in-flight chat task.
                                         if let Some(tx) = chat_cancel_tx.take() {
                                             let _ = tx.send(());
@@ -611,53 +618,30 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         if let Some(handle) = chat_task.take() {
                                             handle.abort();
                                         }
-                                        app.conversation_history.clear();
-                                        app.current_response.clear();
+                                        // Destroy the current chat gremlin on the
+                                        // daemon so the next message starts fresh.
+                                        if let Some(id) = app.chat_id.take() {
+                                            let c = Arc::clone(&client);
+                                            let tx = result_tx.clone();
+                                            tokio::spawn(async move {
+                                                let lines = match c
+                                                    .send_request(serde_json::json!({
+                                                        "op": "stop",
+                                                        "id": id,
+                                                    }))
+                                                    .await
+                                                {
+                                                    Ok(resp) => format_socket_response("stop", &resp),
+                                                    Err(e) => vec![format!("error: {e}")],
+                                                };
+                                                let _ = tx.send(lines);
+                                            });
+                                        }
                                         app.input.clear();
                                         app.active_request = false;
-                                        app.pending_user_message.clear();
                                     }
                                     CommandResult::Quit => {
                                         break;
-                                    }
-                                    CommandResult::ShowHistory => {
-                                        if app.conversation_history.is_empty() {
-                                            app.push_transcript_line("(no history)".to_string());
-                                        } else {
-                                            let lines: Vec<String> = app
-                                                .conversation_history
-                                                .iter()
-                                                .enumerate()
-                                                .map(|(i, entry)| {
-                                                    let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                                                    let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                                                    let preview: String = if content.chars().count() > 60 {
-                                                        let truncated: String =
-                                                            content.chars().take(57).collect();
-                                                        format!("{truncated}...")
-                                                    } else {
-                                                        content.to_string()
-                                                    };
-                                                    format!("  [{i}] {role}: {preview}")
-                                                })
-                                                .collect();
-                                            for line in lines {
-                                                app.push_transcript_line(line);
-                                            }
-                                        }
-                                    }
-                                    CommandResult::TruncateHistory(idx) => {
-                                        if idx >= app.conversation_history.len() {
-                                            let msg = format!(
-                                                "invalid index {idx} — history has {} entries",
-                                                app.conversation_history.len()
-                                            );
-                                            app.push_transcript_line(msg);
-                                        } else {
-                                            app.conversation_history.truncate(idx);
-                                            let msg = format!("history truncated to {idx} entries");
-                                            app.push_transcript_line(msg);
-                                        }
                                     }
                                     CommandResult::SocketOp { op, payload } => {
                                         if op == "log" {
@@ -736,13 +720,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 live_area.draw(|_| {})?;
 
                                 app.active_request = true;
-                                app.pending_user_message = input.clone();
-                                let history = app.conversation_history.clone();
+                                let chat_id = app.chat_id.clone();
                                 let chat_tx = chat_tx.clone();
                                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                                 chat_cancel_tx = Some(cancel_tx);
                                 chat_task = Some(tokio::spawn(async move {
-                                    match send_message(&input, &history, cancel_rx).await {
+                                    match send_message(chat_id.as_deref(), &input, cancel_rx).await {
                                         Ok(mut rx) => {
                                             while let Some(event) = rx.recv().await {
                                                 if chat_tx.send(event).is_err() {
@@ -751,7 +734,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             }
                                         }
                                         Err(e) => {
-                                            let _ = chat_tx.send(ChatEvent::Error(e));
+                                            let _ = chat_tx.send(ChatEvent::Error {
+                                                message: e,
+                                                id: None,
+                                            });
                                         }
                                     }
                                 }));
@@ -973,7 +959,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     ChatEvent::StreamChunk(text) => {
                         log::debug!("StreamChunk len={}", text.len());
                         app.push_response(&text);
-                        app.current_response.push_str(&text);
                     }
                     ChatEvent::ReasoningChunk(text) => {
                         log::debug!("ReasoningChunk len={}", text.len());
@@ -986,9 +971,16 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     ChatEvent::TurnComplete { text, tool_calls, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
                     }
-                    ChatEvent::Done { text, usage } => {
-                        log::debug!("Done text_len={} current_response_len={} has_current_turn={}",
-                            text.len(), app.current_response.len(), app.has_current_turn());
+                    ChatEvent::Done { text, usage, id } => {
+                        log::debug!("Done text_len={} has_current_turn={}",
+                            text.len(), app.has_current_turn());
+                        // Capture the gremlin id on the first turn so
+                        // subsequent messages target the same chat gremlin.
+                        // Do this before the has_current_turn skip so a failed
+                        // first turn still records the id for the next message.
+                        if let Some(id) = id {
+                            app.chat_id = Some(id);
+                        }
                         if !app.has_current_turn() {
                             log::debug!("Done SKIPPED — no current turn");
                             continue;
@@ -998,9 +990,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // streamed text (e.g. called Done without saying
                         // anything). Otherwise the StreamChunk text IS the
                         // response.
-                        if app.current_response.is_empty() && !text.is_empty() {
+                        if app.response_text.is_empty() && !text.is_empty() {
                             log::debug!("Done using summary (no streamed text)");
-                            app.current_response = text.clone();
                             app.replace_response(&text);
                         } else {
                             log::debug!("Done — keeping streamed response");
@@ -1030,41 +1021,16 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
 
-                        // Commit turn to history.
-                        let user_msg =
-                            std::mem::take(&mut app.pending_user_message);
-                        if !user_msg.is_empty() {
-                            app.conversation_history.push(serde_json::json!({
-                                "role": "user", "content": user_msg
-                            }));
-                        }
-                        let resp = app.current_response.clone();
-                        if !resp.is_empty() {
-                            app.conversation_history.push(serde_json::json!({
-                                "role": "assistant", "content": resp
-                            }));
-                        }
                         app.active_request = false;
                         chat_task = None;
                         chat_cancel_tx = None;
                     }
-                    ChatEvent::Ended { reason } => {
+                    ChatEvent::Ended { reason, id } => {
+                        if let Some(id) = id {
+                            app.chat_id = Some(id);
+                        }
                         if !app.has_current_turn() {
                             continue;
-                        }
-                        // Commit current turn to history.
-                        let user_msg =
-                            std::mem::take(&mut app.pending_user_message);
-                        if !user_msg.is_empty() {
-                            app.conversation_history.push(serde_json::json!({
-                                "role": "user", "content": user_msg
-                            }));
-                        }
-                        let resp = app.current_response.clone();
-                        if !resp.is_empty() {
-                            app.conversation_history.push(serde_json::json!({
-                                "role": "assistant", "content": resp
-                            }));
                         }
                         app.active_request = false;
                         chat_task = None;
@@ -1072,17 +1038,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         let msg = format!("chat ended: {reason}");
                         app.push_transcript_line(msg);
                     }
-                    ChatEvent::Error(msg) => {
+                    ChatEvent::Error { message: msg, id } => {
+                        if let Some(id) = id {
+                            app.chat_id = Some(id);
+                        }
                         if !app.has_current_turn() {
                             continue;
-                        }
-                        // Commit current turn to history.
-                        let user_msg =
-                            std::mem::take(&mut app.pending_user_message);
-                        if !user_msg.is_empty() {
-                            app.conversation_history.push(serde_json::json!({
-                                "role": "user", "content": user_msg
-                            }));
                         }
                         app.active_request = false;
                         chat_task = None;
@@ -1154,20 +1115,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
     // ── Exit ──────────────────────────────────────────────────────
 
-    // Finish current turn if active.
-    if app.has_current_turn() {
-        let user_msg = std::mem::take(&mut app.pending_user_message);
-        if !user_msg.is_empty() {
-            app.conversation_history
-                .push(serde_json::json!({"role": "user", "content": user_msg}));
-        }
-        let resp = app.current_response.clone();
-        if !resp.is_empty() {
-            app.conversation_history
-                .push(serde_json::json!({"role": "assistant", "content": resp}));
-        }
-        app.active_request = false;
-    }
+    // The daemon owns the conversation; nothing to commit on exit.
+    app.active_request = false;
 
     // Abort any lingering log follow on exit.
     if let Some(handle) = log_follow_handle.take() {
