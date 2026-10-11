@@ -666,33 +666,57 @@ resumable, and cheap to reason about, in roughly that order.
 
 ## 8. TUI
 
-This is a design document, not an implementation plan. It describes the desired
-visual layout and behavior. No crate names, no module names, no code.
+The TUI is a single fullscreen viewport (alternate screen) composed from a
+**vertical stack of widgets**. Each widget owns its own rendering buffers,
+reports its desired height, and paints itself into the region the layout pass
+assigns it. The screen is not a monolithic render function; it is a
+`LiveArea` that owns an ordered widget vec and a diff engine.
 
-### 8.1 Viewport model
+### 8.1 The widget trait
 
-The TUI renders into a single fullscreen viewport (alternate screen). The
-viewport is a **vertical list of widgets**. Two elements are always pinned:
+Every region of the screen is a widget behind a single trait. A widget
+declares how tall it wants to be and how to paint itself:
 
-- **Input bar** — always the second-to-last row.
-- **Info bar** — always the last row.
+- **`height_constraint`** — the layout constraint for the widget's region at a
+given width. Fixed widgets return `Length(N)`; elastic widgets return
+`Min(0)`; empty widgets return `Length(0)` and consume no space.
+- **`render`** — paints the widget into its assigned region, returning any
+overflow lines that must be committed to terminal scrollback. Only the
+transcript widget returns non-empty overflow; every other widget returns
+nothing.
 
-Everything above the input bar is the **transcript area** — a scrollable region
-containing the widget list. Widgets stack vertically in chronological order
-(oldest at top). The transcript area always tail-anchors: the most recent widget
-is at the bottom, just above the input bar.
+Widgets receive a shared read-only `RenderContext` (input text, gremlin count,
+project name, active overlay mode, the daemon-derived run table, and the
+content-region height). Stateless widgets read their content from the context;
+stateful widgets own their own buffers.
 
-The user never scrolls within the TUI itself. Terminal multiplexer scrollback
-(tmux copy-mode, etc.) captures everything rendered to the alternate screen.
+### 8.2 The widget stack
 
-### 8.2 Widget types
+`LiveArea` owns `widgets: Vec<Box<dyn LiveAreaWidget>>`, ordered top-to-bottom.
+The initial stack is:
+
+| Widget | Constraint | Overflow? | Notes |
+|---|---|---|---|
+| `TranscriptWidget` | `Min(0)` | Yes | Owns the `ScrollableBuffer`. The only widget that produces overflow. |
+| `ReasoningWidget` | `Length(h)` | No | Owns a `BoundedBuffer` (5 visible rows); `h` is 0 when empty. |
+| `ToolsWidget` | `Length(h)` | No | Owns a `BoundedBuffer` (5 visible rows); `h` is 0 when empty. |
+| `InputBarWidget` | `Length(1)` | No | Stateless — reads `input` from the render context. |
+| `InfoBarWidget` | `Length(1)` | No | Stateless — reads gremlin count, project name, etc. |
+
+The input and info bars are the last two widgets and are always pinned to the
+bottom two rows. Everything above them is the **content region** — the
+scrollable transcript area.
 
 #### 8.2.1 Transcript widget
 
+The transcript is the scrollable region holding completed turns, the current
+prompt, and the streaming response. It is the only widget that can overflow:
+when its content exceeds its region height, its `render` splits the FIFO head
+off into overflow lines, which `LiveArea` commits to terminal scrollback.
+
 A single widget type handles both the in-flight (streaming) turn and the
-finished turn. A `finished` flag distinguishes the two states; the finished
-state is the active state plus a stats footer. Layout, top-to-bottom, with one
-blank line between every element:
+finished turn. Layout, top-to-bottom, with one blank line between every
+element:
 
 ```
   > add rate limiting                                     ← prompt (bold magenta/white)
@@ -731,7 +755,7 @@ streaming is deferred. Read/edit tools are filtered from display but still
 count toward the stats tool count. If no tools ran, the section is absent.
 
 **Sizing.** The widget uses its natural height — it is never greedy and never
-expandable. As content streams in, `height()` grows and the layout pass
+expandable. As content streams in, its height grows and the layout pass
 re-allocates; there is no jarring space-absorption jump when a prompt is
 submitted. Every line reaches the terminal so tmux captures it.
 
@@ -740,36 +764,36 @@ submitted. Every line reaches the terminal so tmux captures it.
 partials; the widget stays in place and gains a stats footer. It does not
 vanish.
 
-#### 8.2.2 Finished transcript widget
+#### 8.2.2 Reasoning and tools widgets
 
-A transcript widget with `finished = true`. It renders the full layout above
-(prompt, reasoning window, tool list, response) plus the stats footer. The
-reasoning window is frozen at its last 2–3 lines; the response shows the full
-model output. The widget is not expandable — its full content is always
-rendered and accessible in tmux copy-mode scrollback.
+The current turn's reasoning and active-tool output are separate widgets, each
+owning a `BoundedBuffer` capped at 5 visible rows. They sit between the
+transcript and the input bar and grow only while a turn is streaming. When
+empty they report `Length(0)` and consume no space. On turn completion their
+tails are flattened into the transcript and the buffers reset for the next
+turn.
 
-#### 8.2.3 System widget
+#### 8.2.3 System content
 
-Non-chat transcript content: the startup banner, daemon events, command
-output (`/ls`, `/info`, etc.), and errors.
+Non-chat transcript content — the startup banner, daemon events, command
+output (`/ls`, `/info`, etc.), and errors — is pushed into the transcript
+widget as ordinary lines:
 
 ```
   gremlins tui — type /help for commands, Ctrl+C to exit
 ```
 
-**Auto-collapse.** When a new widget is pushed on top of a system widget
-(e.g. a chat turn starts, another command runs), existing system widgets
-collapse to a single summary line. Ctrl+O expands them along with all other
-expandable widgets.
-
 #### 8.2.4 Overlay widgets
 
-Overlays render on top of the transcript area, occluding the widgets beneath.
-They are ephemeral — toggled by commands or keybindings, dismissed with `Esc`.
-Dismissing an overlay returns to the transcript view underneath.
+Overlays are widgets pushed onto the top of the stack, occluding the content
+widgets beneath them. They are ephemeral — toggled by commands or keybindings,
+dismissed with `Esc`. Dismissing an overlay pops it from the stack and returns
+to the transcript view underneath.
 
-Unlike transcript widgets, overlays have fixed positions and sizes. They do not
-participate in the vertical widget list.
+A **blocking** overlay (single-gremlin watch, debug) collapses the content
+widgets to zero height so it occupies the whole content region; the input and
+info bars remain visible. A **non-blocking** overlay (gremlins watch) occupies
+only the upper portion and leaves the transcript flowing below it.
 
 ##### 8.2.4.1 Gremlins watch (partial overlay)
 
@@ -862,7 +886,30 @@ The overlay model generalizes to any transient UI:
   changes.
 - **Session log widget** — full scrollable log of the current chat session.
 
-### 8.3 Visual states
+### 8.3 Layout and rendering model
+
+On each frame, `LiveArea::compose`:
+
+1. Reserves the bottom two rows for the input and info bars, so their
+   `Length(1)` constraints can never be compressed by the variable-height
+   content widgets above them.
+2. Collects a `height_constraint` from every content widget and splits the
+   remaining region vertically with a single ratatui layout pass.
+3. Walks the widgets in order, calling `render()` for each in its allocated
+   region. Collapsed (zero-height) chunks are skipped.
+4. Collects overflow from the transcript widget and calls `commit_scrollback`
+   to push it into terminal scrollback.
+5. Runs a diff-driven paint: only cells that changed from the previous frame
+   are sent to the terminal.
+
+The bottom two rows are kept out of the scrolling region (`RESERVED_ROWS`), so
+the pinned bars never scroll. Everything above them participates in scrollback.
+
+Widgets can be added or removed at runtime by pushing/popping the widget vec.
+A widget whose `height_constraint` returns 0 (because it is empty) consumes no
+screen space, and the layout adjusts.
+
+### 8.4 Visual states
 
 Each diagram shows the terminal's alternate screen — the `╔═══╗` box is the
 **viewport** (what's visible on screen). Content above the `─── viewport top ───`
@@ -870,7 +917,7 @@ marker has scrolled off into the terminal's scrollback buffer (accessible via
 tmux copy-mode, terminal scrollback, etc.). The input and info bars are always
 pinned at the viewport bottom.
 
-#### 8.3.1 Idle — several finished turns
+#### 8.4.1 Idle — several finished turns
 
 ```
                         ~~~ terminal scrollback ~~~
@@ -904,7 +951,7 @@ list, response) plus the stats footer. Two blank lines separate adjacent
 widgets. Older turns scroll off the top into terminal scrollback. The input
 bar waits for the next message.
 
-#### 8.3.2 Active turn — streaming
+#### 8.4.2 Active turn — streaming
 
 ```
                         ~~~ terminal scrollback ~~~
@@ -935,13 +982,13 @@ bar waits for the next message.
                      ─── viewport bottom ───
 ```
 
-The active widget sits at the bottom of the transcript area, just above the
+The active turn sits at the bottom of the transcript area, just above the
 input bar. It renders the prompt, a capped reasoning window, a tool list that
 populates as results arrive, and the accumulating response. The widget grows
-as content arrives; older finished widgets scroll off the top of the viewport
+as content arrives; older finished turns scroll off the top of the viewport
 into terminal scrollback.
 
-#### 8.3.3 Finished turn with stats footer
+#### 8.4.3 Finished turn with stats footer
 
 ```
                         ~~~ terminal scrollback ~~~
@@ -981,9 +1028,9 @@ into terminal scrollback.
 When the turn finishes, the reasoning window freezes at its last 2–3 lines and
 a stats footer appears at the bottom of the widget. The widget is not
 expandable — its full content is always rendered and accessible in tmux
-copy-mode scrollback. `Ctrl+O` has no effect on transcript widgets.
+copy-mode scrollback.
 
-#### 8.3.4 Gremlins watch overlay
+#### 8.4.4 Gremlins watch overlay
 
 ```
                         ~~~ terminal scrollback ~~~
@@ -1020,7 +1067,7 @@ The watch overlay occupies the upper portion. Transcript widgets flow below it;
 older ones scroll into terminal scrollback. The input bar still accepts chat —
 the overlay is non-blocking.
 
-### 8.4 Widget lifecycle
+### 8.5 Widget lifecycle
 
 ```
                   user submits message
@@ -1042,16 +1089,13 @@ the overlay is non-blocking.
                         ▼
                     discarded
 
-  system widgets (banner, events, command output) are pushed directly into
-  the transcript. They auto-collapse when a new widget appears on top of
-  them and are expandable via Ctrl+O. Transcript widgets are not expandable
-  — Ctrl+O affects only system widgets.
+  system content (banner, events, command output) is pushed directly into the
+  transcript widget. Overlay widgets exist outside this lifecycle — they are
+  pushed/popped from the top of the widget stack, have no persistent state
+  when hidden, and are dismissed by `Esc`.
 ```
 
-Overlay widgets exist outside this lifecycle. They are toggled by commands,
-dismissed by `Esc`, and have no persistent state when hidden.
-
-### 8.5 Input routing
+### 8.6 Input routing
 
 The input bar is the primary interaction surface. Key routing rules:
 
@@ -1062,23 +1106,24 @@ The input bar is the primary interaction surface. Key routing rules:
 | Gremlins watch overlay visible | Accepts chat text and slash commands as normal |
 | Single gremlin watch visible | Accepts slash commands only |
 | Debug widget visible | Input bar disabled; debug prompt inside the overlay accepts debug commands |
-| Detail mode (widgets expanded) | Accepts chat text and slash commands as normal |
 
 `Esc` in order of priority:
 
 1. If a blocking overlay is visible (single watch, debug), dismiss the overlay.
 2. If a non-blocking overlay is visible (gremlins watch), dismiss the overlay.
-3. If in detail mode (widgets expanded), return to collapsed state.
-4. If an active turn is streaming, abort the turn (transition widget to finished, discard partial response).
-5. Otherwise, clear the input bar.
+3. If an active turn is streaming, abort the turn (transition widget to finished, discard partial response).
+4. Otherwise, clear the input bar.
 
-### 8.6 Summary
+### 8.7 Summary
 
-The TUI is a list of self-contained widgets stacked vertically. The active turn
-is one widget; every completed turn is another. Overlays are transient panels
-that occlude the transcript. The input and info bars are always pinned. The user
+The TUI is a stack of self-contained widgets laid out top-to-bottom. The
+transcript is the one elastic, overflow-producing widget; reasoning and tools
+are bounded, transient widgets that appear only during a streaming turn; the
+input and info bars are fixed and always pinned. Overlays are widgets pushed
+onto the top of the stack that occlude the content beneath them. The user
 never scrolls within the TUI — tmux and terminal features handle that. Widgets
-describe their own content and lifecycle; the viewport just lays them out.
+describe their own content and lifecycle; `LiveArea` just lays them out,
+commits overflow to scrollback, and diffs the result to the terminal.
 
 ## 9. Chat backend
 
