@@ -546,6 +546,41 @@ impl App {
         self.response_text.push_str(text);
     }
 
+    /// Reconcile the current turn's streamed response against the
+    /// authoritative full text from `TurnComplete`.
+    ///
+    /// `response_text` accumulates across the agent loop until the next
+    /// user prompt, so the authoritative text must only repair the current
+    /// turn's trailing slice. If the buffer already ends with the full text,
+    /// it is left untouched; if it ends with a prefix of the full text, the
+    /// truncated suffix is replaced; otherwise the buffer is empty and the
+    /// full text is appended.
+    pub fn reconcile_response(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        if self.response_text.ends_with(text) {
+            return;
+        }
+
+        if self.response_text.is_empty() {
+            self.response_text.push_str(text);
+            return;
+        }
+
+        // Find the longest suffix of `response_text` that is also a prefix
+        // of `text`. That suffix is the portion of the current turn that
+        // survived streamed chunks; drop it and append the complete text.
+        let overlap = (0..=self.response_text.len())
+            .rev()
+            .find(|&len| text.starts_with(&self.response_text[self.response_text.len() - len..]))
+            .unwrap_or(0);
+        self.response_text
+            .truncate(self.response_text.len() - overlap);
+        self.response_text.push_str(text);
+    }
+
     /// Whether the current turn has any content.
     pub fn has_current_turn(&self) -> bool {
         self.current_prompt.is_some()
@@ -562,5 +597,51 @@ impl App {
             Line::from(Span::styled(line, Style::default())),
             LineOrigin::Transcript,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_response_fills_dropped_suffix_without_touching_prior_turns() {
+        let mut app = App::new();
+        app.response_text.push_str("first turn\n");
+        app.response_text.push_str("second tur");
+
+        app.reconcile_response("second turn complete");
+
+        assert_eq!(app.response_text, "first turn\nsecond turn complete");
+    }
+
+    #[test]
+    fn reconcile_response_keeps_complete_streamed_text() {
+        let mut app = App::new();
+        app.response_text
+            .push_str("first turn\nsecond turn complete");
+
+        app.reconcile_response("second turn complete");
+
+        assert_eq!(app.response_text, "first turn\nsecond turn complete");
+    }
+
+    #[test]
+    fn reconcile_response_appends_when_buffer_is_empty() {
+        let mut app = App::new();
+
+        app.reconcile_response("complete turn");
+
+        assert_eq!(app.response_text, "complete turn");
+    }
+
+    #[test]
+    fn reconcile_response_ignores_empty_authoritative_text() {
+        let mut app = App::new();
+        app.response_text.push_str("streamed");
+
+        app.reconcile_response("");
+
+        assert_eq!(app.response_text, "streamed");
     }
 }

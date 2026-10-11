@@ -970,6 +970,18 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     ChatEvent::TurnComplete { text, tool_calls, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
+                        // `text` is the model's full response for the just-completed
+                        // turn — the same text streamed via StreamChunk. Reconcile
+                        // `response_text` so the display shows the complete response
+                        // even when broadcast StreamChunk events were dropped due to
+                        // channel lag. `response_text` accumulates across the agent
+                        // loop, so only the current turn's trailing slice is repaired.
+                        app.reconcile_response(&text);
+                        // Record tool calls so they appear in the transcript rather
+                        // than being silently lost.
+                        for tc in &tool_calls {
+                            app.push_tool(tc);
+                        }
                     }
                     ChatEvent::Done { text, usage, id } => {
                         log::debug!("Done text_len={} has_current_turn={}",
