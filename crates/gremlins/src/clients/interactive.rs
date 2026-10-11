@@ -115,6 +115,9 @@ pub enum InteractiveEvent {
     Done {
         /// Final text result.
         text: String,
+        /// The `Done` tool's `summary` argument, preserved distinctly from
+        /// the streamed text so consumers can append it at turn end.
+        summary: String,
         /// Token usage summary.
         usage: Option<super::protocol::UsageStats>,
     },

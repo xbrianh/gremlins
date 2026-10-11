@@ -437,6 +437,7 @@ impl CmdBackend {
             CompletedRun {
                 exit_code: status.code().unwrap_or(1),
                 text_result: state.result_text,
+                summary: None,
                 events,
                 cost_usd: state.cost_usd,
                 token_usage: None,
@@ -468,6 +469,7 @@ impl CmdBackend {
             CompletedRun {
                 exit_code: status.code().unwrap_or(1),
                 text_result: Some(text),
+                summary: None,
                 events: None,
                 cost_usd: None,
                 token_usage: None,

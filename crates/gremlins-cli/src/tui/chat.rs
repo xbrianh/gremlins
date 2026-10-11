@@ -26,6 +26,9 @@ pub enum ChatEvent {
     },
     Done {
         text: String,
+        /// The `Done` tool's `summary` argument, appended to the turn's
+        /// model text at turn end.
+        summary: String,
         usage: Option<Value>,
         /// The gremlin id, carried so the TUI can capture it on the first
         /// turn and reuse it for subsequent messages.
@@ -99,6 +102,11 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            summary: value
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             usage: value.get("usage").cloned(),
             id: value.get("id").and_then(|v| v.as_str()).map(String::from),
             turn,
@@ -128,5 +136,48 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
             })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_done_carries_summary() {
+        let value = serde_json::json!({
+            "type": "done",
+            "id": "chat-0000",
+            "text": "streamed response",
+            "summary": "answered the question",
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+            "turn": "3",
+        });
+        match parse_chat_event(&value) {
+            Some(ChatEvent::Done {
+                text,
+                summary,
+                id,
+                turn,
+                ..
+            }) => {
+                assert_eq!(text, "streamed response");
+                assert_eq!(summary, "answered the question");
+                assert_eq!(id.as_deref(), Some("chat-0000"));
+                assert_eq!(turn.as_deref(), Some("3"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_done_missing_summary_defaults_to_empty() {
+        let value = serde_json::json!({"type": "done", "text": "hi"});
+        match parse_chat_event(&value) {
+            Some(ChatEvent::Done { summary, .. }) => {
+                assert_eq!(summary, "");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 }

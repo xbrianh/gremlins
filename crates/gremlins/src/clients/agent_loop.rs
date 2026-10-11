@@ -413,6 +413,7 @@ fn usage_stats(
 
 fn completed_run(
     text: Option<String>,
+    summary: Option<String>,
     events: &Option<Vec<serde_json::Value>>,
     usage: UsageStats,
     messages: Option<Vec<Message>>,
@@ -420,6 +421,7 @@ fn completed_run(
     CompletedRun {
         exit_code: 0,
         text_result: text,
+        summary,
         events: events.clone(),
         cost_usd: None,
         token_usage: Some(usage),
@@ -930,7 +932,7 @@ async fn run_agent_loop_core(
                     .unwrap_or("")
                     .to_string();
                 let result_text = if text.trim().is_empty() && !summary.is_empty() {
-                    summary
+                    summary.clone()
                 } else {
                     text.clone()
                 };
@@ -962,6 +964,7 @@ async fn run_agent_loop_core(
                         log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
                         se.send(InteractiveEvent::Done {
                             text: result_text.clone(),
+                            summary: summary.clone(),
                             usage: Some(usage.clone()),
                         });
                     }
@@ -974,6 +977,7 @@ async fn run_agent_loop_core(
                 messages.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
                 return Ok(completed_run(
                     Some(result_text),
+                    Some(summary),
                     captured,
                     usage,
                     Some(messages),
@@ -1094,6 +1098,7 @@ async fn run_agent_loop_core(
             messages.push(assistant_tool_message(&text, &[]));
             return Ok(completed_run(
                 Some(final_text),
+                None,
                 captured,
                 usage,
                 Some(messages),
@@ -1912,6 +1917,95 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e["message"]["content"][0]["type"] == "tool_result"));
+    }
+
+    /// The `Done` summary must survive alongside streamed text: when the
+    /// model streams a final message and then calls `Done(summary)`, the
+    /// returned `CompletedRun` carries both the streamed text (as
+    /// `text_result`) and the summary (as `summary`), distinctly.
+    #[tokio::test]
+    async fn loop_done_summary_survives_alongside_streamed_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-summary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("here is my full answer"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "answered the question"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            model.clone().erase(),
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+        // Streamed text remains authoritative for the response body.
+        assert_eq!(
+            result.text_result.as_deref(),
+            Some("here is my full answer")
+        );
+        // The summary is preserved distinctly, not discarded.
+        assert_eq!(result.summary.as_deref(), Some("answered the question"));
+    }
+
+    /// When the model calls `Done(summary)` without streaming any text, the
+    /// summary still becomes the response (existing fallback preserved), and
+    /// is also carried as the distinct summary field.
+    #[tokio::test]
+    async fn loop_done_summary_fallback_when_no_streamed_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-summary-fb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "did the thing"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            model.clone().erase(),
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("did the thing"));
+        assert_eq!(result.summary.as_deref(), Some("did the thing"));
     }
 
     #[tokio::test]

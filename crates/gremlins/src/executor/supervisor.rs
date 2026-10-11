@@ -1772,7 +1772,7 @@ async fn handle_debug(
                             break;
                         }
                     }
-                    Ok(InteractiveEvent::Done { text, usage }) => {
+                    Ok(InteractiveEvent::Done { text, usage, .. }) => {
                         let payload = serde_json::json!({"type": "done", "text": text, "usage": usage});
                         if writer.write_json_line(&payload).await.is_err() {
                             let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
@@ -2166,10 +2166,10 @@ async fn run_chat_turn(
                             break;
                         }
                     }
-                    Some(InteractiveEvent::Done { text, usage }) => {
+                    Some(InteractiveEvent::Done { text, summary, usage }) => {
                         // Re-insert the gremlin before emitting `done`.
                         finish(&id, &mut run_task, &turn_cancel, &chat_state, &done).await;
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "done", "id": id, "text": text, "usage": usage}));
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "done", "id": id, "text": text, "summary": summary, "usage": usage}));
                         let _ = writer.write_json_line(&payload).await;
                         return;
                     }

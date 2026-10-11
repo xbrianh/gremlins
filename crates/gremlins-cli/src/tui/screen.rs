@@ -477,6 +477,36 @@ impl<B: Backend> LiveArea<B> {
             .response_is_empty()
     }
 
+    /// Borrow the current turn's streaming response text.
+    #[cfg(test)]
+    pub fn response_text(&self) -> &str {
+        self.widgets
+            .iter()
+            .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
+            .expect("transcript widget present")
+            .response_text()
+    }
+
+    /// Finish the current turn's response at `Done` time.
+    ///
+    /// `text` is the authoritative final model text (the `Done` tool's
+    /// summary when nothing was streamed, otherwise the streamed response).
+    /// `summary` is the `Done` tool's `summary` argument, appended to the
+    /// response so it is displayed as part of the finished turn.
+    ///
+    /// The summary is skipped when it is empty or when it already equals the
+    /// text now on screen (e.g. the fallback above used it as the response
+    /// body), so it is never duplicated.
+    pub fn finish_response(&mut self, text: &str, summary: &str) {
+        if self.response_is_empty() && !text.is_empty() {
+            self.replace_response(text);
+        }
+        if !summary.is_empty() && summary != text {
+            self.push_response("\n\n");
+            self.push_response(summary);
+        }
+    }
+
     /// Discard the current turn without committing it to the transcript.
     pub fn clear_current_turn(&mut self) {
         self.transcript_mut().clear_prompt();
@@ -1229,5 +1259,39 @@ mod tests {
             visible.contains("response after overlay"),
             "Transcript mutation should target the transcript even with an overlay pushed.\nBuffer:\n{visible}"
         );
+    }
+
+    #[test]
+    fn finish_response_appends_distinct_summary_once() {
+        let mut live = new_live(80, 24);
+        live.push_response("streamed response");
+
+        live.finish_response("streamed response", "answered the question");
+
+        assert_eq!(
+            live.response_text(),
+            "streamed response\n\nanswered the question"
+        );
+    }
+
+    #[test]
+    fn finish_response_fallback_does_not_duplicate_summary() {
+        let mut live = new_live(80, 24);
+
+        // No streamed text: the summary becomes the response body, and must
+        // not be appended a second time.
+        live.finish_response("did the thing", "did the thing");
+
+        assert_eq!(live.response_text(), "did the thing");
+    }
+
+    #[test]
+    fn finish_response_ignores_empty_summary() {
+        let mut live = new_live(80, 24);
+        live.push_response("streamed response");
+
+        live.finish_response("streamed response", "");
+
+        assert_eq!(live.response_text(), "streamed response");
     }
 }

@@ -1132,9 +1132,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             live_area.push_tool(tc);
                         }
                     }
-                    ChatEvent::Done { text, usage, id, .. } => {
-                        log::debug!("Done text_len={} has_current_turn={}",
-                            text.len(), live_area.has_current_turn());
+                    ChatEvent::Done { text, summary, usage, id, .. } => {
+                        log::debug!("Done text_len={} summary_len={} has_current_turn={}",
+                            text.len(), summary.len(), live_area.has_current_turn());
                         // Capture the gremlin id on the first turn so
                         // subsequent messages target the same chat gremlin.
                         // Do this before the has_current_turn skip so a failed
@@ -1150,13 +1150,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // machinery. Only use it when the model produced no
                         // streamed text (e.g. called Done without saying
                         // anything). Otherwise the StreamChunk text IS the
-                        // response.
-                        if live_area.response_is_empty() && !text.is_empty() {
-                            log::debug!("Done using summary (no streamed text)");
-                            live_area.replace_response(&text);
-                        } else {
-                            log::debug!("Done — keeping streamed response");
-                        }
+                        // response. The summary is appended to the response
+                        // (unless empty or already equal to the text on
+                        // screen) so it is displayed as part of the turn.
+                        live_area.finish_response(&text, &summary);
 
                         // Build usage summary line.
                         if let Some(usage) = usage {
