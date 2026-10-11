@@ -20,6 +20,7 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm",
 crossterm = "0.29"
 tempfile = "3"
 unicode-width = "0.2"
+shlex = "1"
 
 [features]
 telemetry = []

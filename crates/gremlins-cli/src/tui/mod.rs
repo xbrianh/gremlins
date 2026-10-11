@@ -31,6 +31,83 @@ fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
     }
 }
 
+/// Submit plain-text chat input to the daemon.
+///
+/// This is the shared tail of the Enter and `Ctrl+G`-editor paths. Caller
+/// is responsible for taking the input, recording history, and stopping any
+/// log follow first. The caller must have already checked `active_request`.
+fn send_chat_input(
+    live_area: &mut LiveArea,
+    app: &mut App,
+    client: &Arc<client::DaemonClient>,
+    input: String,
+    turn_gen: &mut u64,
+    active_turn: &mut Option<String>,
+) -> io::Result<()> {
+    if app.active_request {
+        let msg = "a request is already in progress — wait for the response";
+        live_area.push_transcript_line(msg.to_string());
+        return Ok(());
+    }
+
+    // Start a new turn with the prompt.
+    live_area.submit_prompt(input.clone());
+
+    // Push initial "thinking..." line.
+    live_area.push_reasoning_text("thinking...");
+    live_area.flush_reasoning();
+
+    // Force an immediate frame so "thinking..." appears without waiting
+    // for the next event.
+    live_area.compose(app)?;
+
+    app.active_request = true;
+    *turn_gen += 1;
+    let turn_id = turn_gen.to_string();
+    *active_turn = Some(turn_id.clone());
+    let chat_id = app.chat_id.clone();
+    let client_for_chat = Arc::clone(client);
+    let chat_tx = client_for_chat.chat_sender();
+    tokio::spawn(async move {
+        let mut request = serde_json::json!({
+            "op": "chat",
+            "text": input,
+            "turn": turn_id,
+        });
+        if let Some(id) = chat_id {
+            request["id"] = serde_json::Value::String(id);
+        }
+        match client_for_chat.send_request(request).await {
+            Ok(resp) => {
+                // A chat ack is `{"type":"ok",...}`; an error response is
+                // `{"type":"error",...}`. Surface a setup failure as a chat
+                // error so `active_request` is cleared.
+                if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
+                    let msg = resp
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown error")
+                        .to_string();
+                    let _ = chat_tx.send(ChatEvent::Error {
+                        message: msg,
+                        id: None,
+                        turn: None,
+                    });
+                }
+            }
+            Err(e) => {
+                let _ = chat_tx.send(ChatEvent::Error {
+                    message: e,
+                    id: None,
+                    turn: None,
+                });
+            }
+        }
+    });
+
+    Ok(())
+}
+
 /// Route a submitted line from the debug overlay prompt.
 ///
 /// The debug socket is opened when `/debug <id>` is dispatched; this
@@ -436,7 +513,44 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Char('g')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
-                            open_editor(live_area);
+                            // Never suspend the TUI while a chat turn is
+                            // in flight; the editor can't even be given a
+                            // meaningful prompt to submit yet.
+                            if app.active_request {
+                                live_area.push_transcript_line(
+                                    "a request is already in progress — wait for the response"
+                                        .to_string(),
+                                );
+                                continue;
+                            }
+
+                            match open_editor(&app.input) {
+                                Ok(Some(text)) => {
+                                    app.input.clear();
+                                    // The editor submission follows the
+                                    // plain-text Enter path exactly.
+                                    app.push_history(text.clone());
+                                    send_chat_input(
+                                        live_area,
+                                        &mut app,
+                                        &client,
+                                        text,
+                                        &mut turn_gen,
+                                        &mut active_turn,
+                                    )?;
+                                }
+                                Ok(None) => {
+                                    app.input.clear();
+                                }
+                                Err(e) => {
+                                    // The editor never returned composed
+                                    // text; preserve what the user already
+                                    // typed in the input bar.
+                                    live_area.push_transcript_line(format!(
+                                        "editor error: {e}"
+                                    ));
+                                }
+                            }
                         }
 
                         KeyCode::Esc => {
@@ -707,64 +821,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     continue;
                                 }
 
-                                // Start a new turn with the prompt.
-                                live_area.submit_prompt(input.clone());
-
-                                // Push initial "thinking..." line.
-                                live_area.push_reasoning_text("thinking...");
-                                live_area.flush_reasoning();
-
-                                // Force an immediate frame so "thinking..."
-                                // appears without waiting for the next event.
-                                live_area.compose(&app)?;
-
-                                app.active_request = true;
-                                turn_gen += 1;
-                                let turn_id = turn_gen.to_string();
-                                active_turn = Some(turn_id.clone());
-                                let chat_id = app.chat_id.clone();
-                                let client_for_chat = Arc::clone(&client);
-                                let chat_tx = client_for_chat.chat_sender();
-                                tokio::spawn(async move {
-                                    let mut request = serde_json::json!({
-                                        "op": "chat",
-                                        "text": input,
-                                        "turn": turn_id,
-                                    });
-                                    if let Some(id) = chat_id {
-                                        request["id"] = serde_json::Value::String(id);
-                                    }
-                                    match client_for_chat.send_request(request).await {
-                                        Ok(resp) => {
-                                            // A chat ack is `{"type":"ok",...}`;
-                                            // an error response is
-                                            // `{"type":"error",...}`. Surface a
-                                            // setup failure as a chat error so
-                                            // `active_request` is cleared.
-                                            if resp.get("type").and_then(|v| v.as_str())
-                                                == Some("error")
-                                            {
-                                                let msg = resp
-                                                    .get("message")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("unknown error")
-                                                    .to_string();
-                                                let _ = chat_tx.send(ChatEvent::Error {
-                                                    message: msg,
-                                                    id: None,
-                                                    turn: None,
-                                                });
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let _ = chat_tx.send(ChatEvent::Error {
-                                                message: e,
-                                                id: None,
-                                                turn: None,
-                                            });
-                                        }
-                                    }
-                                });
+                                send_chat_input(
+                                    live_area,
+                                    &mut app,
+                                    &client,
+                                    input,
+                                    &mut turn_gen,
+                                    &mut active_turn,
+                                )?;
                             }
                         }
                         KeyCode::Backspace => {
