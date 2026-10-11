@@ -5,7 +5,10 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::tui::buffer::{BoundedBuffer, LineOrigin, ScrollableBuffer};
+use crate::tui::buffer::LineOrigin;
+use crate::tui::widgets::{
+    InfoBarWidget, InputBarWidget, ReasoningWidget, ToolsWidget, TranscriptWidget,
+};
 
 /// Application state for the TUI.
 ///
@@ -45,24 +48,18 @@ pub struct App {
     /// Cursor into `input_history`; `None` means editing a fresh line.
     pub history_cursor: Option<usize>,
 
-    // ── LiveArea region model ─────────────────────────────────────
+    // ── LiveArea widgets ──────────────────────────────────────────
     //
-    /// Completed turns flattened as styled lines (oldest first),
-    /// interleaved with blank-line padding. Banner and system messages
-    /// are appended here. Scrolled-off content is dropped internally.
-    pub scrollable: ScrollableBuffer,
-    /// Current-turn prompt (without `> ` prefix — the renderer adds it).
-    pub current_prompt: Option<String>,
-    /// Current-turn reasoning lines (bounded to 5 visible rows).
-    pub reasoning: BoundedBuffer,
-    /// Un-flushed reasoning text (accumulated across chunks, flushed
-    /// on newline or by [`flush_reasoning`]).
-    pub reasoning_partial: String,
-    /// Current-turn active tool names (bounded to 5 visible rows).
-    pub tools: BoundedBuffer,
-    /// Current-turn streaming response text (raw markdown). Parsed into
-    /// styled [`Line`]s at render time.
-    pub response_text: String,
+    /// Scrollable transcript (completed turns + current prompt + response).
+    pub(crate) transcript: TranscriptWidget,
+    /// Current-turn reasoning region (bounded to 5 visible rows).
+    pub(crate) reasoning: ReasoningWidget,
+    /// Current-turn active-tools region (bounded to 5 visible rows).
+    pub(crate) tools: ToolsWidget,
+    /// Input bar (stateless).
+    pub(crate) input_bar: InputBarWidget,
+    /// Info bar (stateless).
+    pub(crate) info_bar: InfoBarWidget,
     /// Terminal width cached for buffer trimming. Updated before each frame.
     pub width: u16,
 }
@@ -140,12 +137,11 @@ impl App {
             overlay: None,
             input_history: Vec::new(),
             history_cursor: None,
-            scrollable: ScrollableBuffer::new(),
-            current_prompt: None,
-            reasoning: BoundedBuffer::new(5),
-            reasoning_partial: String::new(),
-            tools: BoundedBuffer::new(5),
-            response_text: String::new(),
+            transcript: TranscriptWidget::new(),
+            reasoning: ReasoningWidget::new(),
+            tools: ToolsWidget::new(),
+            input_bar: InputBarWidget,
+            info_bar: InfoBarWidget,
             width: 80,
         }
     }
@@ -425,17 +421,17 @@ impl App {
 
     // ── LiveArea region helpers ───────────────────────────────────
 
-    /// Flatten the current turn into [`scrollable`](Self::scrollable) and
-    /// start a new turn with the given prompt.
+    /// Flatten the current turn into the transcript and start a new turn
+    /// with the given prompt.
     ///
     /// The previous turn's prompt, reasoning, tools, and response are
     /// flattened with blank-line padding and appended.  Only the tail of
     /// each ephemeral buffer (the portion actually displayed) is preserved;
     /// the head is permanently dropped.  All current-turn fields are then
-    /// cleared and `current_prompt` is set.
+    /// cleared and the new prompt is set.
     pub fn submit_prompt(&mut self, prompt: String) {
         // Flatten the previous turn if there was one.
-        if let Some(prev_prompt) = self.current_prompt.take() {
+        if let Some(prev_prompt) = self.transcript.take_prompt() {
             let prompt_style = Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD);
@@ -445,13 +441,13 @@ impl App {
 
             let width = self.width;
 
-            if !self.scrollable.is_empty() {
-                self.scrollable.push(Line::from(""), LineOrigin::Separator);
-                self.scrollable.push(Line::from(""), LineOrigin::Separator);
+            if !self.transcript.is_empty() {
+                self.transcript.push_separator();
+                self.transcript.push_separator();
             }
 
             // Prompt.
-            self.scrollable.push(
+            self.transcript.push_line(
                 Line::from(vec![
                     Span::styled("> ", marker_style),
                     Span::styled(prev_prompt, prompt_style),
@@ -460,29 +456,36 @@ impl App {
             );
 
             // Reasoning — only the visible tail.
-            let reasoning_tail = self.reasoning.lines(width);
+            let reasoning_tail = self.reasoning.take_tail(width);
             if !reasoning_tail.is_empty() {
-                self.scrollable.push(Line::from(""), LineOrigin::Separator);
+                self.transcript.push_separator();
                 for line in reasoning_tail {
-                    self.scrollable.push(line, LineOrigin::FlattenedReasoning);
+                    self.transcript
+                        .push_line(line, LineOrigin::FlattenedReasoning);
                 }
             }
 
             // Tools — only the visible tail.
-            let tools_tail = self.tools.lines(width);
+            let tools_tail = self.tools.take_tail(width);
             if !tools_tail.is_empty() {
-                self.scrollable.push(Line::from(""), LineOrigin::Separator);
+                self.transcript.push_separator();
                 for line in tools_tail {
-                    self.scrollable.push(line, LineOrigin::FlattenedTools);
+                    self.transcript.push_line(line, LineOrigin::FlattenedTools);
                 }
             }
 
             // Response.
-            if !self.response_text.is_empty() {
-                self.scrollable.push(Line::from(""), LineOrigin::Separator);
-                for line_str in self.response_text.lines() {
-                    self.scrollable.push(
-                        Line::from(Span::styled(line_str.to_string(), Style::default())),
+            if !self.transcript.response_is_empty() {
+                self.transcript.push_separator();
+                let response_lines: Vec<String> = self
+                    .transcript
+                    .response_text()
+                    .lines()
+                    .map(|s| s.to_string())
+                    .collect();
+                for line_str in response_lines {
+                    self.transcript.push_line(
+                        Line::from(Span::styled(line_str, Style::default())),
                         LineOrigin::FlattenedResponse,
                     );
                 }
@@ -490,60 +493,38 @@ impl App {
         }
 
         // Clear current-turn fields.
-        self.current_prompt = Some(prompt);
-        self.reasoning = BoundedBuffer::new(5);
-        self.reasoning_partial.clear();
-        self.tools = BoundedBuffer::new(5);
-        self.response_text.clear();
+        self.transcript.set_prompt(prompt);
+        self.reasoning.clear();
+        self.tools.clear();
+        self.transcript.clear_response();
     }
 
     /// Flush the reasoning partial buffer (if any) into a completed
     /// reasoning line.
     pub fn flush_reasoning(&mut self) {
-        if !self.reasoning_partial.is_empty() {
-            let remaining = std::mem::take(&mut self.reasoning_partial);
-            let style = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC);
-            self.reasoning
-                .push(Line::from(Span::styled(format!("  {remaining}"), style)));
-        }
+        self.reasoning.flush();
     }
 
     /// Append reasoning text (may be a partial chunk). Text is accumulated
     /// and flushed to a reasoning line only when a newline is encountered.
     pub fn push_reasoning_text(&mut self, text: &str) {
-        let style = Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC);
-        self.reasoning_partial.push_str(text);
-        while let Some(newline_pos) = self.reasoning_partial.find('\n') {
-            let line: String = self.reasoning_partial[..newline_pos].into();
-            self.reasoning_partial = self.reasoning_partial[newline_pos + 1..].into();
-            self.reasoning
-                .push(Line::from(Span::styled(format!("  {line}"), style)));
-        }
+        self.reasoning.push_text(text);
     }
 
     /// Record a tool call. Oldest entries are discarded once the region
     /// exceeds its visible-row bound.
     pub fn push_tool(&mut self, name: &str) {
-        let style = Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC);
-        self.tools
-            .push(Line::from(Span::styled(format!("  {name}"), style)));
+        self.tools.push(name);
     }
 
     /// Append streaming response text.
     pub fn push_response(&mut self, text: &str) {
-        self.response_text.push_str(text);
+        self.transcript.push_response(text);
     }
 
     /// Replace the entire response text (used for Done reconciliation).
     pub fn replace_response(&mut self, text: &str) {
-        self.response_text.clear();
-        self.response_text.push_str(text);
+        self.transcript.replace_response(text);
     }
 
     /// Reconcile the current turn's streamed response against the
@@ -556,47 +537,36 @@ impl App {
     /// truncated suffix is replaced; otherwise the buffer is empty and the
     /// full text is appended.
     pub fn reconcile_response(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-
-        if self.response_text.ends_with(text) {
-            return;
-        }
-
-        if self.response_text.is_empty() {
-            self.response_text.push_str(text);
-            return;
-        }
-
-        // Find the longest suffix of `response_text` that is also a prefix
-        // of `text`. That suffix is the portion of the current turn that
-        // survived streamed chunks; drop it and append the complete text.
-        let overlap = (0..=self.response_text.len())
-            .rev()
-            .find(|&len| text.starts_with(&self.response_text[self.response_text.len() - len..]))
-            .unwrap_or(0);
-        self.response_text
-            .truncate(self.response_text.len() - overlap);
-        self.response_text.push_str(text);
+        self.transcript.reconcile_response(text);
     }
 
     /// Whether the current turn has any content.
     pub fn has_current_turn(&self) -> bool {
-        self.current_prompt.is_some()
+        self.transcript.has_prompt()
     }
 
-    /// Append a system message to [`scrollable`](Self::scrollable) with
-    /// default style and blank-line padding from the previous entry.
+    /// Whether the current turn's streaming response is empty.
+    pub fn response_is_empty(&self) -> bool {
+        self.transcript.response_is_empty()
+    }
+
+    /// Discard the current turn without committing it to the transcript.
+    pub fn clear_current_turn(&mut self) {
+        self.transcript.clear_prompt();
+        self.reasoning.clear();
+        self.tools.clear();
+        self.transcript.clear_response();
+    }
+
+    /// Clear the transcript/scrollback.
+    pub fn clear_transcript(&mut self) {
+        self.transcript.clear_scrollable();
+    }
+
+    /// Append a system message to the transcript with default style and
+    /// blank-line padding from the previous entry.
     pub fn push_transcript_line(&mut self, line: String) {
-        if !self.scrollable.is_empty() {
-            self.scrollable.push(Line::from(""), LineOrigin::Separator);
-            self.scrollable.push(Line::from(""), LineOrigin::Separator);
-        }
-        self.scrollable.push(
-            Line::from(Span::styled(line, Style::default())),
-            LineOrigin::Transcript,
-        );
+        self.transcript.push_transcript_line(line);
     }
 }
 
@@ -607,23 +577,28 @@ mod tests {
     #[test]
     fn reconcile_response_fills_dropped_suffix_without_touching_prior_turns() {
         let mut app = App::new();
-        app.response_text.push_str("first turn\n");
-        app.response_text.push_str("second tur");
+        app.push_response("first turn\n");
+        app.push_response("second tur");
 
         app.reconcile_response("second turn complete");
 
-        assert_eq!(app.response_text, "first turn\nsecond turn complete");
+        assert_eq!(
+            app.transcript.response_text(),
+            "first turn\nsecond turn complete"
+        );
     }
 
     #[test]
     fn reconcile_response_keeps_complete_streamed_text() {
         let mut app = App::new();
-        app.response_text
-            .push_str("first turn\nsecond turn complete");
+        app.push_response("first turn\nsecond turn complete");
 
         app.reconcile_response("second turn complete");
 
-        assert_eq!(app.response_text, "first turn\nsecond turn complete");
+        assert_eq!(
+            app.transcript.response_text(),
+            "first turn\nsecond turn complete"
+        );
     }
 
     #[test]
@@ -632,16 +607,16 @@ mod tests {
 
         app.reconcile_response("complete turn");
 
-        assert_eq!(app.response_text, "complete turn");
+        assert_eq!(app.transcript.response_text(), "complete turn");
     }
 
     #[test]
     fn reconcile_response_ignores_empty_authoritative_text() {
         let mut app = App::new();
-        app.response_text.push_str("streamed");
+        app.push_response("streamed");
 
         app.reconcile_response("");
 
-        assert_eq!(app.response_text, "streamed");
+        assert_eq!(app.transcript.response_text(), "streamed");
     }
 }

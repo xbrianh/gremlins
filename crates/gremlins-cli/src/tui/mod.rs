@@ -6,6 +6,7 @@ pub mod commands;
 pub mod editor;
 pub mod screen;
 pub mod ui;
+pub mod widgets;
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal};
@@ -486,11 +487,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 });
                                 // Discard the current turn without
                                 // committing to history.
-                                app.current_prompt = None;
-                                app.reasoning.clear();
-                                app.reasoning_partial.clear();
-                                app.tools.clear();
-                                app.response_text.clear();
+                                app.clear_current_turn();
                                 app.active_request = false;
                                 active_turn = None;
                             }
@@ -610,15 +607,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     }
                                     CommandResult::RestartChat => {
                                         // Clear current turn.
-                                        app.current_prompt = None;
-                                        app.reasoning.clear();
-                                        app.reasoning_partial.clear();
-                                        app.tools.clear();
-                                        app.response_text.clear();
+                                        app.clear_current_turn();
                                         // Clear the transcript/scrollback so the
                                         // UI no longer shows the old conversation
                                         // after the daemon has discarded it.
-                                        app.scrollable.clear();
+                                        app.clear_transcript();
                                         // Cancel any in-flight turn on the daemon
                                         // (do not abort `chat_task` mid-write).
                                         if app.active_request {
@@ -1061,7 +1054,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // streamed text (e.g. called Done without saying
                         // anything). Otherwise the StreamChunk text IS the
                         // response.
-                        if app.response_text.is_empty() && !text.is_empty() {
+                        if app.response_is_empty() && !text.is_empty() {
                             log::debug!("Done using summary (no streamed text)");
                             app.replace_response(&text);
                         } else {
