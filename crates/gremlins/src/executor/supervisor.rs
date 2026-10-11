@@ -642,7 +642,7 @@ async fn handle_launch(
     // Spawn the log writer: reads from the channel, appends to $state_dir/log,
     // and broadcasts to live subscribers.
     let log_path = gremlin.state.state_dir().join("log");
-    spawn_log_writer(log_rx, log_path, log_broadcast.clone());
+    spawn_log_writer(log_rx, log_path, log_broadcast.clone(), None);
 
     let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
@@ -892,7 +892,7 @@ async fn handle_resume(
 
     // Spawn the log writer.
     let log_path = gremlin.state.state_dir().join("log");
-    spawn_log_writer(log_rx, log_path, log_broadcast.clone());
+    spawn_log_writer(log_rx, log_path, log_broadcast.clone(), None);
 
     let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
@@ -2299,7 +2299,7 @@ async fn register_chat_gremlin(mut gremlin: Gremlin) {
     let (log_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.log_tx = Some(log_tx.clone());
     let log_path = gremlin.state.state_dir().join("log");
-    spawn_log_writer(log_rx, log_path, log_broadcast.clone());
+    spawn_log_writer(log_rx, log_path, log_broadcast.clone(), None);
 
     // Interactive channels so debug can attach to the current stage.
     let channels = InteractiveChannels::new();
@@ -2477,6 +2477,7 @@ fn spawn_log_writer(
     mut log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     log_path: PathBuf,
     broadcast_tx: broadcast::Sender<String>,
+    relay: Option<LogRelay>,
 ) {
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
@@ -2508,6 +2509,13 @@ fn spawn_log_writer(
                 }
                 // Broadcast to live subscribers — ignore errors (no subscribers).
                 let _ = broadcast_tx.send(stamped);
+                // Best-effort relay into the parent log: send the raw,
+                // un-timestamped part with the relay prefix applied (the
+                // parent's log writer adds its own timestamp). A failed
+                // send is ignored.
+                if let Some(relay) = &relay {
+                    let _ = relay.tx.send(format!("{}{}", relay.prefix, part));
+                }
             }
         }
     });
@@ -2607,6 +2615,13 @@ pub(crate) struct LaunchResult {
     pub gremlin_rx: tokio::sync::oneshot::Receiver<Gremlin>,
 }
 
+/// Best-effort relay of a child's log into another gremlin's log channel.
+#[derive(Clone)]
+pub(crate) struct LogRelay {
+    pub tx: tokio::sync::mpsc::UnboundedSender<String>,
+    pub prefix: String,
+}
+
 /// Launch a pre-configured child gremlin, registering it in the run_map so
 /// it appears in `gremlins ls` with live status.
 ///
@@ -2623,7 +2638,7 @@ pub(crate) struct LaunchResult {
 /// This function is synchronous (no `.await`) so its caller — the parallel
 /// executor — does not produce a non-`Send` future. The run_map uses a
 /// `std::sync::Mutex` so `lock()` never blocks on an async runtime.
-pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
+pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> LaunchResult {
     let id = gremlin.id.to_string();
 
     // Set up the per-gremlin log channel.
@@ -2642,7 +2657,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
 
     // Spawn the log writer.
     let log_path = gremlin.state.state_dir().join("log");
-    spawn_log_writer(log_rx, log_path, log_broadcast.clone());
+    spawn_log_writer(log_rx, log_path, log_broadcast.clone(), relay);
 
     // Reuse the cancel token inherited from the parent via Gremlin::fork;
     // create a fresh one only when there is no parent token.
