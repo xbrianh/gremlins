@@ -4,7 +4,7 @@
 //! `HashMap<String, RunHandle>` and dispatches socket requests to the
 //! appropriate handler.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -52,6 +52,37 @@ impl Clone for SharedWriter {
             inner: Arc::clone(&self.inner),
         }
     }
+}
+
+/// The in-flight chat turn for a connection, if any.
+struct CurrentTurn {
+    id: String,
+    /// Client-generated turn id, used to match a `cancel_chat` to the turn
+    /// it targets so a late cancel cannot hit a subsequent turn.
+    turn: Option<String>,
+    cancel: Arc<CancelToken>,
+    /// Fired (with a stored permit) once the turn has re-inserted its
+    /// gremlin (or dropped it). A follow-up `chat` for the same id waits on
+    /// this so it never sees the gremlin as "unknown" mid-turn.
+    done: Arc<tokio::sync::Notify>,
+}
+
+/// Connection-scoped state for chat gremlins and the in-flight turn.
+///
+/// Shared between the dispatch loop and every chat turn spawned by the
+/// connection. The mutex serialises turn completion (gremlin re-insertion)
+/// against connection teardown and `stop`, so a gremlin can never be
+/// resurrected after its owning connection has cleaned it up.
+#[derive(Default)]
+struct ConnectionChatState {
+    /// Chat gremlins created or referenced by this connection. When the
+    /// connection exits they are shut down, so the socket lifecycle owns them.
+    ids: HashSet<String>,
+    /// The in-flight chat turn, if any.
+    current: Option<CurrentTurn>,
+    /// Set when the owning connection exits. Once set, turns drop their
+    /// gremlin instead of re-inserting it.
+    abandoned: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +345,10 @@ async fn handle_connection(
         }
     });
 
+    // Chat gremlins created or referenced by this connection. When the
+    // connection exits they are shut down, so the socket lifecycle owns them.
+    let chat_state = Arc::new(tokio::sync::Mutex::new(ConnectionChatState::default()));
+
     loop {
         let request = match socket::read_json_line(&mut reader).await {
             Ok(Some(v)) => v,
@@ -346,13 +381,15 @@ async fn handle_connection(
             break;
         }
 
-        if op == "chat" {
-            let _ = event_start_tx.send(true);
-            handle_chat(&request, &state_root, reader, &writer).await;
-            break;
-        }
-
-        let _outcome = dispatch_op(&op, &request, &state_root, &shutdown_tx, &writer).await;
+        let _outcome = dispatch_op(
+            &op,
+            &request,
+            &state_root,
+            &shutdown_tx,
+            &writer,
+            &chat_state,
+        )
+        .await;
         // Unblock events *after* the response is written so one-shot
         // clients always read the response before any broadcast event.
         let _ = event_start_tx.send(true);
@@ -361,6 +398,29 @@ async fn handle_connection(
     // Abort the event-forwarding subtask so it doesn't leak the write
     // half or linger waiting for broadcasts after the client is gone.
     event_handle.abort();
+
+    // Mark the connection abandoned and cancel the in-flight turn before
+    // the connection-scoped cleanup removes its gremlin. Holding the lock
+    // here closes the race where a turn finishes and re-inserts the gremlin
+    // while cleanup is running: the turn re-inserts under the same lock and
+    // observes `abandoned`/`ids` atomically.
+    let owned_ids = {
+        let mut state = chat_state.lock().await;
+        state.abandoned = true;
+        if let Some(cur) = state.current.take() {
+            cur.cancel.cancel();
+        }
+        state.ids.drain().collect::<Vec<_>>()
+    };
+
+    // The connection is gone: shut down every chat gremlin it owned.
+    for id in owned_ids {
+        cleanup_chat_gremlin(&id).await;
+    }
+
+    // After cleanup the run map may have drained; let shutdown observe it
+    // once the connection counter is decremented by the accept loop.
+    check_shutdown(&shutdown_tx);
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +438,7 @@ async fn dispatch_op(
     state_root: &Path,
     shutdown_tx: &watch::Sender<bool>,
     writer: &SharedWriter,
+    chat_state: &Arc<tokio::sync::Mutex<ConnectionChatState>>,
 ) -> DispatchOutcome {
     match op {
         "launch" => {
@@ -386,6 +447,18 @@ async fn dispatch_op(
             DispatchOutcome::Continue
         }
         "stop" => {
+            // Mark the id dead and cancel its in-flight turn before running
+            // the stop cleanup, so a turn cannot re-insert the gremlin after
+            // `handle_stop` has removed it.
+            if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
+                let mut state = chat_state.lock().await;
+                state.ids.remove(id);
+                if let Some(cur) = &state.current {
+                    if cur.id == id {
+                        cur.cancel.cancel();
+                    }
+                }
+            }
             let resp = handle_stop(request, shutdown_tx).await;
             let _ = writer.write_json_line(&resp).await;
             DispatchOutcome::Continue
@@ -408,6 +481,14 @@ async fn dispatch_op(
         "info" => {
             let resp = handle_info(request, state_root).await;
             let _ = writer.write_json_line(&resp).await;
+            DispatchOutcome::Continue
+        }
+        "chat" => {
+            handle_chat(request, state_root, writer, chat_state).await;
+            DispatchOutcome::Continue
+        }
+        "cancel_chat" => {
+            handle_cancel_chat(request, writer, chat_state).await;
             DispatchOutcome::Continue
         }
         _ => {
@@ -1757,8 +1838,8 @@ fn chat_gremlins() -> &'static Arc<tokio::sync::Mutex<HashMap<String, Gremlin>>>
 async fn handle_chat(
     request: &Value,
     state_root: &Path,
-    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
+    chat_state: &Arc<tokio::sync::Mutex<ConnectionChatState>>,
 ) {
     log::debug!("handle_chat: received chat request");
 
@@ -1771,6 +1852,12 @@ async fn handle_chat(
         return;
     }
     let chat_id = request.get("id").and_then(|v| v.as_str()).map(String::from);
+    // Client-generated turn id, echoed on every chat event so the TUI can
+    // drop stale events from a superseded turn.
+    let turn = request
+        .get("turn")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     // 1. Init config
     if let Err(e) = config::init_global() {
@@ -1831,10 +1918,30 @@ async fn handle_chat(
                 let _ = writer.write_json_line(&resp).await;
                 return;
             }
-            if !chat_gremlins().lock().await.contains_key(&id) {
-                let resp = error_response(&format!("unknown chat gremlin {id:?}"));
-                let _ = writer.write_json_line(&resp).await;
-                return;
+            // The gremlin is temporarily out of the map while a turn runs.
+            // If this connection owns the id and a turn is in flight, wait
+            // for it to re-insert before declaring the id unknown. This lets
+            // a fast follow-up after Esc/cancel reuse the same gremlin.
+            loop {
+                if chat_gremlins().lock().await.contains_key(&id) {
+                    break;
+                }
+                let wait = {
+                    let state = chat_state.lock().await;
+                    if state.abandoned || !state.ids.contains(&id) {
+                        None
+                    } else {
+                        state.current.as_ref().map(|c| Arc::clone(&c.done))
+                    }
+                };
+                match wait {
+                    Some(done) => done.notified().await,
+                    None => {
+                        let resp = error_response(&format!("unknown chat gremlin {id:?}"));
+                        let _ = writer.write_json_line(&resp).await;
+                        return;
+                    }
+                }
             }
             id
         }
@@ -1853,10 +1960,14 @@ async fn handle_chat(
         }
     };
 
+    // Track the id as owned by this connection *before* removing the gremlin
+    // from the map, so connection teardown and `stop` can always find it.
+    chat_state.lock().await.ids.insert(id.clone());
+
     // 5. Take the gremlin out of the map, install this turn's definition,
     //    stream channel, and a fresh per-turn cancel token, then drop the
     //    global lock before running so other chats are not serialized.
-    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel::<InteractiveEvent>();
+    let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel::<InteractiveEvent>();
     let turn_cancel = CancelToken::new();
     let mut gremlin = {
         let mut gremlins = chat_gremlins().lock().await;
@@ -1884,6 +1995,9 @@ async fn handle_chat(
     let stage = match gremlin.definition.next_stage().await {
         Ok(s) => s,
         Err(e) => {
+            // Re-insert the gremlin (it is still owned by this connection)
+            // and report the error. The id remains in `chat_state.ids` so
+            // connection teardown still shuts it down.
             chat_gremlins().lock().await.insert(id.clone(), gremlin);
             let resp = error_response(&format!("definition error: {e}"));
             let _ = writer.write_json_line(&resp).await;
@@ -1891,52 +2005,179 @@ async fn handle_chat(
         }
     };
 
-    // 6. Run the stage concurrently with stream forwarding so the TUI gets
-    //    live output and the broadcast channel stays drained.
+    // 6. Run the stage in the background. Events are forwarded as
+    //    unsolicited JSON lines to this connection while the dispatch
+    //    loop stays live for cancel_chat and other ops.
+    let done = Arc::new(tokio::sync::Notify::new());
+    {
+        let mut state = chat_state.lock().await;
+        state.current = Some(CurrentTurn {
+            id: id.clone(),
+            turn: turn.clone(),
+            cancel: turn_cancel.clone(),
+            done: Arc::clone(&done),
+        });
+    }
+
+    let writer_for_turn = writer.clone();
+    let turn_ctx = TurnCtx {
+        id: id.clone(),
+        turn: turn.clone(),
+        turn_cancel: turn_cancel.clone(),
+        chat_state: Arc::clone(chat_state),
+        done: Arc::clone(&done),
+    };
+    tokio::spawn(async move {
+        run_chat_turn(turn_ctx, stage, gremlin, stream_rx, writer_for_turn).await;
+    });
+
+    // Acknowledge the request so the TUI's `send_request` completes.
+    // Chat events themselves are unsolicited lines written by the task
+    // above and classified separately by the client read loop.
+    let _ = writer
+        .write_json_line(&ok_response(
+            serde_json::json!({"id": id, "status": "streaming"}),
+        ))
+        .await;
+}
+
+/// Re-insert a finished turn's gremlin, or drop it if the connection no
+/// longer owns it (abandoned or stopped). Runs under the connection-state
+/// lock so the check-and-insert is atomic with teardown/`stop`.
+///
+/// Returns `true` if the gremlin was re-inserted.
+async fn reinsert_chat_gremlin(
+    id: &str,
+    gremlin: Gremlin,
+    chat_state: &Arc<tokio::sync::Mutex<ConnectionChatState>>,
+) -> bool {
+    let state = chat_state.lock().await;
+    if state.abandoned || !state.ids.contains(id) {
+        drop(gremlin);
+        return false;
+    }
+    chat_gremlins().lock().await.insert(id.to_string(), gremlin);
+    true
+}
+
+/// Build a chat-protocol JSON line, tagging it with the client's turn id
+/// (when present) so the TUI can drop stale events from a superseded turn.
+fn chat_payload(turn: &Option<String>, fields: serde_json::Value) -> serde_json::Value {
+    let mut obj = match fields {
+        serde_json::Value::Object(m) => m,
+        other => {
+            let mut m = serde_json::Map::new();
+            m.insert("value".to_string(), other);
+            m
+        }
+    };
+    if let Some(t) = turn {
+        obj.insert("turn".to_string(), serde_json::Value::String(t.clone()));
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Shared context threaded through a chat turn's forwarding task.
+struct TurnCtx {
+    id: String,
+    turn: Option<String>,
+    turn_cancel: Arc<CancelToken>,
+    chat_state: Arc<tokio::sync::Mutex<ConnectionChatState>>,
+    done: Arc<tokio::sync::Notify>,
+}
+
+async fn run_chat_turn(
+    ctx: TurnCtx,
+    stage: crate::definition::ExecutorStage,
+    mut gremlin: Gremlin,
+    mut stream_rx: tokio::sync::mpsc::UnboundedReceiver<InteractiveEvent>,
+    writer: SharedWriter,
+) {
+    let id = ctx.id;
+    let turn = ctx.turn;
+    let turn_cancel = ctx.turn_cancel;
+    let chat_state = ctx.chat_state;
+    let done = ctx.done;
+    // Spawn the stage runner so we can select on it alongside stream events.
     let mut run_task = tokio::spawn(async move {
         let result = crate::executor::run::run_stage(&stage, &mut gremlin).await;
         (result, gremlin)
     });
 
+    // Await the run task, re-insert the gremlin (or drop it if the
+    // connection no longer owns it), clear the connection's in-flight turn,
+    // and signal completion. The gremlin is re-inserted *before* the
+    // terminal event is written so a follow-up `chat` never observes the id
+    // as unknown.
+    async fn finish(
+        id: &str,
+        run_task: &mut tokio::task::JoinHandle<(Result<(), crate::executor::RunError>, Gremlin)>,
+        turn_cancel: &Arc<CancelToken>,
+        chat_state: &Arc<tokio::sync::Mutex<ConnectionChatState>>,
+        done: &tokio::sync::Notify,
+    ) {
+        match run_task.await {
+            Ok((_, gremlin)) => {
+                reinsert_chat_gremlin(id, gremlin, chat_state).await;
+            }
+            Err(e) => {
+                log::warn!("handle_chat: run task panicked for {id}: {e}");
+            }
+        }
+        // Clear the in-flight turn so a late `cancel_chat` (racing a
+        // just-finished `done`) is a no-op rather than cancelling a
+        // subsequent turn.
+        let mut state = chat_state.lock().await;
+        if let Some(cur) = &state.current {
+            if Arc::ptr_eq(&cur.cancel, turn_cancel) {
+                state.current = None;
+            }
+        }
+        done.notify_one();
+    }
+
+    // Forward stream events until a terminal event, a write error, or a
+    // cancellation.
     loop {
         tokio::select! {
             result = stream_rx.recv() => {
                 match result {
                     Some(InteractiveEvent::StreamChunk { text }) => {
-                        let payload = serde_json::json!({"type": "stream_chunk", "text": text});
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "stream_chunk", "text": text}));
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
                     }
                     Some(InteractiveEvent::ReasoningChunk { text }) => {
-                        let payload = serde_json::json!({"type": "reasoning_chunk", "text": text});
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "reasoning_chunk", "text": text}));
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
                     }
                     Some(InteractiveEvent::ToolResult { name, output }) => {
-                        let payload = serde_json::json!({"type": "tool_result", "name": name, "output": output});
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "tool_result", "name": name, "output": output}));
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
                     }
-                    Some(InteractiveEvent::TurnComplete { turn, text, tool_calls }) => {
-                        let payload = serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
+                    Some(InteractiveEvent::TurnComplete { turn: tc_turn, text, tool_calls }) => {
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "turn_complete", "turn": tc_turn, "text": text, "tool_calls": tool_calls}));
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
                     }
                     Some(InteractiveEvent::Done { text, usage }) => {
-                        // Carry the gremlin id so the TUI can capture it on
-                        // the first turn and reuse it for subsequent messages.
-                        let payload = serde_json::json!({"type": "done", "id": id, "text": text, "usage": usage});
+                        // Re-insert the gremlin before emitting `done`.
+                        finish(&id, &mut run_task, &turn_cancel, &chat_state, &done).await;
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "done", "id": id, "text": text, "usage": usage}));
                         let _ = writer.write_json_line(&payload).await;
-                        break;
+                        return;
                     }
                     Some(InteractiveEvent::Ended { reason }) => {
-                        let payload = serde_json::json!({"type": "ended", "id": id, "reason": reason});
+                        finish(&id, &mut run_task, &turn_cancel, &chat_state, &done).await;
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": reason}));
                         let _ = writer.write_json_line(&payload).await;
-                        break;
+                        return;
                     }
                     Some(InteractiveEvent::Ready { .. }) => {
                         // Ignore Ready in chat mode — the agent runs to
@@ -1945,74 +2186,107 @@ async fn handle_chat(
                     None => {
                         // The mpsc channel closed without Done/Ended — the
                         // agent exited before emitting a terminal event.
-                        let payload = serde_json::json!({"type": "error", "id": id, "message": "agent exited before completing"});
+                        finish(&id, &mut run_task, &turn_cancel, &chat_state, &done).await;
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "error", "id": id, "message": "agent exited before completing"}));
                         let _ = writer.write_json_line(&payload).await;
-                        break;
+                        return;
                     }
                 }
             }
-            _ = socket::read_json_line(&mut reader) => {
-                // Client disconnected — cancel this turn but keep the gremlin
-                // alive so a later request with the same id can resume.
-                turn_cancel.cancel();
-                break;
-            }
-            run_result = &mut run_task => {
-                // Stage finished (or panicked). Surface the result and
-                // re-insert the gremlin for the next turn.
-                match run_result {
-                    Ok((result, gremlin)) => {
-                        if let Err(e) = result {
-                            let payload = serde_json::json!({"type": "error", "id": id, "message": e.to_string()});
-                            let _ = writer.write_json_line(&payload).await;
-                        }
-                        chat_gremlins().lock().await.insert(id.clone(), gremlin);
-                    }
-                    Err(e) => {
-                        let payload = serde_json::json!({"type": "error", "id": id, "message": format!("agent task failed: {e}")});
-                        let _ = writer.write_json_line(&payload).await;
-                    }
-                }
-                log::debug!("handle_chat: done forwarding for {id}");
+            _ = turn_cancel.cancelled() => {
+                // Esc/cancel: stop forwarding, re-insert the gremlin, and
+                // emit a single terminal `ended`. The stage's later
+                // done/error is suppressed because we return here.
+                finish(&id, &mut run_task, &turn_cancel, &chat_state, &done).await;
+                let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}));
+                let _ = writer.write_json_line(&payload).await;
                 return;
             }
         }
     }
 
-    // Drain any remaining buffered events after a terminal event or write
-    // error, then re-insert the gremlin once the stage has fully finished.
-    while let Ok(event) = stream_rx.try_recv() {
-        match event {
-            InteractiveEvent::Done { text, usage } => {
-                let payload =
-                    serde_json::json!({"type": "done", "id": id, "text": text, "usage": usage});
-                let _ = writer.write_json_line(&payload).await;
-            }
-            InteractiveEvent::Ended { reason } => {
-                let payload = serde_json::json!({"type": "ended", "id": id, "reason": reason});
-                let _ = writer.write_json_line(&payload).await;
-            }
-            _ => {}
-        }
-    }
-
-    // Await the run task so the gremlin is returned and re-inserted even when
-    // the client disconnected mid-turn.
-    match run_task.await {
-        Ok((result, gremlin)) => {
-            if let Err(e) = result {
-                let payload =
-                    serde_json::json!({"type": "error", "id": id, "message": e.to_string()});
-                let _ = writer.write_json_line(&payload).await;
-            }
-            chat_gremlins().lock().await.insert(id.clone(), gremlin);
-        }
-        Err(e) => {
-            log::warn!("handle_chat: run task panicked for {id}: {e}");
-        }
-    }
-
+    // Reached on a write error (client gone). Re-insert the gremlin and
+    // signal completion; nothing more can be written to the dead socket.
+    finish(&id, &mut run_task, &turn_cancel, &chat_state, &done).await;
     log::debug!("handle_chat: done forwarding for {id}");
+}
+
+/// Cancel the in-flight chat turn for this connection, if one is active.
+///
+/// The terminal `ended` event is emitted by the turn task (which owns the
+/// gremlin re-insertion), so this handler only cancels the token and acks.
+/// When the request names a `turn`, only a matching in-flight turn is
+/// cancelled, so a late `cancel_chat` cannot hit a subsequent turn. A no-op
+/// when no matching turn is in flight.
+async fn handle_cancel_chat(
+    request: &Value,
+    writer: &SharedWriter,
+    chat_state: &Arc<tokio::sync::Mutex<ConnectionChatState>>,
+) {
+    let turn = request
+        .get("turn")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let mut state = chat_state.lock().await;
+    let matches = match &state.current {
+        Some(cur) => turn
+            .as_deref()
+            .is_none_or(|t| Some(t) == cur.turn.as_deref()),
+        None => false,
+    };
+    if matches {
+        if let Some(cur) = state.current.take() {
+            cur.cancel.cancel();
+        }
+    }
+    let _ = writer
+        .write_json_line(&ok_response(serde_json::json!({})))
+        .await;
+}
+
+/// Shut down a chat gremlin using the same cleanup sequence as a `stop`
+/// op: remove the run-map entry, write terminal state, reap the client,
+/// drop the persistent gremlin, and emit `RunStopped`.
+async fn cleanup_chat_gremlin(id: &str) {
+    if validate_gremlin_id(id).is_err() {
+        return;
+    }
+
+    // If the turn's run task is still in flight, cancel it.
+    let handle = {
+        let map = get_run_map().lock().unwrap();
+        map.get(id).map(|handle| handle.cancel.clone())
+    };
+    if let Some(cancel) = handle {
+        cancel.cancel();
+    }
+
+    // Remove from RUN_MAP. If the id wasn't there (already stopped by
+    // the operator mid-session), the persistent map entry still needs
+    // removing so the gremlin doesn't linger.
+    let state_tx = {
+        let mut map = get_run_map().lock().unwrap();
+        match map.remove(id) {
+            Some(handle) => Some(handle.state_tx.clone()),
+            None => None,
+        }
+    };
+
+    if let Some(state_tx) = state_tx {
+        let _ = state_tx.send(RunState {
+            id: id.to_string(),
+            status: "stopped".to_string(),
+            stage: String::new(),
+            started_at: String::new(),
+        });
+    }
+
+    if let Ok(sd) = state::StateData::open(id) {
+        sd.write_terminal_state(1);
+    }
+    reap_client_for(id);
+    chat_gremlins().lock().await.remove(id);
+    emit_event(DaemonEvent::RunStopped { id: id.to_string() });
 }
 
 /// Insert a freshly created chat gremlin into the persistent map and the run

@@ -19,6 +19,8 @@ use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use super::chat::{parse_chat_event, ChatEvent};
+
 /// A persistent connection to the executor daemon.
 ///
 /// The read half is driven by a background task that routes every incoming
@@ -39,6 +41,8 @@ struct ReadState {
     response_txs: Mutex<VecDeque<oneshot::Sender<Value>>>,
     /// Daemon events forwarded to the TUI event loop.
     event_tx: mpsc::UnboundedSender<DaemonEvent>,
+    /// Chat events routed to the TUI chat arm.
+    chat_tx: mpsc::UnboundedSender<ChatEvent>,
     /// Raw JSON lines that are neither responses nor DaemonEvents.
     raw_tx: mpsc::UnboundedSender<Value>,
 }
@@ -49,6 +53,7 @@ pub async fn connect() -> Result<
     (
         DaemonClient,
         mpsc::UnboundedReceiver<DaemonEvent>,
+        mpsc::UnboundedReceiver<ChatEvent>,
         mpsc::UnboundedReceiver<Value>,
     ),
     String,
@@ -57,10 +62,12 @@ pub async fn connect() -> Result<
     let (read_half, write_half) = stream.into_split();
 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (chat_tx, chat_rx) = mpsc::unbounded_channel();
     let (raw_tx, raw_rx) = mpsc::unbounded_channel();
     let state = Arc::new(ReadState {
         response_txs: Mutex::new(VecDeque::new()),
         event_tx,
+        chat_tx,
         raw_tx,
     });
 
@@ -76,6 +83,7 @@ pub async fn connect() -> Result<
             read_handle: Mutex::new(Some(read_handle)),
         },
         event_rx,
+        chat_rx,
         raw_rx,
     ))
 }
@@ -112,6 +120,13 @@ impl DaemonClient {
         if let Some(handle) = self.read_handle.lock().await.take() {
             handle.abort();
         }
+    }
+
+    /// A sender for chat events, so a caller can inject a locally-detected
+    /// error (e.g. a failed chat request) into the same stream the TUI's
+    /// chat arm consumes.
+    pub fn chat_sender(&self) -> mpsc::UnboundedSender<ChatEvent> {
+        self.state.chat_tx.clone()
     }
 }
 
@@ -168,6 +183,14 @@ async fn read_loop(read_half: OwnedReadHalf, state: Arc<ReadState>) {
         // at any time, even when a request is pending.
         if let Ok(event) = serde_json::from_value::<DaemonEvent>(value.clone()) {
             let _ = state.event_tx.send(event);
+            continue;
+        }
+
+        // Classify chat events before FIFO response delivery. Chat turns
+        // stream as unsolicited JSON lines and must not be misrouted to a
+        // pending request waiter (which would corrupt FIFO alignment).
+        if let Some(event) = parse_chat_event(&value) {
+            let _ = state.chat_tx.send(event);
             continue;
         }
 

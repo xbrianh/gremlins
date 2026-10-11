@@ -18,7 +18,7 @@ use tokio::io::BufReader;
 use tokio::sync::mpsc;
 
 use app::{ActiveRun, App, Overlay};
-use chat::{send_message, ChatEvent};
+use chat::ChatEvent;
 use commands::{dispatch, CommandResult};
 use editor::open_editor;
 use gremlins::executor::socket;
@@ -308,7 +308,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut app = App::new();
 
     // ── Connect to the daemon socket ──────────────────────────────
-    let (client, mut event_rx, mut raw_rx) = match client::connect().await {
+    let (client, mut event_rx, mut chat_rx, mut raw_rx) = match client::connect().await {
         Ok(c) => c,
         Err(e) => {
             return Err(io::Error::new(io::ErrorKind::NotConnected, e));
@@ -365,12 +365,15 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     // Dedicated follow for the single-gremlin log overlay.
     let mut overlay_log_handle: Option<tokio::task::JoinHandle<()>> = None;
     let mut overlay_log_following: Option<String> = None;
-    // ── Chat task handle (aborted on Esc to stop the agent) ───────
-    let mut chat_task: Option<tokio::task::JoinHandle<()>> = None;
-    // Oneshot sender to cancel the socket-reader spawned inside
-    // send_message(). Firing this drops write_half so the daemon
-    // sees EOF and stops the agent immediately.
-    let mut chat_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
+    // ── Chat turn state ────────────────────────────────────────
+    // (the chat request is sent from a detached task; we no longer need to
+    // abort it, so no JoinHandle is kept)
+    // Monotonic turn id, bumped on every submit and every Esc so that a
+    // stale turn's terminal events (which arrive after a cancel or a new
+    // submit) can be recognised and dropped.
+    let mut turn_gen: u64 = 0;
+    // The turn id of the currently active turn, if any.
+    let mut active_turn: Option<String> = None;
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
     // ── Debug session state ────────────────────────────────────────
@@ -394,9 +397,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     // ── Startup banner ────────────────────────────────────────────
     let banner = "gremlins tui — type /help for commands, Ctrl+C to exit";
     app.push_transcript_line(banner.to_string());
-
-    // ── Channel for chat events from the current (or most recent) message.
-    let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<ChatEvent>();
 
     // ── Event loop ────────────────────────────────────────────────
     loop {
@@ -468,15 +468,22 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
 
                             app.input.clear();
-                            // If a chat request is in-flight, abort it to
-                            // stop the agent loop and all tool calls.
+                            // If a chat request is in-flight, cancel it on the
+                            // daemon. Do not abort `chat_task` — it may be
+                            // inside `send_request`, and aborting mid-write
+                            // would desync the response FIFO. The task finishes
+                            // on its own once the ack arrives.
                             if app.active_request {
-                                if let Some(tx) = chat_cancel_tx.take() {
-                                    let _ = tx.send(());
-                                }
-                                if let Some(handle) = chat_task.take() {
-                                    handle.abort();
-                                }
+                                turn_gen += 1;
+                                let cancel_turn = active_turn.clone();
+                                let c = Arc::clone(&client);
+                                tokio::spawn(async move {
+                                    let mut req = serde_json::json!({"op": "cancel_chat"});
+                                    if let Some(t) = cancel_turn {
+                                        req["turn"] = serde_json::Value::String(t);
+                                    }
+                                    let _ = c.send_request(req).await;
+                                });
                                 // Discard the current turn without
                                 // committing to history.
                                 app.current_prompt = None;
@@ -485,6 +492,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.tools.clear();
                                 app.response_text.clear();
                                 app.active_request = false;
+                                active_turn = None;
                             }
                         }
                         KeyCode::Enter => {
@@ -611,12 +619,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // UI no longer shows the old conversation
                                         // after the daemon has discarded it.
                                         app.scrollable.clear();
-                                        // Abort in-flight chat task.
-                                        if let Some(tx) = chat_cancel_tx.take() {
-                                            let _ = tx.send(());
-                                        }
-                                        if let Some(handle) = chat_task.take() {
-                                            handle.abort();
+                                        // Cancel any in-flight turn on the daemon
+                                        // (do not abort `chat_task` mid-write).
+                                        if app.active_request {
+                                            turn_gen += 1;
+                                            let cancel_turn = active_turn.clone();
+                                            let c = Arc::clone(&client);
+                                            tokio::spawn(async move {
+                                                let mut req = serde_json::json!({"op": "cancel_chat"});
+                                                if let Some(t) = cancel_turn {
+                                                    req["turn"] = serde_json::Value::String(t);
+                                                }
+                                                let _ = c.send_request(req).await;
+                                            });
                                         }
                                         // Destroy the current chat gremlin on the
                                         // daemon so the next message starts fresh.
@@ -639,6 +654,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         }
                                         app.input.clear();
                                         app.active_request = false;
+                                        active_turn = None;
                                     }
                                     CommandResult::Quit => {
                                         break;
@@ -720,27 +736,52 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 live_area.draw(|_| {})?;
 
                                 app.active_request = true;
+                                turn_gen += 1;
+                                let turn_id = turn_gen.to_string();
+                                active_turn = Some(turn_id.clone());
                                 let chat_id = app.chat_id.clone();
-                                let chat_tx = chat_tx.clone();
-                                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-                                chat_cancel_tx = Some(cancel_tx);
-                                chat_task = Some(tokio::spawn(async move {
-                                    match send_message(chat_id.as_deref(), &input, cancel_rx).await {
-                                        Ok(mut rx) => {
-                                            while let Some(event) = rx.recv().await {
-                                                if chat_tx.send(event).is_err() {
-                                                    break;
-                                                }
+                                let client_for_chat = Arc::clone(&client);
+                                let chat_tx = client_for_chat.chat_sender();
+                                tokio::spawn(async move {
+                                    let mut request = serde_json::json!({
+                                        "op": "chat",
+                                        "text": input,
+                                        "turn": turn_id,
+                                    });
+                                    if let Some(id) = chat_id {
+                                        request["id"] = serde_json::Value::String(id);
+                                    }
+                                    match client_for_chat.send_request(request).await {
+                                        Ok(resp) => {
+                                            // A chat ack is `{"type":"ok",...}`;
+                                            // an error response is
+                                            // `{"type":"error",...}`. Surface a
+                                            // setup failure as a chat error so
+                                            // `active_request` is cleared.
+                                            if resp.get("type").and_then(|v| v.as_str())
+                                                == Some("error")
+                                            {
+                                                let msg = resp
+                                                    .get("message")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("unknown error")
+                                                    .to_string();
+                                                let _ = chat_tx.send(ChatEvent::Error {
+                                                    message: msg,
+                                                    id: None,
+                                                    turn: None,
+                                                });
                                             }
                                         }
                                         Err(e) => {
                                             let _ = chat_tx.send(ChatEvent::Error {
                                                 message: e,
                                                 id: None,
+                                                turn: None,
                                             });
                                         }
                                     }
-                                }));
+                                });
                             }
                         }
                         KeyCode::Backspace => {
@@ -955,16 +996,34 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Chat events ────────────────────────────────
             Some(event) = chat_rx.recv() => {
+                // Drop events that belong to a superseded turn (a turn that
+                // was cancelled by Esc or replaced by a newer submit).
+                let event_turn = match &event {
+                    ChatEvent::StreamChunk { turn, .. }
+                    | ChatEvent::ReasoningChunk { turn, .. }
+                    | ChatEvent::ToolResult { turn, .. }
+                    | ChatEvent::TurnComplete { turn, .. }
+                    | ChatEvent::Done { turn, .. }
+                    | ChatEvent::Ended { turn, .. }
+                    | ChatEvent::Error { turn, .. } => turn.clone(),
+                };
+                if let (Some(active), Some(ev)) = (&active_turn, &event_turn) {
+                    if active != ev {
+                        log::debug!("dropping stale chat event for turn {ev} (active {active})");
+                        continue;
+                    }
+                }
+
                 match event {
-                    ChatEvent::StreamChunk(text) => {
+                    ChatEvent::StreamChunk { text, .. } => {
                         log::debug!("StreamChunk len={}", text.len());
                         app.push_response(&text);
                     }
-                    ChatEvent::ReasoningChunk(text) => {
+                    ChatEvent::ReasoningChunk { text, .. } => {
                         log::debug!("ReasoningChunk len={}", text.len());
                         app.push_reasoning_text(&text);
                     }
-                    ChatEvent::ToolResult { name } => {
+                    ChatEvent::ToolResult { name, .. } => {
                         log::debug!("ToolResult name={name}");
                         app.push_tool(&name);
                     }
@@ -983,7 +1042,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             app.push_tool(tc);
                         }
                     }
-                    ChatEvent::Done { text, usage, id } => {
+                    ChatEvent::Done { text, usage, id, .. } => {
                         log::debug!("Done text_len={} has_current_turn={}",
                             text.len(), app.has_current_turn());
                         // Capture the gremlin id on the first turn so
@@ -1034,10 +1093,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
 
                         app.active_request = false;
-                        chat_task = None;
-                        chat_cancel_tx = None;
+                        active_turn = None;
                     }
-                    ChatEvent::Ended { reason, id } => {
+                    ChatEvent::Ended { reason, id, .. } => {
                         if let Some(id) = id {
                             app.chat_id = Some(id);
                         }
@@ -1045,12 +1103,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             continue;
                         }
                         app.active_request = false;
-                        chat_task = None;
-                        chat_cancel_tx = None;
+                        active_turn = None;
                         let msg = format!("chat ended: {reason}");
                         app.push_transcript_line(msg);
                     }
-                    ChatEvent::Error { message: msg, id } => {
+                    ChatEvent::Error { message: msg, id, .. } => {
                         if let Some(id) = id {
                             app.chat_id = Some(id);
                         }
@@ -1058,8 +1115,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             continue;
                         }
                         app.active_request = false;
-                        chat_task = None;
-                        chat_cancel_tx = None;
+                        active_turn = None;
                         let full = format!("chat error: {msg}");
                         app.push_transcript_line(full);
                     }

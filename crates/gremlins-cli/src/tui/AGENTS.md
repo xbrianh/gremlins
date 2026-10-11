@@ -70,12 +70,12 @@ run()
 2. `app.submit_prompt()` flattens the previous turn into `scrollable`, starts a new turn
 3. Push `"thinking..."` reasoning line, force an immediate frame
 4. Set `app.active_request = true`, store `app.pending_user_message`
-5. Spawn `chat::send_message()` → `chat_tx` channel (with a `oneshot` cancel channel for Esc)
+5. Spawn a task that sends `{"op": "chat", "text", "id"}` via the persistent `DaemonClient` (Esc sends `{"op": "cancel_chat"}`)
 6. `ChatEvent::ReasoningChunk` → `app.push_reasoning_text()` (accumulates partials, flushes on newline)
 7. `ChatEvent::ToolResult` → `app.push_tool()`
 8. `ChatEvent::StreamChunk` → `app.push_response()` + accumulate `app.current_response`
 9. `ChatEvent::Done` → reconcile `current_response` with `Done.text` (use summary only if nothing streamed), commit user+assistant to `conversation_history`, clear `active_request`
-10. `Esc` during active request → fire cancel oneshot, abort chat task, discard current turn without committing
+10. `Esc` during active request → abort chat task, send `cancel_chat`, discard current turn without committing
 
 ### Daemon events
 `DaemonEvent` variants arrive on `event_rx`:
