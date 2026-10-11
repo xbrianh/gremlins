@@ -18,7 +18,7 @@ use tokio::sync::watch;
 use crate::clients::agent_loop::CancelToken;
 use crate::clients::client::Client;
 use crate::clients::interactive::{
-    InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle,
+    InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle, StreamEventSender,
 };
 use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
@@ -553,7 +553,9 @@ async fn handle_launch(
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
-    gremlin.runtime_config.stream_events = Some(interactive_handle.evt_tx.clone());
+    gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
+        interactive_handle.evt_tx.clone(),
+    ));
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer: reads from the channel, appends to $state_dir/log,
@@ -802,7 +804,9 @@ async fn handle_resume(
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
-    gremlin.runtime_config.stream_events = Some(interactive_handle.evt_tx.clone());
+    gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
+        interactive_handle.evt_tx.clone(),
+    ));
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.
@@ -1852,7 +1856,7 @@ async fn handle_chat(
     // 5. Take the gremlin out of the map, install this turn's definition,
     //    stream channel, and a fresh per-turn cancel token, then drop the
     //    global lock before running so other chats are not serialized.
-    let (stream_tx, mut stream_rx) = broadcast::channel::<InteractiveEvent>(256);
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel::<InteractiveEvent>();
     let turn_cancel = CancelToken::new();
     let mut gremlin = {
         let mut gremlins = chat_gremlins().lock().await;
@@ -1866,7 +1870,7 @@ async fn handle_chat(
         }
     };
     gremlin.definition = Box::new(definition);
-    gremlin.runtime_config.stream_events = Some(stream_tx);
+    gremlin.runtime_config.stream_events = Some(StreamEventSender::Mpsc(stream_tx));
     gremlin.cancel_token = Some(turn_cancel.clone());
 
     // Point the run-map handle's cancel token at this turn so `stop` cancels
@@ -1898,50 +1902,49 @@ async fn handle_chat(
         tokio::select! {
             result = stream_rx.recv() => {
                 match result {
-                    Ok(InteractiveEvent::StreamChunk { text }) => {
+                    Some(InteractiveEvent::StreamChunk { text }) => {
                         let payload = serde_json::json!({"type": "stream_chunk", "text": text});
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
                     }
-                    Ok(InteractiveEvent::ReasoningChunk { text }) => {
+                    Some(InteractiveEvent::ReasoningChunk { text }) => {
                         let payload = serde_json::json!({"type": "reasoning_chunk", "text": text});
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
                     }
-                    Ok(InteractiveEvent::ToolResult { name, output }) => {
+                    Some(InteractiveEvent::ToolResult { name, output }) => {
                         let payload = serde_json::json!({"type": "tool_result", "name": name, "output": output});
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
                     }
-                    Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls }) => {
+                    Some(InteractiveEvent::TurnComplete { turn, text, tool_calls }) => {
                         let payload = serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
                     }
-                    Ok(InteractiveEvent::Done { text, usage }) => {
+                    Some(InteractiveEvent::Done { text, usage }) => {
                         // Carry the gremlin id so the TUI can capture it on
                         // the first turn and reuse it for subsequent messages.
                         let payload = serde_json::json!({"type": "done", "id": id, "text": text, "usage": usage});
                         let _ = writer.write_json_line(&payload).await;
                         break;
                     }
-                    Ok(InteractiveEvent::Ended { reason }) => {
+                    Some(InteractiveEvent::Ended { reason }) => {
                         let payload = serde_json::json!({"type": "ended", "id": id, "reason": reason});
                         let _ = writer.write_json_line(&payload).await;
                         break;
                     }
-                    Ok(InteractiveEvent::Ready { .. }) => {
+                    Some(InteractiveEvent::Ready { .. }) => {
                         // Ignore Ready in chat mode — the agent runs to
                         // completion without pausing.
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => {
-                        // Channel closed without Done/Ended — the agent
-                        // exited before emitting a terminal event. Report it.
+                    None => {
+                        // The mpsc channel closed without Done/Ended — the
+                        // agent exited before emitting a terminal event.
                         let payload = serde_json::json!({"type": "error", "id": id, "message": "agent exited before completing"});
                         let _ = writer.write_json_line(&payload).await;
                         break;
@@ -2358,7 +2361,9 @@ pub(crate) fn launch_child(mut gremlin: Gremlin) -> LaunchResult {
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
-    gremlin.runtime_config.stream_events = Some(interactive_handle.evt_tx.clone());
+    gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
+        interactive_handle.evt_tx.clone(),
+    ));
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.

@@ -37,7 +37,7 @@ use serde_json::{Map, Value};
 use crate::artifacts::uri::Uri;
 use crate::clients::agent_loop::CancelToken;
 use crate::clients::client::Client;
-use crate::clients::interactive::{InteractiveEvent, InteractiveHandle, InteractiveSession};
+use crate::clients::interactive::{InteractiveHandle, InteractiveSession, StreamEventSender};
 use crate::config;
 use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::core::{discovery, env_file};
@@ -183,11 +183,11 @@ pub(crate) struct RuntimeConfig {
     pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Interactive handle (supervisor → agent loop).
     pub interactive: Option<InteractiveHandle>,
-    /// Broadcast sender for stream events (reasoning chunks, stream chunks,
+    /// Sender for stream events (reasoning chunks, stream chunks,
     /// tool results, turn complete, done). When Some, the agent loop emits
     /// every stream event. Chat and debug mode set this; normal pipelines
     /// leave it None for zero overhead.
-    pub stream_events: Option<tokio::sync::broadcast::Sender<InteractiveEvent>>,
+    pub stream_events: Option<StreamEventSender>,
 }
 
 impl Clone for RuntimeConfig {

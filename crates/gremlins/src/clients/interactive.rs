@@ -131,6 +131,54 @@ pub enum InteractiveEvent {
     },
 }
 
+/// Sender for stream events emitted by the agent loop.
+///
+/// The interactive/debug path uses a broadcast sender because it genuinely
+/// has multiple subscribers (the debug supervisor calls `subscribe()`). The
+/// chat path uses an unbounded mpsc sender so a slow TUI socket write can
+/// never drop model output — backpressure is expressed as memory growth, not
+/// data loss.
+#[derive(Clone, Debug)]
+pub enum StreamEventSender {
+    Broadcast(broadcast::Sender<InteractiveEvent>),
+    Mpsc(mpsc::UnboundedSender<InteractiveEvent>),
+}
+
+impl StreamEventSender {
+    /// Send one stream event.
+    ///
+    /// The broadcast variant preserves the existing `receiver_count()` gate
+    /// so non-interactive pipeline runs (no subscriber) avoid per-token
+    /// allocation. The mpsc variant sends unconditionally: an unbounded send
+    /// never blocks, and checking `is_closed()` would race with the actual
+    /// send.
+    pub(crate) fn send(&self, event: InteractiveEvent) {
+        match self {
+            Self::Broadcast(tx) => {
+                if tx.receiver_count() > 0 {
+                    let _ = tx.send(event);
+                }
+            }
+            Self::Mpsc(tx) => {
+                let _ = tx.send(event);
+            }
+        }
+    }
+
+    /// Whether [`send`](Self::send) will actually deliver an event.
+    ///
+    /// Broadcast senders only deliver when at least one receiver is
+    /// subscribed, so callers can skip building an [`InteractiveEvent`]
+    /// entirely for unsubscribed broadcast senders. Mpsc senders always
+    /// deliver (unbounded sends never block), so they report `true`.
+    pub(crate) fn wants_events(&self) -> bool {
+        match self {
+            Self::Broadcast(tx) => tx.receiver_count() > 0,
+            Self::Mpsc(_) => true,
+        }
+    }
+}
+
 // ── Channel triplet ───────────────────────────────────────────────────────
 
 /// Created once per gremlin at launch. Call [`split`](InteractiveChannels::split)
@@ -420,5 +468,50 @@ mod tests {
             result.is_ok(),
             "cmd_tx.closed() should resolve after session is dropped"
         );
+    }
+
+    /// `wants_events` is false for an unsubscribed broadcast sender and true
+    /// for mpsc, so callers can skip building payloads when nobody listens.
+    #[test]
+    fn stream_event_sender_wants_events() {
+        let (broadcast_tx, _) = broadcast::channel(16);
+        let broadcast_sender = StreamEventSender::Broadcast(broadcast_tx.clone());
+        assert!(!broadcast_sender.wants_events());
+
+        let rx = broadcast_tx.subscribe();
+        assert!(broadcast_sender.wants_events());
+        drop(rx);
+        assert!(!broadcast_sender.wants_events());
+
+        let (mpsc_tx, _mpsc_rx) = mpsc::unbounded_channel();
+        let mpsc_sender = StreamEventSender::Mpsc(mpsc_tx);
+        assert!(mpsc_sender.wants_events());
+    }
+
+    /// An unbounded mpsc stream sender never drops events, even when the
+    /// receiver is paused, and `recv` returns `None` once the sender drops.
+    #[tokio::test]
+    async fn mpsc_stream_sender_never_drops_and_closes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sender = StreamEventSender::Mpsc(tx);
+
+        for i in 0..1_000 {
+            sender.send(InteractiveEvent::StreamChunk {
+                text: format!("chunk-{i}"),
+            });
+        }
+
+        // The receiver is paused, yet every event is still buffered.
+        for i in 0..1_000 {
+            match rx.recv().await {
+                Some(InteractiveEvent::StreamChunk { text }) => {
+                    assert_eq!(text, format!("chunk-{i}"));
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+
+        drop(sender);
+        assert!(rx.recv().await.is_none());
     }
 }

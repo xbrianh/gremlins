@@ -8,7 +8,7 @@ use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
 use super::agent_loop::CancelToken;
-use super::interactive::{InteractiveEvent, InteractiveSession};
+use super::interactive::{InteractiveSession, StreamEventSender};
 use super::protocol::CompletedRun;
 use super::task::TaskModelSelector;
 
@@ -41,9 +41,9 @@ pub struct RunParams {
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
     pub cancel_token: Option<Arc<CancelToken>>,
-    /// Broadcast sender for stream events. When Some, the agent loop emits
+    /// Sender for stream events. When Some, the agent loop emits
     /// every stream event (reasoning, text, tool results, turn complete, done).
-    pub stream_events: Option<tokio::sync::broadcast::Sender<InteractiveEvent>>,
+    pub stream_events: Option<StreamEventSender>,
     /// Pre-populated message history. When set, the agent loop starts with
     /// these messages already in its internal history (carrying their original
     /// roles) instead of building from a bare system-prompt + user-prompt pair.

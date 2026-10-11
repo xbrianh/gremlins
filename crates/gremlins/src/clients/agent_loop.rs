@@ -14,7 +14,9 @@ use rig_core::streaming::{Item, StreamEvent};
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
-use super::interactive::{InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken};
+use super::interactive::{
+    InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken, StreamEventSender,
+};
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
@@ -90,8 +92,7 @@ pub(crate) struct RunContext {
     pub(crate) expected_artifact_paths: Vec<PathBuf>,
     pub(crate) reminder_budget: usize,
     pub(crate) completion_nudge_budget: usize,
-    pub(crate) stream_events:
-        Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
+    pub(crate) stream_events: Option<StreamEventSender>,
     /// Pre-populated message history carried into the loop's internal history.
     pub(crate) prepopulated_messages: Option<Vec<Message>>,
 }
@@ -468,7 +469,7 @@ async fn run_agent_loop_core(
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     interactive: Option<InteractiveSession>,
-    stream_events: Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
+    stream_events: Option<StreamEventSender>,
     prepopulated_messages: Option<Vec<Message>>,
 ) -> Result<CompletedRun, ClientError> {
     // Destructure the interactive session into its components so we can
@@ -741,17 +742,17 @@ async fn run_agent_loop_core(
                     }
                     last_token = Some(now);
                     // Emit stream deltas via stream_events channel.
-                    // Gate on receiver_count to avoid per-token allocation
-                    // for non-interactive runs with no subscriber.
+                    // Gate on wants_events() before building the event so
+                    // unsubscribed broadcast senders avoid per-token
+                    // allocation; mpsc senders always want events.
                     if let Some(ref se) = stream_events {
-                        if se.receiver_count() > 0 {
+                        if se.wants_events() {
                             match &chunk {
                                 Item::Event(StreamEvent::Text { ref text, .. }) => {
-                                    let _ = se
-                                        .send(InteractiveEvent::StreamChunk { text: text.clone() });
+                                    se.send(InteractiveEvent::StreamChunk { text: text.clone() });
                                 }
                                 Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
-                                    let _ = se.send(InteractiveEvent::ReasoningChunk {
+                                    se.send(InteractiveEvent::ReasoningChunk {
                                         text: text.clone(),
                                     });
                                 }
@@ -761,7 +762,7 @@ async fn run_agent_loop_core(
                                 }) => {
                                     // Emit tool calls as reasoning so they
                                     // appear in the live thought stream.
-                                    let _ = se.send(InteractiveEvent::ReasoningChunk {
+                                    se.send(InteractiveEvent::ReasoningChunk {
                                         text: format_tool_call(tc),
                                     });
                                 }
@@ -801,11 +802,10 @@ async fn run_agent_loop_core(
 
         // Emit TurnComplete via stream_events, before text/tool_calls
         // are consumed by the rest of the turn processing.
-        // Gate on receiver_count to avoid allocation when no subscriber.
         if let Some(ref se) = stream_events {
-            if se.receiver_count() > 0 {
+            if se.wants_events() {
                 log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
-                let _ = se.send(InteractiveEvent::TurnComplete {
+                se.send(InteractiveEvent::TurnComplete {
                     turn: turn_num,
                     text: text.clone(),
                     tool_calls: tool_calls.iter().map(format_tool_call).collect(),
@@ -957,12 +957,10 @@ async fn run_agent_loop_core(
                     );
                 }
                 // Emit Done via stream_events.
-                // Gate on receiver_count so non-interactive runs skip
-                // the allocation.
                 if let Some(ref se) = stream_events {
-                    if se.receiver_count() > 0 {
+                    if se.wants_events() {
                         log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
-                        let _ = se.send(InteractiveEvent::Done {
+                        se.send(InteractiveEvent::Done {
                             text: result_text.clone(),
                             usage: Some(usage.clone()),
                         });
@@ -1233,16 +1231,15 @@ async fn run_agent_loop_core(
                 }
             }
             // Emit tool result via stream_events.
-            // Gate on receiver_count to avoid allocation when no subscriber.
             if let Some(ref se) = stream_events {
-                if se.receiver_count() > 0 {
+                if se.wants_events() {
                     // For Read, truncate to a reasonable preview.
                     let display = if job.name == "Read" {
                         trunc(&output, 500)
                     } else {
                         trunc(&output, 200)
                     };
-                    let _ = se.send(InteractiveEvent::ToolResult {
+                    se.send(InteractiveEvent::ToolResult {
                         name: job.name.clone(),
                         output: display,
                     });
@@ -3351,7 +3348,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(evt_tx_clone),
+                Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
             )
             .await
@@ -3458,7 +3455,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(evt_tx_clone),
+                Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
             )
             .await
@@ -3552,7 +3549,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(evt_tx_clone),
+                Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
             )
             .await
@@ -3635,7 +3632,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(evt_tx_clone),
+                Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
             )
             .await
