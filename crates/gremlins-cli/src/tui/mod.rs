@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use app::{ActiveRun, App, Overlay};
 use chat::ChatEvent;
 use commands::{dispatch, CommandResult};
-use editor::open_editor;
+use editor::{open_editor, ReaderChannels, SuspendHandle};
 use gremlins::executor::socket;
 use screen::LiveArea;
 use widgets::{DebugWidget, WatchSingleWidget, WatchTableWidget};
@@ -413,25 +413,46 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     // ── Crossterm event channel (polling task → async) ─────────
     // Uses poll + sleep instead of blocking read so that the event
     // loop is never starved by a background reader holding the stdin lock.
+    // The reader can be suspended (parked) while an external editor owns
+    // the terminal, so it never races the editor for keystrokes.
+    let (suspend_handle, reader) = SuspendHandle::new();
     let (ct_tx, mut ct_rx) = mpsc::unbounded_channel::<Event>();
-    tokio::spawn(async move {
-        loop {
-            match crossterm::event::poll(Duration::from_millis(20)) {
-                Ok(true) => match crossterm::event::read() {
-                    Ok(ev) => {
-                        if ct_tx.send(ev).is_err() {
-                            break;
+    {
+        let ReaderChannels {
+            mut suspend_rx,
+            mut resume_rx,
+            parked,
+            dead,
+        } = reader;
+        tokio::spawn(async move {
+            loop {
+                // Park on a suspend request: acknowledge, then wait for the
+                // resume signal before polling again.
+                if suspend_rx.try_recv().is_ok() {
+                    parked.notify_one();
+                    if resume_rx.recv().await.is_none() {
+                        break;
+                    }
+                    continue;
+                }
+                match crossterm::event::poll(Duration::from_millis(20)) {
+                    Ok(true) => match crossterm::event::read() {
+                        Ok(ev) => {
+                            if ct_tx.send(ev).is_err() {
+                                break;
+                            }
                         }
+                        Err(_) => break,
+                    },
+                    Ok(false) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                     Err(_) => break,
-                },
-                Ok(false) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                Err(_) => break,
             }
-        }
-    });
+            dead.notify_waiters();
+        });
+    }
 
     // ── Channel for socket-op results ─────────────────────────────
     let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Vec<String>>();
@@ -524,28 +545,50 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
-                            match open_editor(&app.input) {
-                                Ok(Some(text)) => {
-                                    app.input.clear();
-                                    // The editor submission follows the
-                                    // plain-text Enter path exactly.
-                                    app.push_history(text.clone());
-                                    send_chat_input(
-                                        live_area,
-                                        &mut app,
-                                        &client,
-                                        text,
-                                        &mut turn_gen,
-                                        &mut active_turn,
-                                    )?;
-                                }
-                                Ok(None) => {
-                                    app.input.clear();
+                            match open_editor(&app.input, &suspend_handle).await {
+                                Ok(outcome) => {
+                                    // `open_editor` returns the reader-resume
+                                    // guard so we can drain the event channel
+                                    // while the reader is still parked. This
+                                    // guarantees no handoff keystrokes are
+                                    // either replayed afterwards or discarded
+                                    // accidentally: the channel cannot change
+                                    // during the drain.
+                                    let (result, _resume) = outcome.into_parts();
+                                    while ct_rx.try_recv().is_ok() {}
+                                    match result {
+                                        Ok(Some(text)) => {
+                                            // Write the composed text back into the
+                                            // input bar for review; it is only sent
+                                            // to the model when the user presses
+                                            // Enter. Reset history navigation so the
+                                            // fresh text isn't treated as a history
+                                            // position.
+                                            app.input = text;
+                                            app.history_cursor = None;
+                                        }
+                                        Ok(None) => {
+                                            // Editor aborted without changes; leave
+                                            // the input bar exactly as it was.
+                                        }
+                                        Err(e) => {
+                                            // The editor never returned composed
+                                            // text; preserve what the user already
+                                            // typed in the input bar.
+                                            live_area.push_transcript_line(format!(
+                                                "editor error: {e}"
+                                            ));
+                                        }
+                                    }
+                                    // `_resume` drops here and wakes the parked
+                                    // reader after the drain completes.
+                                    drop(_resume);
                                 }
                                 Err(e) => {
-                                    // The editor never returned composed
-                                    // text; preserve what the user already
-                                    // typed in the input bar.
+                                    // Failed to suspend the input reader (it
+                                    // had already exited). No terminal state
+                                    // was touched, so there is nothing to
+                                    // drain or resume.
                                     live_area.push_transcript_line(format!(
                                         "editor error: {e}"
                                     ));
