@@ -1079,3 +1079,111 @@ is one widget; every completed turn is another. Overlays are transient panels
 that occlude the transcript. The input and info bars are always pinned. The user
 never scrolls within the TUI — tmux and terminal features handle that. Widgets
 describe their own content and lifecycle; the viewport just lays them out.
+
+## 9. Chat backend
+
+A chat is a gremlin — a persistent one with an unbounded chain of Agent stages.
+Each user message appends a new stage to the chain; each stage runs a fresh
+agent loop (§3.1) to completion. The daemon owns all context management.
+Front-ends are thin clients that send text into a gremlin and stream events
+back out.
+
+### 9.1 A chat is a gremlin
+
+The `chat_id` is a `gremlin_id`. A chat gremlin lives in the run map alongside
+pipeline gremlins, appears in `gremlins ls`, and supports every op a normal
+gremlin does — `stop`, `resume`, `debug`, `info`, `log`. Multiple chats can
+coexist; each is an independent gremlin with its own worktree, artifact
+registry, and state.
+
+A chat gremlin's definition is built programmatically at creation time and
+grows with every user message — each turn appends a new Agent stage to the
+chain. The definition is never written to `.gremlins/`; it lives in the
+gremlin's state directory as `definition.yaml`.
+
+### 9.2 Daemon owns context; front-ends are thin
+
+The TUI (or any front-end) sends exactly:
+
+```json
+{"op": "chat", "id": "<gremlin_id>", "text": "<user message>"}
+```
+
+No history, no transcript, no tool records — the front-end holds no
+conversation state beyond the gremlin id it is attached to. The daemon
+manages the entire context lifecycle internally. A front-end that disconnects
+and reconnects to the same gremlin id picks up exactly where it left off.
+
+This makes the chat backend front-end-agnostic: the TUI, a CLI one-shot
+(`gremlins chat <id> "message"`), a web dashboard, or an API all speak the
+same protocol against the same gremlin.
+
+### 9.3 Per-turn Agent stages with full context
+
+Each turn is a complete Agent stage — a fresh agent loop with a fresh model
+context, per §3.1. Context flows from one stage to the next through the
+artifact registry, in the form of the full message array from the previous
+stage.
+
+After stage N completes:
+
+1. The daemon serializes the agent loop's accumulated message array — system
+   prompt, user messages, assistant responses, tool calls, and tool results —
+   as a structured artifact (`artifact://conversation.json`).
+2. Stage N+1 prepares its agent loop with this message array pre-populated.
+   The new user prompt is appended as the next user message, and the loop
+   proceeds from there.
+3. The model sees the previous conversation with proper role attribution:
+   its own assistant messages are in the assistant role, tool calls and
+   results are in the tool/tool_result roles, not flattened into a system
+   prompt transcript.
+
+```
+Stage N agent loop:                    Stage N+1 agent loop:
+  [system]                                [system]
+  [user: "fix the login bug"]             [user: "fix the login bug"]    ─┐
+  [assistant: "I'll read auth.rs"]        [assistant: ...]               │
+  [tool: Read auth.rs]                    [tool: Read auth.rs]           │ pre-populated
+  [tool_result: (120 lines)]              [tool_result: ...]             │ from artifact
+  [assistant: "The bug is in..."]         [assistant: ...]               │
+  [tool: Edit auth.rs]                    [tool: Edit auth.rs]           │
+  [tool_result: "ok"]                     [tool_result: "ok"]           ─┘
+  [assistant: "Done."]                    [user: "add rate limiting"]    ← new
+                                          [assistant: ...]               ← new turn
+```
+
+This is not API-level session resumption — there are no provider-specific
+session IDs, no shared HTTP connections. It is content-level: the messages
+from stage N are replayed as prefix messages in stage N+1's ChatCompletion
+request. Every provider supports it, and prompt caching benefits naturally
+from the stable prefix (system prompt + history).
+
+### 9.4 Pause between stages
+
+The gremlin pauses after each Agent stage completes, waiting for the next
+user message. This is the same mechanism the interactive debug protocol uses:
+the run loop finishes a stage, reaches the end of the (current) definition,
+and blocks on an external signal. When a new message arrives, the daemon
+appends a stage to the definition and resumes the run loop.
+
+From the gremlin's perspective it is one continuous run — one `state.json`,
+one stage cursor, one artifact registry, one worktree. It simply has an
+unbounded definition that grows as the conversation progresses.
+
+### 9.5 History rollback
+
+Because each turn is a discrete stage, rolling back is truncating the stage
+chain at any point. The daemon drops stages after the truncation point,
+rewinds the artifact registry to the snapshot at that point, and sets the
+stage cursor. The next user message resumes from there. No message editing,
+no partial rewrites — the boundary is the stage boundary.
+
+`/clear` (or `/new`) destroys the gremlin and creates a fresh one. The old
+gremlin remains inspectable in the run map until cleaned up.
+
+### 9.6 Relationship to the TUI
+
+The TUI (§8) is one front-end for the chat backend. It sends `{"op": "chat",
+"id": "<gremlin_id>", "text": "..."}` and renders stream events (reasoning
+chunks, tool results, response text, turn completion) as transcript widgets.
+The TUI holds no conversation history — the daemon is the authority.
