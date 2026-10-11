@@ -1459,12 +1459,18 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
         }
     }
 
+    let last = widths.len().saturating_sub(1);
+
     let header_line = headers
         .iter()
         .enumerate()
         .map(|(index, header)| {
-            let width = widths.get(index).copied().unwrap_or(0);
-            format!("{header:<width$}")
+            if index == last {
+                header.to_string()
+            } else {
+                let width = widths.get(index).copied().unwrap_or(0);
+                format!("{header:<width$}")
+            }
         })
         .collect::<Vec<_>>()
         .join("  ");
@@ -1475,8 +1481,12 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
             .iter()
             .enumerate()
             .map(|(index, cell)| {
-                let width = widths.get(index).copied().unwrap_or(0);
-                format!("{cell:<width$}")
+                if index == last {
+                    cell.clone()
+                } else {
+                    let width = widths.get(index).copied().unwrap_or(0);
+                    format!("{cell:<width$}")
+                }
             })
             .collect::<Vec<_>>()
             .join("  ");
