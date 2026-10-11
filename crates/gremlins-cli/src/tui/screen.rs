@@ -24,11 +24,17 @@ use crossterm::{
 use ratatui::{
     backend::{Backend, ClearType, CrosstermBackend},
     buffer::{Buffer, Cell},
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
 };
 
-#[cfg(test)]
-pub use ratatui::backend::TestBackend;
+use crate::tui::app::App;
+use crate::tui::buffer::LineOrigin;
+use crate::tui::widgets::{
+    InfoBarWidget, InputBarWidget, LiveAreaWidget, ReasoningWidget, RenderContext, ToolsWidget,
+    TranscriptWidget,
+};
 
 /// Number of rows reserved at the bottom of the screen for input and
 /// info bars. These rows are excluded from the scrollback region.
@@ -47,6 +53,16 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     scrollback_log: Vec<String>,
     /// Whether [`Drop`] should restore the terminal (raw mode, cursor).
     needs_terminal_cleanup: bool,
+    /// Scrollable transcript (completed turns + current prompt + response).
+    transcript: TranscriptWidget,
+    /// Current-turn reasoning region (bounded to 5 visible rows).
+    reasoning: ReasoningWidget,
+    /// Current-turn active-tools region (bounded to 5 visible rows).
+    tools: ToolsWidget,
+    /// Input bar (stateless).
+    input_bar: InputBarWidget,
+    /// Info bar (stateless).
+    info_bar: InfoBarWidget,
 }
 
 impl<B: Backend> LiveArea<B> {
@@ -64,6 +80,11 @@ impl<B: Backend> LiveArea<B> {
             rows,
             scrollback_log: Vec::new(),
             needs_terminal_cleanup: false,
+            transcript: TranscriptWidget::new(),
+            reasoning: ReasoningWidget::new(),
+            tools: ToolsWidget::new(),
+            input_bar: InputBarWidget,
+            info_bar: InfoBarWidget,
         }
     }
 
@@ -210,9 +231,197 @@ impl<B: Backend> LiveArea<B> {
         self.rows.saturating_sub(RESERVED_ROWS)
     }
 
-    /// Mutable access to the current frame buffer (for render functions).
-    pub fn curr_mut(&mut self) -> &mut Buffer {
-        &mut self.curr
+    /// Compose and paint a full frame.
+    ///
+    /// Reserves the bottom [`RESERVED_ROWS`] for the input and info bars,
+    /// lays the content widgets (transcript, reasoning, tools) out in the
+    /// remaining area by their height constraints, renders each into the
+    /// current buffer, commits any transcript overflow to terminal
+    /// scrollback, and diff-paints the frame.
+    pub fn compose(&mut self, app: &App) -> io::Result<()> {
+        let gremlin_count = app.gremlin_count_str();
+        let ctx = RenderContext {
+            input: &app.input,
+            following_log: app.following_log.as_deref(),
+            gremlin_count: &gremlin_count,
+            project_name: app.project_name_str(),
+        };
+
+        let width = self.cols;
+        let area = Rect::new(0, 0, self.cols, self.rows);
+
+        // Reserve the two fixed bars first, exactly as the original
+        // two-phase split did. The content widgets are laid out only within
+        // the remaining rect, so their `Length` constraints can never
+        // compress or drop the bars.
+        let bar_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        let content_area = bar_chunks[0];
+        let input_bar_area = bar_chunks[1];
+        let info_bar_area = bar_chunks[2];
+
+        // Render the bars unconditionally.
+        self.input_bar.render(input_bar_area, &mut self.curr, &ctx);
+        self.info_bar.render(info_bar_area, &mut self.curr, &ctx);
+
+        let mut overflow = Vec::new();
+        if content_area.height > 0 {
+            let mut widgets: Vec<&mut dyn LiveAreaWidget> =
+                vec![&mut self.transcript, &mut self.reasoning, &mut self.tools];
+
+            let constraints: Vec<Constraint> =
+                widgets.iter().map(|w| w.height_constraint(width)).collect();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(constraints)
+                .split(content_area);
+
+            for (widget, chunk) in widgets.iter_mut().zip(chunks.iter()) {
+                overflow.extend(widget.render(*chunk, &mut self.curr, &ctx));
+            }
+        }
+
+        if !overflow.is_empty() {
+            self.commit_scrollback(&overflow, self.cols)?;
+        }
+
+        self.draw(|_| {})
+    }
+
+    // ── Widget mutation (moved from `App`) ───────────────────────
+
+    /// Flatten the current turn into the transcript and start a new turn
+    /// with the given prompt.
+    pub fn submit_prompt(&mut self, prompt: String) {
+        if let Some(prev_prompt) = self.transcript.take_prompt() {
+            let prompt_style = Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD);
+            let marker_style = Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD);
+
+            let width = self.cols;
+
+            if !self.transcript.is_empty() {
+                self.transcript.push_separator();
+                self.transcript.push_separator();
+            }
+
+            self.transcript.push_line(
+                Line::from(vec![
+                    Span::styled("> ", marker_style),
+                    Span::styled(prev_prompt, prompt_style),
+                ]),
+                LineOrigin::FlattenedPrompt,
+            );
+
+            let reasoning_tail = self.reasoning.take_tail(width);
+            if !reasoning_tail.is_empty() {
+                self.transcript.push_separator();
+                for line in reasoning_tail {
+                    self.transcript
+                        .push_line(line, LineOrigin::FlattenedReasoning);
+                }
+            }
+
+            let tools_tail = self.tools.take_tail(width);
+            if !tools_tail.is_empty() {
+                self.transcript.push_separator();
+                for line in tools_tail {
+                    self.transcript.push_line(line, LineOrigin::FlattenedTools);
+                }
+            }
+
+            if !self.transcript.response_is_empty() {
+                self.transcript.push_separator();
+                let response_lines: Vec<String> = self
+                    .transcript
+                    .response_text()
+                    .lines()
+                    .map(|s| s.to_string())
+                    .collect();
+                for line_str in response_lines {
+                    self.transcript.push_line(
+                        Line::from(Span::styled(line_str, Style::default())),
+                        LineOrigin::FlattenedResponse,
+                    );
+                }
+            }
+        }
+
+        self.transcript.set_prompt(prompt);
+        self.reasoning.clear();
+        self.tools.clear();
+        self.transcript.clear_response();
+    }
+
+    /// Flush the reasoning partial buffer (if any) into a completed
+    /// reasoning line.
+    pub fn flush_reasoning(&mut self) {
+        self.reasoning.flush();
+    }
+
+    /// Append reasoning text (may be a partial chunk).
+    pub fn push_reasoning_text(&mut self, text: &str) {
+        self.reasoning.push_text(text);
+    }
+
+    /// Record a tool call.
+    pub fn push_tool(&mut self, name: &str) {
+        self.tools.push(name);
+    }
+
+    /// Append streaming response text.
+    pub fn push_response(&mut self, text: &str) {
+        self.transcript.push_response(text);
+    }
+
+    /// Replace the entire response text (used for Done reconciliation).
+    pub fn replace_response(&mut self, text: &str) {
+        self.transcript.replace_response(text);
+    }
+
+    /// Reconcile the current turn's streamed response against the
+    /// authoritative full text from `TurnComplete`.
+    pub fn reconcile_response(&mut self, text: &str) {
+        self.transcript.reconcile_response(text);
+    }
+
+    /// Whether the current turn has any content.
+    pub fn has_current_turn(&self) -> bool {
+        self.transcript.has_prompt()
+    }
+
+    /// Whether the current turn's streaming response is empty.
+    pub fn response_is_empty(&self) -> bool {
+        self.transcript.response_is_empty()
+    }
+
+    /// Discard the current turn without committing it to the transcript.
+    pub fn clear_current_turn(&mut self) {
+        self.transcript.clear_prompt();
+        self.reasoning.clear();
+        self.tools.clear();
+        self.transcript.clear_response();
+    }
+
+    /// Clear the transcript/scrollback.
+    pub fn clear_transcript(&mut self) {
+        self.transcript.clear_scrollable();
+    }
+
+    /// Append a system message to the transcript with default style and
+    /// blank-line padding from the previous entry.
+    pub fn push_transcript_line(&mut self, line: String) {
+        self.transcript.push_transcript_line(line);
     }
 }
 
@@ -304,11 +513,28 @@ impl<B: Backend> Drop for LiveArea<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::App;
     use ratatui::{backend::TestBackend, buffer::Buffer, style::Style, text::Line as TuiLine};
 
     /// Helper: write a single text line at a given row.
     fn put_line(buf: &mut Buffer, y: u16, text: &str) {
         buf.set_string(0, y, text, Style::default());
+    }
+
+    /// Dump the backend's visible buffer as trimmed rows.
+    fn dump_buffer(buf: &Buffer) -> String {
+        let area = buf.area;
+        let mut rows: Vec<String> = Vec::new();
+        for y in 0..area.height {
+            let row: String = (0..area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>();
+            rows.push(row.trim_end().to_string());
+        }
+        while rows.last().is_some_and(|r| r.is_empty()) {
+            rows.pop();
+        }
+        rows.join("\n")
     }
 
     /// Returns the backend's internal scrollback buffer as trimmed
@@ -502,5 +728,114 @@ mod tests {
         let mut expected = Buffer::empty(area);
         expected.set_string(0, 2, "ef", Style::default());
         assert_eq!(buf, expected);
+    }
+
+    // ── compose() frame tests ────────────────────────────────────
+
+    #[test]
+    fn compose_chat_response_visible_after_done() {
+        let cols: u16 = 80;
+        let rows: u16 = 24;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.push_transcript_line(
+            "gremlins tui — type /help for commands, Ctrl+C to exit".to_string(),
+        );
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking...");
+        live_area.flush_reasoning();
+        live_area.push_reasoning_text("The user just said hi.");
+        live_area.flush_reasoning();
+        live_area.push_tool("Done");
+        live_area.replace_response("Greeted the user; no task was requested yet.");
+
+        live_area.compose(&app).unwrap();
+
+        // In a 24-row terminal, this content should not overflow.
+        assert!(live_area.scrollback().is_empty());
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("Greeted the user"),
+            "Response text should be visible.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("> hi"),
+            "Prompt should be visible.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn compose_multi_frame_streaming_response_visible_after_done() {
+        let cols: u16 = 80;
+        let rows: u16 = 24;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.push_transcript_line(
+            "gremlins tui — type /help for commands, Ctrl+C to exit".to_string(),
+        );
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking...");
+        live_area.flush_reasoning();
+        live_area.compose(&app).unwrap();
+
+        live_area.push_reasoning_text("The user just said hi.");
+        live_area.flush_reasoning();
+        live_area.compose(&app).unwrap();
+
+        live_area.push_reasoning_text("I should respond briefly.");
+        live_area.flush_reasoning();
+        live_area.push_tool("Done");
+        live_area.compose(&app).unwrap();
+
+        live_area.replace_response("Greeted the user; no task was requested yet.");
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("Greeted the user"),
+            "Response should be visible after Done.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("> hi"),
+            "Prompt should be visible.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn compose_short_viewport_reserves_bars_and_skips_overflow() {
+        let cols: u16 = 80;
+        let rows: u16 = 2;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+        live_area.push_transcript_line("some transcript line".to_string());
+        live_area.submit_prompt("hi".to_string());
+        live_area.replace_response("a response");
+
+        live_area.compose(&app).unwrap();
+
+        // With zero content rows, nothing can scroll into the terminal.
+        assert!(live_area.scrollback().is_empty());
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        // The two fixed bars must still be rendered even when the content
+        // area has zero height.
+        assert!(
+            visible.contains("gremlins tui"),
+            "Info bar should be visible.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains(">"),
+            "Input bar prompt should be visible.\nBuffer:\n{visible}"
+        );
     }
 }

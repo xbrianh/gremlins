@@ -14,7 +14,6 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 | `client.rs` | Persistent `DaemonClient`. Long-lived socket for request/response + unsolicited `DaemonEvent` broadcast. Also `follow_log()` on a dedicated connection. |
 | `commands.rs` | Slash-command dispatch. Returns `CommandResult` — the event loop handles each variant. |
 | `editor.rs` | Stub wired to `Ctrl+G`. Appends placeholder to transcript. |
-| `ui.rs` | Ratatui render. `render_livearea()` lays out bottom-up: info bar → input bar → tools → reasoning → scrollable; returns overflow lines for the caller to commit. |
 
 ## Architecture
 
@@ -28,7 +27,7 @@ run()
       ├─ client::connect() → DaemonClient + event_rx + raw_rx
       ├─ Initial "ls" snapshot → populates app.active_runs
       ├─ Crossterm event channel (poll 20ms → mpsc)
-      ├─ Per-frame: render_livearea() → commit overflow → live_area.draw()
+      ├─ Per-frame: live_area.compose(&app) → render widgets → commit overflow → draw
       ├─ tokio::select! over 8 channels:
       │    1. ct_rx        — crossterm events (keys, resize)
       │    2. event_rx     — DaemonEvent broadcasts
@@ -91,12 +90,19 @@ run()
 
 ## Rendering
 
-`ui::render_livearea()` splits the frame into 3 vertical constraints:
-1. `Min(0)` — content area (scrollable + reasoning + tools, allocated bottom-up within it)
-2. `Length(1)` — input bar: `> ` prompt + input text + block cursor (inverted space)
-3. `Length(1)` — info bar: gremlin count, project name, log-follow indicator, key hints
+`LiveArea::compose(&app)` reserves the bottom two rows for the fixed bars,
+then lays the content widgets out top-to-bottom in the remaining area:
+1. `Length(1)` — input bar: `> ` prompt + input text + block cursor (inverted space)
+2. `Length(1)` — info bar: gremlin count, project name, log-follow indicator, key hints
 
-The content area is subdivided bottom-up: tools → reasoning → scrollable. The scrollable budget is `content_height - reasoning_height - tools_height - fixed(prompt+response+separators)`. Overflow is computed via `ScrollableBuffer::overflow_split()`, drained, and returned as lines for `LiveArea::commit_scrollback()`.
+The content area (everything above the two reserved rows) is subdivided
+top-to-bottom: transcript → reasoning → tools. The transcript fills
+(`Min(0)`), while reasoning and tools report `Length` constraints from their
+visible line counts. The scrollable budget is `content_height -
+reasoning_height - tools_height - fixed(prompt+response+separators)`.
+Overflow is computed via `ScrollableBuffer::overflow_split()`, drained, and
+returned as lines for `LiveArea::commit_scrollback()`. When the content area
+has zero height, content widgets are skipped and no overflow is produced.
 
 ## Adding a New Slash Command
 

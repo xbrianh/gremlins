@@ -5,7 +5,6 @@ pub mod client;
 pub mod commands;
 pub mod editor;
 pub mod screen;
-pub mod ui;
 pub mod widgets;
 
 use std::collections::HashMap;
@@ -14,7 +13,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use ratatui::layout::Rect;
 use tokio::io::BufReader;
 use tokio::sync::mpsc;
 
@@ -24,7 +22,6 @@ use commands::{dispatch, CommandResult};
 use editor::open_editor;
 use gremlins::executor::socket;
 use screen::LiveArea;
-use ui::render_livearea;
 
 /// Abort the dedicated log-follow task for the single-gremlin overlay.
 fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
@@ -328,7 +325,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
         }
         Err(e) => {
             let msg = format!("error fetching initial state: {e}");
-            app.push_transcript_line(msg);
+            live_area.push_transcript_line(msg);
         }
     }
 
@@ -397,26 +394,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
     // ── Startup banner ────────────────────────────────────────────
     let banner = "gremlins tui — type /help for commands, Ctrl+C to exit";
-    app.push_transcript_line(banner.to_string());
+    live_area.push_transcript_line(banner.to_string());
 
     // ── Event loop ────────────────────────────────────────────────
     loop {
-        let gremlin_count = app.gremlin_count_str();
-        let project_name = app.project_name_str().to_string();
-        let (cols, rows) = live_area.size();
+        let (cols, _rows) = live_area.size();
         app.width = cols;
-        let area = Rect::new(0, 0, cols, rows);
-        let overflow = render_livearea(
-            live_area.curr_mut(),
-            area,
-            &mut app,
-            &gremlin_count,
-            &project_name,
-        );
-        if !overflow.is_empty() {
-            live_area.commit_scrollback(&overflow, cols)?;
-        }
-        live_area.draw(|_| {})?;
+        live_area.compose(&app)?;
 
         tokio::select! {
             // ── Crossterm events ──────────────────────────────
@@ -447,7 +431,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Char('g')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
-                            open_editor(&mut app);
+                            open_editor(live_area);
                         }
 
                         KeyCode::Esc => {
@@ -487,7 +471,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 });
                                 // Discard the current turn without
                                 // committing to history.
-                                app.clear_current_turn();
+                                live_area.clear_current_turn();
                                 app.active_request = false;
                                 active_turn = None;
                             }
@@ -600,18 +584,18 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         }
                                     }
                                     CommandResult::Lines(lines) => {
-                                        app.push_transcript_line(format!("> {input}"));
+                                        live_area.push_transcript_line(format!("> {input}"));
                                         for line in &lines {
-                                            app.push_transcript_line(line.clone());
+                                            live_area.push_transcript_line(line.clone());
                                         }
                                     }
                                     CommandResult::RestartChat => {
                                         // Clear current turn.
-                                        app.clear_current_turn();
+                                        live_area.clear_current_turn();
                                         // Clear the transcript/scrollback so the
                                         // UI no longer shows the old conversation
                                         // after the daemon has discarded it.
-                                        app.clear_transcript();
+                                        live_area.clear_transcript();
                                         // Cancel any in-flight turn on the daemon
                                         // (do not abort `chat_task` mid-write).
                                         if app.active_request {
@@ -701,32 +685,20 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 // Plain text — send to chat agent.
                                 if app.active_request {
                                     let msg = "a request is already in progress — wait for the response";
-                                    app.push_transcript_line(msg.to_string());
+                                    live_area.push_transcript_line(msg.to_string());
                                     continue;
                                 }
 
                                 // Start a new turn with the prompt.
-                                app.submit_prompt(input.clone());
+                                live_area.submit_prompt(input.clone());
 
                                 // Push initial "thinking..." line.
-                                app.push_reasoning_text("thinking...");
-                                app.flush_reasoning();
+                                live_area.push_reasoning_text("thinking...");
+                                live_area.flush_reasoning();
 
                                 // Force an immediate frame so "thinking..."
                                 // appears without waiting for the next event.
-                                let (cols, rows) = live_area.size();
-                                let area = Rect::new(0, 0, cols, rows);
-                                let overflow = render_livearea(
-                                    live_area.curr_mut(),
-                                    area,
-                                    &mut app,
-                                    &gremlin_count,
-                                    &project_name,
-                                );
-                                if !overflow.is_empty() {
-                                    live_area.commit_scrollback(&overflow, cols)?;
-                                }
-                                live_area.draw(|_| {})?;
+                                live_area.compose(&app)?;
 
                                 app.active_request = true;
                                 turn_gen += 1;
@@ -846,7 +818,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     gremlins::executor::DaemonEvent::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
-                            app.push_transcript_line(line.clone());
+                            live_area.push_transcript_line(line.clone());
                         }
                         if overlay_log_following.as_deref() == Some(&id) {
                             app.push_overlay_log_line(line);
@@ -917,7 +889,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown error");
                     let full = format!("error: {msg}");
-                    app.push_transcript_line(full);
+                    live_area.push_transcript_line(full);
                 }
             }
 
@@ -937,7 +909,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     Some("log_line") => {
                         if let Some(line) = raw.get("line").and_then(|v| v.as_str()) {
                             if app.following_log.is_some() {
-                                app.push_transcript_line(line.to_string());
+                                live_area.push_transcript_line(line.to_string());
                             }
                         }
                     }
@@ -972,7 +944,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             .unwrap_or("unknown error");
                         let full = format!("error: {msg}");
                         if app.following_log.is_some() {
-                            app.push_transcript_line(full.clone());
+                            live_area.push_transcript_line(full.clone());
                             app.following_log = None;
                         }
                     }
@@ -983,7 +955,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             // ── Socket-op results ─────────────────────────────
             Some(lines) = result_rx.recv() => {
                 for line in lines {
-                    app.push_transcript_line(line);
+                    live_area.push_transcript_line(line);
                 }
             }
 
@@ -1010,15 +982,15 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 match event {
                     ChatEvent::StreamChunk { text, .. } => {
                         log::debug!("StreamChunk len={}", text.len());
-                        app.push_response(&text);
+                        live_area.push_response(&text);
                     }
                     ChatEvent::ReasoningChunk { text, .. } => {
                         log::debug!("ReasoningChunk len={}", text.len());
-                        app.push_reasoning_text(&text);
+                        live_area.push_reasoning_text(&text);
                     }
                     ChatEvent::ToolResult { name, .. } => {
                         log::debug!("ToolResult name={name}");
-                        app.push_tool(&name);
+                        live_area.push_tool(&name);
                     }
                     ChatEvent::TurnComplete { text, tool_calls, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
@@ -1028,16 +1000,16 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // even when broadcast StreamChunk events were dropped due to
                         // channel lag. `response_text` accumulates across the agent
                         // loop, so only the current turn's trailing slice is repaired.
-                        app.reconcile_response(&text);
+                        live_area.reconcile_response(&text);
                         // Record tool calls so they appear in the transcript rather
                         // than being silently lost.
                         for tc in &tool_calls {
-                            app.push_tool(tc);
+                            live_area.push_tool(tc);
                         }
                     }
                     ChatEvent::Done { text, usage, id, .. } => {
                         log::debug!("Done text_len={} has_current_turn={}",
-                            text.len(), app.has_current_turn());
+                            text.len(), live_area.has_current_turn());
                         // Capture the gremlin id on the first turn so
                         // subsequent messages target the same chat gremlin.
                         // Do this before the has_current_turn skip so a failed
@@ -1045,7 +1017,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         if let Some(id) = id {
                             app.chat_id = Some(id);
                         }
-                        if !app.has_current_turn() {
+                        if !live_area.has_current_turn() {
                             log::debug!("Done SKIPPED — no current turn");
                             continue;
                         }
@@ -1054,9 +1026,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // streamed text (e.g. called Done without saying
                         // anything). Otherwise the StreamChunk text IS the
                         // response.
-                        if app.response_is_empty() && !text.is_empty() {
+                        if live_area.response_is_empty() && !text.is_empty() {
                             log::debug!("Done using summary (no streamed text)");
-                            app.replace_response(&text);
+                            live_area.replace_response(&text);
                         } else {
                             log::debug!("Done — keeping streamed response");
                         }
@@ -1081,7 +1053,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     "{} tokens · {pct}",
                                     prompt + completion
                                 );
-                                app.push_transcript_line(summary);
+                                live_area.push_transcript_line(summary);
                             }
                         }
 
@@ -1092,25 +1064,25 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         if let Some(id) = id {
                             app.chat_id = Some(id);
                         }
-                        if !app.has_current_turn() {
+                        if !live_area.has_current_turn() {
                             continue;
                         }
                         app.active_request = false;
                         active_turn = None;
                         let msg = format!("chat ended: {reason}");
-                        app.push_transcript_line(msg);
+                        live_area.push_transcript_line(msg);
                     }
                     ChatEvent::Error { message: msg, id, .. } => {
                         if let Some(id) = id {
                             app.chat_id = Some(id);
                         }
-                        if !app.has_current_turn() {
+                        if !live_area.has_current_turn() {
                             continue;
                         }
                         app.active_request = false;
                         active_turn = None;
                         let full = format!("chat error: {msg}");
-                        app.push_transcript_line(full);
+                        live_area.push_transcript_line(full);
                     }
                 }
             }

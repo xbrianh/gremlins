@@ -1,31 +1,12 @@
 use std::collections::HashMap;
 
-use ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-};
-
-use crate::tui::buffer::LineOrigin;
-use crate::tui::widgets::{
-    InfoBarWidget, InputBarWidget, ReasoningWidget, ToolsWidget, TranscriptWidget,
-};
-
 /// Application state for the TUI.
 ///
-/// Pure state, no I/O. Owned by the event loop and passed mutably to the
-/// renderer on each frame.
-///
-/// ## Transcript model
-///
-/// Completed turns are flattened into [`scrollable`](Self::scrollable). The
-/// current turn lives in separate fields ([`current_prompt`](Self::current_prompt),
-/// [`reasoning`](Self::reasoning), [`tools`](Self::tools),
-/// [`response_text`](Self::response_text)) and is rendered below the transcript.
-///
-/// Ephemeral regions (reasoning, tools) are bounded (max 5 visible rows each)
-/// and are never committed to terminal scrollback. Only
-/// [`scrollable`](Self::scrollable) and [`response_text`](Self::response_text)
-/// can overflow.
+/// Pure display state, no I/O and no widget ownership. Owned by the event
+/// loop and passed immutably to [`LiveArea::compose`](crate::tui::screen::LiveArea::compose)
+/// on each frame. The rendering widgets (transcript, reasoning, tools, input
+/// bar, info bar) live in `LiveArea`; `App` only carries the read-only state
+/// those widgets consume via their render context.
 pub struct App {
     /// Current text in the input bar.
     pub input: String,
@@ -47,19 +28,6 @@ pub struct App {
     pub input_history: Vec<String>,
     /// Cursor into `input_history`; `None` means editing a fresh line.
     pub history_cursor: Option<usize>,
-
-    // ── LiveArea widgets ──────────────────────────────────────────
-    //
-    /// Scrollable transcript (completed turns + current prompt + response).
-    pub(crate) transcript: TranscriptWidget,
-    /// Current-turn reasoning region (bounded to 5 visible rows).
-    pub(crate) reasoning: ReasoningWidget,
-    /// Current-turn active-tools region (bounded to 5 visible rows).
-    pub(crate) tools: ToolsWidget,
-    /// Input bar (stateless).
-    pub(crate) input_bar: InputBarWidget,
-    /// Info bar (stateless).
-    pub(crate) info_bar: InfoBarWidget,
     /// Terminal width cached for buffer trimming. Updated before each frame.
     pub width: u16,
 }
@@ -137,11 +105,6 @@ impl App {
             overlay: None,
             input_history: Vec::new(),
             history_cursor: None,
-            transcript: TranscriptWidget::new(),
-            reasoning: ReasoningWidget::new(),
-            tools: ToolsWidget::new(),
-            input_bar: InputBarWidget,
-            info_bar: InfoBarWidget,
             width: 80,
         }
     }
@@ -417,206 +380,5 @@ impl App {
                 None
             }
         }
-    }
-
-    // ── LiveArea region helpers ───────────────────────────────────
-
-    /// Flatten the current turn into the transcript and start a new turn
-    /// with the given prompt.
-    ///
-    /// The previous turn's prompt, reasoning, tools, and response are
-    /// flattened with blank-line padding and appended.  Only the tail of
-    /// each ephemeral buffer (the portion actually displayed) is preserved;
-    /// the head is permanently dropped.  All current-turn fields are then
-    /// cleared and the new prompt is set.
-    pub fn submit_prompt(&mut self, prompt: String) {
-        // Flatten the previous turn if there was one.
-        if let Some(prev_prompt) = self.transcript.take_prompt() {
-            let prompt_style = Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD);
-            let marker_style = Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD);
-
-            let width = self.width;
-
-            if !self.transcript.is_empty() {
-                self.transcript.push_separator();
-                self.transcript.push_separator();
-            }
-
-            // Prompt.
-            self.transcript.push_line(
-                Line::from(vec![
-                    Span::styled("> ", marker_style),
-                    Span::styled(prev_prompt, prompt_style),
-                ]),
-                LineOrigin::FlattenedPrompt,
-            );
-
-            // Reasoning — only the visible tail.
-            let reasoning_tail = self.reasoning.take_tail(width);
-            if !reasoning_tail.is_empty() {
-                self.transcript.push_separator();
-                for line in reasoning_tail {
-                    self.transcript
-                        .push_line(line, LineOrigin::FlattenedReasoning);
-                }
-            }
-
-            // Tools — only the visible tail.
-            let tools_tail = self.tools.take_tail(width);
-            if !tools_tail.is_empty() {
-                self.transcript.push_separator();
-                for line in tools_tail {
-                    self.transcript.push_line(line, LineOrigin::FlattenedTools);
-                }
-            }
-
-            // Response.
-            if !self.transcript.response_is_empty() {
-                self.transcript.push_separator();
-                let response_lines: Vec<String> = self
-                    .transcript
-                    .response_text()
-                    .lines()
-                    .map(|s| s.to_string())
-                    .collect();
-                for line_str in response_lines {
-                    self.transcript.push_line(
-                        Line::from(Span::styled(line_str, Style::default())),
-                        LineOrigin::FlattenedResponse,
-                    );
-                }
-            }
-        }
-
-        // Clear current-turn fields.
-        self.transcript.set_prompt(prompt);
-        self.reasoning.clear();
-        self.tools.clear();
-        self.transcript.clear_response();
-    }
-
-    /// Flush the reasoning partial buffer (if any) into a completed
-    /// reasoning line.
-    pub fn flush_reasoning(&mut self) {
-        self.reasoning.flush();
-    }
-
-    /// Append reasoning text (may be a partial chunk). Text is accumulated
-    /// and flushed to a reasoning line only when a newline is encountered.
-    pub fn push_reasoning_text(&mut self, text: &str) {
-        self.reasoning.push_text(text);
-    }
-
-    /// Record a tool call. Oldest entries are discarded once the region
-    /// exceeds its visible-row bound.
-    pub fn push_tool(&mut self, name: &str) {
-        self.tools.push(name);
-    }
-
-    /// Append streaming response text.
-    pub fn push_response(&mut self, text: &str) {
-        self.transcript.push_response(text);
-    }
-
-    /// Replace the entire response text (used for Done reconciliation).
-    pub fn replace_response(&mut self, text: &str) {
-        self.transcript.replace_response(text);
-    }
-
-    /// Reconcile the current turn's streamed response against the
-    /// authoritative full text from `TurnComplete`.
-    ///
-    /// `response_text` accumulates across the agent loop until the next
-    /// user prompt, so the authoritative text must only repair the current
-    /// turn's trailing slice. If the buffer already ends with the full text,
-    /// it is left untouched; if it ends with a prefix of the full text, the
-    /// truncated suffix is replaced; otherwise the buffer is empty and the
-    /// full text is appended.
-    pub fn reconcile_response(&mut self, text: &str) {
-        self.transcript.reconcile_response(text);
-    }
-
-    /// Whether the current turn has any content.
-    pub fn has_current_turn(&self) -> bool {
-        self.transcript.has_prompt()
-    }
-
-    /// Whether the current turn's streaming response is empty.
-    pub fn response_is_empty(&self) -> bool {
-        self.transcript.response_is_empty()
-    }
-
-    /// Discard the current turn without committing it to the transcript.
-    pub fn clear_current_turn(&mut self) {
-        self.transcript.clear_prompt();
-        self.reasoning.clear();
-        self.tools.clear();
-        self.transcript.clear_response();
-    }
-
-    /// Clear the transcript/scrollback.
-    pub fn clear_transcript(&mut self) {
-        self.transcript.clear_scrollable();
-    }
-
-    /// Append a system message to the transcript with default style and
-    /// blank-line padding from the previous entry.
-    pub fn push_transcript_line(&mut self, line: String) {
-        self.transcript.push_transcript_line(line);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reconcile_response_fills_dropped_suffix_without_touching_prior_turns() {
-        let mut app = App::new();
-        app.push_response("first turn\n");
-        app.push_response("second tur");
-
-        app.reconcile_response("second turn complete");
-
-        assert_eq!(
-            app.transcript.response_text(),
-            "first turn\nsecond turn complete"
-        );
-    }
-
-    #[test]
-    fn reconcile_response_keeps_complete_streamed_text() {
-        let mut app = App::new();
-        app.push_response("first turn\nsecond turn complete");
-
-        app.reconcile_response("second turn complete");
-
-        assert_eq!(
-            app.transcript.response_text(),
-            "first turn\nsecond turn complete"
-        );
-    }
-
-    #[test]
-    fn reconcile_response_appends_when_buffer_is_empty() {
-        let mut app = App::new();
-
-        app.reconcile_response("complete turn");
-
-        assert_eq!(app.transcript.response_text(), "complete turn");
-    }
-
-    #[test]
-    fn reconcile_response_ignores_empty_authoritative_text() {
-        let mut app = App::new();
-        app.push_response("streamed");
-
-        app.reconcile_response("");
-
-        assert_eq!(app.transcript.response_text(), "streamed");
     }
 }

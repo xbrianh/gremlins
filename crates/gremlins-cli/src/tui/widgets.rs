@@ -6,10 +6,11 @@
 //! [`LiveAreaWidget::height_constraint`]) and paint itself (via
 //! [`LiveAreaWidget::render`]).
 //!
-//! `render_livearea` iterates the widgets top-to-bottom, splits the screen
-//! by their height constraints, and collects any overflow lines returned by
-//! the transcript widget. Widgets never commit scrollback themselves — that
-//! remains the caller's responsibility.
+//! [`LiveArea::compose`](crate::tui::screen::LiveArea::compose) iterates the
+//! widgets top-to-bottom, splits the screen by their height constraints, and
+//! collects any overflow lines returned by the transcript widget. Widgets
+//! never commit scrollback themselves — that remains the caller's
+//! responsibility.
 
 use ratatui::{
     buffer::Buffer,
@@ -492,5 +493,56 @@ impl LiveAreaWidget for InfoBarWidget {
         paragraph.render(area, buf);
 
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_response_fills_dropped_suffix_without_touching_prior_turns() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_response("first turn\n");
+        transcript.push_response("second tur");
+
+        transcript.reconcile_response("second turn complete");
+
+        assert_eq!(
+            transcript.response_text(),
+            "first turn\nsecond turn complete"
+        );
+    }
+
+    #[test]
+    fn reconcile_response_keeps_complete_streamed_text() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_response("first turn\nsecond turn complete");
+
+        transcript.reconcile_response("second turn complete");
+
+        assert_eq!(
+            transcript.response_text(),
+            "first turn\nsecond turn complete"
+        );
+    }
+
+    #[test]
+    fn reconcile_response_appends_when_buffer_is_empty() {
+        let mut transcript = TranscriptWidget::new();
+
+        transcript.reconcile_response("complete turn");
+
+        assert_eq!(transcript.response_text(), "complete turn");
+    }
+
+    #[test]
+    fn reconcile_response_ignores_empty_authoritative_text() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_response("streamed");
+
+        transcript.reconcile_response("");
+
+        assert_eq!(transcript.response_text(), "streamed");
     }
 }
