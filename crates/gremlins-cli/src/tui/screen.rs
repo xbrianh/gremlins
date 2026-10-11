@@ -323,6 +323,7 @@ impl<B: Backend> LiveArea<B> {
                 LineOrigin::FlattenedPrompt,
             );
 
+            self.reasoning.flush();
             let reasoning_tail = self.reasoning.take_tail(width);
             if !reasoning_tail.is_empty() {
                 self.transcript.push_separator();
@@ -836,6 +837,67 @@ mod tests {
         assert!(
             visible.contains(">"),
             "Input bar prompt should be visible.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn submit_prompt_flushes_trailing_reasoning_partial() {
+        let cols: u16 = 80;
+        let rows: u16 = 24;
+        let mut live_area = new_live(cols, rows);
+
+        // First turn: reasoning ends WITHOUT a trailing newline, so the
+        // final fragment sits in `reasoning_partial`.
+        live_area.submit_prompt("first".to_string());
+        live_area.push_reasoning_text("thinking without a newline");
+
+        // Flatten the turn by submitting the next prompt. The trailing
+        // partial must be flushed into the transcript before `take_tail`.
+        live_area.submit_prompt("second".to_string());
+
+        // The flattened reasoning (with its two-space indent) must now be
+        // part of the scrollable transcript, visible in the rendered frame.
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("thinking without a newline"),
+            "Trailing reasoning fragment should be committed to the transcript.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn submit_prompt_newline_terminated_reasoning_unchanged() {
+        let cols: u16 = 80;
+        let rows: u16 = 24;
+        let mut live_area = new_live(cols, rows);
+
+        // Reasoning that already ends in a newline is fully flushed by
+        // `push_text`; `flush` must be a no-op and add no extra blank line.
+        live_area.submit_prompt("first".to_string());
+        live_area.push_reasoning_text("thinking with a newline\n");
+        live_area.submit_prompt("second".to_string());
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("thinking with a newline"),
+            "Newline-terminated reasoning should be committed.\nBuffer:\n{visible}"
+        );
+        // `flush` must be a no-op: exactly one committed reasoning line,
+        // with no duplicate and no extra blank row introduced.
+        let occurrences = visible
+            .lines()
+            .filter(|l| l.contains("thinking with a newline"))
+            .count();
+        assert_eq!(
+            occurrences, 1,
+            "Reasoning should be committed exactly once, no duplicate.\nBuffer:\n{visible}"
         );
     }
 }

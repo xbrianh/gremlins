@@ -219,30 +219,33 @@ impl LiveAreaWidget for TranscriptWidget {
         };
         let response_height = wrapped_height(&response_lines, width) as u16;
 
-        // Blank separators.
-        let sep_tp_est = if !self.scrollable.is_empty() && !prompt_lines.is_empty() {
-            1u16
-        } else {
-            0
-        };
+        // Blank separators. `sep_pr` (prompt/response) is independent of
+        // the drain; `sep_tp` (transcript/prompt) is decided against the
+        // *post-drain* transcript state, since that is what `render` emits.
         let sep_pr = if !prompt_lines.is_empty() && !response_lines.is_empty() {
             1u16
         } else {
             0
         };
 
-        // Fixed (non-transcript) scrollable height.
-        let fixed = prompt_height
-            .saturating_add(response_height)
-            .saturating_add(sep_tp_est)
-            .saturating_add(sep_pr);
-
         // ── Overflow: split the FIFO head ─────────────────────────
-        let transcript_available = area.height.saturating_sub(fixed);
-        let (split_idx, _overflow_rows) =
-            self.scrollable.overflow_split(transcript_available, width);
+        //
+        // The separator between transcript and prompt is present exactly
+        // when both the post-drain transcript and the prompt are non-empty.
+        // We cannot know the post-drain emptiness before draining, so we
+        // drain in two steps: first without reserving the separator row,
+        // then, if the transcript survives, reserve the separator row and
+        // drain any additional overflow it forces. The single `sep_tp`
+        // decision below is then used for both the reserved height and the
+        // rendered line list, so they always agree.
+        let avail = area.height.saturating_sub(
+            prompt_height
+                .saturating_add(response_height)
+                .saturating_add(sep_pr),
+        );
+        let (split_idx, _overflow_rows) = self.scrollable.overflow_split(avail, width);
 
-        let overflow_lines: Vec<Line<'static>> = if split_idx > 0 {
+        let mut overflow_lines: Vec<Line<'static>> = if split_idx > 0 {
             let head: Vec<Line<'static>> = self.scrollable.visible_lines()[..split_idx].to_vec();
             self.scrollable.drain_head(split_idx);
             head
@@ -250,13 +253,31 @@ impl LiveAreaWidget for TranscriptWidget {
             Vec::new()
         };
 
+        // If the transcript survived the first drain and a prompt is
+        // present, reserve one row for the separator and drain the extra
+        // overflow it forces. The separator is emitted only when the
+        // transcript survives that reservation; if reserving the separator
+        // would empty the FIFO, we skip it and keep the first split's
+        // suffix with no separator (otherwise a row is reserved but never
+        // emitted, producing a stray blank / dropped fitting line).
+        let mut sep_tp = 0u16;
+        if !self.scrollable.is_empty() && !prompt_lines.is_empty() {
+            let (extra_idx, _) = self
+                .scrollable
+                .overflow_split(avail.saturating_sub(1), width);
+            if extra_idx < self.scrollable.visible_lines().len() {
+                if extra_idx > 0 {
+                    let head: Vec<Line<'static>> =
+                        self.scrollable.visible_lines()[..extra_idx].to_vec();
+                    self.scrollable.drain_head(extra_idx);
+                    overflow_lines.extend(head);
+                }
+                sep_tp = 1;
+            }
+        }
+
         // ── Build combined scrollable lines (post-drain) ──────────
         let mut combined: Vec<Line<'static>> = self.scrollable.visible_lines().to_vec();
-        let sep_tp = if !combined.is_empty() && !prompt_lines.is_empty() {
-            1u16
-        } else {
-            0
-        };
         if sep_tp > 0 {
             combined.push(Line::from(""));
         }
@@ -544,5 +565,87 @@ mod tests {
         transcript.reconcile_response("");
 
         assert_eq!(transcript.response_text(), "streamed");
+    }
+
+    // ── separator accounting ────────────────────────────────────
+
+    /// Render a transcript into a buffer and return trimmed rows.
+    fn render_rows(transcript: &mut TranscriptWidget, cols: u16, rows: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, cols, rows);
+        let mut buf = Buffer::empty(area);
+        let ctx = RenderContext {
+            input: "",
+            following_log: None,
+            gremlin_count: "0",
+            project_name: "",
+        };
+        transcript.render(area, &mut buf, &ctx);
+        (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn separator_accounting_no_stray_blank_when_drain_empties_fifo() {
+        // A transcript whose content overflows a tight area such that the
+        // extra drain would empty the FIFO. The fitting transcript line
+        // must be kept, the prompt/response must not be clipped, and no
+        // stray blank line may appear.
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_line(
+            Line::from(Span::raw("transcript line one")),
+            LineOrigin::Transcript,
+        );
+        transcript.push_line(
+            Line::from(Span::raw("transcript line two")),
+            LineOrigin::Transcript,
+        );
+        transcript.set_prompt("hi".to_string());
+        transcript.replace_response("resp");
+
+        // 4 rows: transcript (1) + prompt (1) + sep_pr (1) + response (1).
+        // The separator between transcript and prompt must be omitted
+        // because reserving it would empty the FIFO.
+        let rows = render_rows(&mut transcript, 80, 4);
+
+        assert_eq!(
+            rows,
+            vec![
+                "transcript line two".to_string(),
+                "> hi".to_string(),
+                String::new(),
+                "resp".to_string(),
+            ],
+            "Expected the fitting transcript line kept with no stray blank"
+        );
+    }
+
+    #[test]
+    fn separator_accounting_reserves_separator_when_transcript_survives() {
+        // When the transcript survives the drain, the separator between
+        // transcript and prompt must be present and nothing clipped.
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_line(
+            Line::from(Span::raw("transcript line one")),
+            LineOrigin::Transcript,
+        );
+        transcript.set_prompt("hi".to_string());
+        transcript.replace_response("resp");
+
+        // 5 rows: transcript (1) + sep_tp (1) + prompt (1) + sep_pr (1)
+        // + response (1) = 5, fits exactly.
+        let rows = render_rows(&mut transcript, 80, 5);
+
+        assert!(rows[0].contains("transcript line one"), "{rows:?}");
+        assert!(rows[1].is_empty(), "separator should be blank, {rows:?}");
+        assert!(rows[2].contains("> hi"), "{rows:?}");
+        assert!(rows[3].is_empty(), "separator should be blank, {rows:?}");
+        assert!(rows[4].contains("resp"), "{rows:?}");
     }
 }
