@@ -647,7 +647,7 @@ impl LiveAreaWidget for ReasoningWidget {
     }
 
     fn max_height(&self, _ctx: &RenderContext) -> u16 {
-        5
+        u16::MAX
     }
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
@@ -762,7 +762,7 @@ impl LiveAreaWidget for ToolEventsWidget {
     }
 
     fn max_height(&self, _ctx: &RenderContext) -> u16 {
-        5
+        u16::MAX
     }
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
@@ -1746,7 +1746,7 @@ mod tests {
         assert_eq!(reasoning.desired_rows(80), 10);
         assert_eq!(reasoning.min_height(80, &input_ctx("", 0)), 5);
         assert!(reasoning.flexible(&input_ctx("", 0)));
-        assert_eq!(reasoning.max_height(&input_ctx("", 0)), 5);
+        assert_eq!(reasoning.max_height(&input_ctx("", 0)), u16::MAX);
 
         let mut tools = ToolEventsWidget::new();
         for i in 0..10 {
@@ -1755,7 +1755,7 @@ mod tests {
         assert_eq!(tools.desired_rows(80), 10);
         assert_eq!(tools.min_height(80, &input_ctx("", 0)), 5);
         assert!(tools.flexible(&input_ctx("", 0)));
-        assert_eq!(tools.max_height(&input_ctx("", 0)), 5);
+        assert_eq!(tools.max_height(&input_ctx("", 0)), u16::MAX);
     }
 
     #[test]

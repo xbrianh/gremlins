@@ -1377,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_capped_at_five_rows() {
+    fn reasoning_fills_available_rows_beyond_five() {
         let cols: u16 = 80;
         let rows: u16 = 24;
         let mut live_area = new_live(cols, rows);
@@ -1386,8 +1386,8 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
-        // 8 reasoning lines: the widget's `max_height` caps it at 5 rows, so
-        // only the tail five lines are visible and the head is trimmed.
+        // 8 reasoning lines should all be visible when no other widget
+        // contests the space.
         for i in 0..8 {
             live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
         }
@@ -1395,22 +1395,16 @@ mod tests {
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
-        for i in 3..8 {
+        for i in 0..8 {
             assert!(
                 visible.contains(&format!("reasoning line {i}")),
-                "reasoning line {i} should be visible (5-row cap keeps the tail).\nBuffer:\n{visible}"
-            );
-        }
-        for i in 0..3 {
-            assert!(
-                !visible.contains(&format!("reasoning line {i}")),
-                "reasoning line {i} should be trimmed (5-row cap).\nBuffer:\n{visible}"
+                "reasoning line {i} should be visible (no 5-row cap).\nBuffer:\n{visible}"
             );
         }
     }
 
     #[test]
-    fn response_wins_and_shrinks_reasoning_and_tools_to_five_rows() {
+    fn response_wins_and_shrinks_reasoning_and_tools() {
         let cols: u16 = 80;
         let rows: u16 = 12;
         let mut live_area = new_live(cols, rows);
@@ -1440,8 +1434,8 @@ mod tests {
             visible.contains("response line 0"),
             "response should be visible.\nBuffer:\n{visible}"
         );
-        // Reasoning shrinks toward its five-row floor, keeping its tail and
-        // trimming its head.
+        // Reasoning (priority 5) shrinks before the response (priority 10),
+        // keeping its tail and trimming its head.
         assert!(
             visible.contains("reasoning line 9"),
             "reasoning should keep its tail.\nBuffer:\n{visible}"
