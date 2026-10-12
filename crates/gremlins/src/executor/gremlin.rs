@@ -1259,11 +1259,13 @@ impl Gremlin {
 
     /// The framework substitution variables for a stage.
     pub fn framework_subs(&self, stage_name: &str) -> HashMap<String, String> {
-        framework_subs(
+        let mut subs = framework_subs(
             stage_name,
             &self.cwd().to_string_lossy(),
             self.client.model(),
-        )
+        );
+        subs.insert("kind".to_string(), self.state.read_str("kind"));
+        subs
     }
 }
 

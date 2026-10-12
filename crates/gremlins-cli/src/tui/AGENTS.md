@@ -7,8 +7,8 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 | File | Role |
 |------|------|
 | `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, debug-session plumbing (`DebugEvent`, `start_debug_session`), `format_socket_response()`. |
-| `app.rs` | Pure state (`App`). Active runs, conversation history, overlay mode marker, input history. No I/O, no widget ownership. |
-| `buffer.rs` | Display buffer: `ScrollableBuffer` (single styled FIFO that overflows into terminal scrollback, with a pinned turn boundary). Plus `wrapped_height` helpers and `LineOrigin` provenance tags. |
+| `app.rs` | Pure state (`App`). Active runs, chat id, overlay mode marker, input history, cursor state. No I/O, no widget ownership. |
+| `buffer.rs` | Display buffer: `LineBuffer` (styled FIFO, with drain-head and wrapping helpers). Plus `wrapped_height` and `line_wrapped_height` utilities. |
 | `markdown.rs` | Markdown-to-ratatui renderer. Turns a markdown string into `Vec<Line<'static>>` of styled spans via `pulldown-cmark` (tables, strikethrough, task lists). |
 | `screen.rs` | `LiveArea` — owns the main terminal screen, the dynamic widget stack (`Vec<Box<dyn LiveAreaWidget>>`), diff-driven double buffering, `commit_scrollback()` (renders overflow + `scroll_region_up`), raw-mode/cursor lifecycle. |
 | `widgets.rs` | `LiveAreaWidget` trait + concrete widgets: transcript (the single styled FIFO + current-turn draft state), input bar, info bar, and the three overlay widgets (watch table, watch single, debug). |

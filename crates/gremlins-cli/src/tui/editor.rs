@@ -195,6 +195,12 @@ fn run_editor_process(input: &str) -> io::Result<Option<String>> {
             format!("failed to parse editor command: {editor}"),
         )
     })?;
+    if parts.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("editor resolved to empty command: {editor}"),
+        ));
+    }
     let program = parts.remove(0);
     let args = parts;
 

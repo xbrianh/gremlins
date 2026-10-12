@@ -536,10 +536,15 @@ impl<B: Backend> LiveArea<B> {
     /// Unpin the current turn and clear its draft state. The content is
     /// already in the FIFO.
     pub fn finish_turn(&mut self) {
-        // Flush the reasoning widget's trailing partial so the final
-        // fragment is committed before the widget is cleared on the next
-        // prompt.
-        self.reasoning_mut().flush_reasoning();
+        // Drain reasoning and tool-event content into the transcript so
+        // they survive into the next frame and are preserved when the
+        // next prompt clears the live widgets.
+        for line in self.reasoning_mut().take_lines() {
+            self.transcript_mut().push_styled_line(line);
+        }
+        for line in self.tool_events_mut().take_lines() {
+            self.transcript_mut().push_styled_line(line);
+        }
         self.transcript_mut().finish_turn();
     }
 

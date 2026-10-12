@@ -666,7 +666,7 @@ resumable, and cheap to reason about, in roughly that order.
 
 ## 8. TUI
 
-The TUI is a single fullscreen viewport (alternate screen) composed from a
+The TUI is a single fullscreen viewport (main screen, no alternate screen) composed from a
 **vertical stack of widgets**. Each widget owns its own rendering buffers,
 reports its desired height, and paints itself into the region the layout pass
 assigns it. The screen is not a monolithic render function; it is a
@@ -911,7 +911,7 @@ screen space, and the layout adjusts.
 
 ### 8.4 Visual states
 
-Each diagram shows the terminal's alternate screen — the `╔═══╗` box is the
+Each diagram shows the terminal's main screen — the `╔═══╗` box is the
 **viewport** (what's visible on screen). Content above the `─── viewport top ───`
 marker has scrolled off into the terminal's scrollback buffer (accessible via
 tmux copy-mode, terminal scrollback, etc.). The input and info bars are always

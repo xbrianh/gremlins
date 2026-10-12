@@ -152,10 +152,11 @@ pub async fn prepare_agent(
 
     let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
 
-    // Read the hidden sandbox opt-out. It is honored only for the chat gremlin
-    // (the sole stage that sets it); any other stage that smuggles the key in
-    // is ignored, so containment cannot be disabled by arbitrary stages.
-    let allow_all = (name == "chat")
+    // Read the hidden sandbox opt-out. It is honored only when the
+    // gremlin's kind is "chat" (set programmatically by the chat builder,
+    // never by user YAML), so containment cannot be disabled by arbitrary
+    // user-defined stages.
+    let allow_all = framework_subs.get("kind").map(|s| s.as_str()) == Some("chat")
         && agent
             .options
             .get(SANDBOX_ALLOW_ALL_KEY)

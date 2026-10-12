@@ -29,9 +29,10 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
     }
 
     let body = &trimmed[1..]; // strip the leading '/'
-    let mut parts = body.split_whitespace();
-    let cmd = parts.next().unwrap_or("");
-    let args: Vec<&str> = parts.collect();
+    // Split with shlex to preserve quoted arguments containing spaces.
+    let parts = shlex::split(body).unwrap_or_else(|| body.split_whitespace().map(String::from).collect());
+    let cmd = parts.first().map(|s| s.as_str()).unwrap_or("");
+    let args: Vec<&str> = parts.iter().skip(1).map(|s| s.as_str()).collect();
 
     match cmd {
         "chat" => Some(CommandResult::Lines(vec![

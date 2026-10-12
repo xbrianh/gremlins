@@ -999,9 +999,19 @@ async fn run_agent_loop_core(
                 // Capture the full message history (prior turns + this final
                 // user prompt + assistant message) so the chat gremlin can
                 // persist complete model context between stages.
+                //
+                // Push a tool_result for Done so the next turn's history
+                // starts from a valid round — OpenAI and Anthropic require
+                // every assistant tool-use message be paired with a matching
+                // tool-result message.
                 let mut messages = history.clone();
                 messages.push(next_prompt.clone());
                 messages.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                messages.push(Message::tool_result(
+                    done_tc.id.clone(),
+                    done_tc.function.name.clone(),
+                    "Done accepted.",
+                ));
                 return Ok(completed_run(
                     Some(result_text),
                     Some(summary),

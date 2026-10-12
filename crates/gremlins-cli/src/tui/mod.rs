@@ -513,7 +513,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     Err(_) => break,
                 }
             }
-            dead.notify_waiters();
+            dead.notify_one();
         });
     }
 
@@ -583,6 +583,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if app.overlay.as_ref().is_some_and(Overlay::has_prompt) {
                                 app.overlay = None;
                                 live_area.pop_overlay();
+                                // Drop the debug socket so the daemon sees EOF.
+                                if let Some(handle) = debug_task.take() {
+                                    handle.abort();
+                                }
+                                debug_cmd_tx = None;
+                                debug_evt_rx = None;
                                 continue;
                             }
                             if app.input.is_empty() {
@@ -1269,12 +1275,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         log::debug!("ReasoningChunk len={}", text.len());
                         live_area.push_reasoning_text(&text);
                     }
-                    ChatEvent::ToolResult { name, .. } => {
-                        // The bare tool name is intentionally not rendered here;
-                        // `ChatEvent::TurnComplete` is the sole source of rich
-                        // tool-event lines. The event is still matched (and logged)
-                        // because other consumers rely on its payload.
-                        log::debug!("ToolResult name={name}");
+                    ChatEvent::ToolResult { name, output, .. } => {
+                        if !output.is_empty() {
+                            log::debug!("ToolResult name={name} output_len={}", output.len());
+                            live_area.push_tool(&format!("{name}: {}", &output));
+                        } else {
+                            log::debug!("ToolResult name={name}");
+                        }
                     }
                     ChatEvent::TurnComplete { text, tool_calls, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);

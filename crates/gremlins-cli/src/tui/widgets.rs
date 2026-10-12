@@ -197,6 +197,13 @@ impl TranscriptWidget {
     pub fn push_transcript_line(&mut self, line: String) {
         self.invalidate_desired_cache();
         let styled = Line::from(Span::styled(line, Style::default()));
+        self.push_styled_line(styled);
+    }
+
+    /// Push a pre-styled line into the FIFO with the same insertion logic
+    /// as `push_transcript_line`.
+    pub fn push_styled_line(&mut self, styled: Line<'static>) {
+        self.invalidate_desired_cache();
         match self.turn_start {
             Some(t) => {
                 let mut inserted = 0usize;
@@ -206,8 +213,6 @@ impl TranscriptWidget {
                     self.scrollable.insert(t, Line::from(""));
                     inserted += 1;
                 }
-                // Shift the markers by the number of lines inserted before
-                // the pinned turn.
                 self.turn_start = Some(t + inserted);
                 if let Some(r) = &mut self.response_start {
                     *r += inserted;
@@ -564,6 +569,15 @@ impl ReasoningWidget {
         self.partial.clear();
     }
 
+    /// Drain all completed lines and the trailing partial (if any) into
+    /// a `Vec` of styled lines, then clear the buffer.
+    pub fn take_lines(&mut self) -> Vec<Line<'static>> {
+        self.flush_reasoning();
+        let lines = self.lines.visible_lines().to_vec();
+        self.clear();
+        lines
+    }
+
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty() && self.partial.is_empty()
     }
@@ -684,6 +698,13 @@ impl ToolEventsWidget {
     /// Reset the live region for a new turn.
     pub fn clear(&mut self) {
         self.lines.clear();
+    }
+
+    /// Drain all styled tool lines and clear the buffer.
+    pub fn take_lines(&mut self) -> Vec<Line<'static>> {
+        let lines = self.lines.visible_lines().to_vec();
+        self.clear();
+        lines
     }
 
     pub fn is_empty(&self) -> bool {

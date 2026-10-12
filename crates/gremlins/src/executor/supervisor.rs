@@ -399,23 +399,15 @@ async fn handle_connection(
     // half or linger waiting for broadcasts after the client is gone.
     event_handle.abort();
 
-    // Mark the connection abandoned and cancel the in-flight turn before
-    // the connection-scoped cleanup removes its gremlin. Holding the lock
-    // here closes the race where a turn finishes and re-inserts the gremlin
-    // while cleanup is running: the turn re-inserts under the same lock and
-    // observes `abandoned`/`ids` atomically.
-    let owned_ids = {
-        let mut state = chat_state.lock().await;
-        state.abandoned = true;
-        if let Some(cur) = state.current.take() {
-            cur.cancel.cancel();
-        }
-        state.ids.drain().collect::<Vec<_>>()
-    };
-
-    // The connection is gone: shut down every chat gremlin it owned.
-    for id in owned_ids {
-        cleanup_chat_gremlin(&id).await;
+    // Mark the connection abandoned and cancel the in-flight turn.
+    // Chat gremlins outlive any single socket connection, so the
+    // owning connection just abandons its ids — the gremlins
+    // themselves stay live for the next reconnection.
+    // Cleanup only happens on explicit `stop`.
+    let mut state = chat_state.lock().await;
+    state.abandoned = true;
+    if let Some(cur) = state.current.take() {
+        cur.cancel.cancel();
     }
 
     // After cleanup the run map may have drained; let shutdown observe it
@@ -1968,7 +1960,7 @@ async fn handle_chat(
     // 5. Take the gremlin out of the map, install this turn's definition,
     //    stream channel, and a fresh per-turn cancel token, then drop the
     //    global lock before running so other chats are not serialized.
-    let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel::<InteractiveEvent>();
+    let (stream_tx, stream_rx) = tokio::sync::mpsc::channel::<InteractiveEvent>(256);
     let turn_cancel = CancelToken::new();
     let mut gremlin = {
         let mut gremlins = chat_gremlins().lock().await;
@@ -2057,6 +2049,14 @@ async fn reinsert_chat_gremlin(
         drop(gremlin);
         return false;
     }
+    // Guard against resurrection: if the gremlin was stopped (via `stop`
+    // from any connection), the run-map entry is gone and we must not
+    // re-insert. The owning connection's `ids` still contains the id at
+    // this point, so the check above is not sufficient.
+    if !get_run_map().lock().unwrap().contains_key(id) {
+        drop(gremlin);
+        return false;
+    }
     chat_gremlins().lock().await.insert(id.to_string(), gremlin);
     true
 }
@@ -2091,7 +2091,7 @@ async fn run_chat_turn(
     ctx: TurnCtx,
     stage: crate::definition::ExecutorStage,
     mut gremlin: Gremlin,
-    mut stream_rx: tokio::sync::mpsc::UnboundedReceiver<InteractiveEvent>,
+    mut stream_rx: tokio::sync::mpsc::Receiver<InteractiveEvent>,
     writer: SharedWriter,
 ) {
     let id = ctx.id;
@@ -2236,7 +2236,12 @@ async fn handle_cancel_chat(
         None => false,
     };
     if matches {
-        if let Some(cur) = state.current.take() {
+        // Cancel the token but leave `current` installed — its `done`
+        // `Notify` is what `handle_chat` waits on when the gremlin is
+        // temporarily out of `CHAT_GREMLINS`. `run_chat_turn::finish`
+        // clears `current` once the turn has completed and re-inserted
+        // (or dropped) the gremlin.
+        if let Some(cur) = &state.current {
             cur.cancel.cancel();
         }
     }
@@ -2248,6 +2253,7 @@ async fn handle_cancel_chat(
 /// Shut down a chat gremlin using the same cleanup sequence as a `stop`
 /// op: remove the run-map entry, write terminal state, reap the client,
 /// drop the persistent gremlin, and emit `RunStopped`.
+#[allow(dead_code)]
 async fn cleanup_chat_gremlin(id: &str) {
     if validate_gremlin_id(id).is_err() {
         return;

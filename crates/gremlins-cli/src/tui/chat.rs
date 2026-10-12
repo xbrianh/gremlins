@@ -17,6 +17,7 @@ pub enum ChatEvent {
     },
     ToolResult {
         name: String,
+        output: String,
         turn: Option<String>,
     },
     TurnComplete {
@@ -74,6 +75,11 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
         Some("tool_result") => Some(ChatEvent::ToolResult {
             name: value
                 .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            output: value
+                .get("output")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
