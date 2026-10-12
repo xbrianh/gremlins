@@ -63,6 +63,16 @@ fn is_retryable(err: &ProviderError, opts: &LoopOpts<'_>) -> bool {
     matches!(classify(err.clone()), ClientError::ApiServerError { .. })
 }
 
+/// Sleep for the turn-level backoff, aborting early when the cancel token is
+/// set. Returns `true` if cancellation was observed (the caller must abandon
+/// the retry and unwind), `false` if the full backoff elapsed.
+async fn retry_backoff(cancel: &CancelToken, wait: f64) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs_f64(wait)) => false,
+        _ = cancel.cancelled() => true,
+    }
+}
+
 #[derive(Debug)]
 pub struct CancelToken {
     flag: AtomicBool,
@@ -683,7 +693,16 @@ async fn run_agent_loop_core(
                         prefix,
                         &format!("retry: transient error, backing off {wait}s"),
                     );
-                    tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                    if retry_backoff(cancel, wait).await {
+                        log::info!(
+                            "agent_loop: cancelled during retry backoff (label={})",
+                            prefix
+                        );
+                        send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                        return Err(ClientError::Runtime {
+                            message: "cancelled".into(),
+                        });
+                    }
                     continue;
                 }
                 stream_error = Some(e);
@@ -806,7 +825,16 @@ async fn run_agent_loop_core(
                         );
                         drop(response);
                         retry_turn = true;
-                        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                        if retry_backoff(cancel, wait).await {
+                            log::info!(
+                                "agent_loop: cancelled during retry backoff (label={})",
+                                prefix
+                            );
+                            send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                            return Err(ClientError::Runtime {
+                                message: "cancelled".into(),
+                            });
+                        }
                         break;
                     }
                     stream_error = Some(e);
@@ -2042,8 +2070,10 @@ mod tests {
         std::fs::write(&f, "content").unwrap();
 
         // Turn 0: Read tool call (completes).
-        // Turn 1 attempt 1: 429 mid-stream error (retried).
+        // Turn 1 attempt 1: text + tool call, then a 429 mid-stream error
+        // (retried — the partial text and tool call must be discarded).
         // Turn 1 attempt 2: Done (completes).
+        let side_effect = dir.join("side.txt");
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
             vec![
                 rig_core::test_utils::MockStreamEvent::tool_call(
@@ -2053,9 +2083,15 @@ mod tests {
                 ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
-            vec![rig_core::test_utils::MockStreamEvent::error(
-                "http://429: slow down",
-            )],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("partial"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "w1",
+                    "Write",
+                    serde_json::json!({ "file_path": side_effect.to_str().unwrap(), "content": "x" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::error("http://429: slow down"),
+            ],
             vec![
                 rig_core::test_utils::MockStreamEvent::text("recovered"),
                 rig_core::test_utils::MockStreamEvent::tool_call(
@@ -2085,6 +2121,13 @@ mod tests {
 
         assert_eq!(result.text_result.as_deref(), Some("recovered"));
 
+        // The aborted turn's partial text and tool call must be discarded:
+        // no duplicated text and no tool side effect from the 429 turn.
+        assert!(
+            !side_effect.exists(),
+            "aborted turn's Write must not have executed"
+        );
+
         // Three requests: turn 0, turn 1 (429), turn 1 retry (Done).
         assert_eq!(model.requests().len(), 3);
 
@@ -2101,6 +2144,51 @@ mod tests {
         // turn_num counts completed turns only: turn 0 + turn 1 = 2, not 3.
         let usage = result.token_usage.unwrap();
         assert_eq!(usage.turns, 2, "turn_num must exclude the retried attempt");
+    }
+
+    /// A cancel token set during the turn-level backoff must abandon the
+    /// retry immediately rather than sleeping out the full backoff window.
+    #[tokio::test(start_paused = true)]
+    async fn loop_429_backoff_observes_cancellation() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-429-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::error("http://429: slow down"),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "boom",
+            ctx.clone(),
+            cancel.clone(),
+            loop_opts(None),
+            None,
+        ));
+
+        // Let the loop reach the retry backoff, then cancel mid-sleep.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        cancel.cancel();
+        tokio::time::advance(Duration::from_millis(500)).await;
+
+        let result = handle.await.unwrap();
+        match result {
+            Err(ClientError::Runtime { message }) => {
+                assert_eq!(message, "cancelled");
+            }
+            other => panic!("expected cancellation, got: {other:?}"),
+        }
     }
 
     /// The `Done` summary must survive alongside streamed text: when the
