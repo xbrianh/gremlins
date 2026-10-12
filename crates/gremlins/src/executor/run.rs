@@ -383,7 +383,9 @@ async fn run_agent(
                 }
             },
             Err(e) => {
-                if e.downcast_ref::<crate::executor::state::MissingArtifact>().is_some() {
+                if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                    .is_some()
+                {
                     None // First turn — no artifact yet
                 } else {
                     return Err(RunError::Message(format!(

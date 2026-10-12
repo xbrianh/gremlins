@@ -548,8 +548,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut active_turn: Option<String> = None;
     // Chat IDs explicitly destroyed by /clear — terminal events from
     // these sessions are stale and must not restore them.
-    let mut cleared_chat_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut cleared_chat_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
     // ── Debug session state ────────────────────────────────────────
