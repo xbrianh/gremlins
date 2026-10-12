@@ -1412,9 +1412,9 @@ pub(crate) fn format_tool_call(tc: &ToolCall) -> String {
             .and_then(|v| v.as_str())
             .map(|s| format!("url={s:?}")),
         "Task" => args
-            .get("description")
+            .get("kind")
             .and_then(|v| v.as_str())
-            .map(|s| format!("description={s:?}")),
+            .map(|s| format!("kind={s:?}")),
         _ => None,
     };
 

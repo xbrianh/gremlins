@@ -2104,7 +2104,11 @@ message to finish. The summary parameter briefly describes what you accomplished
             "properties": {
                 "kind": {
                     "type": "string",
-                    "description": "The kind of task. Must be one of: Scout (codebase exploration), Implement (apply a planned change), Research (investigate a question), Verify (check correctness, run tests), Fix (targeted bugfix), Review (audit code for issues), Write (author docs or prose), Refactor (restructure existing code)"
+                    "enum": TaskKind::ALL
+                        .iter()
+                        .map(|kind| serde_json::Value::String(kind.as_str().to_string()))
+                        .collect::<Vec<_>>(),
+                    "description": "The kind of task to delegate."
                 },
                 "prompt": {
                     "type": "string",
