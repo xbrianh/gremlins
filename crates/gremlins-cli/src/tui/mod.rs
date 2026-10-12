@@ -6,6 +6,7 @@ pub mod commands;
 pub mod editor;
 pub mod markdown;
 pub mod screen;
+pub mod theme;
 pub mod widgets;
 
 use std::collections::HashMap;

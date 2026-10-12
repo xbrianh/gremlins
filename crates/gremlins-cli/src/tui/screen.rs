@@ -756,6 +756,7 @@ impl<B: Backend> Drop for LiveArea<B> {
 mod tests {
     use super::*;
     use crate::tui::app::{ActiveRun, App, Overlay};
+    use crate::tui::theme::DEFAULT_THEME;
     use ratatui::{backend::TestBackend, buffer::Buffer, style::Style, text::Line as TuiLine};
 
     /// Helper: write a single text line at a given row.
@@ -806,7 +807,7 @@ mod tests {
     fn plain(s: &str) -> TuiLine<'static> {
         TuiLine::from(ratatui::text::Span::styled(
             s.to_string(),
-            Style::default().fg(ratatui::style::Color::White),
+            Style::default().fg(DEFAULT_THEME.text),
         ))
     }
 
