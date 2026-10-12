@@ -73,6 +73,13 @@ pub trait LiveAreaWidget {
     /// given the current render context.
     fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint;
 
+    /// Bring this widget's buffer into its final state for the frame. This
+    /// is the single place content is mutated before measurement: the
+    /// transcript rebuilds a dirty response region into its FIFO, and the
+    /// reasoning widget flushes its trailing partial into a completed line.
+    /// Defaults to a no-op.
+    fn finalize(&mut self, _width: u16) {}
+
     /// Render this widget into `area`. This is paint-only: overflow is
     /// reported separately via [`take_overflow`](Self::take_overflow).
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext);
@@ -119,6 +126,13 @@ pub trait LiveAreaWidget {
     /// one widget ever does.
     fn overflow_priority(&self) -> i32 {
         0
+    }
+
+    /// The maximum height this widget may be allocated, as a first-class
+    /// layout constraint. Defaults to `u16::MAX` (uncapped). The input bar
+    /// caps at 5 rows and the watch table caps at half the content region.
+    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+        u16::MAX
     }
 }
 
@@ -361,32 +375,26 @@ impl TranscriptWidget {
     }
 
     /// Wrapped height of the pinned current turn (prompt plus response) at
-    /// the given width. Completed-turn history does not compete for space;
-    /// it continues to overflow to scrollback. A dirty response region is
-    /// accounted for by rendering the accumulator in place of the stale
-    /// FIFO tail.
+    /// the given width. This is the transcript's shrink floor: allocation
+    /// must never clip the in-progress turn that `take_overflow` refuses to
+    /// scroll away.
+    fn pinned_turn_height(&self, width: u16) -> u16 {
+        let start = self.turn_start.unwrap_or(self.scrollable.len());
+        let lines = self.scrollable.visible_lines();
+        let current: Vec<Line<'static>> = lines[start..].to_vec();
+        (wrapped_height(&current, width).min(u16::MAX as usize)) as u16
+    }
+
+    /// Wrapped height of the full FIFO (completed history plus the pinned
+    /// current turn) at the given width. Measurement happens on finalized
+    /// content, so no prediction of a dirty response region is needed.
     fn desired_height(&self, width: u16) -> u16 {
         if let Some((w, h)) = self.desired_cache.get() {
             if w == width {
                 return h;
             }
         }
-        let start = self.turn_start.unwrap_or(self.scrollable.len());
-        let lines = self.scrollable.visible_lines();
-        let mut current: Vec<Line<'static>> = lines[start..].to_vec();
-        if self.response_dirty {
-            if let Some(rs) = self.response_start {
-                // Drop any stale response already in the FIFO (from before
-                // the dirty rebuild), keeping only the prompt portion.
-                let keep = rs.saturating_sub(start);
-                current.truncate(keep);
-            }
-            current.extend(markdown::render(
-                &self.response_accumulator,
-                Style::default(),
-            ));
-        }
-        let h = (wrapped_height(&current, width).min(u16::MAX as usize)) as u16;
+        let h = (self.scrollable.wrapped_height(width).min(u16::MAX as usize)) as u16;
         self.desired_cache.set(Some((width, h)));
         h
     }
@@ -395,9 +403,6 @@ impl TranscriptWidget {
     /// `available_rows`. Lines at or after the pinned turn are never
     /// reported as overflow, keeping an in-progress turn on screen.
     pub fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
-        // Rebuild the response region first so the overflow split measures
-        // exactly what will be painted this frame.
-        self.rebuild_response();
         self.invalidate_desired_cache();
         let pinned = self.turn_start.unwrap_or(self.scrollable.len());
         let (_overflow_rows, overflow_lines): (_, Vec<_>) =
@@ -615,6 +620,12 @@ impl LiveAreaWidget for ReasoningWidget {
         self.desired_rows(width)
     }
 
+    fn finalize(&mut self, _width: u16) {
+        // Flush the trailing partial into a completed line so measurement
+        // and painting see the same finalized content.
+        self.flush_reasoning();
+    }
+
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
         // Keep the visible tail; the head is discarded, never committed to
         // terminal scrollback.
@@ -730,7 +741,6 @@ impl LiveAreaWidget for ToolEventsWidget {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        trim_to_tail(&mut self.lines, area.height, area.width);
         let tail = self.lines.visible_lines().to_vec();
         if !tail.is_empty() {
             Paragraph::new(tail)
@@ -750,14 +760,15 @@ impl LiveAreaWidget for TranscriptWidget {
         0
     }
 
-    fn height_constraint(&self, _width: u16, ctx: &RenderContext) -> Constraint {
+    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
         // When a blocking overlay is active, collapse to zero so the overlay
         // occupies the whole content region.
         if ctx.blocking_overlay() {
             return Constraint::Length(0);
         }
-        // Fills whatever remains after the fixed-height widgets below it.
-        Constraint::Min(0)
+        // Shrink floor: the pinned current turn must stay on screen. The
+        // transcript fills whatever remains above that floor.
+        Constraint::Min(self.pinned_turn_height(width))
     }
 
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
@@ -767,14 +778,15 @@ impl LiveAreaWidget for TranscriptWidget {
         self.desired_height(width)
     }
 
+    fn finalize(&mut self, _width: u16) {
+        self.rebuild_response();
+    }
+
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
         self.take_overflow(available_rows, width)
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        // Rebuild the response region if dirty.
-        self.rebuild_response();
-
         let tail = self.scrollable.visible_lines().to_vec();
         if !tail.is_empty() {
             let paragraph = Paragraph::new(tail).wrap(Wrap { trim: false });
@@ -798,11 +810,11 @@ impl InputBarWidget {
         Self { v_scroll: 0 }
     }
 
-    /// The wrapped rows of the input text (prompt + text) at `width`.
+    /// The wrapped rows of the input text (prompt + text) at `width`,
+    /// uncapped.
     pub fn wrapped_rows(&self, width: u16, input: &str) -> u16 {
         let text = Self::full_line(input);
-        let rows = wrapped_height(&[text], width).max(1);
-        rows.min(5) as u16
+        (wrapped_height(&[text], width).max(1).min(u16::MAX as usize)) as u16
     }
 
     /// Build the full styled line: prompt + input text.
@@ -951,7 +963,17 @@ impl LiveAreaWidget for InputBarWidget {
     }
 
     fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
-        Constraint::Length(self.wrapped_rows(width, ctx.input))
+        // Minimum: the wrapped content, capped at 5 rows. The bar is not
+        // shrunk below its visible text unless the viewport cannot fit it.
+        Constraint::Length(self.wrapped_rows(width, ctx.input).min(5))
+    }
+
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        self.wrapped_rows(width, ctx.input)
+    }
+
+    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+        5
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
@@ -1060,13 +1082,11 @@ impl WatchTableWidget {
         Self
     }
 
-    /// Desired height: the table header + one row per run + footer, capped
-    /// at half the content region so the transcript below stays visible.
+    /// Desired height: the table header + one row per run + footer.
     fn desired_height(&self, ctx: &RenderContext) -> u16 {
         let rows = ctx.active_runs.len().max(1) as u16;
-        // header + rows + footer, capped at half the content region.
-        let half = ctx.content_height / 2;
-        (rows + 2).min(half.max(1))
+        // header + rows + footer.
+        rows + 2
     }
 }
 
@@ -1086,7 +1106,19 @@ impl LiveAreaWidget for WatchTableWidget {
         if ctx.blocking_overlay() {
             return Constraint::Length(0);
         }
-        Constraint::Length(self.desired_height(ctx))
+        // Real minimum: just the header row. The half-region cap lives in
+        // `max_height`, so the minimum can never exceed it.
+        Constraint::Length(1)
+    }
+
+    fn desired_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
+        self.desired_height(ctx)
+    }
+
+    fn max_height(&self, ctx: &RenderContext) -> u16 {
+        // Cap at half the content region so the transcript below stays
+        // visible.
+        (ctx.content_height / 2).max(1)
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
@@ -1480,6 +1512,7 @@ mod tests {
         // In-progress turn: pinned at the prompt line.
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("resp");
+        LiveAreaWidget::finalize(&mut transcript, 80);
 
         // Only 1 row available; the pinned prompt/response must stay put.
         let overflow = transcript.take_overflow(1, 80);
@@ -1508,6 +1541,7 @@ mod tests {
         transcript.push_transcript_line("abcdefghijklmnopqrstuvwxyz".to_string());
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("resp");
+        LiveAreaWidget::finalize(&mut transcript, 10);
 
         // Width 10: the prior line wraps to 3 rows. With 1 available row,
         // overflow would want to drop the wrapped prior line, but the pinned
@@ -1531,14 +1565,16 @@ mod tests {
     }
 
     #[test]
-    fn take_overflow_rebuilds_dirty_response_before_measuring() {
+    fn finalize_rebuilds_dirty_response_before_measuring() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("short");
         // Reconcile to a much longer response, leaving the region dirty.
         transcript.reconcile_response("a much longer response body that wraps");
 
-        // Overflow must measure the rebuilt response, not the stale short one.
+        // Finalize rebuilds the dirty response into the FIFO before
+        // measurement/overflow.
+        LiveAreaWidget::finalize(&mut transcript, 10);
         let _ = transcript.take_overflow(2, 10);
         let text: Vec<String> = transcript
             .scrollable

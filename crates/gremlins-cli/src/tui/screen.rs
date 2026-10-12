@@ -247,21 +247,19 @@ impl<B: Backend> LiveArea<B> {
 
     /// Compose and paint a full frame.
     ///
-    /// Lays all widgets out top-to-bottom in a single priority-aware pass
-    /// with three phases:
+    /// Lays all widgets out top-to-bottom in a single ordered pipeline:
     ///
-    /// 1. **Desired pass.** Every widget is given its desired height (fixed
-    ///    widgets keep their fixed height; flexible widgets report how much
-    ///    they *want*).
-    /// 2. **Shrink pass.** When the sum of desired heights exceeds the
-    ///    viewport, widgets are shrunk in ascending `size_priority` order
-    ///    (lowest first) from their desired height down to their minimum
-    ///    height until the layout fits. If the sum of minimums still
-    ///    exceeds the viewport, shrinking continues below minimum in the
-    ///    same priority order.
-    /// 3. **Expand pass.** When the sum of desired heights is below the
-    ///    viewport, the remaining rows go to the highest-priority flexible
-    ///    widget (the transcript), so it keeps filling leftover space.
+    /// 1. **Finalize.** Every widget brings its buffer into its final state
+    ///    for the frame (the transcript rebuilds a dirty response region;
+    ///    the reasoning widget flushes its trailing partial).
+    /// 2. **Measure.** Each widget reports its desired height from finalized
+    ///    content, clamped to `[min, max]`.
+    /// 3. **Allocate.** Priority-aware shrink/expand passes fit the heights
+    ///    to the viewport, honoring each widget's `max_height`.
+    /// 4. **Set.** The allocated heights are recorded (including the bottom
+    ///    bars' reserved rows).
+    /// 5. **Flush & paint.** Overflow is drained and committed to scrollback,
+    ///    then each widget paints into its region.
     ///
     /// Only the transcript widget may return overflow; overlay widgets
     /// always return an empty overflow `Vec`. Collapsed (zero-height) chunks
@@ -282,20 +280,34 @@ impl<B: Backend> LiveArea<B> {
 
         let width = self.cols;
 
-        // ── Priority-aware layout pass ────────────────────────────
+        // ── Five-step layout pipeline ────────────────────────────
         //
-        // Three phases: desired, shrink, expand. Each widget reports a
-        // minimum height (via `height_constraint`) and a desired height
-        // (via `desired_height`, defaulting to the minimum).
+        // 1. Finalize every widget's buffer (single mutation point before
+        //    measurement).
+        // 2. Measure desired height from finalized content.
+        // 3. Allocate heights via priority-aware shrink/expand, honoring
+        //    each widget's `max_height`.
+        // 4. Set the allocated heights.
+        // 5. Drain overflow and commit scrollback, then paint.
+        for w in self.widgets.iter_mut() {
+            w.finalize(width);
+        }
+
         let n = self.widgets.len();
         let mut min_heights = vec![0u16; n];
         let mut desired_heights = vec![0u16; n];
+        let mut max_heights = vec![0u16; n];
 
         for (i, w) in self.widgets.iter().enumerate() {
             let c = w.height_constraint(width, &ctx);
             let (h, _flex) = constraint_height(c, self.rows);
-            min_heights[i] = h;
-            desired_heights[i] = w.desired_height(width, &ctx).max(h);
+            // Force the minimum into [0, max] so a widget whose minimum
+            // exceeds its cap cannot drive below-minimum shrinking.
+            min_heights[i] = h.min(w.max_height(&ctx));
+            max_heights[i] = w.max_height(&ctx);
+            // Clamp desired height to [min, max] so allocation honors both
+            // bounds uniformly.
+            desired_heights[i] = w.desired_height(width, &ctx).max(h).min(max_heights[i]);
         }
 
         // Shrink pass: when the sum of desired heights exceeds the viewport,
@@ -354,13 +366,22 @@ impl<B: Backend> LiveArea<B> {
             }
         }
 
-        // The bottom bars (input + info) are always the last two widgets.
-        // Track their combined height so the scroll region excludes them.
-        self.reserved_rows = if n >= 2 {
-            heights[n - 2] + heights[n - 1]
-        } else {
-            0
-        };
+        // Cap every allocated height at its widget's `max_height` so the
+        // expand pass cannot exceed a first-class cap (e.g. the input bar's
+        // 5-row limit or the watch table's half-region limit).
+        for i in 0..n {
+            heights[i] = heights[i].min(max_heights[i]);
+        }
+
+        // Derive reserved rows from the allocated heights of the actual
+        // input-bar and info-bar widgets, not positionally.
+        self.reserved_rows = self
+            .widgets
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.as_any().is::<InputBarWidget>() || w.as_any().is::<InfoBarWidget>())
+            .map(|(i, _)| heights[i])
+            .sum();
 
         // ── Drain overflow, then paint each widget ──────────────
         //
@@ -472,7 +493,7 @@ impl<B: Backend> LiveArea<B> {
     /// Reconcile the input bar's scroll offsets so the cursor stays visible
     /// after a cursor move or text edit.
     pub fn ensure_input_cursor_visible(&mut self, cursor: usize, input: &str, width: u16) {
-        let rows = self.input_bar_mut().wrapped_rows(width, input);
+        let rows = self.input_bar_mut().wrapped_rows(width, input).min(5);
         self.input_bar_mut()
             .ensure_cursor_visible(cursor, input, width, rows);
     }
