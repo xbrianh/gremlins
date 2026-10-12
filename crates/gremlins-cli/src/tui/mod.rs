@@ -1270,6 +1270,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
                         app.active_request = false;
                         active_turn = None;
+
+                        // Repaint immediately so the finished response text
+                        // and Done summary are visible without waiting for the
+                        // next input event.
+                        live_area.compose(&app)?;
                     }
                     ChatEvent::Ended { reason, id, .. } => {
                         if let Some(id) = id {
@@ -1282,6 +1287,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         active_turn = None;
                         let msg = format!("chat ended: {reason}");
                         live_area.push_transcript_line(msg);
+
+                        // Repaint immediately so the ended state is visible
+                        // without waiting for the next input event.
+                        live_area.compose(&app)?;
                     }
                     ChatEvent::Error { message: msg, id, .. } => {
                         if let Some(id) = id {
@@ -1294,6 +1303,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         active_turn = None;
                         let full = format!("chat error: {msg}");
                         live_area.push_transcript_line(full);
+
+                        // Repaint immediately so the error state is visible
+                        // without waiting for the next input event.
+                        live_area.compose(&app)?;
                     }
                 }
             }
