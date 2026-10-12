@@ -508,7 +508,7 @@ mod tests {
 
         // Drain the channel — at most 16 events survived.
         let mut count = 0;
-        while let Some(_) = rx.recv().await {
+        while rx.recv().await.is_some() {
             count += 1;
         }
         assert!(count <= 16, "at most 16 events survive: got {count}");

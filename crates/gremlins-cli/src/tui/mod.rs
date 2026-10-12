@@ -1278,7 +1278,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     ChatEvent::ToolResult { name, output, .. } => {
                         if !output.is_empty() {
                             log::debug!("ToolResult name={name} output_len={}", output.len());
-                            live_area.push_tool(&format!("{name}: {}", &output));
+                            live_area.push_tool(&format!("{name}: {}", output));
                         } else {
                             log::debug!("ToolResult name={name}");
                         }

@@ -2228,7 +2228,7 @@ async fn handle_cancel_chat(
         .get("turn")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let mut state = chat_state.lock().await;
+    let state = chat_state.lock().await;
     let matches = match &state.current {
         Some(cur) => turn
             .as_deref()

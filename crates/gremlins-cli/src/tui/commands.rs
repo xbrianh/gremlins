@@ -29,8 +29,9 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
     }
 
     let body = &trimmed[1..]; // strip the leading '/'
-    // Split with shlex to preserve quoted arguments containing spaces.
-    let parts = shlex::split(body).unwrap_or_else(|| body.split_whitespace().map(String::from).collect());
+                              // Split with shlex to preserve quoted arguments containing spaces.
+    let parts =
+        shlex::split(body).unwrap_or_else(|| body.split_whitespace().map(String::from).collect());
     let cmd = parts.first().map(|s| s.as_str()).unwrap_or("");
     let args: Vec<&str> = parts.iter().skip(1).map(|s| s.as_str()).collect();
 
