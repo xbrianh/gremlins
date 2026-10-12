@@ -5,6 +5,8 @@ use std::sync::Arc;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
+use super::backend::ClientError;
+use super::retry;
 use super::tools::{self, ToolContext};
 
 /// Build a [`TaskModelSelector`] from the raw `task-clients` config maps and
@@ -188,6 +190,7 @@ pub(crate) fn make_task_runner(
     parent_model_name: String,
     idle_timeout: f64,
     max_turns: usize,
+    max_retries: usize,
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
@@ -203,6 +206,7 @@ pub(crate) fn make_task_runner(
         parent_model_name,
         idle_timeout,
         max_turns,
+        max_retries,
         0,
         String::new(),
         completion_nudge_budget,
@@ -223,6 +227,7 @@ fn make_task_runner_at_depth(
     _parent_model_name: String,
     idle_timeout: f64,
     max_turns: usize,
+    max_retries: usize,
     depth: u32,
     id_chain: String,
     completion_nudge_budget: usize,
@@ -280,6 +285,7 @@ fn make_task_runner_at_depth(
                 model_name.clone(),
                 idle_timeout,
                 max_turns,
+                max_retries,
                 depth + 1,
                 new_chain,
                 completion_nudge_budget,
@@ -294,20 +300,49 @@ fn make_task_runner_at_depth(
                 &work_root, &scratch,
             ));
 
-            let result = crate::clients::agent_loop::run_agent_loop_nested(
-                selected_model,
-                &task,
-                system_prompt,
-                &child_ctx,
-                &cancel,
-                tool_filter.as_deref(),
-                &child_prefix,
-                idle_timeout,
-                max_turns,
-                completion_nudge_budget,
-                log_tx.clone(),
-                max_tokens,
-                skip_temperature,
+            // The parent backends validate `max_retries` before starting a run,
+            // so this is normally already bounded. Clamp defensively anyway:
+            // task runners are stored closures and shouldn't be able to panic
+            // from a mis-sliced backoff schedule if a caller ever constructs one
+            // independently.
+            let retry_budget = max_retries.min(retry::STREAM_IDLE_BACKOFF.len());
+            let result = retry::with_retry(
+                &retry::STREAM_IDLE_BACKOFF[..retry_budget],
+                |e: &ClientError| {
+                    matches!(
+                        e,
+                        ClientError::Timeout { .. } | ClientError::ApiServerError { .. }
+                    )
+                },
+                |attempt, e, wait| {
+                    let cause = match e {
+                        ClientError::Timeout { .. } => "stream idle timeout",
+                        ClientError::ApiServerError { .. } => "transient-error",
+                        _ => "error",
+                    };
+                    log::warn!(
+                        "{child_prefix}stream {cause}, retrying in {wait}s ({}/{})...",
+                        attempt + 1,
+                        retry_budget
+                    );
+                },
+                || {
+                    crate::clients::agent_loop::run_agent_loop_nested(
+                        selected_model.clone(),
+                        &task,
+                        system_prompt.clone(),
+                        &child_ctx,
+                        &cancel,
+                        tool_filter.as_deref(),
+                        &child_prefix,
+                        idle_timeout,
+                        max_turns,
+                        completion_nudge_budget,
+                        log_tx.clone(),
+                        max_tokens,
+                        skip_temperature,
+                    )
+                },
             )
             .await;
 
@@ -523,6 +558,7 @@ mod tests {
             "model".into(),
             5.0,
             10,
+            1,
             0,
             None,
             None,
@@ -563,6 +599,7 @@ mod tests {
             "model".into(),
             0.2,
             10,
+            0,
             MAX_DEPTH,
             String::new(),
             0,
@@ -575,6 +612,92 @@ mod tests {
         assert!(
             blocked.contains("max depth (3) exceeded"),
             "call at MAX_DEPTH should be rejected, got: {blocked}"
+        );
+    }
+
+    /// Retry a transient nested-loop failure; a 429 on the first attempt
+    /// must back off and try again, yielding the successful text.
+    #[tokio::test(start_paused = true)]
+    async fn make_task_runner_retries_transient_errors() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let ctx = depth_test_ctx();
+        let model = MockCompletionModel::from_stream_turns([
+            vec![MockStreamEvent::error("http://429: slow down")],
+            vec![
+                MockStreamEvent::text("recovered"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ])
+        .erase();
+        let cancel = super::super::agent_loop::CancelToken::new();
+        let runner = make_task_runner(
+            model,
+            None,
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            "model".into(),
+            5.0,
+            10,
+            1,
+            0,
+            None,
+            None,
+            false,
+        );
+
+        let handle = tokio::spawn(runner("label".into(), "transient".into()));
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        let output = handle.await.unwrap();
+        assert!(
+            !output.contains("Task error"),
+            "transient error must be retried, got: {output}"
+        );
+        assert_eq!(output, "recovered");
+    }
+
+    /// When every attempt fails retryably, the Task still returns a string
+    /// result (not an unwinding error) so the parent sees `Task error: …`.
+    #[tokio::test(start_paused = true)]
+    async fn make_task_runner_exhausts_retries_as_string() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let ctx = depth_test_ctx();
+        let model = MockCompletionModel::from_stream_turns([
+            vec![MockStreamEvent::error("http://429: slow down")],
+            vec![MockStreamEvent::error("http://429: slow down")],
+        ]);
+        let cancel = super::super::agent_loop::CancelToken::new();
+        let runner = make_task_runner(
+            model.clone().erase(),
+            None,
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            "model".into(),
+            5.0,
+            10,
+            1,
+            0,
+            None,
+            None,
+            false,
+        );
+
+        let handle = tokio::spawn(runner("label".into(), "exhaust".into()));
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        let output = handle.await.unwrap();
+        assert!(
+            output.starts_with("Task error: "),
+            "exhausted retries must remain in the tool result, got: {output}"
+        );
+        assert_eq!(
+            model.requests().len(),
+            2,
+            "exhausted retries must perform one retry after the initial attempt"
         );
     }
 
@@ -615,6 +738,7 @@ mod tests {
             "model".into(),
             0.2,
             10,
+            0,
             0,
             None,
             None,
@@ -714,6 +838,7 @@ mod tests {
                 "model".into(),
                 5.0,
                 10,
+                1,
                 0,
                 Some(log_tx),
                 None,

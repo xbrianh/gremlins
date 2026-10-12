@@ -31,5 +31,5 @@ dirs = "6"
 tempfile = "3"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "test-util"] }
 rig-core = { version = ">=0.43, <0.44", features = ["test-utils"] }
