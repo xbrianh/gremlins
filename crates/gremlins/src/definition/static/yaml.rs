@@ -1231,4 +1231,48 @@ mod tests {
             .unwrap();
         assert_round_trip(&stage);
     }
+
+    #[test]
+    fn task_clients_unknown_key_is_a_schema_error() {
+        use serde_yaml::Mapping;
+
+        // A minimal agent stage carrying a `task-clients` map with a
+        // non-`TaskKind` key must be rejected at load time.
+        for bad_key in ["", "scout", "Scout*"] {
+            let mut m = Mapping::new();
+            m.insert(
+                serde_yaml::Value::String("name".into()),
+                serde_yaml::Value::String("plan".into()),
+            );
+            m.insert(
+                serde_yaml::Value::String("type".into()),
+                serde_yaml::Value::String("agent".into()),
+            );
+            m.insert(
+                serde_yaml::Value::String("prompt".into()),
+                serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("hi".into())]),
+            );
+            let mut tc = Mapping::new();
+            tc.insert(
+                serde_yaml::Value::String(bad_key.into()),
+                serde_yaml::Value::String("openai:mini".into()),
+            );
+            m.insert(
+                serde_yaml::Value::String("task-clients".into()),
+                serde_yaml::Value::Mapping(tc),
+            );
+
+            let err = stage_from_yaml(&m, Some(&config::Config::default()), None)
+                .expect_err("an unknown task-clients key must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unknown task-clients key"),
+                "error must name the bad key, got: {msg}"
+            );
+            assert!(
+                msg.contains("Scout"),
+                "error must list the allowed kinds, got: {msg}"
+            );
+        }
+    }
 }

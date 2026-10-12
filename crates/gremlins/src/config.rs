@@ -221,11 +221,28 @@ impl Config {
             .default_client_by_stage
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
 
+        // Validate every present task-client map before applying precedence,
+        // so a bad key in a shadowed map is still rejected.
+        if let Some(m) = cfg_file.default_task_clients.as_ref() {
+            validate_task_clients_keys(m.keys())?;
+        }
+        if let Some(m) = cfg_file.task_clients.as_ref() {
+            validate_task_clients_keys(m.keys())?;
+        }
+
         let task_clients: Option<IndexMap<String, String>> = cfg_file
             .default_task_clients
             .or(cfg_file.task_clients)
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
-        validate_task_clients(task_clients.as_ref())?;
+
+        // Validate profile-level task-clients keys before consuming the map.
+        if let Some(profiles) = cfg_file.client_profiles.as_ref() {
+            for profile in profiles.values() {
+                if let Some(m) = profile.task_clients.as_ref() {
+                    validate_task_clients_keys(m.keys())?;
+                }
+            }
+        }
 
         let client_profiles: IndexMap<String, ClientProfile> = cfg_file
             .client_profiles
@@ -371,35 +388,34 @@ fn parse_stage_clients(
 
 /// Parse an already-resolved stage-level `task-clients` map into the kind-keyed
 /// lookup form used by task runners. Keys must already be canonical `TaskKind`
-/// spellings (guaranteed by the YAML reader); an unknown key is skipped with a
-/// warning rather than failing, since this runs at runtime on merged maps.
-pub fn parse_task_clients_map(map: Option<&IndexMap<String, String>>) -> HashMap<TaskKind, String> {
+/// spellings (guaranteed by the YAML reader); an unknown or empty key is a hard
+/// error, matching the load-time validation, so a merged runtime map that
+/// bypasses load-time checks cannot silently drop an override.
+pub fn parse_task_clients_map(
+    map: Option<&IndexMap<String, String>>,
+) -> Result<HashMap<TaskKind, String>, ConfigError> {
     let Some(obj) = map else {
-        return HashMap::new();
+        return Ok(HashMap::new());
     };
+
+    validate_task_clients_keys(obj.keys())?;
 
     let mut by_kind = HashMap::new();
     for (key, val_str) in obj {
-        match TaskKind::parse(key) {
-            Some(kind) => {
-                by_kind.insert(kind, val_str.clone());
-            }
-            None => {
-                warn!("config key {key:?} in task-clients is not a valid Task kind — skipping");
-            }
+        // Keys are guaranteed valid by the check above; `parse` cannot fail.
+        if let Some(kind) = TaskKind::parse(key) {
+            by_kind.insert(kind, val_str.clone());
         }
     }
-    by_kind
+    Ok(by_kind)
 }
 
-/// Validate the raw `task-clients`/`default-task-clients` map read from
-/// `settings.yaml`. Every key must be a canonical `TaskKind` spelling; an
-/// unknown or empty key is a hard config error.
-fn validate_task_clients(map: Option<&IndexMap<String, String>>) -> Result<(), ConfigError> {
-    let Some(obj) = map else {
-        return Ok(());
-    };
-    for key in obj.keys() {
+/// Validate that every key in a `task-clients`/`default-task-clients` map is a
+/// canonical `TaskKind` spelling. An unknown or empty key is a hard error.
+fn validate_task_clients_keys<'a>(
+    keys: impl Iterator<Item = &'a String>,
+) -> Result<(), ConfigError> {
+    for key in keys {
         if TaskKind::parse(key).is_none() {
             return Err(ConfigError::TaskClients(format!(
                 "unknown task-clients key {key:?}: expected one of {}",
@@ -1070,41 +1086,39 @@ not-a-key: 1"#,
             ("Implement".to_string(), "openai:gpt-4o".to_string()),
         ]
         .into();
-        let by_kind = parse_task_clients_map(Some(&map));
+        let by_kind = parse_task_clients_map(Some(&map)).unwrap();
         assert_eq!(by_kind.len(), 2);
         assert_eq!(by_kind.get(&TaskKind::Scout).unwrap(), "openai:gpt-4o-mini");
         assert_eq!(by_kind.get(&TaskKind::Implement).unwrap(), "openai:gpt-4o");
 
-        // Unknown keys are skipped (with a warning) at runtime.
+        // Unknown keys are rejected at runtime, matching load-time validation.
         let map: IndexMap<String, String> = [
             ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
             ("Bogus".to_string(), "openai:gpt-5".to_string()),
-            ("scout".to_string(), "openai:gpt-5".to_string()),
         ]
         .into();
-        let by_kind = parse_task_clients_map(Some(&map));
-        assert_eq!(by_kind.len(), 1);
-        assert!(by_kind.contains_key(&TaskKind::Scout));
+        assert!(parse_task_clients_map(Some(&map)).is_err());
 
         // Absent key yields an empty map.
-        assert!(parse_task_clients_map(None).is_empty());
+        assert!(parse_task_clients_map(None).unwrap().is_empty());
     }
 
     #[test]
     fn test_validate_task_clients_rejects_unknown_keys() {
         let map: IndexMap<String, String> =
             [("Scout".to_string(), "openai:mini".to_string())].into();
-        assert!(validate_task_clients(Some(&map)).is_ok());
+        assert!(validate_task_clients_keys(map.keys()).is_ok());
 
         let bad: IndexMap<String, String> =
             [("scout".to_string(), "openai:mini".to_string())].into();
-        assert!(validate_task_clients(Some(&bad)).is_err());
+        assert!(validate_task_clients_keys(bad.keys()).is_err());
 
         let star: IndexMap<String, String> =
             [("Scout*".to_string(), "openai:mini".to_string())].into();
-        assert!(validate_task_clients(Some(&star)).is_err());
+        assert!(validate_task_clients_keys(star.keys()).is_err());
 
-        assert!(validate_task_clients(None).is_ok());
+        let empty: IndexMap<String, String> = IndexMap::new();
+        assert!(validate_task_clients_keys(empty.keys()).is_ok());
     }
 
     #[test]

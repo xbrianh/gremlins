@@ -216,7 +216,7 @@ fn resolve_task_clients(
     global: Option<&IndexMap<String, String>>,
     enclosing: Option<&IndexMap<String, String>>,
     stage: Option<&IndexMap<String, String>>,
-) -> HashMap<TaskKind, String> {
+) -> Result<HashMap<TaskKind, String>, config::ConfigError> {
     let effective = config::merge_task_clients_runtime(global, enclosing, stage);
     config::parse_task_clients_map(effective.as_ref())
 }
@@ -240,7 +240,11 @@ async fn run_agent(
         gremlin.runtime_config.default_task_clients.as_ref(),
         enclosing_task_clients,
         stage_task_clients.as_ref(),
-    );
+    )
+    .map_err(|e| RunError::StageFailed {
+        stage: agent.name.clone(),
+        message: e.to_string(),
+    })?;
 
     let client = resolve_client(node, gremlin, enclosing_client)?;
     let framework_subs = gremlin.framework_subs(&agent.name);
@@ -1292,7 +1296,8 @@ mod tests {
             gremlin.runtime_config.default_task_clients.as_ref(),
             None,
             None,
-        );
+        )
+        .unwrap();
 
         // The task-kind key survives; the stage-name keys do not leak in.
         assert_eq!(
