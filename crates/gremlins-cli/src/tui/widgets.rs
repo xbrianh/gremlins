@@ -155,9 +155,9 @@ macro_rules! as_any_methods {
 ///
 /// This is the only widget that can overflow. Its
 /// [`take_overflow`](TranscriptWidget::take_overflow) splits the FIFO head
-/// off into overflow lines when the combined content exceeds the region's
-/// height, respecting the pinned turn boundary so an in-progress turn never
-/// reaches terminal scrollback.
+/// off into overflow lines whenever the combined content exceeds the
+/// region's height. The transcript is a plain FIFO: it drains its head and
+/// renders its tail regardless of whether a turn is in progress.
 pub struct TranscriptWidget {
     /// The single styled FIFO — the only thing `render` reads.
     scrollable: LineBuffer,
@@ -169,7 +169,7 @@ pub struct TranscriptWidget {
     response_start: Option<usize>,
     /// Whether the response region needs re-rendering into the FIFO.
     response_dirty: bool,
-    /// Cached wrapped desired height `(width, height)` for the pinned turn,
+    /// Cached wrapped desired height `(width, height)` for the FIFO,
     /// invalidated whenever the FIFO, accumulator, or width changes.
     desired_cache: Cell<Option<(u16, u16)>>,
 }
@@ -380,20 +380,9 @@ impl TranscriptWidget {
         }
     }
 
-    /// Wrapped height of the pinned current turn (prompt plus response) at
-    /// the given width. This is the transcript's shrink floor: allocation
-    /// must never clip the in-progress turn that `take_overflow` refuses to
-    /// scroll away.
-    fn pinned_turn_height(&self, width: u16) -> u16 {
-        let start = self.turn_start.unwrap_or(self.scrollable.len());
-        let lines = self.scrollable.visible_lines();
-        let current: Vec<Line<'static>> = lines[start..].to_vec();
-        (wrapped_height(&current, width).min(u16::MAX as usize)) as u16
-    }
-
-    /// Wrapped height of the full FIFO (completed history plus the pinned
-    /// current turn) at the given width. Measurement happens on finalized
-    /// content, so no prediction of a dirty response region is needed.
+    /// Wrapped height of the full FIFO at the given width. Measurement
+    /// happens on finalized content, so no prediction of a dirty response
+    /// region is needed.
     fn desired_height(&self, width: u16) -> u16 {
         if let Some((w, h)) = self.desired_cache.get() {
             if w == width {
@@ -406,13 +395,13 @@ impl TranscriptWidget {
     }
 
     /// Drain the head of the transcript FIFO that does not fit in
-    /// `available_rows`. Lines at or after the pinned turn are never
-    /// reported as overflow, keeping an in-progress turn on screen.
+    /// `available_rows`. The FIFO is drained unconditionally: an in-progress
+    /// turn overflows into terminal scrollback exactly like completed
+    /// history.
     pub fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
         self.invalidate_desired_cache();
-        let pinned = self.turn_start.unwrap_or(self.scrollable.len());
         let (_overflow_rows, overflow_lines): (_, Vec<_>) =
-            split_overflow(&self.scrollable, available_rows, width, pinned);
+            split_overflow(&self.scrollable, available_rows, width);
         if overflow_lines.is_empty() {
             return Vec::new();
         }
@@ -461,26 +450,36 @@ fn render_prompt(prompt: &str) -> Vec<Line<'static>> {
 
 /// Find a prefix of `buffer` that does not fit within `available_rows`.
 ///
-/// Lines at or after `pinned` are never included, so an in-progress turn is
-/// never committed to scrollback. Returns the number of overflowing wrapped
-/// rows and the actual head lines (in render order).
+/// The head is drained unconditionally; an in-progress turn is treated like
+/// any other FIFO content. Returns the number of overflowing wrapped rows
+/// and the actual head lines (in render order).
 fn split_overflow(
     buffer: &LineBuffer,
     available_rows: u16,
     width: u16,
-    pinned: usize,
 ) -> (usize, Vec<Line<'static>>) {
+    // Zero-area regions have no place to put overflow, and the transcript
+    // may be collapsed by a blocking overlay or a very short viewport. Keep
+    // the FIFO intact in those cases.
+    if width == 0 || available_rows == 0 {
+        return (0, Vec::new());
+    }
+
     let available = available_rows as usize;
     let total = buffer.wrapped_height(width);
     if total <= available {
         return (0, Vec::new());
     }
 
-    let limit = pinned.min(buffer.len());
+    let lines = buffer.visible_lines();
     let mut dropped = 0usize;
     let mut drop_count = 0usize;
-    while total - dropped > available && drop_count < limit {
-        dropped += line_wrapped_height(&buffer.visible_lines()[drop_count], width);
+    // Drain the head until the remaining content fits, but never drain the
+    // final line: a single line that wraps taller than the viewport must
+    // stay in the FIFO so the tail-anchored renderer can show its wrapped
+    // tail. Overflowing preceding lines is enough to make room.
+    while total - dropped > available && drop_count + 1 < lines.len() {
+        dropped += line_wrapped_height(&lines[drop_count], width);
         drop_count += 1;
     }
 
@@ -488,7 +487,7 @@ fn split_overflow(
         return (0, Vec::new());
     }
 
-    let overflow_lines = buffer.visible_lines()[..drop_count].to_vec();
+    let overflow_lines = lines[..drop_count].to_vec();
     (dropped, overflow_lines)
 }
 
@@ -758,15 +757,18 @@ impl LiveAreaWidget for TranscriptWidget {
         0
     }
 
-    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
-        // When a blocking overlay is active, collapse to zero so the overlay
-        // occupies the whole content region.
+    fn min_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
+        // The transcript is a plain FIFO with a one-row floor: it always
+        // reserves a single row so a streaming response stays visible even
+        // when reasoning/tool widgets contest the space, but the floor no
+        // longer depends on where a turn happens to start. Content that does
+        // not fit is drained to scrollback. A blocking overlay collapses it
+        // to zero by the same logic.
         if ctx.blocking_overlay() {
-            return 0;
+            0
+        } else {
+            1
         }
-        // Shrink floor: the pinned current turn must stay on screen. The
-        // transcript fills whatever remains above that floor.
-        self.pinned_turn_height(width)
     }
 
     fn flexible(&self, ctx: &RenderContext) -> bool {
@@ -792,10 +794,70 @@ impl LiveAreaWidget for TranscriptWidget {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        let tail = self.scrollable.visible_lines().to_vec();
-        if !tail.is_empty() {
-            let paragraph = Paragraph::new(tail).wrap(Wrap { trim: false });
-            paragraph.render(area, buf);
+        // Clear the region first so a shorter frame cannot leave stale cells
+        // from a previous, taller transcript.
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let lines = self.scrollable.visible_lines();
+        if lines.is_empty() {
+            return;
+        }
+
+        let full_rows = wrapped_height(lines, area.width);
+        if full_rows == 0 {
+            return;
+        }
+
+        // Tail-anchored, wrapping-aware paint. When the FIFO fits, paint it
+        // top-anchored directly. Otherwise skip the wrapped rows above the
+        // visible window and render only the tail slice, so the most recent
+        // content is always visible without materializing the whole history.
+        let skip = full_rows.saturating_sub(area.height as usize);
+        if skip == 0 {
+            Paragraph::new(lines.to_vec())
+                .wrap(Wrap { trim: false })
+                .render(area, buf);
+            return;
+        }
+
+        // Find the first line that contributes wrapped rows to the window.
+        let mut cum = 0usize;
+        let mut start = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            let h = line_wrapped_height(line, area.width);
+            if cum + h > skip {
+                start = i;
+                break;
+            }
+            cum += h;
+        }
+        // Wrapped rows of `lines[start]` that sit above the visible window.
+        let partial = skip - cum;
+
+        // Render the tail slice into a buffer tall enough to hold the window
+        // plus the partial head, then copy the last `area.height` rows.
+        let render_rows = (partial + area.height as usize) as u16;
+        let render_area = Rect::new(0, 0, area.width, render_rows);
+        let mut render_buf = Buffer::empty(render_area);
+        Paragraph::new(lines[start..].to_vec())
+            .wrap(Wrap { trim: false })
+            .render(render_area, &mut render_buf);
+
+        for y in 0..area.height {
+            let src_y = partial as u16 + y;
+            if src_y >= render_rows {
+                break;
+            }
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)] = render_buf[(x, src_y)].clone();
+            }
         }
     }
 }
@@ -1518,37 +1580,32 @@ mod tests {
     }
 
     #[test]
-    fn take_overflow_never_drains_pinned_turn() {
+    fn take_overflow_drains_in_progress_turn() {
         let mut transcript = TranscriptWidget::new();
-        // Completed turn that may overflow.
+        // Completed history.
         transcript.push_transcript_line("prior".to_string());
         // In-progress turn: pinned at the prompt line.
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("resp");
         LiveAreaWidget::finalize(&mut transcript, 80);
 
-        // Only 1 row available; the pinned prompt/response must stay put.
+        // Only 1 row available. The FIFO drains its head unconditionally,
+        // so the prompt is now scrollback and the tail "resp" stays on
+        // screen.
         let overflow = transcript.take_overflow(1, 80);
+        let overflow_text: Vec<String> = overflow.iter().map(|l| l.to_string()).collect();
         let text: Vec<String> = transcript
             .scrollable
             .visible_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(
-            text.contains(&"> hi".to_string()),
-            "pinned turn must never be drained: {text:?}"
-        );
-        assert!(
-            text.contains(&"resp".to_string()),
-            "pinned turn must never be drained: {text:?}"
-        );
-        // Only the pre-turn separator/prior line may overflow.
-        assert!(!overflow.is_empty());
+        assert_eq!(overflow_text, vec!["prior", "", "> hi"]);
+        assert_eq!(text, vec!["resp"]);
     }
 
     #[test]
-    fn take_overflow_respects_pinned_boundary_with_wrapping() {
+    fn take_overflow_drains_wrapped_head_lines_unconditionally() {
         let mut transcript = TranscriptWidget::new();
         // A long prior line that wraps to many rows.
         transcript.push_transcript_line("abcdefghijklmnopqrstuvwxyz".to_string());
@@ -1557,24 +1614,59 @@ mod tests {
         LiveAreaWidget::finalize(&mut transcript, 10);
 
         // Width 10: the prior line wraps to 3 rows. With 1 available row,
-        // overflow would want to drop the wrapped prior line, but the pinned
-        // turn boundary caps the drain at the prompt line.
+        // the wrapped-aware overflow drain rolls through the head (long
+        // prior, separator, prompt) until only one wrapped row remains: the
+        // response tail.
         let overflow = transcript.take_overflow(1, 10);
+        let overflow_text: Vec<String> = overflow.iter().map(|l| l.to_string()).collect();
         let text: Vec<String> = transcript
             .scrollable
             .visible_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(
-            text.contains(&"> hi".to_string()),
-            "pinned turn must never be drained: {text:?}"
+        assert_eq!(
+            overflow_text,
+            vec!["abcdefghijklmnopqrstuvwxyz", "", "> hi"]
         );
-        assert!(
-            text.contains(&"resp".to_string()),
-            "pinned turn must never be drained: {text:?}"
-        );
+        assert_eq!(text, vec!["resp"]);
+    }
+
+    #[test]
+    fn clear_current_turn_still_truncates_to_recorded_start_after_overflow() {
+        let mut transcript = TranscriptWidget::new();
+
+        // A completed turn remains in the FIFO before the current one.
+        transcript.submit_prompt("first".to_string());
+        transcript.push_response("first response");
+        transcript.finish_turn();
+
+        transcript.push_transcript_line("completed system note".to_string());
+
+        // The current turn starts after that completed content.
+        transcript.submit_prompt("current".to_string());
+        transcript.push_response("current response");
+        LiveAreaWidget::finalize(&mut transcript, 80);
+
+        // Drain the head far enough that the turn start index shifts but the
+        // pre-turn completed content stays in the FIFO.
+        let overflow = transcript.take_overflow(5, 80);
         assert!(!overflow.is_empty());
+
+        transcript.clear_current_turn();
+
+        assert!(!transcript.has_current_turn());
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(!text.contains(&"> current".to_string()));
+        assert!(
+            text.contains(&"completed system note".to_string()),
+            "completed content before the turn start must survive: {text:?}"
+        );
     }
 
     #[test]
