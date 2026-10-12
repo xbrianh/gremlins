@@ -19,6 +19,7 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::Client;
+use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -203,19 +204,19 @@ fn resolve_client(
 // Agent
 // ---------------------------------------------------------------------------
 
-/// Resolve the effective task-client lookup maps for an agent stage, merging
+/// Resolve the effective task-client lookup map for an agent stage, merging
 /// the three runtime layers (global defaults, enclosing composite, stage-local)
-/// and parsing the result into exact/prefix `HashMap`s.
+/// and parsing the result into a kind-keyed `HashMap`.
 ///
-/// These are the maps handed to [`build_task_selector`]; they describe
-/// task-description → model-spec entries, *not* the stage-name → client-spec
+/// This is the map handed to [`build_task_selector`]; it describes
+/// task-kind → model-spec entries, *not* the stage-name → client-spec
 /// entries held in `RuntimeConfig::stage_clients_*`. Keeping the two apart is
 /// what this helper exists to make testable.
 fn resolve_task_clients(
     global: Option<&IndexMap<String, String>>,
     enclosing: Option<&IndexMap<String, String>>,
     stage: Option<&IndexMap<String, String>>,
-) -> (HashMap<String, String>, HashMap<String, String>) {
+) -> Result<HashMap<TaskKind, String>, config::ConfigError> {
     let effective = config::merge_task_clients_runtime(global, enclosing, stage);
     config::parse_task_clients_map(effective.as_ref())
 }
@@ -235,11 +236,15 @@ async fn run_agent(
         unreachable!("run_agent is only called for agent stages")
     };
 
-    let (task_clients_exact, task_clients_prefix) = resolve_task_clients(
+    let task_clients_by_kind = resolve_task_clients(
         gremlin.runtime_config.default_task_clients.as_ref(),
         enclosing_task_clients,
         stage_task_clients.as_ref(),
-    );
+    )
+    .map_err(|e| RunError::StageFailed {
+        stage: agent.name.clone(),
+        message: e.to_string(),
+    })?;
 
     let client = resolve_client(node, gremlin, enclosing_client)?;
     let framework_subs = gremlin.framework_subs(&agent.name);
@@ -355,11 +360,7 @@ async fn run_agent(
                 stage: agent.name.clone(),
                 message,
             })?;
-        crate::clients::task::build_task_selector(
-            backend,
-            &task_clients_exact,
-            &task_clients_prefix,
-        )
+        crate::clients::task::build_task_selector(backend, &task_clients_by_kind)
     };
 
     // Chat gremlins pre-populate the agent loop's history from the previous
@@ -1287,25 +1288,26 @@ mod tests {
             .stage_clients_prefix
             .insert("wri".to_string(), "cmd:stage-prefix".to_string());
 
-        // A task-client entry keyed by a *task description* — the right map.
-        let global = IndexMap::from([("scout".to_string(), "openai:mini".to_string())]);
+        // A task-client entry keyed by a *task kind* — the right map.
+        let global = IndexMap::from([("Scout".to_string(), "openai:mini".to_string())]);
         gremlin.runtime_config.default_task_clients = Some(global);
 
-        let (exact, prefix) = resolve_task_clients(
+        let by_kind = resolve_task_clients(
             gremlin.runtime_config.default_task_clients.as_ref(),
             None,
             None,
-        );
+        )
+        .unwrap();
 
-        // The task-description key survives; the stage-name keys do not leak in.
+        // The task-kind key survives; the stage-name keys do not leak in.
         assert_eq!(
-            exact.get("scout"),
+            by_kind.get(&TaskKind::Scout),
             Some(&"openai:mini".to_string()),
             "the task-client entry must be present"
         );
         assert!(
-            !exact.contains_key("writer") && !prefix.contains_key("wri"),
-            "stage-client entries must not appear in the task-client maps"
+            !by_kind.contains_key(&TaskKind::Implement),
+            "stage-client entries must not appear in the task-client map"
         );
     }
 

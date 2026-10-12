@@ -24,7 +24,7 @@ the concrete backend implementations themselves (`backends/`).
 | `lazy_auth_http.rs` | Lazy-auth HTTP client wrappers for dynamic-auth backends. `LazyBearerHttpClient` (Anthropic) and `LazyApiKeyHttpClient` (Azure OpenAI) hold a `TokenProvider` + scope and acquire a token on the first outgoing request, caching it for the model's lifetime. |
 | `token_provider.rs` | `TokenProvider` trait — custom abstraction over Azure identity credential types (client secret, CLI, managed identity, chained default), with `TokenProviderError`. |
 | `config.rs` | `agent_system_prompt` / `task_system_prompt` — the system prompts injected into top-level and nested (Task) agent invocations. Also owns `ProviderAuth`, `Providers`, and the `providers.yaml` loading/credential-resolution helpers (`api_key`, `base_url`, `auth_token`, `azure_auth_method`, `azure_auth_scope`). |
-| `task.rs` | `TaskModelSelector`/`TaskModelFactory` — resolves `task-clients` overrides (exact + prefix match) so a `Task` tool call can run under a different model than its parent. |
+| `task.rs` | `TaskModelSelector`/`TaskModelFactory` — resolves `task-clients` overrides (exact `TaskKind` lookup) so a `Task` tool call can run under a different model than its parent. |
 | `backends/mod.rs` | The `backends!` macro: declares each backend's module and generates `registry()`, mapping provider name → `BuildFn`. Adding a provider is one line here. |
 | `backends/openai.rs` | `OpenAiBackend` — wraps `OpenAiRunState` for `api.openai.com`, default model `gpt-4o`. |
 | `backends/openrouter.rs` | `OpenRouterBackend` — wraps `OpenAiRunState` for `openrouter.ai`, with its own transient-error classifier for retry. |

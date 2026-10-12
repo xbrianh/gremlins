@@ -9,6 +9,8 @@ use regex::Regex;
 use rig_core::completion::ToolDefinition;
 use tokio::process::Command;
 
+use super::task_kind::TaskKind;
+
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
 /// Cap on Task calls spawned from a single model message. Without this, one
@@ -39,7 +41,7 @@ pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
 type TaskFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
 
 /// Callback that `invoke` calls for Task tool invocations.
-pub(crate) type TaskFn = Arc<dyn Fn(String, String) -> TaskFuture + Send + Sync>;
+pub(crate) type TaskFn = Arc<dyn Fn(TaskKind, String) -> TaskFuture + Send + Sync>;
 
 /// How tool-path sandboxing is applied for a stage's agent loop.
 ///
@@ -1037,7 +1039,7 @@ fn audit_key_arg(args_json: &str) -> String {
         return String::new();
     };
     if let Some(obj) = d.as_object() {
-        for k in ["file_path", "command", "pattern", "path", "description"] {
+        for k in ["file_path", "command", "pattern", "path", "kind"] {
             if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
                     return v.to_string();
@@ -1706,7 +1708,7 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str)>> {
         "Write" => Some(vec![("file_path", "string"), ("content", "string")]),
         "Grep" => Some(vec![("pattern", "string")]),
         "Glob" => Some(vec![("pattern", "string")]),
-        "Task" => Some(vec![("description", "string"), ("prompt", "string")]),
+        "Task" => Some(vec![("kind", "string"), ("prompt", "string")]),
         "Done" => Some(vec![("summary", "string")]),
         _ => None,
     }
@@ -1871,29 +1873,26 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
         "Glob" => glob_invoke(ctx, args_json).await,
         "Task" => {
             if let Some(f) = &ctx.task_fn {
-                let description = args
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
                 if prompt.is_empty() {
                     return "Error: Task prompt is required".to_string();
                 }
-                let out = f(description.to_string(), prompt.to_string()).await;
+                let Some(kind) = TaskKind::parse(kind_str) else {
+                    return format!(
+                        "Error: unknown Task kind {kind_str:?}. Expected one of: {}",
+                        TaskKind::ALL
+                            .iter()
+                            .map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                };
+                let out = f(kind, prompt.to_string()).await;
                 // Label the result so concurrent Task outputs can be told apart.
-                let final_output = if description.is_empty() {
-                    out
-                } else {
-                    format!("# {description}\n\n{out}")
-                };
-                let desc_preview = if description.is_empty() {
-                    "(empty)".to_string()
-                } else {
-                    preview_str(description, 80)
-                };
+                let final_output = format!("# {kind}\n\n{out}");
                 log::info!(
-                    "task dispatch complete: desc={desc_q} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?}",
-                    desc_q = desc_preview,
+                    "task dispatch complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?}",
                     p_len = prompt.len(),
                     p_preview = preview_str(prompt, 120),
                     o_len = final_output.len(),
@@ -2103,16 +2102,20 @@ message to finish. The summary parameter briefly describes what you accomplished
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
-                "description": {
+                "kind": {
                     "type": "string",
-                    "description": "Short label for this task, used in logs and as the result header. Known labels: Scout (codebase exploration), Implement (apply a planned change), Research (investigate a question), Verify (check correctness, run tests), Fix (targeted bugfix), Review (audit code for issues), Write (author docs or prose), Refactor (restructure existing code)"
+                    "enum": TaskKind::ALL
+                        .iter()
+                        .map(|kind| serde_json::Value::String(kind.as_str().to_string()))
+                        .collect::<Vec<_>>(),
+                    "description": "The kind of task to delegate."
                 },
                 "prompt": {
                     "type": "string",
                     "description": "Full task briefing for the worker. The worker starts with a clean conversation context and sees nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field."
                 }
             },
-            "required": ["description", "prompt"],
+            "required": ["kind", "prompt"],
             "additionalProperties": false
         }),
     });
@@ -2510,7 +2513,7 @@ mod tests {
         assert!(validate_tool_args("Glob", &serde_json::json!({"pattern": "*.rs"})).is_none());
         assert!(validate_tool_args(
             "Task",
-            &serde_json::json!({"description": "d", "prompt": "do it"})
+            &serde_json::json!({"kind": "Scout", "prompt": "do it"})
         )
         .is_none());
     }
@@ -2576,7 +2579,7 @@ mod tests {
 
     #[test]
     fn validate_tool_args_task_missing_prompt() {
-        let err = validate_tool_args("Task", &serde_json::json!({"description": "d"})).unwrap();
+        let err = validate_tool_args("Task", &serde_json::json!({"kind": "Scout"})).unwrap();
         assert!(err.contains("missing 'prompt'"));
         assert!(err.contains("Task"));
     }
@@ -3511,7 +3514,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
         };
-        let args = serde_json::json!({"description": "d", "prompt": "do something"}).to_string();
+        let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("Task", &c, &args).await;
         assert!(result.contains("Task not available"));
     }
@@ -3521,9 +3524,9 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |description, prompt| {
+        let task_fn: TaskFn = Arc::new(move |kind, prompt| {
             *called2.lock().unwrap() = true;
-            Box::pin(async move { format!("task result: {description} / {prompt}") })
+            Box::pin(async move { format!("task result: {kind} / {prompt}") })
         });
         let c = ToolContext {
             cwd: Some(dir.clone()),
@@ -3535,17 +3538,44 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
         };
-        let args =
-            serde_json::json!({"description": "label", "prompt": "do something"}).to_string();
+        let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("Task", &c, &args).await;
         assert!(*called.lock().unwrap());
-        assert!(result.contains("task result: label / do something"));
+        assert!(result.contains("task result: Scout / do something"));
     }
 
     #[tokio::test]
     async fn task_empty_prompt_returns_error() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_description, _prompt| {
+        let task_fn: TaskFn =
+            Arc::new(|_kind, _prompt| Box::pin(async move { "should not be called".to_string() }));
+        let c = ToolContext {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            base_env: None,
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
+            audit_log: None,
+            allowed_tools: None,
+            task_fn: Some(task_fn),
+            audit_lock: None,
+        };
+        let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
+        let result = invoke("Task", &c, &args).await;
+        assert!(result.contains("Task prompt is required"));
+
+        // Missing prompt key entirely — caught by schema validation.
+        let args2 = serde_json::json!({"kind": "Scout"}).to_string();
+        let result2 = invoke("Task", &c, &args2).await;
+        assert!(result2.contains("missing 'prompt'"), "got: {result2}");
+    }
+
+    #[tokio::test]
+    async fn task_unknown_kind_rejected_before_callback() {
+        let dir = tmp();
+        let called = Arc::new(std::sync::Mutex::new(false));
+        let called2 = called.clone();
+        let task_fn: TaskFn = Arc::new(move |_kind, _prompt| {
+            *called2.lock().unwrap() = true;
             Box::pin(async move { "should not be called".to_string() })
         });
         let c = ToolContext {
@@ -3558,20 +3588,19 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
         };
-        let args = serde_json::json!({"description": "d", "prompt": ""}).to_string();
+        let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
         let result = invoke("Task", &c, &args).await;
-        assert!(result.contains("Task prompt is required"));
-
-        // Missing prompt key entirely — caught by schema validation.
-        let args2 = serde_json::json!({"description": "d"}).to_string();
-        let result2 = invoke("Task", &c, &args2).await;
-        assert!(result2.contains("missing 'prompt'"), "got: {result2}");
+        assert!(result.contains("unknown Task kind"), "got: {result}");
+        assert!(
+            !*called.lock().unwrap(),
+            "callback must not run for unknown kind"
+        );
     }
 
     #[tokio::test]
-    async fn task_result_is_headered_with_description() {
+    async fn task_result_is_headered_with_kind() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_d, _p| Box::pin(async move { "body".to_string() }));
+        let task_fn: TaskFn = Arc::new(|_k, _p| Box::pin(async move { "body".to_string() }));
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
@@ -3582,8 +3611,8 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
         };
-        let args = serde_json::json!({"description": "scout docs", "prompt": "go"}).to_string();
-        assert_eq!(invoke("Task", &c, &args).await, "# scout docs\n\nbody");
+        let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
+        assert_eq!(invoke("Task", &c, &args).await, "# Scout\n\nbody");
     }
 
     #[tokio::test]
@@ -3922,7 +3951,7 @@ mod tests {
     async fn invoke_does_not_cap_task() {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_d, _p| Box::pin(async move { "x".repeat(500) }));
+        let task_fn: TaskFn = Arc::new(|_k, _p| Box::pin(async move { "x".repeat(500) }));
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
@@ -3933,7 +3962,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
         };
-        let args = serde_json::json!({"description": "t", "prompt": "go"}).to_string();
+        let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
         let result = invoke("Task", &c, &args).await;
         assert!(

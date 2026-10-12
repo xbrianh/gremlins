@@ -6,6 +6,8 @@ use indexmap::IndexMap;
 use log::warn;
 use serde::Deserialize;
 
+use crate::clients::task_kind::TaskKind;
+
 /// Default name of the project-local overlay directory.
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
@@ -92,8 +94,6 @@ pub struct Config {
     default_client: Option<String>,
     exact_stage_clients: HashMap<String, String>,
     prefix_stage_clients: HashMap<String, String>,
-    exact_task_clients: HashMap<String, String>,
-    prefix_task_clients: HashMap<String, String>,
     default_task_clients: Option<IndexMap<String, String>>,
     client_profiles: IndexMap<String, ClientProfile>,
     path_overrides: PathOverrides,
@@ -221,11 +221,28 @@ impl Config {
             .default_client_by_stage
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
 
+        // Validate every present task-client map before applying precedence,
+        // so a bad key in a shadowed map is still rejected.
+        if let Some(m) = cfg_file.default_task_clients.as_ref() {
+            validate_task_clients_keys(m.keys())?;
+        }
+        if let Some(m) = cfg_file.task_clients.as_ref() {
+            validate_task_clients_keys(m.keys())?;
+        }
+
         let task_clients: Option<IndexMap<String, String>> = cfg_file
             .default_task_clients
             .or(cfg_file.task_clients)
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
-        let (exact_task_clients, prefix_task_clients) = parse_task_clients(task_clients.as_ref());
+
+        // Validate profile-level task-clients keys before consuming the map.
+        if let Some(profiles) = cfg_file.client_profiles.as_ref() {
+            for profile in profiles.values() {
+                if let Some(m) = profile.task_clients.as_ref() {
+                    validate_task_clients_keys(m.keys())?;
+                }
+            }
+        }
 
         let client_profiles: IndexMap<String, ClientProfile> = cfg_file
             .client_profiles
@@ -289,8 +306,6 @@ impl Config {
             default_client,
             exact_stage_clients,
             prefix_stage_clients,
-            exact_task_clients,
-            prefix_task_clients,
             default_task_clients: task_clients,
             client_profiles,
             path_overrides,
@@ -306,16 +321,6 @@ impl Config {
     /// Returns `(exact_map, prefix_map)` from `default-client-by-stage`.
     pub fn default_client_by_stage(&self) -> (&HashMap<String, String>, &HashMap<String, String>) {
         (&self.exact_stage_clients, &self.prefix_stage_clients)
-    }
-
-    /// Returns `(exact_map, prefix_map)` from `task-clients`.
-    ///
-    /// Exact-map keys are matched by equality; prefix-map keys by
-    /// `description.starts_with(prefix)`, longest prefix winning. All matching
-    /// is case-insensitive: map keys are lowercased at parse time and the
-    /// caller lowercases the `description` it looks up.
-    pub fn task_clients(&self) -> (&HashMap<String, String>, &HashMap<String, String>) {
-        (&self.exact_task_clients, &self.prefix_task_clients)
     }
 
     /// The raw `default-task-clients` map, in declaration order.
@@ -381,62 +386,48 @@ fn parse_stage_clients(
     (exact, prefix)
 }
 
-/// Parse the `task-clients` map, which overrides the model used by a Task tool
-/// invocation whose `description` matches a key.
-///
-/// Keys are lowercased here so lookup is case-insensitive; a key ending in `*`
-/// denotes a prefix match, anything else an exact match.
-/// Parse an already-resolved stage-level `task-clients` map into the
-/// `(exact, prefix)` lookup form used by task runners.
+/// Parse an already-resolved stage-level `task-clients` map into the kind-keyed
+/// lookup form used by task runners. Keys must already be canonical `TaskKind`
+/// spellings (guaranteed by the YAML reader); an unknown or empty key is a hard
+/// error, matching the load-time validation, so a merged runtime map that
+/// bypasses load-time checks cannot silently drop an override.
 pub fn parse_task_clients_map(
     map: Option<&IndexMap<String, String>>,
-) -> (HashMap<String, String>, HashMap<String, String>) {
-    parse_task_clients(map)
-}
-
-fn parse_task_clients(
-    map: Option<&IndexMap<String, String>>,
-) -> (HashMap<String, String>, HashMap<String, String>) {
+) -> Result<HashMap<TaskKind, String>, ConfigError> {
     let Some(obj) = map else {
-        return (HashMap::new(), HashMap::new());
+        return Ok(HashMap::new());
     };
 
-    let mut exact = HashMap::new();
-    let mut prefix = HashMap::new();
-    let mut seen = std::collections::HashSet::new();
+    validate_task_clients_keys(obj.keys())?;
 
+    let mut by_kind = HashMap::new();
     for (key, val_str) in obj {
-        let normalized = if let Some(p) = key.strip_suffix('*') {
-            if p.is_empty() {
-                warn!(
-                    "config key {:?} in task-clients produces an empty prefix, \
-                     which would match every task — skipping",
-                    key
-                );
-                continue;
-            }
-            p.to_lowercase()
-        } else {
-            key.to_lowercase()
-        };
-
-        if !seen.insert(normalized.clone()) {
-            warn!(
-                "config key {:?} in task-clients normalizes to {:?}, \
-                 which duplicates another key — skipping",
-                key, normalized
-            );
-            continue;
-        }
-
-        if key.ends_with('*') {
-            prefix.insert(normalized, val_str.clone());
-        } else {
-            exact.insert(normalized, val_str.clone());
+        // Keys are guaranteed valid by the check above; `parse` cannot fail.
+        if let Some(kind) = TaskKind::parse(key) {
+            by_kind.insert(kind, val_str.clone());
         }
     }
+    Ok(by_kind)
+}
 
-    (exact, prefix)
+/// Validate that every key in a `task-clients`/`default-task-clients` map is a
+/// canonical `TaskKind` spelling. An unknown or empty key is a hard error.
+fn validate_task_clients_keys<'a>(
+    keys: impl Iterator<Item = &'a String>,
+) -> Result<(), ConfigError> {
+    for key in keys {
+        if TaskKind::parse(key).is_none() {
+            return Err(ConfigError::TaskClients(format!(
+                "unknown task-clients key {key:?}: expected one of {}",
+                TaskKind::ALL
+                    .iter()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +442,8 @@ pub enum ConfigError {
     Yaml(#[from] serde_yaml::Error),
     #[error("profile error: {0}")]
     Profile(String),
+    #[error("task-clients error: {0}")]
+    TaskClients(String),
 }
 
 fn parse_yaml_config(path: &Path) -> Result<ConfigFile, ConfigError> {
@@ -542,9 +535,6 @@ pub fn merge_task_clients(
     let mut merged: IndexMap<String, String> = global.cloned().unwrap_or_default();
     if let Some(stage) = stage {
         for (key, value) in stage {
-            // Remove case-insensitive duplicate so stage wins
-            let key_lower = key.to_lowercase();
-            merged.retain(|k, _| k.to_lowercase() != key_lower);
             merged.insert(key.clone(), value.clone());
         }
     }
@@ -1090,42 +1080,45 @@ not-a-key: 1"#,
 
     #[test]
     fn test_parse_task_clients() {
-        // Exact and prefix keys, both normalized to lowercase.
+        // Canonical kind keys are kept as-is.
         let map: IndexMap<String, String> = [
             ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
-            ("Implement*".to_string(), "openai:gpt-4o".to_string()),
+            ("Implement".to_string(), "openai:gpt-4o".to_string()),
         ]
         .into();
-        let (exact, prefix) = parse_task_clients(Some(&map));
-        assert_eq!(exact.len(), 1);
-        assert_eq!(exact.get("scout").unwrap(), "openai:gpt-4o-mini");
-        assert_eq!(prefix.len(), 1);
-        assert_eq!(prefix.get("implement").unwrap(), "openai:gpt-4o");
+        let by_kind = parse_task_clients_map(Some(&map)).unwrap();
+        assert_eq!(by_kind.len(), 2);
+        assert_eq!(by_kind.get(&TaskKind::Scout).unwrap(), "openai:gpt-4o-mini");
+        assert_eq!(by_kind.get(&TaskKind::Implement).unwrap(), "openai:gpt-4o");
 
-        // An empty prefix is dropped.
-        let map: IndexMap<String, String> = [
-            ("*".to_string(), "openai:gpt-4o".to_string()),
-            ("ok-*".to_string(), "openai:gpt-5".to_string()),
-        ]
-        .into();
-        let (exact, prefix) = parse_task_clients(Some(&map));
-        assert!(exact.is_empty());
-        assert_eq!(prefix.len(), 1);
-        assert_eq!(prefix.get("ok-").unwrap(), "openai:gpt-5");
-
-        // Case-only duplicates are detected and the later one is skipped.
+        // Unknown keys are rejected at runtime, matching load-time validation.
         let map: IndexMap<String, String> = [
             ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
-            ("scout".to_string(), "openai:gpt-5".to_string()),
+            ("Bogus".to_string(), "openai:gpt-5".to_string()),
         ]
         .into();
-        let (exact, _) = parse_task_clients(Some(&map));
-        assert_eq!(exact.len(), 1);
-        assert_eq!(exact.get("scout").unwrap(), "openai:gpt-4o-mini");
+        assert!(parse_task_clients_map(Some(&map)).is_err());
 
-        // Absent key yields empty maps.
-        let (exact, prefix) = parse_task_clients(None);
-        assert!(exact.is_empty() && prefix.is_empty());
+        // Absent key yields an empty map.
+        assert!(parse_task_clients_map(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_validate_task_clients_rejects_unknown_keys() {
+        let map: IndexMap<String, String> =
+            [("Scout".to_string(), "openai:mini".to_string())].into();
+        assert!(validate_task_clients_keys(map.keys()).is_ok());
+
+        let bad: IndexMap<String, String> =
+            [("scout".to_string(), "openai:mini".to_string())].into();
+        assert!(validate_task_clients_keys(bad.keys()).is_err());
+
+        let star: IndexMap<String, String> =
+            [("Scout*".to_string(), "openai:mini".to_string())].into();
+        assert!(validate_task_clients_keys(star.keys()).is_err());
+
+        let empty: IndexMap<String, String> = IndexMap::new();
+        assert!(validate_task_clients_keys(empty.keys()).is_ok());
     }
 
     #[test]
