@@ -4,12 +4,13 @@
 //! styled FIFO), an input bar, an info bar, and overlay widgets. Each
 //! widget is behind the [`LiveAreaWidget`] trait, owns its own rendering
 //! buffers, and knows how to lay itself out (via
-//! [`LiveAreaWidget::height_constraint`]) and paint itself (via
-//! [`LiveAreaWidget::render`]).
+//! [`LiveAreaWidget::min_height`] and [`LiveAreaWidget::flexible`]) and paint
+//! itself (via [`LiveAreaWidget::render`]).
 //!
 //! [`LiveArea::compose`](crate::tui::screen::LiveArea::compose) iterates the
-//! widgets top-to-bottom, splits the screen by their height constraints, and
-//! collects any overflow lines returned by the transcript widget. Widgets
+//! widgets top-to-bottom, splits the screen by their minimum heights and
+//! flexibility, and collects any overflow lines returned by the transcript
+//! widget. Widgets
 //! never commit scrollback themselves — that remains the caller's
 //! responsibility.
 
@@ -18,7 +19,7 @@ use std::collections::HashMap;
 
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Widget, Wrap},
@@ -28,7 +29,7 @@ use crate::tui::app::{ActiveRun, Overlay};
 use crate::tui::buffer::{line_wrapped_height, wrapped_height, LineBuffer};
 use crate::tui::markdown;
 /// Shared read-only state handed to each widget's [`LiveAreaWidget::render`]
-/// and [`LiveAreaWidget::height_constraint`].
+/// and [`LiveAreaWidget::min_height`].
 ///
 /// Stateless widgets (input bar, info bar) read their content from here
 /// rather than owning buffers of their own. Overlay widgets observe what is
@@ -65,13 +66,20 @@ impl<'a> RenderContext<'a> {
 /// A single LiveArea rendering region.
 ///
 /// Widgets are laid out top-to-bottom in the order they appear in the
-/// widget vec. Each reports its desired height via
-/// [`height_constraint`](Self::height_constraint) and paints itself into the
-/// region it is assigned by [`render`](Self::render).
+/// widget vec. Each reports its minimum height via
+/// [`min_height`](Self::min_height), whether it may absorb leftover rows via
+/// [`flexible`](Self::flexible), and paints itself into the region it is
+/// assigned by [`render`](Self::render).
 pub trait LiveAreaWidget {
-    /// The layout constraint for this widget's region at the given width,
-    /// given the current render context.
-    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint;
+    /// The fewest rows this widget can tolerate at the given width and render
+    /// context. This is the floor the priority system shrinks down to.
+    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16;
+
+    /// Whether this widget may absorb leftover rows in the expand pass.
+    /// Defaults to `false`.
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        false
+    }
 
     /// Bring this widget's buffer into its final state for the frame. This
     /// is the single place content is mutated before measurement: the
@@ -110,14 +118,7 @@ pub trait LiveAreaWidget {
     /// minimum is what they shrink down to when space is contested. Defaults
     /// to the widget's minimum height.
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
-        match self.height_constraint(width, ctx) {
-            Constraint::Length(n) | Constraint::Max(n) | Constraint::Min(n) => n,
-            Constraint::Ratio(num, den) => (ctx.content_height as u32 * num)
-                .checked_div(den)
-                .unwrap_or(0) as u16,
-            Constraint::Percentage(p) => ctx.content_height.saturating_mul(p) / 100,
-            Constraint::Fill(_) => 0,
-        }
+        self.min_height(width, ctx)
     }
 
     /// Ordering for committing overflow to scrollback. **Lower value is
@@ -567,15 +568,6 @@ impl ReasoningWidget {
         self.lines.is_empty() && self.partial.is_empty()
     }
 
-    /// Minimum height: 1 row when non-empty, 0 when empty.
-    fn min_rows(&self) -> u16 {
-        if self.is_empty() {
-            0
-        } else {
-            1
-        }
-    }
-
     /// Desired height: the full wrapped content height (uncapped).
     fn desired_rows(&self, width: u16) -> u16 {
         if self.is_empty() {
@@ -612,12 +604,20 @@ impl LiveAreaWidget for ReasoningWidget {
         5
     }
 
-    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
-        Constraint::Min(self.min_rows())
+    fn min_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
+        self.desired_rows(width).min(5)
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
     }
 
     fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
         self.desired_rows(width)
+    }
+
+    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+        5
     }
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
@@ -690,15 +690,6 @@ impl ToolEventsWidget {
         self.lines.is_empty()
     }
 
-    /// Minimum height: 1 row when non-empty, 0 when empty.
-    fn min_rows(&self) -> u16 {
-        if self.is_empty() {
-            0
-        } else {
-            1
-        }
-    }
-
     /// Desired height: the full wrapped content height (uncapped).
     fn desired_rows(&self, width: u16) -> u16 {
         if self.is_empty() {
@@ -721,12 +712,20 @@ impl LiveAreaWidget for ToolEventsWidget {
         1
     }
 
-    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
-        Constraint::Min(self.min_rows())
+    fn min_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
+        self.desired_rows(width).min(5)
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
     }
 
     fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
         self.desired_rows(width)
+    }
+
+    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+        5
     }
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
@@ -754,15 +753,22 @@ impl LiveAreaWidget for TranscriptWidget {
         0
     }
 
-    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
+    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         // When a blocking overlay is active, collapse to zero so the overlay
         // occupies the whole content region.
         if ctx.blocking_overlay() {
-            return Constraint::Length(0);
+            return 0;
         }
         // Shrink floor: the pinned current turn must stay on screen. The
         // transcript fills whatever remains above that floor.
-        Constraint::Min(self.pinned_turn_height(width))
+        self.pinned_turn_height(width)
+    }
+
+    fn flexible(&self, ctx: &RenderContext) -> bool {
+        // When a blocking overlay is active the transcript collapses to zero
+        // and must not absorb leftover rows, mirroring the old `Length(0)`
+        // (inflexible) vs `Min` (flexible) split.
+        !ctx.blocking_overlay()
     }
 
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
@@ -956,10 +962,10 @@ impl LiveAreaWidget for InputBarWidget {
         100
     }
 
-    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
+    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         // Minimum: the wrapped content, capped at 5 rows. The bar is not
         // shrunk below its visible text unless the viewport cannot fit it.
-        Constraint::Length(self.wrapped_rows(width, ctx.input).min(5))
+        self.wrapped_rows(width, ctx.input).min(5)
     }
 
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
@@ -1026,8 +1032,8 @@ impl LiveAreaWidget for InfoBarWidget {
         90
     }
 
-    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
-        Constraint::Length(1)
+    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
+        1
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
@@ -1096,13 +1102,13 @@ impl LiveAreaWidget for WatchTableWidget {
         50
     }
 
-    fn height_constraint(&self, _width: u16, ctx: &RenderContext) -> Constraint {
+    fn min_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
         if ctx.blocking_overlay() {
-            return Constraint::Length(0);
+            return 0;
         }
         // Real minimum: just the header row. The half-region cap lives in
         // `max_height`, so the minimum can never exceed it.
-        Constraint::Length(1)
+        1
     }
 
     fn desired_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
@@ -1198,9 +1204,13 @@ impl LiveAreaWidget for WatchSingleWidget {
         50
     }
 
-    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
+    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
         // Fills the entire content area above the fixed bars.
-        Constraint::Min(0)
+        0
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
@@ -1308,9 +1318,13 @@ impl LiveAreaWidget for DebugWidget {
         50
     }
 
-    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
+    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
         // Fills the entire content area above the fixed bars.
-        Constraint::Min(0)
+        0
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
@@ -1679,14 +1693,10 @@ mod tests {
         let reasoning = ReasoningWidget::new();
         let tools = ToolEventsWidget::new();
         assert_eq!(reasoning.desired_rows(80), 0);
-        assert_eq!(
-            reasoning.height_constraint(80, &input_ctx("", 0)),
-            Constraint::Min(0)
-        );
-        assert_eq!(
-            tools.height_constraint(80, &input_ctx("", 0)),
-            Constraint::Min(0)
-        );
+        assert_eq!(reasoning.min_height(80, &input_ctx("", 0)), 0);
+        assert!(reasoning.flexible(&input_ctx("", 0)));
+        assert_eq!(tools.min_height(80, &input_ctx("", 0)), 0);
+        assert!(tools.flexible(&input_ctx("", 0)));
     }
 
     #[test]
@@ -1697,14 +1707,44 @@ mod tests {
         }
         // 10 lines, uncapped: desired height is 10, not 5.
         assert_eq!(reasoning.desired_rows(80), 10);
-        assert_eq!(reasoning.min_rows(), 1);
+        assert_eq!(reasoning.min_height(80, &input_ctx("", 0)), 5);
+        assert!(reasoning.flexible(&input_ctx("", 0)));
+        assert_eq!(reasoning.max_height(&input_ctx("", 0)), 5);
 
         let mut tools = ToolEventsWidget::new();
         for i in 0..10 {
             tools.push_tool(&format!("tool-{i}"));
         }
         assert_eq!(tools.desired_rows(80), 10);
-        assert_eq!(tools.min_rows(), 1);
+        assert_eq!(tools.min_height(80, &input_ctx("", 0)), 5);
+        assert!(tools.flexible(&input_ctx("", 0)));
+        assert_eq!(tools.max_height(&input_ctx("", 0)), 5);
+    }
+
+    #[test]
+    fn live_tail_widgets_floor_is_wrapped_rows_capped_at_5() {
+        // A single long line that wraps to 3 rows at width 10 must report a
+        // floor of 3, not 1 (raw line count) or 5 (the cap).
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(reasoning.desired_rows(10), 3);
+        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 3);
+
+        let mut tools = ToolEventsWidget::new();
+        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(tools.desired_rows(10), 3);
+        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 3);
+
+        // A long line wrapping past 5 rows caps the floor at 5.
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
+        assert_eq!(reasoning.desired_rows(10), 6);
+        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 5);
+
+        let mut tools = ToolEventsWidget::new();
+        tools.push_tool("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
+        assert_eq!(tools.desired_rows(10), 6);
+        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 5);
     }
 
     // ── input bar cursor positioning ────────────────────────────

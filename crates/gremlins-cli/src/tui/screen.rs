@@ -24,7 +24,7 @@ use crossterm::{
 use ratatui::{
     backend::{Backend, ClearType, CrosstermBackend},
     buffer::{Buffer, Cell},
-    layout::{Constraint, Rect},
+    layout::Rect,
     text::Line,
 };
 
@@ -299,8 +299,7 @@ impl<B: Backend> LiveArea<B> {
         let mut max_heights = vec![0u16; n];
 
         for (i, w) in self.widgets.iter().enumerate() {
-            let c = w.height_constraint(width, &ctx);
-            let (h, _flex) = constraint_height(c, self.rows);
+            let h = w.min_height(width, &ctx);
             // Force the minimum into [0, max] so a widget whose minimum
             // exceeds its cap cannot drive below-minimum shrinking.
             min_heights[i] = h.min(w.max_height(&ctx));
@@ -349,14 +348,12 @@ impl<B: Backend> LiveArea<B> {
         if total < rows {
             let remaining = (rows - total) as u16;
             // Highest priority (largest `size_priority`) flexible widget.
-            // The transcript reports `Length(0)` (not flexible) when a
-            // blocking overlay is active, so it is naturally excluded here.
+            // The transcript reports inflexible when a blocking overlay is
+            // active, so it is naturally excluded here.
             let mut best: Option<usize> = None;
             let mut best_prio = i32::MIN;
             for i in 0..n {
-                let c = self.widgets[i].height_constraint(width, &ctx);
-                let (_h, flex) = constraint_height(c, self.rows);
-                if flex && self.widgets[i].size_priority() > best_prio {
+                if self.widgets[i].flexible(&ctx) && self.widgets[i].size_priority() > best_prio {
                     best_prio = self.widgets[i].size_priority();
                     best = Some(i);
                 }
@@ -706,28 +703,6 @@ impl LiveArea<CrosstermBackend<Stdout>> {
 /// Trim trailing whitespace from a single row captured for scrollback.
 fn trim_trailing_whitespace(s: &str) -> String {
     s.trim_end().to_string()
-}
-
-/// Resolve a ratatui [`Constraint`] into a minimum height and a flexibility
-/// flag. Fixed constraints (`Length`/`Max`/`Ratio`/`Percentage`) request an
-/// exact height; flexible constraints (`Min`/`Fill`) request a minimum and
-/// absorb slack.
-fn constraint_height(c: Constraint, rows: u16) -> (u16, bool) {
-    match c {
-        Constraint::Length(n) => (n, false),
-        Constraint::Max(n) => (n, false),
-        Constraint::Ratio(num, den) => {
-            let r = if den == 0 {
-                0.0
-            } else {
-                num as f32 / den as f32
-            };
-            ((rows as f32 * r) as u16, false)
-        }
-        Constraint::Percentage(p) => (rows.saturating_mul(p) / 100, false),
-        Constraint::Min(n) => (n, true),
-        Constraint::Fill(_) => (0, true),
-    }
 }
 
 /// Scroll the top `region_rows` rows of `buf` up by `amount`, clearing the
@@ -1394,7 +1369,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_grows_uncapped_with_content() {
+    fn reasoning_capped_at_five_rows() {
         let cols: u16 = 80;
         let rows: u16 = 24;
         let mut live_area = new_live(cols, rows);
@@ -1403,7 +1378,8 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
-        // 8 reasoning lines: previously capped at 5, now all visible.
+        // 8 reasoning lines: the widget's `max_height` caps it at 5 rows, so
+        // only the tail five lines are visible and the head is trimmed.
         for i in 0..8 {
             live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
         }
@@ -1411,16 +1387,22 @@ mod tests {
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
-        for i in 0..8 {
+        for i in 3..8 {
             assert!(
                 visible.contains(&format!("reasoning line {i}")),
-                "reasoning line {i} should be visible (no 5-row cap).\nBuffer:\n{visible}"
+                "reasoning line {i} should be visible (5-row cap keeps the tail).\nBuffer:\n{visible}"
+            );
+        }
+        for i in 0..3 {
+            assert!(
+                !visible.contains(&format!("reasoning line {i}")),
+                "reasoning line {i} should be trimmed (5-row cap).\nBuffer:\n{visible}"
             );
         }
     }
 
     #[test]
-    fn response_wins_and_shrinks_reasoning_and_tools_to_one_row() {
+    fn response_wins_and_shrinks_reasoning_and_tools_to_five_rows() {
         let cols: u16 = 80;
         let rows: u16 = 12;
         let mut live_area = new_live(cols, rows);
@@ -1450,26 +1432,24 @@ mod tests {
             visible.contains("response line 0"),
             "response should be visible.\nBuffer:\n{visible}"
         );
-        // Reasoning and tools shrink to their one-row minimum: only their
-        // final (tail) line survives, and their earlier lines are trimmed.
+        // Reasoning shrinks toward its five-row floor, keeping its tail and
+        // trimming its head.
         assert!(
             visible.contains("reasoning line 9"),
-            "reasoning should keep its one-row tail.\nBuffer:\n{visible}"
+            "reasoning should keep its tail.\nBuffer:\n{visible}"
         );
         assert!(
             !visible.contains("reasoning line 0"),
-            "reasoning head should be trimmed to one row.\nBuffer:\n{visible}"
+            "reasoning head should be trimmed.\nBuffer:\n{visible}"
         );
+        // Tools (lowest priority) collapse entirely once the viewport is
+        // exhausted.
         assert!(
-            visible.contains("tool-9"),
-            "tools should keep their one-row tail.\nBuffer:\n{visible}"
+            !visible.contains("tool-9"),
+            "tools should collapse to zero rows.\nBuffer:\n{visible}"
         );
-        assert!(
-            !visible.contains("tool-0"),
-            "tool head should be trimmed to one row.\nBuffer:\n{visible}"
-        );
-        // Reasoning and tools are trimmed to their allocated (minimal) rows;
-        // their content is never committed to scrollback.
+        // Reasoning and tools are trimmed to their allocated rows; their
+        // content is never committed to scrollback.
         assert!(live_area.scrollback().is_empty());
     }
 
@@ -1495,24 +1475,24 @@ mod tests {
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
-        // Tools collapse to their one-row minimum (only the tail survives).
+        // Tools (priority 1) shrink before reasoning (5): they keep only
+        // their tail and trim the head.
         assert!(
             visible.contains("tool-11"),
-            "tools should keep their one-row tail.\nBuffer:\n{visible}"
+            "tools should keep their tail.\nBuffer:\n{visible}"
         );
         assert!(
             !visible.contains("tool-0"),
-            "tool head should be trimmed to one row.\nBuffer:\n{visible}"
+            "tool head should be trimmed.\nBuffer:\n{visible}"
         );
-        // Reasoning keeps several rows (its head is only partially trimmed),
-        // proving it yields after tools.
+        // Reasoning keeps more rows than tools, proving it yields after them.
         assert!(
             visible.contains("reasoning line 11"),
             "reasoning tail should be visible.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("reasoning line 4"),
-            "reasoning should keep several rows while tools shrink first.\nBuffer:\n{visible}"
+            visible.contains("reasoning line 7"),
+            "reasoning should keep more rows than tools.\nBuffer:\n{visible}"
         );
         assert!(
             !visible.contains("reasoning line 0"),

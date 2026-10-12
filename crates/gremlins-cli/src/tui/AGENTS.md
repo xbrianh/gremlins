@@ -48,7 +48,7 @@ run()
 - **Diff-driven double buffering.** `LiveArea` keeps `curr`/`prev` screen-sized `Buffer`s and flushes only changed cells each frame (`prev.diff_iter(&curr)`). `invalidate()` forces a full repaint.
 - **Terminal scrollback promotion.** When the `ScrollableBuffer` FIFO exceeds available rows, `overflow_split()` reports the head prefix; the caller drains it and `commit_scrollback()` renders it and calls `scroll_region_up` to push it into terminal scrollback. The bottom `RESERVED_ROWS` (2: input + info bars) are excluded from the scroll region. A pinned boundary (the current turn's start) ensures an in-progress turn never reaches terminal scrollback — only completed turns and the separator before a new turn may overflow.
 - **Single styled FIFO.** The transcript is one `ScrollableBuffer` of styled lines and is the only render source. Prompt, reasoning, tool, response, and system lines are all pushed into it as styled lines as they arrive. Prompt and response text are markdown-rendered; reasoning and tool lines use dark-gray italic styling. The current turn's draft state (raw response accumulator, turn-start/response-start markers, response-dirty flag) lives on the transcript widget; the FIFO is the only thing `render` reads.
-- **Dynamic widget stack.** `LiveArea` owns an ordered `Vec<Box<dyn LiveAreaWidget>>`. The initial stack (top-to-bottom) is transcript → input bar → info bar. Overlays are pushed/popped at the top of the stack via `push_overlay`/`pop_overlay`. `compose()` lays every widget out in a single ratatui layout pass using each widget's `height_constraint(width, ctx)`.
+- **Dynamic widget stack.** `LiveArea` owns an ordered `Vec<Box<dyn LiveAreaWidget>>`. The initial stack (top-to-bottom) is transcript → input bar → info bar. Overlays are pushed/popped at the top of the stack via `push_overlay`/`pop_overlay`. `compose()` lays every widget out top-to-bottom using each widget's `min_height(width, ctx)` floor and `flexible()` flag.
 - **Overlay widgets.** Three overlay widgets implement `LiveAreaWidget`: `WatchTableWidget` (non-blocking, reads the run table from the render context), `WatchSingleWidget` (blocking log viewer owning its log buffer), and `DebugWidget` (blocking debug session owning prompt/history/connection state). Blocking overlays collapse the transcript to zero height so they occupy the whole content region while the fixed input/info bars stay visible. Overlay-local state is cleared when the widget is popped.
 - **Chat uses a fresh socket per message.** The daemon processes chat as an ephemeral stage. The persistent `DaemonClient` stays free for commands during chat.
 - **Log follow uses a dedicated socket.** The `log` op with `follow:true` monopolizes its connection, so it gets its own (`client::follow_log`).
@@ -108,7 +108,7 @@ drained, and returned as lines for `LiveArea::commit_scrollback()`. Only the
 transcript may return overflow; overlay widgets always return an empty `Vec`.
 
 When a blocking overlay is active, the transcript collapses to zero height
-(its `height_constraint` returns `Length(0)` when `ctx.blocking_overlay()`),
+(its `min_height` returns `0` when `ctx.blocking_overlay()`),
 so the overlay fills the whole content region while the input/info bars
 remain visible. The non-blocking watch table reserves an upper portion and
 leaves the transcript below it visible.
