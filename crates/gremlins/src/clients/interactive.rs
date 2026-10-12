@@ -506,7 +506,10 @@ mod tests {
             });
         }
 
-        // Drain the channel — at most 16 events survived.
+        // Drop the sender so the channel closes after draining buffered
+        // events, rather than blocking forever.
+        drop(sender);
+
         let mut count = 0;
         while rx.recv().await.is_some() {
             count += 1;
