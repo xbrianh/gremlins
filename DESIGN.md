@@ -1074,20 +1074,33 @@ the overlay is non-blocking.
                          │
                          ▼
               ┌─────────────────────┐
-              │ transcript widget   │  prompt + reasoning window + tool list
-              │ (streaming)         │  + response; grows with content
+              │ transcript widget   │  prompt + response; grows with content
+              │ (streaming)         │
+              └─────────┬───────────┘
+              ┌─────────────────────┐
+              │ reasoning widget    │  live tail (dim italic); 5-row cap
+              │ (streaming)         │
+              └─────────┬───────────┘
+              ┌─────────────────────┐
+              │ tool events widget  │  live tool list (dim italic); 5-row cap
+              │ (streaming)         │
               └─────────┬───────────┘
                         │ Done / Ended / Error / Esc
                         ▼
               ┌─────────────────────┐
-              │ transcript widget   │  same layout, frozen reasoning window,
-              │ (finished)          │  plus stats footer
+              │ transcript widget   │  same layout, frozen reasoning and tool
+              │ (finished)          │  widgets, plus stats footer
               └─────────────────────┘
                         │
            session ends / cleared
                         │
                         ▼
                     discarded
+
+  Reasoning and tool-event widgets are ephemeral: they populate during a turn
+  and are cleared when the next prompt is submitted. Their content is never
+  flattened into the transcript — only the prompt and response survive across
+  turns.
 
   system content (banner, events, command output) is pushed directly into the
   transcript widget. Overlay widgets exist outside this lifecycle — they are

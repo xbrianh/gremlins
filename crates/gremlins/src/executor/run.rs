@@ -382,7 +382,15 @@ async fn run_agent(
                     )));
                 }
             },
-            Err(_) => None, // First turn — no artifact yet
+            Err(e) => {
+                if e.downcast_ref::<crate::executor::state::MissingArtifact>().is_some() {
+                    None // First turn — no artifact yet
+                } else {
+                    return Err(RunError::Message(format!(
+                        "failed to read conversation artifact: {e}"
+                    )));
+                }
+            }
         }
     } else {
         None

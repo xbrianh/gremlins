@@ -546,6 +546,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut turn_gen: u64 = 0;
     // The turn id of the currently active turn, if any.
     let mut active_turn: Option<String> = None;
+    // Chat IDs explicitly destroyed by /clear — terminal events from
+    // these sessions are stale and must not restore them.
+    let mut cleared_chat_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
     // ── Debug session state ────────────────────────────────────────
@@ -880,6 +884,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // Destroy the current chat gremlin on the
                                         // daemon so the next message starts fresh.
                                         if let Some(id) = app.chat_id.take() {
+                                            cleared_chat_ids.insert(id.clone());
                                             let c = Arc::clone(&client);
                                             let tx = result_tx.clone();
                                             tokio::spawn(async move {
@@ -1321,7 +1326,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // Do this before the has_current_turn skip so a failed
                         // first turn still records the id for the next message.
                         if let Some(id) = id {
-                            app.chat_id = Some(id);
+                            if !cleared_chat_ids.contains(&id) {
+                                app.chat_id = Some(id);
+                            }
                         }
                         if !live_area.has_current_turn() {
                             log::debug!("Done SKIPPED — no current turn");
@@ -1374,7 +1381,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     ChatEvent::Ended { reason, id, .. } => {
                         if let Some(id) = id {
-                            app.chat_id = Some(id);
+                            if !cleared_chat_ids.contains(&id) {
+                                app.chat_id = Some(id);
+                            }
                         }
                         if !live_area.has_current_turn() {
                             continue;
@@ -1391,7 +1400,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     ChatEvent::Error { message: msg, id, .. } => {
                         if let Some(id) = id {
-                            app.chat_id = Some(id);
+                            if !cleared_chat_ids.contains(&id) {
+                                app.chat_id = Some(id);
+                            }
                         }
                         if !live_area.has_current_turn() {
                             continue;
@@ -1411,7 +1422,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // Esc + resubmit targets the same chat gremlin rather
                         // than creating a second one.
                         log::debug!("ChatId captured: {id}");
-                        app.chat_id = Some(id);
+                        if !cleared_chat_ids.contains(&id) {
+                            app.chat_id = Some(id);
+                        }
                     }
                 }
             }
