@@ -274,10 +274,7 @@ impl Config {
         let (exact_stage_clients, prefix_stage_clients) =
             parse_stage_clients(stage_clients.as_ref());
 
-        let path_overrides = cfg_file
-            .paths
-            .map(PathOverrides::from)
-            .unwrap_or_default();
+        let path_overrides = cfg_file.paths.map(PathOverrides::from).unwrap_or_default();
 
         let max_tool_output_bytes = cfg_file
             .max_tool_output_bytes
