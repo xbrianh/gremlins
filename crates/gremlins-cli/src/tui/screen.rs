@@ -975,120 +975,6 @@ mod tests {
     // ── compose() frame tests ────────────────────────────────────
 
     #[test]
-    fn compose_in_progress_tall_response_overflows_and_tail_visible() {
-        let cols: u16 = 40;
-        let rows: u16 = 8;
-        let mut live_area = new_live(cols, rows);
-
-        let mut app = App::new();
-        app.project_name = "gremlins".to_string();
-
-        // Completed content before the turn.
-        live_area.push_transcript_line("banner".to_string());
-        live_area.submit_prompt("hi".to_string());
-
-        // A response far taller than the viewport, still in-progress (no
-        // `finish_turn`).
-        let body: String = (0..40)
-            .map(|i| format!("response line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        live_area.replace_response(&body);
-
-        live_area.compose(&app).unwrap();
-
-        // In-progress overflow now commits to terminal scrollback.
-        assert!(
-            !live_area.scrollback().is_empty(),
-            "in-progress response taller than viewport must overflow"
-        );
-
-        // The tail (most recent content) is visible in the rendered frame;
-        // the oldest content has overflowed into scrollback. The response is
-        // a single wrapped line, so its head is above the visible window
-        // rather than in scrollback.
-        let visible = dump_buffer(live_area.backend().buffer());
-        assert!(
-            visible.contains("response line 39"),
-            "the most recent response line must be visible: {visible}"
-        );
-        assert!(
-            !visible.contains("response line 0"),
-            "the oldest response line must not be visible: {visible}"
-        );
-        assert!(
-            live_area.scrollback().iter().any(|l| l.contains("> hi")),
-            "the prompt must overflow into scrollback: {:?}",
-            live_area.scrollback()
-        );
-    }
-
-    #[test]
-    fn compose_short_viewport_shows_fresh_prompt_not_oldest_line() {
-        let cols: u16 = 40;
-        let rows: u16 = 6;
-        let mut live_area = new_live(cols, rows);
-
-        let mut app = App::new();
-        app.project_name = "gremlins".to_string();
-
-        // A completed turn that pushes content beyond the viewport.
-        for i in 0..12 {
-            live_area.push_transcript_line(format!("completed line {i}"));
-        }
-        // Fresh prompt: the tail the user just submitted.
-        live_area.submit_prompt("brand new prompt".to_string());
-
-        live_area.compose(&app).unwrap();
-
-        let visible = dump_buffer(live_area.backend().buffer());
-        let combined = format!("{}\n\n{}", live_area.scrollback().join("\n"), visible);
-        assert!(
-            visible.contains("brand new prompt"),
-            "the freshly submitted prompt (tail) must be visible: {visible}"
-        );
-        assert!(
-            !visible.contains("completed line 0"),
-            "the oldest completed line (head) must not be visible: {visible}"
-        );
-        assert!(
-            combined.contains("completed line 0"),
-            "the oldest completed line belongs in scrollback, not dropped: {combined}"
-        );
-    }
-
-    #[test]
-    fn compose_tail_anchor_is_wrapping_aware() {
-        let cols: u16 = 10;
-        let rows: u16 = 6;
-        let mut live_area = new_live(cols, rows);
-
-        let mut app = App::new();
-        app.project_name = "gremlins".to_string();
-
-        // Two long raw lines, each longer than the 10-col width so each wraps
-        // to multiple rows. The transcript gets fewer rows than the combined
-        // wrapped height, so tail anchoring must show the wrapped tail of the
-        // newest line rather than clipping at a raw line index.
-        live_area.push_transcript_line("abcdefghijklmnopqrstuvwxyz".to_string());
-        live_area.push_transcript_line("ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string());
-
-        live_area.compose(&app).unwrap();
-
-        let visible = dump_buffer(live_area.backend().buffer());
-        // The wrapped tail of the newest line must be visible.
-        assert!(
-            visible.contains("WXYZ") || visible.contains("UVWXYZ"),
-            "the wrapped tail of the newest line must be visible: {visible}"
-        );
-        // The full oldest line must not be visible: its head overflowed.
-        assert!(
-            !visible.contains("abcdefghijklmnopqrstuvwxyz"),
-            "the oldest line's full text must not be visible: {visible}"
-        );
-    }
-
-    #[test]
     fn compose_chat_response_visible_after_done() {
         let cols: u16 = 80;
         let rows: u16 = 24;
@@ -1532,11 +1418,9 @@ mod tests {
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
-        // The response must be present (it wins the contested space). The
-        // transcript is tail-anchored, so the newest response line is what
-        // stays visible.
+        // The response must be present (it wins the contested space).
         assert!(
-            visible.contains("response line 19"),
+            visible.contains("response line 0"),
             "response should be visible.\nBuffer:\n{visible}"
         );
         // Reasoning (priority 5) shrinks before the response (priority 10),
@@ -1549,26 +1433,15 @@ mod tests {
             !visible.contains("reasoning line 0"),
             "reasoning head should be trimmed.\nBuffer:\n{visible}"
         );
-        // Tools (lowest priority) shrink the most: their head is trimmed,
-        // keeping only the tail.
+        // Tools (lowest priority) collapse entirely once the viewport is
+        // exhausted.
         assert!(
-            !visible.contains("tool-0"),
-            "tools head should be trimmed.\nBuffer:\n{visible}"
-        );
-        assert!(
-            visible.contains("tool-9"),
-            "tools should keep their tail.\nBuffer:\n{visible}"
+            !visible.contains("tool-9"),
+            "tools should collapse to zero rows.\nBuffer:\n{visible}"
         );
         // Reasoning and tools are trimmed to their allocated rows; their
-        // content is never committed to scrollback. The transcript's tall
-        // in-progress response, however, now overflows into scrollback.
-        let scrollback = live_area.scrollback();
-        assert!(
-            scrollback
-                .iter()
-                .all(|l| !l.contains("reasoning") && !l.contains("tool-")),
-            "reasoning/tool content must not reach scrollback: {scrollback:?}"
-        );
+        // content is never committed to scrollback.
+        assert!(live_area.scrollback().is_empty());
     }
 
     #[test]

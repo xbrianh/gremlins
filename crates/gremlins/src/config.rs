@@ -924,6 +924,84 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn test_config_denies_unknown_top_level_key() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-client: "a:b"
+not-a-key: 1"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_denies_unknown_key_in_profile() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"client-profiles:
+  demo:
+    client: "a:b"
+    not-a-key: 1"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_denies_unknown_key_under_paths() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"paths:
+  state-root: /tmp/gremlins-state
+  not-a-key: 1"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_denies_unknown_key_under_azure_openai() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"azure-openai:
+  endpoint: https://example.com
+  not-a-key: 1"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_accepts_closed_paths_section() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"paths:
+  state-root: /tmp/gremlins-state
+  work-root: /tmp/gremlins-work
+  config-root: /tmp/gremlins-config
+  project-root: /tmp/gremlins-project
+  overlay-dir: /tmp/gremlins-overlay
+  scratch-root: /tmp/gremlins-scratch"#,
+        ));
+        let overrides = Config::load().unwrap().path_overrides;
+        assert_eq!(
+            overrides.state_root,
+            Some(PathBuf::from("/tmp/gremlins-state"))
+        );
+        assert_eq!(
+            overrides.work_root,
+            Some(PathBuf::from("/tmp/gremlins-work"))
+        );
+        assert_eq!(
+            overrides.config_root,
+            Some(PathBuf::from("/tmp/gremlins-config"))
+        );
+        assert_eq!(
+            overrides.project_root,
+            Some(PathBuf::from("/tmp/gremlins-project"))
+        );
+        assert_eq!(
+            overrides.overlay_dir,
+            Some(PathBuf::from("/tmp/gremlins-overlay"))
+        );
+        assert_eq!(
+            overrides.scratch_root,
+            Some(PathBuf::from("/tmp/gremlins-scratch"))
+        );
+    }
+
+    #[test]
     fn test_config_default_client() {
         let cfg_file: ConfigFile =
             serde_yaml::from_str(r#"default-client: "openai:gpt-4o""#).unwrap();
