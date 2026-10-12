@@ -247,15 +247,26 @@ impl<B: Backend> LiveArea<B> {
 
     /// Compose and paint a full frame.
     ///
-    /// Lays all widgets out top-to-bottom in a single priority-aware pass.
-    /// Each widget reports a requested height via `height_constraint`; when
-    /// the sum exceeds the viewport, fixed-height widgets are shrunk in
-    /// ascending `size_priority` order (lowest first) until the layout fits.
-    /// Flexible (`Min`) widgets absorb the remaining rows. Only the
-    /// transcript widget may return overflow; overlay widgets always return
-    /// an empty overflow `Vec`. Collapsed (zero-height) chunks are skipped
-    /// so a blocking overlay or a short viewport never commits transcript
-    /// overflow.
+    /// Lays all widgets out top-to-bottom in a single priority-aware pass
+    /// with three phases:
+    ///
+    /// 1. **Desired pass.** Every widget is given its desired height (fixed
+    ///    widgets keep their fixed height; flexible widgets report how much
+    ///    they *want*).
+    /// 2. **Shrink pass.** When the sum of desired heights exceeds the
+    ///    viewport, widgets are shrunk in ascending `size_priority` order
+    ///    (lowest first) from their desired height down to their minimum
+    ///    height until the layout fits. If the sum of minimums still
+    ///    exceeds the viewport, shrinking continues below minimum in the
+    ///    same priority order.
+    /// 3. **Expand pass.** When the sum of desired heights is below the
+    ///    viewport, the remaining rows go to the highest-priority flexible
+    ///    widget (the transcript), so it keeps filling leftover space.
+    ///
+    /// Only the transcript widget may return overflow; overlay widgets
+    /// always return an empty overflow `Vec`. Collapsed (zero-height) chunks
+    /// are skipped so a blocking overlay or a short viewport never commits
+    /// transcript overflow.
     pub fn compose(&mut self, app: &App) -> io::Result<()> {
         let gremlin_count = app.gremlin_count_str();
         let ctx = RenderContext {
@@ -273,56 +284,73 @@ impl<B: Backend> LiveArea<B> {
 
         // ── Priority-aware layout pass ────────────────────────────
         //
-        // For each widget, resolve its constraint into a minimum height and
-        // a flexibility flag. Fixed widgets (`Length`/`Max`/`Ratio`/
-        // `Percentage`) request an exact height; flexible widgets (`Min`/
-        // `Fill`) request a minimum and absorb slack. When the sum of
-        // minimums exceeds the viewport, fixed widgets are shrunk in
-        // ascending `size_priority` order (lowest first) until it fits.
+        // Three phases: desired, shrink, expand. Each widget reports a
+        // minimum height (via `height_constraint`) and a desired height
+        // (via `desired_height`, defaulting to the minimum).
         let n = self.widgets.len();
         let mut min_heights = vec![0u16; n];
-        let mut flexible = vec![false; n];
-        let mut fixed_total = 0u16;
+        let mut desired_heights = vec![0u16; n];
 
         for (i, w) in self.widgets.iter().enumerate() {
             let c = w.height_constraint(width, &ctx);
-            let (h, flex) = constraint_height(c, self.rows);
+            let (h, _flex) = constraint_height(c, self.rows);
             min_heights[i] = h;
-            flexible[i] = flex;
-            fixed_total += h;
+            desired_heights[i] = w.desired_height(width, &ctx).max(h);
         }
 
-        // Shrink fixed widgets (ascending size priority) when over budget.
-        if fixed_total > self.rows {
-            let mut order: Vec<usize> = (0..n).filter(|&i| !flexible[i]).collect();
+        // Shrink pass: when the sum of desired heights exceeds the viewport,
+        // shrink in ascending size_priority order (lowest first) from desired
+        // down to minimum, then below minimum if still over budget. The total
+        // is tracked in `u32` so uncapped desired heights cannot overflow a
+        // `u16` sum before being clamped to the viewport.
+        let mut heights = desired_heights.clone();
+        let mut total: u32 = heights.iter().map(|&h| h as u32).sum();
+        let rows = self.rows as u32;
+        if total > rows {
+            let mut order: Vec<usize> = (0..n).collect();
             order.sort_by_key(|&i| self.widgets[i].size_priority());
+            // First shrink down to minimums.
             for &i in &order {
-                if fixed_total <= self.rows {
+                if total <= rows {
                     break;
                 }
-                let excess = fixed_total - self.rows;
-                let shrink = min_heights[i].min(excess);
-                min_heights[i] -= shrink;
-                fixed_total -= shrink;
+                let excess = total - rows;
+                let shrinkable = heights[i].saturating_sub(min_heights[i]) as u32;
+                let shrink = shrinkable.min(excess);
+                heights[i] -= shrink as u16;
+                total -= shrink;
+            }
+            // If still over budget, shrink below minimums in the same order.
+            for &i in &order {
+                if total <= rows {
+                    break;
+                }
+                let excess = total - rows;
+                let shrink = (heights[i] as u32).min(excess);
+                heights[i] -= shrink as u16;
+                total -= shrink;
             }
         }
 
-        // Distribute remaining rows to flexible widgets (on top of their
-        // minimums).
-        let mut heights = min_heights.clone();
-        let remaining = self.rows.saturating_sub(fixed_total);
-        let flex_count = flexible.iter().filter(|&&f| f).count();
-        if flex_count > 0 {
-            let per = remaining / flex_count as u16;
-            let mut extra = remaining % flex_count as u16;
+        // Expand pass: when the sum of desired heights is below the viewport,
+        // give the remaining rows to the highest-priority flexible widget.
+        if total < rows {
+            let remaining = (rows - total) as u16;
+            // Highest priority (largest `size_priority`) flexible widget.
+            // The transcript reports `Length(0)` (not flexible) when a
+            // blocking overlay is active, so it is naturally excluded here.
+            let mut best: Option<usize> = None;
+            let mut best_prio = i32::MIN;
             for i in 0..n {
-                if flexible[i] {
-                    heights[i] += per;
-                    if extra > 0 {
-                        heights[i] += 1;
-                        extra -= 1;
-                    }
+                let c = self.widgets[i].height_constraint(width, &ctx);
+                let (_h, flex) = constraint_height(c, self.rows);
+                if flex && self.widgets[i].size_priority() > best_prio {
+                    best_prio = self.widgets[i].size_priority();
+                    best = Some(i);
                 }
+            }
+            if let Some(i) = best {
+                heights[i] += remaining;
             }
         }
 
@@ -1332,6 +1360,169 @@ mod tests {
         live.finish_response("streamed response", "");
 
         assert_eq!(live.response_text(), "streamed response");
+    }
+
+    #[test]
+    fn reasoning_grows_uncapped_with_content() {
+        let cols: u16 = 80;
+        let rows: u16 = 24;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        // 8 reasoning lines: previously capped at 5, now all visible.
+        for i in 0..8 {
+            live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
+        }
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        for i in 0..8 {
+            assert!(
+                visible.contains(&format!("reasoning line {i}")),
+                "reasoning line {i} should be visible (no 5-row cap).\nBuffer:\n{visible}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_wins_and_shrinks_reasoning_and_tools_to_one_row() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        // Plenty of reasoning and tool content, then a tall response.
+        for i in 0..10 {
+            live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
+        }
+        for i in 0..10 {
+            live_area.push_tool(&format!("tool-{i}"));
+        }
+        let body: String = (0..20)
+            .map(|i| format!("response line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        live_area.replace_response(&body);
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        // The response must be present (it wins the contested space).
+        assert!(
+            visible.contains("response line 0"),
+            "response should be visible.\nBuffer:\n{visible}"
+        );
+        // Reasoning and tools shrink to their one-row minimum: only their
+        // final (tail) line survives, and their earlier lines are trimmed.
+        assert!(
+            visible.contains("reasoning line 9"),
+            "reasoning should keep its one-row tail.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("reasoning line 0"),
+            "reasoning head should be trimmed to one row.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("tool-9"),
+            "tools should keep their one-row tail.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("tool-0"),
+            "tool head should be trimmed to one row.\nBuffer:\n{visible}"
+        );
+        // Reasoning and tools are trimmed to their allocated (minimal) rows;
+        // their content is never committed to scrollback.
+        assert!(live_area.scrollback().is_empty());
+    }
+
+    #[test]
+    fn tools_yield_to_reasoning_when_space_contested() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        // Equal reasoning and tool content; the viewport cannot hold both at
+        // full height, so tools (priority 1) shrink before reasoning (5).
+        for i in 0..12 {
+            live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
+        }
+        for i in 0..12 {
+            live_area.push_tool(&format!("tool-{i}"));
+        }
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        // Tools collapse to their one-row minimum (only the tail survives).
+        assert!(
+            visible.contains("tool-11"),
+            "tools should keep their one-row tail.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("tool-0"),
+            "tool head should be trimmed to one row.\nBuffer:\n{visible}"
+        );
+        // Reasoning keeps several rows (its head is only partially trimmed),
+        // proving it yields after tools.
+        assert!(
+            visible.contains("reasoning line 11"),
+            "reasoning tail should be visible.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("reasoning line 4"),
+            "reasoning should keep several rows while tools shrink first.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("reasoning line 0"),
+            "reasoning head should be trimmed.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn empty_reasoning_and_tools_leave_no_blank_gap() {
+        let cols: u16 = 80;
+        let rows: u16 = 6;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.replace_response("answer");
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        // The transcript content sits directly above the input/info bars with
+        // no rows consumed by the empty reasoning/tool widgets.
+        assert!(visible.contains("> hi"));
+        assert!(visible.contains("answer"));
+        // The answer is contiguous with the prompt (no reasoning/tool rows
+        // interleaved), and no reasoning/tool content is rendered.
+        let lines: Vec<&str> = visible.lines().collect();
+        let prompt_idx = lines
+            .iter()
+            .position(|l| l.contains("> hi"))
+            .expect("prompt row present");
+        assert!(
+            lines[prompt_idx + 1].contains("answer"),
+            "answer should sit directly below the prompt.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("reasoning") && !visible.contains("tool"),
+            "empty reasoning/tool widgets should render nothing.\nBuffer:\n{visible}"
+        );
     }
 
     #[test]

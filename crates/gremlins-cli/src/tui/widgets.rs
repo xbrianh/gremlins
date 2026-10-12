@@ -13,6 +13,7 @@
 //! never commit scrollback themselves — that remains the caller's
 //! responsibility.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use ratatui::{
@@ -95,6 +96,23 @@ pub trait LiveAreaWidget {
         0
     }
 
+    /// The height this widget *wants* at the given width, given the current
+    /// render context. Flexible widgets distinguish "how much I want" from
+    /// "how little I can tolerate" (their minimum height): the desired
+    /// height is what they report when space is plentiful, while the
+    /// minimum is what they shrink down to when space is contested. Defaults
+    /// to the widget's minimum height.
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        match self.height_constraint(width, ctx) {
+            Constraint::Length(n) | Constraint::Max(n) | Constraint::Min(n) => n,
+            Constraint::Ratio(num, den) => (ctx.content_height as u32 * num)
+                .checked_div(den)
+                .unwrap_or(0) as u16,
+            Constraint::Percentage(p) => ctx.content_height.saturating_mul(p) / 100,
+            Constraint::Fill(_) => 0,
+        }
+    }
+
     /// Ordering for committing overflow to scrollback. **Lower value is
     /// committed first.** Only the transcript produces overflow today, but
     /// the integer gives `compose` a deterministic ordering if more than
@@ -136,6 +154,9 @@ pub struct TranscriptWidget {
     response_start: Option<usize>,
     /// Whether the response region needs re-rendering into the FIFO.
     response_dirty: bool,
+    /// Cached wrapped desired height `(width, height)` for the pinned turn,
+    /// invalidated whenever the FIFO, accumulator, or width changes.
+    desired_cache: Cell<Option<(u16, u16)>>,
 }
 
 impl TranscriptWidget {
@@ -146,13 +167,20 @@ impl TranscriptWidget {
             turn_start: None,
             response_start: None,
             response_dirty: false,
+            desired_cache: Cell::new(None),
         }
+    }
+
+    /// Invalidate the cached desired height after any content mutation.
+    fn invalidate_desired_cache(&self) {
+        self.desired_cache.set(None);
     }
 
     /// Append a system message. When a turn is active, the message is
     /// inserted before the pinned turn; otherwise it is appended with
     /// blank-line padding from the previous entry.
     pub fn push_transcript_line(&mut self, line: String) {
+        self.invalidate_desired_cache();
         let styled = Line::from(Span::styled(line, Style::default()));
         match self.turn_start {
             Some(t) => {
@@ -183,6 +211,7 @@ impl TranscriptWidget {
     /// Start a new turn with the given prompt: push a separator and the
     /// markdown-rendered prompt, then pin the turn start.
     pub fn submit_prompt(&mut self, prompt: String) {
+        self.invalidate_desired_cache();
         if !self.scrollable.is_empty() {
             self.scrollable.push(Line::from(""));
         }
@@ -200,6 +229,7 @@ impl TranscriptWidget {
 
     /// Append streaming response text.
     pub fn push_response(&mut self, text: &str) {
+        self.invalidate_desired_cache();
         if self.response_start.is_none() {
             self.response_start = Some(self.scrollable.len());
         }
@@ -209,6 +239,7 @@ impl TranscriptWidget {
 
     /// Replace the entire response text.
     pub fn replace_response(&mut self, text: &str) {
+        self.invalidate_desired_cache();
         if self.response_start.is_none() {
             self.response_start = Some(self.scrollable.len());
         }
@@ -233,6 +264,7 @@ impl TranscriptWidget {
         if text.is_empty() {
             return;
         }
+        self.invalidate_desired_cache();
 
         if self.response_accumulator.ends_with(text) {
             return;
@@ -274,6 +306,7 @@ impl TranscriptWidget {
     /// already in the FIFO.
     pub fn finish_turn(&mut self) {
         self.rebuild_response();
+        self.invalidate_desired_cache();
         self.turn_start = None;
         self.response_start = None;
         self.response_dirty = false;
@@ -283,6 +316,7 @@ impl TranscriptWidget {
     /// Discard the current turn: truncate the FIFO back to the turn start
     /// and clear the draft state.
     pub fn clear_current_turn(&mut self) {
+        self.invalidate_desired_cache();
         if let Some(t) = self.turn_start {
             self.scrollable.truncate(t);
             // The separator before the turn (pushed by `submit_prompt`) is
@@ -304,6 +338,7 @@ impl TranscriptWidget {
 
     /// Clear the scrollable FIFO.
     pub fn clear_scrollable(&mut self) {
+        self.invalidate_desired_cache();
         self.scrollable.clear();
         self.turn_start = None;
         self.response_start = None;
@@ -316,12 +351,44 @@ impl TranscriptWidget {
         if !self.response_dirty {
             return;
         }
+        self.invalidate_desired_cache();
         self.response_dirty = false;
         let start = self.response_start.unwrap_or(self.scrollable.len());
         self.scrollable.truncate(start);
         for line in markdown::render(&self.response_accumulator, Style::default()) {
             self.scrollable.push(line);
         }
+    }
+
+    /// Wrapped height of the pinned current turn (prompt plus response) at
+    /// the given width. Completed-turn history does not compete for space;
+    /// it continues to overflow to scrollback. A dirty response region is
+    /// accounted for by rendering the accumulator in place of the stale
+    /// FIFO tail.
+    fn desired_height(&self, width: u16) -> u16 {
+        if let Some((w, h)) = self.desired_cache.get() {
+            if w == width {
+                return h;
+            }
+        }
+        let start = self.turn_start.unwrap_or(self.scrollable.len());
+        let lines = self.scrollable.visible_lines();
+        let mut current: Vec<Line<'static>> = lines[start..].to_vec();
+        if self.response_dirty {
+            if let Some(rs) = self.response_start {
+                // Drop any stale response already in the FIFO (from before
+                // the dirty rebuild), keeping only the prompt portion.
+                let keep = rs.saturating_sub(start);
+                current.truncate(keep);
+            }
+            current.extend(markdown::render(
+                &self.response_accumulator,
+                Style::default(),
+            ));
+        }
+        let h = (wrapped_height(&current, width).min(u16::MAX as usize)) as u16;
+        self.desired_cache.set(Some((width, h)));
+        h
     }
 
     /// Drain the head of the transcript FIFO that does not fit in
@@ -331,6 +398,7 @@ impl TranscriptWidget {
         // Rebuild the response region first so the overflow split measures
         // exactly what will be painted this frame.
         self.rebuild_response();
+        self.invalidate_desired_cache();
         let pinned = self.turn_start.unwrap_or(self.scrollable.len());
         let (_overflow_rows, overflow_lines): (_, Vec<_>) =
             split_overflow(&self.scrollable, available_rows, width, pinned);
@@ -438,8 +506,7 @@ fn trim_to_tail(buffer: &mut LineBuffer, available_rows: u16, width: u16) {
 }
 
 /// Live tail for reasoning text. Accumulates partial chunks into complete
-/// lines and renders them unstyled, capped at a maximum number of visible
-/// rows (5).
+/// lines and renders them unstyled, growing freely with its content.
 pub struct ReasoningWidget {
     lines: LineBuffer,
     partial: String,
@@ -495,11 +562,21 @@ impl ReasoningWidget {
         self.lines.is_empty() && self.partial.is_empty()
     }
 
-    fn visible_rows(&self, width: u16) -> u16 {
+    /// Minimum height: 1 row when non-empty, 0 when empty.
+    fn min_rows(&self) -> u16 {
+        if self.is_empty() {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// Desired height: the full wrapped content height (uncapped).
+    fn desired_rows(&self, width: u16) -> u16 {
         if self.is_empty() {
             return 0;
         }
-        (wrapped_height(&self.rendered_lines(), width) as u16).min(5)
+        (wrapped_height(&self.rendered_lines(), width).min(u16::MAX as usize)) as u16
     }
 
     fn rendered_lines(&self) -> Vec<Line<'static>> {
@@ -526,8 +603,16 @@ impl Default for ReasoningWidget {
 impl LiveAreaWidget for ReasoningWidget {
     as_any_methods!();
 
-    fn height_constraint(&self, width: u16, _ctx: &RenderContext) -> Constraint {
-        Constraint::Length(self.visible_rows(width))
+    fn size_priority(&self) -> i32 {
+        5
+    }
+
+    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
+        Constraint::Min(self.min_rows())
+    }
+
+    fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
+        self.desired_rows(width)
     }
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
@@ -568,7 +653,7 @@ impl LiveAreaWidget for ReasoningWidget {
 }
 
 /// Live tail for tool-call events. Owns a FIFO of unstyled tool-name lines,
-/// capped at a maximum number of visible rows (5).
+/// growing freely with its content.
 pub struct ToolEventsWidget {
     lines: LineBuffer,
 }
@@ -600,11 +685,21 @@ impl ToolEventsWidget {
         self.lines.is_empty()
     }
 
-    fn visible_rows(&self, width: u16) -> u16 {
+    /// Minimum height: 1 row when non-empty, 0 when empty.
+    fn min_rows(&self) -> u16 {
+        if self.is_empty() {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// Desired height: the full wrapped content height (uncapped).
+    fn desired_rows(&self, width: u16) -> u16 {
         if self.is_empty() {
             return 0;
         }
-        (self.lines.wrapped_height(width) as u16).min(5)
+        (self.lines.wrapped_height(width).min(u16::MAX as usize)) as u16
     }
 }
 
@@ -617,8 +712,16 @@ impl Default for ToolEventsWidget {
 impl LiveAreaWidget for ToolEventsWidget {
     as_any_methods!();
 
-    fn height_constraint(&self, width: u16, _ctx: &RenderContext) -> Constraint {
-        Constraint::Length(self.visible_rows(width))
+    fn size_priority(&self) -> i32 {
+        1
+    }
+
+    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
+        Constraint::Min(self.min_rows())
+    }
+
+    fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
+        self.desired_rows(width)
     }
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
@@ -640,7 +743,7 @@ impl LiveAreaWidget for ToolEventsWidget {
 impl LiveAreaWidget for TranscriptWidget {
     as_any_methods!();
     fn size_priority(&self) -> i32 {
-        0
+        10
     }
 
     fn overflow_priority(&self) -> i32 {
@@ -655,6 +758,13 @@ impl LiveAreaWidget for TranscriptWidget {
         }
         // Fills whatever remains after the fixed-height widgets below it.
         Constraint::Min(0)
+    }
+
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        if ctx.blocking_overlay() {
+            return 0;
+        }
+        self.desired_height(width)
     }
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
@@ -1512,7 +1622,7 @@ mod tests {
         // The single long line wraps to 3 rows and cannot fit in 2 visible
         // rows, so the live tail discards it entirely.
         assert!(reasoning.rendered_lines().is_empty());
-        assert_eq!(reasoning.visible_rows(10), 0);
+        assert_eq!(reasoning.desired_rows(10), 0);
     }
 
     #[test]
@@ -1538,15 +1648,33 @@ mod tests {
     fn live_tail_widgets_collapse_to_zero_height_when_empty() {
         let reasoning = ReasoningWidget::new();
         let tools = ToolEventsWidget::new();
-        assert_eq!(reasoning.visible_rows(80), 0);
+        assert_eq!(reasoning.desired_rows(80), 0);
         assert_eq!(
             reasoning.height_constraint(80, &input_ctx("", 0)),
-            Constraint::Length(0)
+            Constraint::Min(0)
         );
         assert_eq!(
             tools.height_constraint(80, &input_ctx("", 0)),
-            Constraint::Length(0)
+            Constraint::Min(0)
         );
+    }
+
+    #[test]
+    fn live_tail_widgets_report_uncapped_desired_height() {
+        let mut reasoning = ReasoningWidget::new();
+        for i in 0..10 {
+            reasoning.push_reasoning_text(&format!("reasoning line {i}\n"));
+        }
+        // 10 lines, uncapped: desired height is 10, not 5.
+        assert_eq!(reasoning.desired_rows(80), 10);
+        assert_eq!(reasoning.min_rows(), 1);
+
+        let mut tools = ToolEventsWidget::new();
+        for i in 0..10 {
+            tools.push_tool(&format!("tool-{i}"));
+        }
+        assert_eq!(tools.desired_rows(80), 10);
+        assert_eq!(tools.min_rows(), 1);
     }
 
     // ── input bar cursor positioning ────────────────────────────
