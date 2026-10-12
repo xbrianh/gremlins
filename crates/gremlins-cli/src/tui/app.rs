@@ -332,10 +332,30 @@ impl App {
 
     // ── Input history helpers ───────────────────────────────────────
 
+    /// Maximum number of entries retained in `input_history` (and thus on
+    /// disk); older entries are dropped when the cap is exceeded.
+    pub const HISTORY_CAP: usize = 500;
+
     /// Append a submitted input to history and reset the cursor.
-    pub fn push_history(&mut self, line: String) {
+    ///
+    /// Consecutive duplicates are suppressed (re-submitting the same prompt
+    /// does not spam history), and the buffer is capped at
+    /// [`Self::HISTORY_CAP`] entries, dropping the oldest when exceeded.
+    ///
+    /// Returns `true` when the history actually changed (an entry was
+    /// appended or dropped), so callers can skip redundant persistence.
+    pub fn push_history(&mut self, line: String) -> bool {
+        if self.input_history.last() == Some(&line) {
+            self.history_cursor = None;
+            return false;
+        }
         self.input_history.push(line);
+        if self.input_history.len() > Self::HISTORY_CAP {
+            let excess = self.input_history.len() - Self::HISTORY_CAP;
+            self.input_history.drain(..excess);
+        }
         self.history_cursor = None;
+        true
     }
 
     /// Move backward through history (older entries). Returns the selected

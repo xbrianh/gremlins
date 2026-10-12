@@ -383,8 +383,74 @@ pub async fn run() {
     }
 }
 
+/// Path to the persisted input history file, under `$state_root/tui/`.
+fn history_path() -> std::path::PathBuf {
+    gremlins::config::state_root()
+        .join("tui")
+        .join("history.json")
+}
+
+/// Maximum byte size of the history file we are willing to read. A larger
+/// file is treated as absent (empty history), guarding against a pathological
+/// file exhausting memory before the event loop starts.
+const HISTORY_MAX_BYTES: u64 = 1 << 20; // 1 MiB
+
+/// Load the persisted input history (a JSON array of strings, newest-last).
+///
+/// A missing, unreadable, oversized, or malformed file yields an empty
+/// history — never a fatal error and never a transcript line. The result is
+/// capped to [`App::HISTORY_CAP`] entries so a valid oversized file cannot
+/// bypass the bounded-history policy.
+fn load_history() -> Vec<String> {
+    let path = history_path();
+    let data = match std::fs::read(&path) {
+        Ok(data) => data,
+        Err(_) => return Vec::new(),
+    };
+    if data.len() as u64 > HISTORY_MAX_BYTES {
+        return Vec::new();
+    }
+    let mut history: Vec<String> = serde_json::from_slice(&data).unwrap_or_default();
+    if history.len() > App::HISTORY_CAP {
+        history.drain(..history.len() - App::HISTORY_CAP);
+    }
+    history
+}
+
+/// Persist the input history as a JSON array of strings (newest-last).
+///
+/// Errors are silently ignored (logged at most); history persistence must
+/// never fail the TUI. The write is atomic: data goes to a sibling temp file
+/// which is then renamed over the target, so a crash mid-write leaves the
+/// previous file intact rather than a truncated one.
+fn save_history(history: &[String]) {
+    let path = history_path();
+    if let Some(dir) = path.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
+        }
+    }
+    let data = match serde_json::to_string_pretty(history) {
+        Ok(data) => data,
+        Err(_) => return,
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, data).is_err() {
+        log::debug!("tui: failed to write history to {}", tmp.display());
+        return;
+    }
+    if std::fs::rename(&tmp, &path).is_err() {
+        log::debug!("tui: failed to rename history into {}", path.display());
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut app = App::new();
+
+    // Seed the in-memory history from the persisted file before the event
+    // loop starts, so Up/Down recall survives a TUI restart.
+    app.input_history = load_history();
 
     // ── Connect to the daemon socket ──────────────────────────────
     let (client, mut event_rx, mut chat_rx, mut raw_rx) = match client::connect().await {
@@ -680,7 +746,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
 
                             // Record the submission for Up/Down history.
-                            app.push_history(input.clone());
+                            if app.push_history(input.clone()) {
+                                save_history(&app.input_history);
+                            }
 
                             // Stop log following on any new command.
                             if let Some(handle) = log_follow_handle.take() {
