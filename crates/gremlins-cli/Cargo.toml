@@ -21,6 +21,7 @@ crossterm = "0.29"
 tempfile = "3"
 unicode-width = "0.2"
 shlex = "1"
+pulldown-cmark = "0.13"
 
 [features]
 telemetry = []

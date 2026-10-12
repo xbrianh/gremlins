@@ -1,8 +1,9 @@
 //! LiveArea rendering widgets.
 //!
-//! The five regions of the LiveArea screen are each owned by a dedicated
-//! widget behind the [`LiveAreaWidget`] trait. Each widget owns its own
-//! rendering buffers and knows how to lay itself out (via
+//! The LiveArea screen is composed of a transcript widget (the single
+//! styled FIFO), an input bar, an info bar, and overlay widgets. Each
+//! widget is behind the [`LiveAreaWidget`] trait, owns its own rendering
+//! buffers, and knows how to lay itself out (via
 //! [`LiveAreaWidget::height_constraint`]) and paint itself (via
 //! [`LiveAreaWidget::render`]).
 //!
@@ -23,7 +24,8 @@ use ratatui::{
 };
 
 use crate::tui::app::{ActiveRun, Overlay};
-use crate::tui::buffer::{wrapped_height, BoundedBuffer, LineOrigin, ScrollableBuffer};
+use crate::tui::buffer::{wrapped_height, LineOrigin, ScrollableBuffer};
+use crate::tui::markdown;
 
 /// Shared read-only state handed to each widget's [`LiveAreaWidget::render`]
 /// and [`LiveAreaWidget::height_constraint`].
@@ -53,8 +55,8 @@ pub struct RenderContext<'a> {
 
 impl<'a> RenderContext<'a> {
     /// Whether a blocking overlay is currently active. When true, the
-    /// content widgets (transcript, reasoning, tools) collapse to zero
-    /// height so the blocking overlay occupies the whole content region.
+    /// content widgets (transcript) collapse to zero height so the blocking
+    /// overlay occupies the whole content region.
     pub fn blocking_overlay(&self) -> bool {
         self.overlay.as_ref().is_some_and(|o| o.is_blocking())
     }
@@ -111,129 +113,173 @@ macro_rules! as_any_methods {
     };
 }
 
-/// The scrollable transcript region: completed turns, the current prompt,
-/// and the streaming response.
+/// Style for reasoning and tool lines: dark-gray italic.
+fn dim_italic() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC)
+}
+
+/// The transcript: a single styled FIFO plus the current turn's draft state.
 ///
 /// This is the only widget that can overflow. Its `render` splits the FIFO
 /// head off into overflow lines when the combined content exceeds the
-/// region's height.
+/// region's height, respecting the pinned turn boundary so an in-progress
+/// turn never reaches terminal scrollback.
 pub struct TranscriptWidget {
+    /// The single styled FIFO — the only thing `render` reads.
     scrollable: ScrollableBuffer,
-    current_prompt: Option<String>,
-    response_text: String,
+    /// Raw response accumulator (for reconciliation).
+    response_accumulator: String,
+    /// FIFO index where the current turn starts (the pinned boundary).
+    turn_start: Option<usize>,
+    /// FIFO index where the response region starts.
+    response_start: Option<usize>,
+    /// Whether the response region needs re-rendering into the FIFO.
+    response_dirty: bool,
+    /// Partial reasoning line accumulator.
+    reasoning_partial: String,
+    /// FIFO index of the live partial reasoning line, if one is present.
+    reasoning_partial_idx: Option<usize>,
 }
 
 impl TranscriptWidget {
     pub fn new() -> Self {
         Self {
             scrollable: ScrollableBuffer::new(),
-            current_prompt: None,
-            response_text: String::new(),
+            response_accumulator: String::new(),
+            turn_start: None,
+            response_start: None,
+            response_dirty: false,
+            reasoning_partial: String::new(),
+            reasoning_partial_idx: None,
         }
     }
 
-    /// Append a system message with blank-line padding from the previous
-    /// entry.
+    /// Append a system message. When a turn is active, the message is
+    /// inserted before the pinned turn; otherwise it is appended with
+    /// blank-line padding from the previous entry.
     pub fn push_transcript_line(&mut self, line: String) {
+        let styled = Line::from(Span::styled(line, Style::default()));
+        match self.turn_start {
+            Some(t) => {
+                let mut inserted = 0usize;
+                self.scrollable.insert(t, styled, LineOrigin::Transcript);
+                inserted += 1;
+                if t > 0 {
+                    self.scrollable
+                        .insert(t, Line::from(""), LineOrigin::Separator);
+                    inserted += 1;
+                }
+                // Shift the markers by the number of lines inserted before
+                // the pinned turn.
+                self.turn_start = Some(t + inserted);
+                if let Some(r) = &mut self.response_start {
+                    *r += inserted;
+                }
+                if let Some(ri) = &mut self.reasoning_partial_idx {
+                    if *ri >= t {
+                        *ri += inserted;
+                    }
+                }
+            }
+            None => {
+                if !self.scrollable.is_empty() {
+                    self.scrollable.push(Line::from(""), LineOrigin::Separator);
+                    self.scrollable.push(Line::from(""), LineOrigin::Separator);
+                }
+                self.scrollable.push(styled, LineOrigin::Transcript);
+            }
+        }
+    }
+
+    /// Start a new turn with the given prompt: push a separator and the
+    /// markdown-rendered prompt, then pin the turn start.
+    pub fn submit_prompt(&mut self, prompt: String) {
+        self.flush_reasoning();
         if !self.scrollable.is_empty() {
             self.scrollable.push(Line::from(""), LineOrigin::Separator);
-            self.scrollable.push(Line::from(""), LineOrigin::Separator);
         }
-        self.scrollable.push(
-            Line::from(Span::styled(line, Style::default())),
-            LineOrigin::Transcript,
+        // Pin the turn at the first prompt line, so the leading separator
+        // (which belongs to the *previous* turn) may still overflow.
+        let start = self.scrollable.len();
+        for line in render_prompt(&prompt) {
+            self.scrollable.push(line, LineOrigin::Prompt);
+        }
+        self.turn_start = Some(start);
+        self.response_start = None;
+        self.response_accumulator.clear();
+        self.response_dirty = false;
+        self.reasoning_partial.clear();
+        self.reasoning_partial_idx = None;
+    }
+
+    /// Append reasoning text (may be a partial chunk). Completed lines are
+    /// pushed into the FIFO; the in-progress partial is kept as a live FIFO
+    /// line so it is visible while streaming.
+    pub fn push_reasoning_text(&mut self, text: &str) {
+        self.reasoning_partial.push_str(text);
+        // Drop the old partial line; it will be re-added after the complete
+        // lines so ordering stays correct.
+        self.remove_reasoning_partial();
+        while let Some(newline_pos) = self.reasoning_partial.find('\n') {
+            let line: String = self.reasoning_partial[..newline_pos].into();
+            self.reasoning_partial = self.reasoning_partial[newline_pos + 1..].into();
+            self.insert_before_response(
+                Line::from(Span::styled(format!("  {line}"), dim_italic())),
+                LineOrigin::Reasoning,
+            );
+        }
+        self.add_reasoning_partial();
+    }
+
+    /// Flush the reasoning partial buffer (if any) into a completed line.
+    pub fn flush_reasoning(&mut self) {
+        // The partial line is already in the FIFO; stop tracking it as
+        // replaceable so it becomes a permanent line.
+        self.reasoning_partial.clear();
+        self.reasoning_partial_idx = None;
+    }
+
+    /// Record a tool call as a styled line.
+    pub fn push_tool(&mut self, name: &str) {
+        self.flush_reasoning();
+        self.insert_before_response(
+            Line::from(Span::styled(format!("  {name}"), dim_italic())),
+            LineOrigin::Tool,
         );
-    }
-
-    /// Push a styled line into the scrollable FIFO with its provenance tag.
-    pub fn push_line(&mut self, line: Line<'static>, origin: LineOrigin) {
-        self.scrollable.push(line, origin);
-    }
-
-    /// Push a blank separator line.
-    pub fn push_separator(&mut self) {
-        self.scrollable.push(Line::from(""), LineOrigin::Separator);
-    }
-
-    /// Whether the scrollable FIFO is empty.
-    pub fn is_empty(&self) -> bool {
-        self.scrollable.is_empty()
-    }
-
-    /// Take the current prompt, leaving `None`.
-    pub fn take_prompt(&mut self) -> Option<String> {
-        self.current_prompt.take()
-    }
-
-    /// Set the current prompt.
-    pub fn set_prompt(&mut self, prompt: String) {
-        self.current_prompt = Some(prompt);
-    }
-
-    /// Clear the current prompt.
-    pub fn clear_prompt(&mut self) {
-        self.current_prompt = None;
-    }
-
-    /// Whether a current prompt is set.
-    pub fn has_prompt(&self) -> bool {
-        self.current_prompt.is_some()
-    }
-
-    /// Borrow the streaming response text.
-    #[cfg(test)]
-    pub fn response_text(&self) -> &str {
-        &self.response_text
-    }
-
-    /// Whether the streaming response is empty.
-    pub fn response_is_empty(&self) -> bool {
-        self.response_text.is_empty()
     }
 
     /// Append streaming response text.
     pub fn push_response(&mut self, text: &str) {
-        self.response_text.push_str(text);
+        self.flush_reasoning();
+        if self.response_start.is_none() {
+            self.response_start = Some(self.scrollable.len());
+        }
+        self.response_accumulator.push_str(text);
+        self.response_dirty = true;
     }
 
     /// Replace the entire response text.
     pub fn replace_response(&mut self, text: &str) {
-        self.response_text.clear();
-        self.response_text.push_str(text);
+        self.flush_reasoning();
+        if self.response_start.is_none() {
+            self.response_start = Some(self.scrollable.len());
+        }
+        self.response_accumulator.clear();
+        self.response_accumulator.push_str(text);
+        self.response_dirty = true;
     }
 
-    /// Clear the response text.
-    pub fn clear_response(&mut self) {
-        self.response_text.clear();
+    /// Whether the streaming response is empty.
+    pub fn response_is_empty(&self) -> bool {
+        self.response_accumulator.is_empty()
     }
 
-    /// Clear the scrollable FIFO.
-    pub fn clear_scrollable(&mut self) {
-        self.scrollable.clear();
-    }
-
-    /// Move the current `response_text` into the scrollable FIFO as
-    /// `FlattenedResponse` lines (preceded by a blank separator when the
-    /// FIFO is non-empty), then clear `response_text`.
-    pub fn flatten_response(&mut self) {
-        if self.response_text.is_empty() {
-            return;
-        }
-
-        if !self.scrollable.is_empty() {
-            self.scrollable.push(Line::from(""), LineOrigin::Separator);
-        }
-
-        let response_lines: Vec<String> =
-            self.response_text.lines().map(|s| s.to_string()).collect();
-        for line_str in response_lines {
-            self.scrollable.push(
-                Line::from(Span::styled(line_str, Style::default())),
-                LineOrigin::FlattenedResponse,
-            );
-        }
-
-        self.response_text.clear();
+    /// Borrow the raw response accumulator.
+    #[cfg(test)]
+    pub fn response_accumulator(&self) -> &str {
+        &self.response_accumulator
     }
 
     /// Reconcile the streamed response against authoritative full text.
@@ -242,22 +288,143 @@ impl TranscriptWidget {
             return;
         }
 
-        if self.response_text.ends_with(text) {
+        if self.response_accumulator.ends_with(text) {
             return;
         }
 
-        if self.response_text.is_empty() {
-            self.response_text.push_str(text);
+        if self.response_start.is_none() {
+            self.response_start = Some(self.scrollable.len());
+        }
+
+        if self.response_accumulator.is_empty() {
+            self.response_accumulator.push_str(text);
+            self.response_dirty = true;
             return;
         }
 
-        let overlap = (0..=self.response_text.len())
-            .rev()
-            .find(|&len| text.starts_with(&self.response_text[self.response_text.len() - len..]))
+        // Walk char boundaries only (never slice mid-codepoint), finding the
+        // smallest start whose suffix is a prefix of `text` — i.e. the
+        // largest overlap.
+        let overlap = self
+            .response_accumulator
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(self.response_accumulator.len()))
+            .find(|&start| text.starts_with(&self.response_accumulator[start..]))
+            .map(|start| self.response_accumulator.len() - start)
             .unwrap_or(0);
-        self.response_text
-            .truncate(self.response_text.len() - overlap);
-        self.response_text.push_str(text);
+        self.response_accumulator
+            .truncate(self.response_accumulator.len() - overlap);
+        self.response_accumulator.push_str(text);
+        self.response_dirty = true;
+    }
+
+    /// Whether a current turn is active (pinned).
+    pub fn has_current_turn(&self) -> bool {
+        self.turn_start.is_some()
+    }
+
+    /// Unpin the current turn and clear its draft state. The content is
+    /// already in the FIFO.
+    pub fn finish_turn(&mut self) {
+        self.flush_reasoning();
+        self.rebuild_response();
+        self.turn_start = None;
+        self.response_start = None;
+        self.response_dirty = false;
+        self.response_accumulator.clear();
+        self.reasoning_partial.clear();
+        self.reasoning_partial_idx = None;
+    }
+
+    /// Discard the current turn: truncate the FIFO back to the turn start
+    /// and clear the draft state.
+    pub fn clear_current_turn(&mut self) {
+        if let Some(t) = self.turn_start {
+            self.scrollable.truncate(t);
+            // The separator before the turn (pushed by `submit_prompt`) is
+            // left behind by the truncation; drop it so Esc leaves no stray
+            // blank line.
+            if t > 0 && self.scrollable.len() == t {
+                if let Some(last) = self.scrollable.visible_lines().last() {
+                    if last.to_string().is_empty() {
+                        self.scrollable.truncate(t - 1);
+                    }
+                }
+            }
+        }
+        self.turn_start = None;
+        self.response_start = None;
+        self.response_dirty = false;
+        self.response_accumulator.clear();
+        self.reasoning_partial.clear();
+        self.reasoning_partial_idx = None;
+    }
+
+    /// Clear the scrollable FIFO.
+    pub fn clear_scrollable(&mut self) {
+        self.scrollable.clear();
+        self.turn_start = None;
+        self.response_start = None;
+        self.response_dirty = false;
+        self.response_accumulator.clear();
+        self.reasoning_partial.clear();
+        self.reasoning_partial_idx = None;
+    }
+
+    /// Insert a line before the response region (or append when there is no
+    /// response yet). Returns the FIFO index where the line landed.
+    fn insert_before_response(&mut self, line: Line<'static>, origin: LineOrigin) -> usize {
+        match self.response_start {
+            Some(r) => {
+                self.scrollable.insert(r, line, origin);
+                self.response_start = Some(r + 1);
+                r
+            }
+            None => {
+                let idx = self.scrollable.len();
+                self.scrollable.push(line, origin);
+                idx
+            }
+        }
+    }
+
+    /// Remove the live partial reasoning line (if any) from the FIFO.
+    fn remove_reasoning_partial(&mut self) {
+        if let Some(idx) = self.reasoning_partial_idx.take() {
+            self.scrollable.remove(idx);
+            if let Some(r) = &mut self.response_start {
+                if *r > idx {
+                    *r -= 1;
+                }
+            }
+        }
+    }
+
+    /// Add (or refresh) the live partial reasoning line in the FIFO.
+    fn add_reasoning_partial(&mut self) {
+        if self.reasoning_partial.is_empty() {
+            return;
+        }
+        let line = Line::from(Span::styled(
+            format!("  {}", self.reasoning_partial),
+            dim_italic(),
+        ));
+        let idx = self.insert_before_response(line, LineOrigin::Reasoning);
+        self.reasoning_partial_idx = Some(idx);
+    }
+
+    /// Re-render the response region into the FIFO if dirty.
+    fn rebuild_response(&mut self) {
+        if !self.response_dirty {
+            return;
+        }
+        self.response_dirty = false;
+        let start = self.response_start.unwrap_or(self.scrollable.len());
+        self.scrollable.truncate(start);
+        for line in markdown::render(&self.response_accumulator, Style::default()) {
+            self.scrollable.push(line, LineOrigin::Response);
+        }
     }
 }
 
@@ -265,6 +432,30 @@ impl Default for TranscriptWidget {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Render a prompt as markdown with a `> ` marker on the first line and
+/// continuation lines indented.
+fn render_prompt(prompt: &str) -> Vec<Line<'static>> {
+    let marker_style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let lines = markdown::render(prompt, text_style);
+    let mut out = Vec::with_capacity(lines.len());
+    for (i, line) in lines.into_iter().enumerate() {
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        if i == 0 {
+            spans.push(Span::styled("> ", marker_style));
+        } else {
+            spans.push(Span::styled("  ", marker_style));
+        }
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
+    out
 }
 
 impl LiveAreaWidget for TranscriptWidget {
@@ -290,276 +481,39 @@ impl LiveAreaWidget for TranscriptWidget {
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) -> Vec<Line<'static>> {
         let width = area.width;
 
-        let prompt_marker = Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD);
-        let prompt_text = Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD);
+        // Rebuild the response region if dirty.
+        self.rebuild_response();
 
-        // ── Current-turn scrollable lines (prompt + response) ─────
-        let prompt_lines: Vec<Line<'static>> = match &self.current_prompt {
-            Some(prompt) => vec![Line::from(vec![
-                Span::styled("> ", prompt_marker),
-                Span::styled(prompt.clone(), prompt_text),
-            ])],
-            None => Vec::new(),
-        };
-        let prompt_height = wrapped_height(&prompt_lines, width) as u16;
+        // Split overflow with the current turn pinned.
+        let pinned = self.turn_start.unwrap_or(self.scrollable.len());
+        let (split_idx, _overflow_rows) =
+            self.scrollable.overflow_split(area.height, width, pinned);
 
-        let response_lines: Vec<Line<'static>> = if self.response_text.is_empty() {
-            Vec::new()
-        } else {
-            self.response_text
-                .lines()
-                .map(|s| Line::from(Span::styled(s.to_string(), Style::default())))
-                .collect()
-        };
-        let response_height = wrapped_height(&response_lines, width) as u16;
-
-        // Blank separators. `sep_pr` (prompt/response) is independent of
-        // the drain; `sep_tp` (transcript/prompt) is decided against the
-        // *post-drain* transcript state, since that is what `render` emits.
-        let sep_pr = if !prompt_lines.is_empty() && !response_lines.is_empty() {
-            1u16
-        } else {
-            0
-        };
-
-        // ── Overflow: split the FIFO head ─────────────────────────
-        //
-        // The separator between transcript and prompt is present exactly
-        // when both the post-drain transcript and the prompt are non-empty.
-        // We cannot know the post-drain emptiness before draining, so we
-        // drain in two steps: first without reserving the separator row,
-        // then, if the transcript survives, reserve the separator row and
-        // drain any additional overflow it forces. The single `sep_tp`
-        // decision below is then used for both the reserved height and the
-        // rendered line list, so they always agree.
-        let avail = area.height.saturating_sub(
-            prompt_height
-                .saturating_add(response_height)
-                .saturating_add(sep_pr),
-        );
-        let (split_idx, _overflow_rows) = self.scrollable.overflow_split(avail, width);
-
-        let mut overflow_lines: Vec<Line<'static>> = if split_idx > 0 {
+        let overflow_lines: Vec<Line<'static>> = if split_idx > 0 {
             let head: Vec<Line<'static>> = self.scrollable.visible_lines()[..split_idx].to_vec();
             self.scrollable.drain_head(split_idx);
+            // Adjust the markers by the drained count.
+            if let Some(t) = &mut self.turn_start {
+                *t = t.saturating_sub(split_idx);
+            }
+            if let Some(r) = &mut self.response_start {
+                *r = r.saturating_sub(split_idx);
+            }
+            if let Some(ri) = &mut self.reasoning_partial_idx {
+                *ri = ri.saturating_sub(split_idx);
+            }
             head
         } else {
             Vec::new()
         };
 
-        // If the transcript survived the first drain and a prompt is
-        // present, reserve one row for the separator and drain the extra
-        // overflow it forces. The separator is emitted only when the
-        // transcript survives that reservation; if reserving the separator
-        // would empty the FIFO, we skip it and keep the first split's
-        // suffix with no separator (otherwise a row is reserved but never
-        // emitted, producing a stray blank / dropped fitting line).
-        let mut sep_tp = 0u16;
-        if !self.scrollable.is_empty() && !prompt_lines.is_empty() {
-            let (extra_idx, _) = self
-                .scrollable
-                .overflow_split(avail.saturating_sub(1), width);
-            if extra_idx < self.scrollable.visible_lines().len() {
-                if extra_idx > 0 {
-                    let head: Vec<Line<'static>> =
-                        self.scrollable.visible_lines()[..extra_idx].to_vec();
-                    self.scrollable.drain_head(extra_idx);
-                    overflow_lines.extend(head);
-                }
-                sep_tp = 1;
-            }
-        }
-
-        // ── Build combined scrollable lines (post-drain) ──────────
-        let mut combined: Vec<Line<'static>> = self.scrollable.visible_lines().to_vec();
-        if sep_tp > 0 {
-            combined.push(Line::from(""));
-        }
-        combined.extend(prompt_lines.iter().cloned());
-        if sep_pr > 0 {
-            combined.push(Line::from(""));
-        }
-        combined.extend(response_lines.iter().cloned());
-
-        if !combined.is_empty() {
-            let paragraph = Paragraph::new(combined).wrap(Wrap { trim: false });
+        let tail = self.scrollable.visible_lines().to_vec();
+        if !tail.is_empty() {
+            let paragraph = Paragraph::new(tail).wrap(Wrap { trim: false });
             paragraph.render(area, buf);
         }
 
         overflow_lines
-    }
-}
-
-/// The current-turn reasoning region (bounded to 5 visible rows).
-pub struct ReasoningWidget {
-    reasoning: BoundedBuffer,
-    reasoning_partial: String,
-}
-
-impl ReasoningWidget {
-    pub fn new() -> Self {
-        Self {
-            reasoning: BoundedBuffer::new(5),
-            reasoning_partial: String::new(),
-        }
-    }
-
-    /// Append reasoning text (may be a partial chunk). Text is accumulated
-    /// and flushed to a reasoning line only when a newline is encountered.
-    pub fn push_text(&mut self, text: &str) {
-        let style = Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC);
-        self.reasoning_partial.push_str(text);
-        while let Some(newline_pos) = self.reasoning_partial.find('\n') {
-            let line: String = self.reasoning_partial[..newline_pos].into();
-            self.reasoning_partial = self.reasoning_partial[newline_pos + 1..].into();
-            self.reasoning
-                .push(Line::from(Span::styled(format!("  {line}"), style)));
-        }
-    }
-
-    /// Flush the reasoning partial buffer (if any) into a completed line.
-    pub fn flush(&mut self) {
-        if !self.reasoning_partial.is_empty() {
-            let remaining = std::mem::take(&mut self.reasoning_partial);
-            let style = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC);
-            self.reasoning
-                .push(Line::from(Span::styled(format!("  {remaining}"), style)));
-        }
-    }
-
-    /// Clear the reasoning buffer and partial accumulator.
-    pub fn clear(&mut self) {
-        self.reasoning.clear();
-        self.reasoning_partial.clear();
-    }
-
-    /// The visible tail of reasoning lines (permanently dropping the head),
-    /// used when flattening a completed turn into the transcript.
-    pub fn take_tail(&mut self, width: u16) -> Vec<Line<'static>> {
-        self.reasoning.lines(width)
-    }
-
-    fn extra_lines(&self) -> Vec<Line<'static>> {
-        if self.reasoning_partial.is_empty() {
-            Vec::new()
-        } else {
-            let reason_style = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC);
-            vec![Line::from(Span::styled(
-                format!("  {}", self.reasoning_partial),
-                reason_style,
-            ))]
-        }
-    }
-}
-
-impl Default for ReasoningWidget {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LiveAreaWidget for ReasoningWidget {
-    as_any_methods!();
-    fn size_priority(&self) -> i32 {
-        10
-    }
-
-    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
-        if ctx.blocking_overlay() {
-            return Constraint::Length(0);
-        }
-        let extra = self.extra_lines();
-        let lines = self.reasoning.visible_lines_with_extra(&extra, width);
-        Constraint::Length(wrapped_height(&lines, width) as u16)
-    }
-
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) -> Vec<Line<'static>> {
-        let width = area.width;
-        let extra = self.extra_lines();
-        let lines = self.reasoning.visible_lines_with_extra(&extra, width);
-
-        if !lines.is_empty() {
-            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-            paragraph.render(area, buf);
-        }
-
-        Vec::new()
-    }
-}
-
-/// The current-turn active-tools region (bounded to 5 visible rows).
-pub struct ToolsWidget {
-    tools: BoundedBuffer,
-}
-
-impl ToolsWidget {
-    pub fn new() -> Self {
-        Self {
-            tools: BoundedBuffer::new(5),
-        }
-    }
-
-    /// Record a tool call. Oldest entries are discarded once the region
-    /// exceeds its visible-row bound.
-    pub fn push(&mut self, name: &str) {
-        let style = Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC);
-        self.tools
-            .push(Line::from(Span::styled(format!("  {name}"), style)));
-    }
-
-    /// Clear the tools buffer.
-    pub fn clear(&mut self) {
-        self.tools.clear();
-    }
-
-    /// The visible tail of tool lines (permanently dropping the head), used
-    /// when flattening a completed turn into the transcript.
-    pub fn take_tail(&mut self, width: u16) -> Vec<Line<'static>> {
-        self.tools.lines(width)
-    }
-}
-
-impl Default for ToolsWidget {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LiveAreaWidget for ToolsWidget {
-    as_any_methods!();
-    fn size_priority(&self) -> i32 {
-        10
-    }
-
-    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
-        if ctx.blocking_overlay() {
-            return Constraint::Length(0);
-        }
-        let lines = self.tools.visible_lines(width);
-        Constraint::Length(wrapped_height(&lines, width) as u16)
-    }
-
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) -> Vec<Line<'static>> {
-        let lines = self.tools.visible_lines(area.width);
-
-        if !lines.is_empty() {
-            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-            paragraph.render(area, buf);
-        }
-
-        Vec::new()
     }
 }
 
@@ -1075,7 +1029,7 @@ mod tests {
         transcript.reconcile_response("second turn complete");
 
         assert_eq!(
-            transcript.response_text(),
+            transcript.response_accumulator,
             "first turn\nsecond turn complete"
         );
     }
@@ -1088,7 +1042,7 @@ mod tests {
         transcript.reconcile_response("second turn complete");
 
         assert_eq!(
-            transcript.response_text(),
+            transcript.response_accumulator,
             "first turn\nsecond turn complete"
         );
     }
@@ -1099,7 +1053,7 @@ mod tests {
 
         transcript.reconcile_response("complete turn");
 
-        assert_eq!(transcript.response_text(), "complete turn");
+        assert_eq!(transcript.response_accumulator, "complete turn");
     }
 
     #[test]
@@ -1109,134 +1063,103 @@ mod tests {
 
         transcript.reconcile_response("");
 
-        assert_eq!(transcript.response_text(), "streamed");
+        assert_eq!(transcript.response_accumulator, "streamed");
     }
 
     #[test]
-    fn flatten_response_moves_full_response_into_scrollable() {
+    fn submit_prompt_pins_turn_and_renders_markdown() {
         let mut transcript = TranscriptWidget::new();
-        transcript.push_response("line one\nline two\nline three");
-
-        transcript.flatten_response();
-
-        assert!(transcript.response_is_empty());
+        transcript.submit_prompt("**bold** prompt".to_string());
+        assert!(transcript.has_current_turn());
         let lines = transcript.scrollable.visible_lines();
-        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(
-            text,
-            vec!["line one", "line two", "line three"],
-            "full response should be flattened into the FIFO"
-        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].to_string(), "> bold prompt");
     }
 
     #[test]
-    fn flatten_response_prepends_separator_when_fifo_nonempty() {
+    fn clear_current_turn_truncates_to_turn_start() {
         let mut transcript = TranscriptWidget::new();
-        transcript.push_line(Line::from(Span::raw("prior turn")), LineOrigin::Transcript);
+        transcript.push_transcript_line("prior".to_string());
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_reasoning_text("thinking\n");
         transcript.push_response("response");
-
-        transcript.flatten_response();
-
+        transcript.clear_current_turn();
+        assert!(!transcript.has_current_turn());
         let lines = transcript.scrollable.visible_lines();
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(
-            text,
-            vec!["prior turn", "", "response"],
-            "a blank separator should precede the flattened response"
-        );
+        assert_eq!(text, vec!["prior"]);
     }
 
     #[test]
-    fn flatten_response_empty_is_noop() {
+    fn finish_turn_unpins_and_keeps_content() {
         let mut transcript = TranscriptWidget::new();
-        transcript.flatten_response();
-        assert!(transcript.scrollable.is_empty());
-    }
-
-    // ── separator accounting ────────────────────────────────────
-
-    /// Render a transcript into a buffer and return trimmed rows.
-    fn render_rows(transcript: &mut TranscriptWidget, cols: u16, rows: u16) -> Vec<String> {
-        let area = Rect::new(0, 0, cols, rows);
-        let mut buf = Buffer::empty(area);
-        let ctx = RenderContext {
-            input: "",
-            cursor: 0,
-            following_log: None,
-            gremlin_count: "0",
-            project_name: "",
-            overlay: None,
-            active_runs: &HashMap::new(),
-            content_height: rows,
-        };
-        transcript.render(area, &mut buf, &ctx);
-        (0..rows)
-            .map(|y| {
-                (0..cols)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect()
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_reasoning_text("thinking\n");
+        transcript.push_tool("Done");
+        transcript.push_response("**answer**");
+        transcript.finish_turn();
+        assert!(!transcript.has_current_turn());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["> hi", "  thinking", "  Done", "answer"]);
     }
 
     #[test]
-    fn separator_accounting_no_stray_blank_when_drain_empties_fifo() {
-        // A transcript whose content overflows a tight area such that the
-        // extra drain would empty the FIFO. The fitting transcript line
-        // must be kept, the prompt/response must not be clipped, and no
-        // stray blank line may appear.
+    fn transcript_line_inserted_before_pinned_turn() {
         let mut transcript = TranscriptWidget::new();
-        transcript.push_line(
-            Line::from(Span::raw("transcript line one")),
-            LineOrigin::Transcript,
-        );
-        transcript.push_line(
-            Line::from(Span::raw("transcript line two")),
-            LineOrigin::Transcript,
-        );
-        transcript.set_prompt("hi".to_string());
-        transcript.replace_response("resp");
-
-        // 4 rows: transcript (1) + prompt (1) + sep_pr (1) + response (1).
-        // The separator between transcript and prompt must be omitted
-        // because reserving it would empty the FIFO.
-        let rows = render_rows(&mut transcript, 80, 4);
-
-        assert_eq!(
-            rows,
-            vec![
-                "transcript line two".to_string(),
-                "> hi".to_string(),
-                String::new(),
-                "resp".to_string(),
-            ],
-            "Expected the fitting transcript line kept with no stray blank"
-        );
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+        transcript.push_transcript_line("system note".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        // "system note" appears above the pinned turn.
+        assert_eq!(text[0], "system note");
+        assert!(text.contains(&"> hi".to_string()));
     }
 
     #[test]
-    fn separator_accounting_reserves_separator_when_transcript_survives() {
-        // When the transcript survives the drain, the separator between
-        // transcript and prompt must be present and nothing clipped.
+    fn reconcile_response_handles_multibyte_char_boundaries() {
         let mut transcript = TranscriptWidget::new();
-        transcript.push_line(
-            Line::from(Span::raw("transcript line one")),
-            LineOrigin::Transcript,
-        );
-        transcript.set_prompt("hi".to_string());
-        transcript.replace_response("resp");
+        // Stream a partial response ending mid-multibyte, then reconcile with
+        // authoritative text that shares a multibyte suffix.
+        transcript.push_response("héllo wörld");
+        transcript.reconcile_response("wörld done");
+        assert_eq!(transcript.response_accumulator, "héllo wörld done");
+    }
 
-        // 5 rows: transcript (1) + sep_tp (1) + prompt (1) + sep_pr (1)
-        // + response (1) = 5, fits exactly.
-        let rows = render_rows(&mut transcript, 80, 5);
+    #[test]
+    fn reasoning_partial_is_visible_in_fifo() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_reasoning_text("thinking");
+        // The partial reasoning line must be in the FIFO before any newline.
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text.contains(&"  thinking".to_string()), "{text:?}");
+    }
 
-        assert!(rows[0].contains("transcript line one"), "{rows:?}");
-        assert!(rows[1].is_empty(), "separator should be blank, {rows:?}");
-        assert!(rows[2].contains("> hi"), "{rows:?}");
-        assert!(rows[3].is_empty(), "separator should be blank, {rows:?}");
-        assert!(rows[4].contains("resp"), "{rows:?}");
+    #[test]
+    fn tool_line_after_response_is_preserved_by_rebuild() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("streamed");
+        // A tool call arriving after response streaming began must not be
+        // erased when the response region is rebuilt.
+        transcript.push_tool("grep");
+        transcript.reconcile_response("streamed complete");
+        transcript.finish_turn();
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text.contains(&"  grep".to_string()), "{text:?}");
+        assert!(text.contains(&"streamed complete".to_string()), "{text:?}");
     }
 
     // ── input bar cursor positioning ────────────────────────────

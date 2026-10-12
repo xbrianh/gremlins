@@ -25,15 +25,13 @@ use ratatui::{
     backend::{Backend, ClearType, CrosstermBackend},
     buffer::{Buffer, Cell},
     layout::{Constraint, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::Line,
 };
 
 use crate::tui::app::App;
-use crate::tui::buffer::LineOrigin;
 use crate::tui::widgets::{
-    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, ReasoningWidget, RenderContext,
-    ToolsWidget, TranscriptWidget, WatchSingleWidget,
+    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, RenderContext, TranscriptWidget,
+    WatchSingleWidget,
 };
 
 /// Number of rows reserved at the bottom of the screen for input and
@@ -54,8 +52,8 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     /// Whether [`Drop`] should restore the terminal (raw mode, cursor).
     needs_terminal_cleanup: bool,
     /// Ordered widget stack, top-to-bottom. The initial stack is transcript,
-    /// reasoning, tools, input bar, info bar. Overlays are pushed/popped at
-    /// the top of the stack.
+    /// input bar, info bar. Overlays are pushed/popped at the top of the
+    /// stack.
     widgets: Vec<Box<dyn LiveAreaWidget>>,
     /// Rows occupied by the bottom bars (input + info) in the most recent
     /// frame. These rows are excluded from the scrollback region.
@@ -79,8 +77,6 @@ impl<B: Backend> LiveArea<B> {
             needs_terminal_cleanup: false,
             widgets: vec![
                 Box::new(TranscriptWidget::new()),
-                Box::new(ReasoningWidget::new()),
-                Box::new(ToolsWidget::new()),
                 Box::new(InputBarWidget::new()),
                 Box::new(InfoBarWidget),
             ],
@@ -375,9 +371,9 @@ impl<B: Backend> LiveArea<B> {
     /// Remove the most recently added overlay widget, if any. The initial
     /// content widgets are never popped.
     pub fn pop_overlay(&mut self) -> Option<Box<dyn LiveAreaWidget>> {
-        // The first five widgets are the fixed content stack; only pop
+        // The first three widgets are the fixed content stack; only pop
         // widgets pushed on top of them.
-        if self.widgets.len() > 5 {
+        if self.widgets.len() > 3 {
             Some(self.widgets.remove(0))
         } else {
             None
@@ -391,20 +387,6 @@ impl<B: Backend> LiveArea<B> {
             .iter_mut()
             .find_map(|w| w.as_any_mut().downcast_mut::<TranscriptWidget>())
             .expect("transcript widget present")
-    }
-
-    fn reasoning_mut(&mut self) -> &mut ReasoningWidget {
-        self.widgets
-            .iter_mut()
-            .find_map(|w| w.as_any_mut().downcast_mut::<ReasoningWidget>())
-            .expect("reasoning widget present")
-    }
-
-    fn tools_mut(&mut self) -> &mut ToolsWidget {
-        self.widgets
-            .iter_mut()
-            .find_map(|w| w.as_any_mut().downcast_mut::<ToolsWidget>())
-            .expect("tools widget present")
     }
 
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
@@ -428,14 +410,10 @@ impl<B: Backend> LiveArea<B> {
 
     // ── Widget mutation (moved from `App`) ───────────────────────
 
-    /// Flatten the current turn into the transcript and start a new turn
-    /// with the given prompt.
+    /// Start a new turn with the given prompt: push a separator and the
+    /// markdown-rendered prompt, then pin the turn start.
     pub fn submit_prompt(&mut self, prompt: String) {
-        self.flatten_turn_prefix();
-
-        let transcript = self.transcript_mut();
-        transcript.set_prompt(prompt);
-        transcript.clear_response();
+        self.transcript_mut().submit_prompt(prompt);
     }
 
     /// Reconcile the input bar's scroll offsets so the cursor stays visible
@@ -454,17 +432,17 @@ impl<B: Backend> LiveArea<B> {
     /// Flush the reasoning partial buffer (if any) into a completed
     /// reasoning line.
     pub fn flush_reasoning(&mut self) {
-        self.reasoning_mut().flush();
+        self.transcript_mut().flush_reasoning();
     }
 
     /// Append reasoning text (may be a partial chunk).
     pub fn push_reasoning_text(&mut self, text: &str) {
-        self.reasoning_mut().push_text(text);
+        self.transcript_mut().push_reasoning_text(text);
     }
 
     /// Record a tool call.
     pub fn push_tool(&mut self, name: &str) {
-        self.tools_mut().push(name);
+        self.transcript_mut().push_tool(name);
     }
 
     /// Append streaming response text.
@@ -483,67 +461,10 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().reconcile_response(text);
     }
 
-    /// Commit the current turn's prompt, reasoning, and tools into the
-    /// transcript FIFO, then clear those buffers.
-    pub fn flatten_turn_prefix(&mut self) {
-        let width = self.cols;
-
-        let prev_prompt = self.transcript_mut().take_prompt();
-        self.reasoning_mut().flush();
-        let reasoning_tail = self.reasoning_mut().take_tail(width);
-        let tools_tail = self.tools_mut().take_tail(width);
-
-        let transcript = self.transcript_mut();
-        if let Some(prev_prompt) = prev_prompt {
-            let prompt_style = Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD);
-            let marker_style = Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD);
-
-            if !transcript.is_empty() {
-                transcript.push_separator();
-                transcript.push_separator();
-            }
-
-            transcript.push_line(
-                Line::from(vec![
-                    Span::styled("> ", marker_style),
-                    Span::styled(prev_prompt, prompt_style),
-                ]),
-                LineOrigin::FlattenedPrompt,
-            );
-
-            if !reasoning_tail.is_empty() {
-                transcript.push_separator();
-                for line in reasoning_tail {
-                    transcript.push_line(line, LineOrigin::FlattenedReasoning);
-                }
-            }
-
-            if !tools_tail.is_empty() {
-                transcript.push_separator();
-                for line in tools_tail {
-                    transcript.push_line(line, LineOrigin::FlattenedTools);
-                }
-            }
-        }
-
-        self.reasoning_mut().clear();
-        self.tools_mut().clear();
-    }
-
-    /// Flatten the current response into the transcript FIFO.
-    pub fn flatten_response(&mut self) {
-        self.transcript_mut().flatten_response();
-    }
-
-    /// Commit the current turn (prompt, reasoning, tools, and response)
-    /// into the transcript FIFO.
+    /// Unpin the current turn and clear its draft state. The content is
+    /// already in the FIFO.
     pub fn finish_turn(&mut self) {
-        self.flatten_turn_prefix();
-        self.flatten_response();
+        self.transcript_mut().finish_turn();
     }
 
     /// Whether the current turn has any content.
@@ -552,7 +473,7 @@ impl<B: Backend> LiveArea<B> {
             .iter()
             .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
             .expect("transcript widget present")
-            .has_prompt()
+            .has_current_turn()
     }
 
     /// Whether the current turn's streaming response is empty.
@@ -571,7 +492,7 @@ impl<B: Backend> LiveArea<B> {
             .iter()
             .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
             .expect("transcript widget present")
-            .response_text()
+            .response_accumulator()
     }
 
     /// Finish the current turn's response at `Done` time.
@@ -596,10 +517,7 @@ impl<B: Backend> LiveArea<B> {
 
     /// Discard the current turn without committing it to the transcript.
     pub fn clear_current_turn(&mut self) {
-        self.transcript_mut().clear_prompt();
-        self.transcript_mut().clear_response();
-        self.reasoning_mut().clear();
-        self.tools_mut().clear();
+        self.transcript_mut().clear_current_turn();
     }
 
     /// Clear the transcript/scrollback.
@@ -1174,29 +1092,29 @@ mod tests {
         use crate::tui::widgets::{DebugWidget, WatchTableWidget};
 
         let mut live = new_live(80, 24);
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 3);
 
         // Popping with no overlay is a no-op.
         assert!(live.pop_overlay().is_none());
 
         live.push_overlay(Box::new(WatchTableWidget::new()));
-        assert_eq!(live.widgets.len(), 6);
+        assert_eq!(live.widgets.len(), 4);
 
         live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
-        assert_eq!(live.widgets.len(), 7);
+        assert_eq!(live.widgets.len(), 5);
 
         // Pop removes the most recently added (debug) first.
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<DebugWidget>().is_some());
-        assert_eq!(live.widgets.len(), 6);
+        assert_eq!(live.widgets.len(), 4);
 
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<WatchTableWidget>().is_some());
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 3);
 
         // Cannot pop the fixed content stack.
         assert!(live.pop_overlay().is_none());
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 3);
     }
 
     #[test]
@@ -1405,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn flatten_response_commits_tall_response_to_scrollback() {
+    fn finish_turn_commits_tall_response_to_scrollback() {
         let cols: u16 = 40;
         let rows: u16 = 8;
         let mut live_area = new_live(cols, rows);

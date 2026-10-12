@@ -4,6 +4,7 @@ pub mod chat;
 pub mod client;
 pub mod commands;
 pub mod editor;
+pub mod markdown;
 pub mod screen;
 pub mod widgets;
 
