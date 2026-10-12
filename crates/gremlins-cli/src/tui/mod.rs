@@ -54,12 +54,8 @@ fn send_chat_input(
     // Start a new turn with the prompt.
     live_area.submit_prompt(input.clone());
 
-    // Push initial "thinking..." line.
-    live_area.push_reasoning_text("thinking...");
-    live_area.flush_reasoning();
-
-    // Force an immediate frame so "thinking..." appears without waiting
-    // for the next event.
+    // Force an immediate frame so the pinned prompt appears without waiting
+    // for the first daemon event.
     live_area.compose(app)?;
 
     app.active_request = true;

@@ -24,9 +24,8 @@ use ratatui::{
 };
 
 use crate::tui::app::{ActiveRun, Overlay};
-use crate::tui::buffer::{wrapped_height, LineOrigin, ScrollableBuffer};
+use crate::tui::buffer::{line_wrapped_height, wrapped_height, LineBuffer};
 use crate::tui::markdown;
-
 /// Shared read-only state handed to each widget's [`LiveAreaWidget::render`]
 /// and [`LiveAreaWidget::height_constraint`].
 ///
@@ -73,9 +72,15 @@ pub trait LiveAreaWidget {
     /// given the current render context.
     fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint;
 
-    /// Render this widget into `area`, returning any overflow lines that
-    /// must be committed to terminal scrollback by the caller.
-    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) -> Vec<Line<'static>>;
+    /// Render this widget into `area`. This is paint-only: overflow is
+    /// reported separately via [`take_overflow`](Self::take_overflow).
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext);
+
+    /// Drain and return any lines that do not fit in `available_rows` at
+    /// the given width. The widget decides what happens to its head.
+    fn take_overflow(&mut self, _available_rows: u16, _width: u16) -> Vec<Line<'static>> {
+        Vec::new()
+    }
 
     /// Downcast helper for locating a concrete widget in the stack.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -113,22 +118,16 @@ macro_rules! as_any_methods {
     };
 }
 
-/// Style for reasoning and tool lines: dark-gray italic.
-fn dim_italic() -> Style {
-    Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC)
-}
-
 /// The transcript: a single styled FIFO plus the current turn's draft state.
 ///
-/// This is the only widget that can overflow. Its `render` splits the FIFO
-/// head off into overflow lines when the combined content exceeds the
-/// region's height, respecting the pinned turn boundary so an in-progress
-/// turn never reaches terminal scrollback.
+/// This is the only widget that can overflow. Its
+/// [`take_overflow`](TranscriptWidget::take_overflow) splits the FIFO head
+/// off into overflow lines when the combined content exceeds the region's
+/// height, respecting the pinned turn boundary so an in-progress turn never
+/// reaches terminal scrollback.
 pub struct TranscriptWidget {
     /// The single styled FIFO — the only thing `render` reads.
-    scrollable: ScrollableBuffer,
+    scrollable: LineBuffer,
     /// Raw response accumulator (for reconciliation).
     response_accumulator: String,
     /// FIFO index where the current turn starts (the pinned boundary).
@@ -137,22 +136,16 @@ pub struct TranscriptWidget {
     response_start: Option<usize>,
     /// Whether the response region needs re-rendering into the FIFO.
     response_dirty: bool,
-    /// Partial reasoning line accumulator.
-    reasoning_partial: String,
-    /// FIFO index of the live partial reasoning line, if one is present.
-    reasoning_partial_idx: Option<usize>,
 }
 
 impl TranscriptWidget {
     pub fn new() -> Self {
         Self {
-            scrollable: ScrollableBuffer::new(),
+            scrollable: LineBuffer::new(),
             response_accumulator: String::new(),
             turn_start: None,
             response_start: None,
             response_dirty: false,
-            reasoning_partial: String::new(),
-            reasoning_partial_idx: None,
         }
     }
 
@@ -164,11 +157,10 @@ impl TranscriptWidget {
         match self.turn_start {
             Some(t) => {
                 let mut inserted = 0usize;
-                self.scrollable.insert(t, styled, LineOrigin::Transcript);
+                self.scrollable.insert(t, styled);
                 inserted += 1;
                 if t > 0 {
-                    self.scrollable
-                        .insert(t, Line::from(""), LineOrigin::Separator);
+                    self.scrollable.insert(t, Line::from(""));
                     inserted += 1;
                 }
                 // Shift the markers by the number of lines inserted before
@@ -177,18 +169,13 @@ impl TranscriptWidget {
                 if let Some(r) = &mut self.response_start {
                     *r += inserted;
                 }
-                if let Some(ri) = &mut self.reasoning_partial_idx {
-                    if *ri >= t {
-                        *ri += inserted;
-                    }
-                }
             }
             None => {
                 if !self.scrollable.is_empty() {
-                    self.scrollable.push(Line::from(""), LineOrigin::Separator);
-                    self.scrollable.push(Line::from(""), LineOrigin::Separator);
+                    self.scrollable.push(Line::from(""));
+                    self.scrollable.push(Line::from(""));
                 }
-                self.scrollable.push(styled, LineOrigin::Transcript);
+                self.scrollable.push(styled);
             }
         }
     }
@@ -196,63 +183,23 @@ impl TranscriptWidget {
     /// Start a new turn with the given prompt: push a separator and the
     /// markdown-rendered prompt, then pin the turn start.
     pub fn submit_prompt(&mut self, prompt: String) {
-        self.flush_reasoning();
         if !self.scrollable.is_empty() {
-            self.scrollable.push(Line::from(""), LineOrigin::Separator);
+            self.scrollable.push(Line::from(""));
         }
         // Pin the turn at the first prompt line, so the leading separator
         // (which belongs to the *previous* turn) may still overflow.
         let start = self.scrollable.len();
         for line in render_prompt(&prompt) {
-            self.scrollable.push(line, LineOrigin::Prompt);
+            self.scrollable.push(line);
         }
         self.turn_start = Some(start);
         self.response_start = None;
         self.response_accumulator.clear();
         self.response_dirty = false;
-        self.reasoning_partial.clear();
-        self.reasoning_partial_idx = None;
-    }
-
-    /// Append reasoning text (may be a partial chunk). Completed lines are
-    /// pushed into the FIFO; the in-progress partial is kept as a live FIFO
-    /// line so it is visible while streaming.
-    pub fn push_reasoning_text(&mut self, text: &str) {
-        self.reasoning_partial.push_str(text);
-        // Drop the old partial line; it will be re-added after the complete
-        // lines so ordering stays correct.
-        self.remove_reasoning_partial();
-        while let Some(newline_pos) = self.reasoning_partial.find('\n') {
-            let line: String = self.reasoning_partial[..newline_pos].into();
-            self.reasoning_partial = self.reasoning_partial[newline_pos + 1..].into();
-            self.insert_before_response(
-                Line::from(Span::styled(format!("  {line}"), dim_italic())),
-                LineOrigin::Reasoning,
-            );
-        }
-        self.add_reasoning_partial();
-    }
-
-    /// Flush the reasoning partial buffer (if any) into a completed line.
-    pub fn flush_reasoning(&mut self) {
-        // The partial line is already in the FIFO; stop tracking it as
-        // replaceable so it becomes a permanent line.
-        self.reasoning_partial.clear();
-        self.reasoning_partial_idx = None;
-    }
-
-    /// Record a tool call as a styled line.
-    pub fn push_tool(&mut self, name: &str) {
-        self.flush_reasoning();
-        self.insert_before_response(
-            Line::from(Span::styled(format!("  {name}"), dim_italic())),
-            LineOrigin::Tool,
-        );
     }
 
     /// Append streaming response text.
     pub fn push_response(&mut self, text: &str) {
-        self.flush_reasoning();
         if self.response_start.is_none() {
             self.response_start = Some(self.scrollable.len());
         }
@@ -262,7 +209,6 @@ impl TranscriptWidget {
 
     /// Replace the entire response text.
     pub fn replace_response(&mut self, text: &str) {
-        self.flush_reasoning();
         if self.response_start.is_none() {
             self.response_start = Some(self.scrollable.len());
         }
@@ -327,14 +273,11 @@ impl TranscriptWidget {
     /// Unpin the current turn and clear its draft state. The content is
     /// already in the FIFO.
     pub fn finish_turn(&mut self) {
-        self.flush_reasoning();
         self.rebuild_response();
         self.turn_start = None;
         self.response_start = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
-        self.reasoning_partial.clear();
-        self.reasoning_partial_idx = None;
     }
 
     /// Discard the current turn: truncate the FIFO back to the turn start
@@ -357,8 +300,6 @@ impl TranscriptWidget {
         self.response_start = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
-        self.reasoning_partial.clear();
-        self.reasoning_partial_idx = None;
     }
 
     /// Clear the scrollable FIFO.
@@ -368,50 +309,6 @@ impl TranscriptWidget {
         self.response_start = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
-        self.reasoning_partial.clear();
-        self.reasoning_partial_idx = None;
-    }
-
-    /// Insert a line before the response region (or append when there is no
-    /// response yet). Returns the FIFO index where the line landed.
-    fn insert_before_response(&mut self, line: Line<'static>, origin: LineOrigin) -> usize {
-        match self.response_start {
-            Some(r) => {
-                self.scrollable.insert(r, line, origin);
-                self.response_start = Some(r + 1);
-                r
-            }
-            None => {
-                let idx = self.scrollable.len();
-                self.scrollable.push(line, origin);
-                idx
-            }
-        }
-    }
-
-    /// Remove the live partial reasoning line (if any) from the FIFO.
-    fn remove_reasoning_partial(&mut self) {
-        if let Some(idx) = self.reasoning_partial_idx.take() {
-            self.scrollable.remove(idx);
-            if let Some(r) = &mut self.response_start {
-                if *r > idx {
-                    *r -= 1;
-                }
-            }
-        }
-    }
-
-    /// Add (or refresh) the live partial reasoning line in the FIFO.
-    fn add_reasoning_partial(&mut self) {
-        if self.reasoning_partial.is_empty() {
-            return;
-        }
-        let line = Line::from(Span::styled(
-            format!("  {}", self.reasoning_partial),
-            dim_italic(),
-        ));
-        let idx = self.insert_before_response(line, LineOrigin::Reasoning);
-        self.reasoning_partial_idx = Some(idx);
     }
 
     /// Re-render the response region into the FIFO if dirty.
@@ -423,8 +320,33 @@ impl TranscriptWidget {
         let start = self.response_start.unwrap_or(self.scrollable.len());
         self.scrollable.truncate(start);
         for line in markdown::render(&self.response_accumulator, Style::default()) {
-            self.scrollable.push(line, LineOrigin::Response);
+            self.scrollable.push(line);
         }
+    }
+
+    /// Drain the head of the transcript FIFO that does not fit in
+    /// `available_rows`. Lines at or after the pinned turn are never
+    /// reported as overflow, keeping an in-progress turn on screen.
+    pub fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+        // Rebuild the response region first so the overflow split measures
+        // exactly what will be painted this frame.
+        self.rebuild_response();
+        let pinned = self.turn_start.unwrap_or(self.scrollable.len());
+        let (_overflow_rows, overflow_lines): (_, Vec<_>) =
+            split_overflow(&self.scrollable, available_rows, width, pinned);
+        if overflow_lines.is_empty() {
+            return Vec::new();
+        }
+
+        let drained = overflow_lines.len();
+        self.scrollable.drain_head(drained);
+        if let Some(t) = &mut self.turn_start {
+            *t = t.saturating_sub(drained);
+        }
+        if let Some(r) = &mut self.response_start {
+            *r = r.saturating_sub(drained);
+        }
+        overflow_lines
     }
 }
 
@@ -458,6 +380,239 @@ fn render_prompt(prompt: &str) -> Vec<Line<'static>> {
     out
 }
 
+/// Find a prefix of `buffer` that does not fit within `available_rows`.
+///
+/// Lines at or after `pinned` are never included, so an in-progress turn is
+/// never committed to scrollback. Returns the number of overflowing wrapped
+/// rows and the actual head lines (in render order).
+fn split_overflow(
+    buffer: &LineBuffer,
+    available_rows: u16,
+    width: u16,
+    pinned: usize,
+) -> (usize, Vec<Line<'static>>) {
+    let available = available_rows as usize;
+    let total = buffer.wrapped_height(width);
+    if total <= available {
+        return (0, Vec::new());
+    }
+
+    let limit = pinned.min(buffer.len());
+    let mut dropped = 0usize;
+    let mut drop_count = 0usize;
+    while total - dropped > available && drop_count < limit {
+        dropped += line_wrapped_height(&buffer.visible_lines()[drop_count], width);
+        drop_count += 1;
+    }
+
+    if drop_count == 0 {
+        return (0, Vec::new());
+    }
+
+    let overflow_lines = buffer.visible_lines()[..drop_count].to_vec();
+    (dropped, overflow_lines)
+}
+
+/// Trims a live-tail buffer to the rows that fit in `available_rows`,
+/// wrapping-aware, discarding the head. Returns nothing: the head is never
+/// committed to terminal scrollback.
+fn trim_to_tail(buffer: &mut LineBuffer, available_rows: u16, width: u16) {
+    if available_rows == 0 || width == 0 {
+        buffer.clear();
+        return;
+    }
+
+    let available = available_rows as usize;
+    let total = buffer.wrapped_height(width);
+    if total <= available {
+        return;
+    }
+
+    let mut drop_count = 0usize;
+    let mut dropped = 0usize;
+    while total - dropped > available && drop_count < buffer.len() {
+        dropped += line_wrapped_height(&buffer.visible_lines()[drop_count], width);
+        drop_count += 1;
+    }
+    buffer.drain_head(drop_count);
+}
+
+/// Live tail for reasoning text. Accumulates partial chunks into complete
+/// lines and renders them unstyled, capped at a maximum number of visible
+/// rows (5).
+pub struct ReasoningWidget {
+    lines: LineBuffer,
+    partial: String,
+}
+
+impl ReasoningWidget {
+    pub fn new() -> Self {
+        Self {
+            lines: LineBuffer::new(),
+            partial: String::new(),
+        }
+    }
+
+    /// Append reasoning text (may be a partial chunk). Completed lines are
+    /// pushed into the buffer; the trailing partial is kept as a live line.
+    pub fn push_reasoning_text(&mut self, text: &str) {
+        self.partial.push_str(text);
+        while let Some(newline_pos) = self.partial.find('\n') {
+            let line: String = self.partial[..newline_pos].into();
+            self.partial = self.partial[newline_pos + 1..].into();
+            self.lines.push(Line::from(line));
+        }
+    }
+
+    /// Flush the trailing partial (if any) into a completed line.
+    #[allow(dead_code)]
+    pub fn flush_reasoning(&mut self) {
+        if !self.partial.is_empty() {
+            let line = std::mem::take(&mut self.partial);
+            self.lines.push(Line::from(line));
+        }
+    }
+
+    /// Reset the live region for a new turn.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.partial.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty() && self.partial.is_empty()
+    }
+
+    fn visible_rows(&self, width: u16) -> u16 {
+        if self.is_empty() {
+            return 0;
+        }
+        (wrapped_height(&self.rendered_lines(), width) as u16).min(5)
+    }
+
+    fn rendered_lines(&self) -> Vec<Line<'static>> {
+        let mut out = self.lines.visible_lines().to_vec();
+        if !self.partial.is_empty() {
+            out.push(Line::from(self.partial.clone()));
+        }
+        out
+    }
+}
+
+impl Default for ReasoningWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveAreaWidget for ReasoningWidget {
+    as_any_methods!();
+
+    fn height_constraint(&self, width: u16, _ctx: &RenderContext) -> Constraint {
+        Constraint::Length(self.visible_rows(width))
+    }
+
+    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+        // Keep the visible tail; the head is discarded, never committed to
+        // terminal scrollback.
+        let rendered = self.rendered_lines();
+        let total = wrapped_height(&rendered, width);
+        if total > available_rows as usize {
+            // Rebuild `lines` from the rendered tail.
+            let mut drop_count = 0usize;
+            let mut dropped = 0usize;
+            while total - dropped > available_rows as usize && drop_count < rendered.len() {
+                dropped += line_wrapped_height(&rendered[drop_count], width);
+                drop_count += 1;
+            }
+            if drop_count == 0 {
+                return Vec::new();
+            }
+            // Drop the first `drop_count` source lines. Partial lines are
+            // always at the tail, so only buffer lines are dropped.
+            let drop_from_buffer = drop_count.min(self.lines.len());
+            self.lines.drain_head(drop_from_buffer);
+            if drop_count > drop_from_buffer {
+                self.partial.clear();
+            }
+        }
+        Vec::new()
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        let lines = self.rendered_lines();
+        if !lines.is_empty() {
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .render(area, buf);
+        }
+    }
+}
+
+/// Live tail for tool-call events. Owns a FIFO of unstyled tool-name lines,
+/// capped at a maximum number of visible rows (5).
+pub struct ToolEventsWidget {
+    lines: LineBuffer,
+}
+
+impl ToolEventsWidget {
+    pub fn new() -> Self {
+        Self {
+            lines: LineBuffer::new(),
+        }
+    }
+
+    /// Append a tool-name line, unstyled.
+    pub fn push_tool(&mut self, name: &str) {
+        self.lines.push(Line::from(name.to_string()));
+    }
+
+    /// Reset the live region for a new turn.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    fn visible_rows(&self, width: u16) -> u16 {
+        if self.is_empty() {
+            return 0;
+        }
+        (self.lines.wrapped_height(width) as u16).min(5)
+    }
+}
+
+impl Default for ToolEventsWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveAreaWidget for ToolEventsWidget {
+    as_any_methods!();
+
+    fn height_constraint(&self, width: u16, _ctx: &RenderContext) -> Constraint {
+        Constraint::Length(self.visible_rows(width))
+    }
+
+    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+        trim_to_tail(&mut self.lines, available_rows, width);
+        Vec::new()
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        trim_to_tail(&mut self.lines, area.height, area.width);
+        let tail = self.lines.visible_lines().to_vec();
+        if !tail.is_empty() {
+            Paragraph::new(tail)
+                .wrap(Wrap { trim: false })
+                .render(area, buf);
+        }
+    }
+}
+
 impl LiveAreaWidget for TranscriptWidget {
     as_any_methods!();
     fn size_priority(&self) -> i32 {
@@ -478,42 +633,19 @@ impl LiveAreaWidget for TranscriptWidget {
         Constraint::Min(0)
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) -> Vec<Line<'static>> {
-        let width = area.width;
+    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+        self.take_overflow(available_rows, width)
+    }
 
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
         // Rebuild the response region if dirty.
         self.rebuild_response();
-
-        // Split overflow with the current turn pinned.
-        let pinned = self.turn_start.unwrap_or(self.scrollable.len());
-        let (split_idx, _overflow_rows) =
-            self.scrollable.overflow_split(area.height, width, pinned);
-
-        let overflow_lines: Vec<Line<'static>> = if split_idx > 0 {
-            let head: Vec<Line<'static>> = self.scrollable.visible_lines()[..split_idx].to_vec();
-            self.scrollable.drain_head(split_idx);
-            // Adjust the markers by the drained count.
-            if let Some(t) = &mut self.turn_start {
-                *t = t.saturating_sub(split_idx);
-            }
-            if let Some(r) = &mut self.response_start {
-                *r = r.saturating_sub(split_idx);
-            }
-            if let Some(ri) = &mut self.reasoning_partial_idx {
-                *ri = ri.saturating_sub(split_idx);
-            }
-            head
-        } else {
-            Vec::new()
-        };
 
         let tail = self.scrollable.visible_lines().to_vec();
         if !tail.is_empty() {
             let paragraph = Paragraph::new(tail).wrap(Wrap { trim: false });
             paragraph.render(area, buf);
         }
-
-        overflow_lines
     }
 }
 
@@ -613,10 +745,10 @@ impl LiveAreaWidget for InputBarWidget {
         Constraint::Length(self.wrapped_rows(width, ctx.input))
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) -> Vec<Line<'static>> {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
         let width = area.width;
         if width == 0 {
-            return Vec::new();
+            return;
         }
 
         // Build the wrapped paragraph, then slice out the visible vertical
@@ -657,8 +789,6 @@ impl LiveAreaWidget for InputBarWidget {
                 cell.set_style(Style::default().bg(Color::White));
             }
         }
-
-        Vec::new()
     }
 }
 
@@ -675,7 +805,7 @@ impl LiveAreaWidget for InfoBarWidget {
         Constraint::Length(1)
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) -> Vec<Line<'static>> {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
         let mut spans = vec![
             Span::styled("gremlins tui", Style::default().fg(Color::Cyan)),
             Span::raw(" · "),
@@ -705,8 +835,6 @@ impl LiveAreaWidget for InfoBarWidget {
 
         let paragraph = Paragraph::new(Line::from(spans));
         paragraph.render(area, buf);
-
-        Vec::new()
     }
 }
 
@@ -752,7 +880,7 @@ impl LiveAreaWidget for WatchTableWidget {
         Constraint::Length(self.desired_height(ctx))
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) -> Vec<Line<'static>> {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         let header_style = Style::default()
@@ -802,8 +930,6 @@ impl LiveAreaWidget for WatchTableWidget {
             let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
             paragraph.render(area, buf);
         }
-
-        Vec::new()
     }
 }
 
@@ -842,7 +968,7 @@ impl LiveAreaWidget for WatchSingleWidget {
         Constraint::Min(0)
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) -> Vec<Line<'static>> {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
         let header = Line::from(vec![
             Span::styled(
                 "following: ",
@@ -873,8 +999,6 @@ impl LiveAreaWidget for WatchSingleWidget {
             let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
             paragraph.render(area, buf);
         }
-
-        Vec::new()
     }
 }
 
@@ -954,7 +1078,7 @@ impl LiveAreaWidget for DebugWidget {
         Constraint::Min(0)
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) -> Vec<Line<'static>> {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
         let status = if self.connecting {
             "connecting…"
         } else if self.connected {
@@ -1011,8 +1135,6 @@ impl LiveAreaWidget for DebugWidget {
             let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
             paragraph.render(area, buf);
         }
-
-        Vec::new()
     }
 }
 
@@ -1081,7 +1203,6 @@ mod tests {
         let mut transcript = TranscriptWidget::new();
         transcript.push_transcript_line("prior".to_string());
         transcript.submit_prompt("hi".to_string());
-        transcript.push_reasoning_text("thinking\n");
         transcript.push_response("response");
         transcript.clear_current_turn();
         assert!(!transcript.has_current_turn());
@@ -1091,17 +1212,42 @@ mod tests {
     }
 
     #[test]
-    fn finish_turn_unpins_and_keeps_content() {
+    fn finish_turn_unpins_and_keeps_content_split_across_widgets() {
         let mut transcript = TranscriptWidget::new();
+        let mut reasoning = ReasoningWidget::new();
+        let mut tools = ToolEventsWidget::new();
+
         transcript.submit_prompt("hi".to_string());
-        transcript.push_reasoning_text("thinking\n");
-        transcript.push_tool("Done");
+        reasoning.push_reasoning_text("thinking\n");
+        tools.push_tool("Done");
         transcript.push_response("**answer**");
         transcript.finish_turn();
+
         assert!(!transcript.has_current_turn());
-        let lines = transcript.scrollable.visible_lines();
-        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(text, vec!["> hi", "  thinking", "  Done", "answer"]);
+        let transcript_text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(transcript_text, vec!["> hi", "answer"]);
+        assert!(!transcript_text.contains(&"thinking".to_string()));
+        assert!(!transcript_text.contains(&"Done".to_string()));
+
+        let reasoning_text: Vec<String> = reasoning
+            .rendered_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(reasoning_text, vec!["thinking"]);
+
+        let tool_text: Vec<String> = tools
+            .lines
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(tool_text, vec!["Done"]);
     }
 
     #[test]
@@ -1118,6 +1264,86 @@ mod tests {
     }
 
     #[test]
+    fn take_overflow_never_drains_pinned_turn() {
+        let mut transcript = TranscriptWidget::new();
+        // Completed turn that may overflow.
+        transcript.push_transcript_line("prior".to_string());
+        // In-progress turn: pinned at the prompt line.
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+
+        // Only 1 row available; the pinned prompt/response must stay put.
+        let overflow = transcript.take_overflow(1, 80);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.contains(&"> hi".to_string()),
+            "pinned turn must never be drained: {text:?}"
+        );
+        assert!(
+            text.contains(&"resp".to_string()),
+            "pinned turn must never be drained: {text:?}"
+        );
+        // Only the pre-turn separator/prior line may overflow.
+        assert!(!overflow.is_empty());
+    }
+
+    #[test]
+    fn take_overflow_respects_pinned_boundary_with_wrapping() {
+        let mut transcript = TranscriptWidget::new();
+        // A long prior line that wraps to many rows.
+        transcript.push_transcript_line("abcdefghijklmnopqrstuvwxyz".to_string());
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+
+        // Width 10: the prior line wraps to 3 rows. With 1 available row,
+        // overflow would want to drop the wrapped prior line, but the pinned
+        // turn boundary caps the drain at the prompt line.
+        let overflow = transcript.take_overflow(1, 10);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.contains(&"> hi".to_string()),
+            "pinned turn must never be drained: {text:?}"
+        );
+        assert!(
+            text.contains(&"resp".to_string()),
+            "pinned turn must never be drained: {text:?}"
+        );
+        assert!(!overflow.is_empty());
+    }
+
+    #[test]
+    fn take_overflow_rebuilds_dirty_response_before_measuring() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("short");
+        // Reconcile to a much longer response, leaving the region dirty.
+        transcript.reconcile_response("a much longer response body that wraps");
+
+        // Overflow must measure the rebuilt response, not the stale short one.
+        let _ = transcript.take_overflow(2, 10);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.iter().any(|l| l.contains("longer response")),
+            "dirty response must be rebuilt before overflow split: {text:?}"
+        );
+    }
+
+    #[test]
     fn reconcile_response_handles_multibyte_char_boundaries() {
         let mut transcript = TranscriptWidget::new();
         // Stream a partial response ending mid-multibyte, then reconcile with
@@ -1128,38 +1354,100 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_partial_is_visible_in_fifo() {
-        let mut transcript = TranscriptWidget::new();
-        transcript.submit_prompt("hi".to_string());
-        transcript.push_reasoning_text("thinking");
-        // The partial reasoning line must be in the FIFO before any newline.
-        let text: Vec<String> = transcript
-            .scrollable
-            .visible_lines()
+    fn reasoning_partial_is_visible_in_reasoning_widget() {
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("thinking");
+        // The partial reasoning line must be visible before any newline.
+        let text: Vec<String> = reasoning
+            .rendered_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(text.contains(&"  thinking".to_string()), "{text:?}");
+        assert!(text.contains(&"thinking".to_string()), "{text:?}");
     }
 
     #[test]
-    fn tool_line_after_response_is_preserved_by_rebuild() {
+    fn tool_line_after_response_is_preserved_in_separate_widget() {
         let mut transcript = TranscriptWidget::new();
+        let mut tools = ToolEventsWidget::new();
+
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("streamed");
-        // A tool call arriving after response streaming began must not be
-        // erased when the response region is rebuilt.
-        transcript.push_tool("grep");
+        // A tool call arriving after response streaming began is stored in
+        // the tool events widget and must not be erased when the response
+        // region is rebuilt.
+        tools.push_tool("grep");
         transcript.reconcile_response("streamed complete");
         transcript.finish_turn();
-        let text: Vec<String> = transcript
+
+        let transcript_text: Vec<String> = transcript
             .scrollable
             .visible_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(text.contains(&"  grep".to_string()), "{text:?}");
-        assert!(text.contains(&"streamed complete".to_string()), "{text:?}");
+        assert!(
+            transcript_text.contains(&"streamed complete".to_string()),
+            "{transcript_text:?}"
+        );
+        assert!(!transcript_text.contains(&"grep".to_string()));
+
+        let tool_text: Vec<String> = tools
+            .lines
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(tool_text.contains(&"grep".to_string()), "{tool_text:?}");
+    }
+
+    #[test]
+    fn reasoning_widget_take_overflow_trims_wrapped_lines_to_cap() {
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n"); // 26 chars → 3 rows at width 10
+        reasoning.flush_reasoning();
+
+        let overflow = reasoning.take_overflow(2, 10);
+        assert!(overflow.is_empty());
+
+        // The single long line wraps to 3 rows and cannot fit in 2 visible
+        // rows, so the live tail discards it entirely.
+        assert!(reasoning.rendered_lines().is_empty());
+        assert_eq!(reasoning.visible_rows(10), 0);
+    }
+
+    #[test]
+    fn tool_events_widget_trims_to_visible_tail_discarding_head() {
+        let mut tools = ToolEventsWidget::new();
+        for i in 0..6 {
+            tools.push_tool(&format!("tool-{i}"));
+        }
+
+        let overflow = tools.take_overflow(2, 80);
+        assert!(overflow.is_empty());
+
+        let text: Vec<String> = tools
+            .lines
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(text, vec!["tool-4", "tool-5"]);
+    }
+
+    #[test]
+    fn live_tail_widgets_collapse_to_zero_height_when_empty() {
+        let reasoning = ReasoningWidget::new();
+        let tools = ToolEventsWidget::new();
+        assert_eq!(reasoning.visible_rows(80), 0);
+        assert_eq!(
+            reasoning.height_constraint(80, &input_ctx("", 0)),
+            Constraint::Length(0)
+        );
+        assert_eq!(
+            tools.height_constraint(80, &input_ctx("", 0)),
+            Constraint::Length(0)
+        );
     }
 
     // ── input bar cursor positioning ────────────────────────────

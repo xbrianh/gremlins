@@ -30,13 +30,14 @@ use ratatui::{
 
 use crate::tui::app::App;
 use crate::tui::widgets::{
-    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, RenderContext, TranscriptWidget,
-    WatchSingleWidget,
+    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, ReasoningWidget, RenderContext,
+    ToolEventsWidget, TranscriptWidget, WatchSingleWidget,
 };
 
-/// Number of rows reserved at the bottom of the screen for input and
-/// info bars. These rows are excluded from the scrollback region.
-const RESERVED_ROWS: u16 = 2;
+/// Approximate number of rows reserved at the bottom of the screen for the
+/// input and info bars before the first layout pass runs. The real value is
+/// tracked each frame from the live widget stack.
+const INITIAL_RESERVED_ROWS: u16 = 2;
 
 /// Owns the main terminal screen with diff-driven double buffering.
 pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
@@ -77,10 +78,12 @@ impl<B: Backend> LiveArea<B> {
             needs_terminal_cleanup: false,
             widgets: vec![
                 Box::new(TranscriptWidget::new()),
+                Box::new(ReasoningWidget::new()),
+                Box::new(ToolEventsWidget::new()),
                 Box::new(InputBarWidget::new()),
                 Box::new(InfoBarWidget),
             ],
-            reserved_rows: RESERVED_ROWS,
+            reserved_rows: INITIAL_RESERVED_ROWS,
         }
     }
 
@@ -331,22 +334,17 @@ impl<B: Backend> LiveArea<B> {
             0
         };
 
-        // ── Render each widget into its allocated chunk ──────────
+        // ── Drain overflow, then paint each widget ──────────────
         //
-        // Overflow is collected per-widget with its `overflow_priority` so
-        // that, if more than one widget ever produces overflow, the lines
-        // are committed in a deterministic order (lowest priority first).
+        // `take_overflow` is the single place where a widget decides what
+        // to do when its content exceeds its allocated rows. The transcript
+        // returns head lines to commit to scrollback; live-tail widgets trim
+        // themselves and return nothing. Every other widget returns nothing.
         let mut overflow: Vec<(i32, Line<'static>)> = Vec::new();
-        let mut y = 0u16;
         for (i, widget) in self.widgets.iter_mut().enumerate() {
             let h = heights[i];
-            if h == 0 {
-                continue;
-            }
-            let chunk = Rect::new(0, y, width, h);
-            y += h;
             let prio = widget.overflow_priority();
-            for line in widget.render(chunk, &mut self.curr, &ctx) {
+            for line in widget.take_overflow(h, width) {
                 overflow.push((prio, line));
             }
         }
@@ -355,6 +353,17 @@ impl<B: Backend> LiveArea<B> {
             overflow.sort_by_key(|(prio, _)| *prio);
             let lines: Vec<Line<'static>> = overflow.into_iter().map(|(_, l)| l).collect();
             self.commit_scrollback(&lines, self.cols)?;
+        }
+
+        let mut y = 0u16;
+        for (i, widget) in self.widgets.iter_mut().enumerate() {
+            let h = heights[i];
+            if h == 0 {
+                continue;
+            }
+            let chunk = Rect::new(0, y, width, h);
+            y += h;
+            widget.render(chunk, &mut self.curr, &ctx);
         }
 
         self.draw(|_| {})
@@ -371,9 +380,9 @@ impl<B: Backend> LiveArea<B> {
     /// Remove the most recently added overlay widget, if any. The initial
     /// content widgets are never popped.
     pub fn pop_overlay(&mut self) -> Option<Box<dyn LiveAreaWidget>> {
-        // The first three widgets are the fixed content stack; only pop
+        // The first five widgets are the fixed content stack; only pop
         // widgets pushed on top of them.
-        if self.widgets.len() > 3 {
+        if self.widgets.len() > 5 {
             Some(self.widgets.remove(0))
         } else {
             None
@@ -387,6 +396,20 @@ impl<B: Backend> LiveArea<B> {
             .iter_mut()
             .find_map(|w| w.as_any_mut().downcast_mut::<TranscriptWidget>())
             .expect("transcript widget present")
+    }
+
+    fn reasoning_mut(&mut self) -> &mut ReasoningWidget {
+        self.widgets
+            .iter_mut()
+            .find_map(|w| w.as_any_mut().downcast_mut::<ReasoningWidget>())
+            .expect("reasoning widget present")
+    }
+
+    fn tool_events_mut(&mut self) -> &mut ToolEventsWidget {
+        self.widgets
+            .iter_mut()
+            .find_map(|w| w.as_any_mut().downcast_mut::<ToolEventsWidget>())
+            .expect("tool events widget present")
     }
 
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
@@ -413,6 +436,8 @@ impl<B: Backend> LiveArea<B> {
     /// Start a new turn with the given prompt: push a separator and the
     /// markdown-rendered prompt, then pin the turn start.
     pub fn submit_prompt(&mut self, prompt: String) {
+        self.reasoning_mut().clear();
+        self.tool_events_mut().clear();
         self.transcript_mut().submit_prompt(prompt);
     }
 
@@ -431,18 +456,19 @@ impl<B: Backend> LiveArea<B> {
 
     /// Flush the reasoning partial buffer (if any) into a completed
     /// reasoning line.
+    #[allow(dead_code)]
     pub fn flush_reasoning(&mut self) {
-        self.transcript_mut().flush_reasoning();
+        self.reasoning_mut().flush_reasoning();
     }
 
     /// Append reasoning text (may be a partial chunk).
     pub fn push_reasoning_text(&mut self, text: &str) {
-        self.transcript_mut().push_reasoning_text(text);
+        self.reasoning_mut().push_reasoning_text(text);
     }
 
     /// Record a tool call.
     pub fn push_tool(&mut self, name: &str) {
-        self.transcript_mut().push_tool(name);
+        self.tool_events_mut().push_tool(name);
     }
 
     /// Append streaming response text.
@@ -1025,41 +1051,37 @@ mod tests {
     }
 
     #[test]
-    fn submit_prompt_flushes_trailing_reasoning_partial() {
+    fn submit_prompt_clears_live_reasoning_widget() {
         let cols: u16 = 80;
         let rows: u16 = 24;
         let mut live_area = new_live(cols, rows);
 
         // First turn: reasoning ends WITHOUT a trailing newline, so the
-        // final fragment sits in `reasoning_partial`.
+        // final fragment sits in the reasoning widget as a live partial.
         live_area.submit_prompt("first".to_string());
         live_area.push_reasoning_text("thinking without a newline");
 
-        // Flatten the turn by submitting the next prompt. The trailing
-        // partial must be flushed into the transcript before `take_tail`.
+        // Submitting the next prompt resets the live region so the prior
+        // turn's reasoning never becomes part of the next turn's transcript.
         live_area.submit_prompt("second".to_string());
 
-        // The flattened reasoning (with its two-space indent) must now be
-        // part of the scrollable transcript, visible in the rendered frame.
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            visible.contains("thinking without a newline"),
-            "Trailing reasoning fragment should be committed to the transcript.\nBuffer:\n{visible}"
+            !visible.contains("thinking without a newline"),
+            "Previous turn reasoning should be cleared on the next prompt.\nBuffer:\n{visible}"
         );
     }
 
     #[test]
-    fn submit_prompt_newline_terminated_reasoning_unchanged() {
+    fn submit_prompt_clears_newline_terminated_reasoning() {
         let cols: u16 = 80;
         let rows: u16 = 24;
         let mut live_area = new_live(cols, rows);
 
-        // Reasoning that already ends in a newline is fully flushed by
-        // `push_text`; `flush` must be a no-op and add no extra blank line.
         live_area.submit_prompt("first".to_string());
         live_area.push_reasoning_text("thinking with a newline\n");
         live_area.submit_prompt("second".to_string());
@@ -1070,18 +1092,8 @@ mod tests {
 
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            visible.contains("thinking with a newline"),
-            "Newline-terminated reasoning should be committed.\nBuffer:\n{visible}"
-        );
-        // `flush` must be a no-op: exactly one committed reasoning line,
-        // with no duplicate and no extra blank row introduced.
-        let occurrences = visible
-            .lines()
-            .filter(|l| l.contains("thinking with a newline"))
-            .count();
-        assert_eq!(
-            occurrences, 1,
-            "Reasoning should be committed exactly once, no duplicate.\nBuffer:\n{visible}"
+            !visible.contains("thinking with a newline"),
+            "Previous newline-terminated reasoning should be cleared.\nBuffer:\n{visible}"
         );
     }
 
@@ -1092,29 +1104,29 @@ mod tests {
         use crate::tui::widgets::{DebugWidget, WatchTableWidget};
 
         let mut live = new_live(80, 24);
-        assert_eq!(live.widgets.len(), 3);
+        assert_eq!(live.widgets.len(), 5);
 
         // Popping with no overlay is a no-op.
         assert!(live.pop_overlay().is_none());
 
         live.push_overlay(Box::new(WatchTableWidget::new()));
-        assert_eq!(live.widgets.len(), 4);
+        assert_eq!(live.widgets.len(), 6);
 
         live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 7);
 
         // Pop removes the most recently added (debug) first.
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<DebugWidget>().is_some());
-        assert_eq!(live.widgets.len(), 4);
+        assert_eq!(live.widgets.len(), 6);
 
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<WatchTableWidget>().is_some());
-        assert_eq!(live.widgets.len(), 3);
+        assert_eq!(live.widgets.len(), 5);
 
         // Cannot pop the fixed content stack.
         assert!(live.pop_overlay().is_none());
-        assert_eq!(live.widgets.len(), 3);
+        assert_eq!(live.widgets.len(), 5);
     }
 
     #[test]
@@ -1346,7 +1358,8 @@ mod tests {
         live_area.replace_response(&body);
         live_area.finish_response(&body, "final summary line");
 
-        // Turn end: commit prompt/reasoning/tools, then the response.
+        // Turn end: commit the transcript response. Reasoning and tools stay
+        // in their own live-tail widgets and never reach transcript scrollback.
         live_area.finish_turn();
         live_area.push_transcript_line("42 tokens".to_string());
 
@@ -1356,43 +1369,21 @@ mod tests {
         // frame or the scrollback log, not dropped.
         let visible = dump_buffer(live_area.backend().buffer());
         let sb = live_area.scrollback().join("\n");
-        assert!(
-            visible.contains("final summary line") || sb.contains("final summary line"),
-            "summary should not be dropped.\nFrame:\n{visible}\nScrollback:\n{sb}"
-        );
-
-        // Submitting the next prompt must not re-append the previous turn's
-        // prompt/reasoning/tools after the response.
-        live_area.submit_prompt("next".to_string());
-        live_area.compose(&app).unwrap();
-
-        let visible = dump_buffer(live_area.backend().buffer());
-        let sb = live_area.scrollback().join("\n");
         let combined = format!("{sb}\n{visible}");
-        let prompt_pos = combined
-            .find("> hi")
-            .expect("previous prompt should be committed");
-        let reasoning_pos = combined
-            .find("thinking...")
-            .expect("previous reasoning should be committed");
-        let tools_pos = combined.find("  Done");
         assert!(
-            tools_pos.is_some(),
-            "previous tools should be committed.\nCombined:\n{combined}"
+            combined.contains("final summary line"),
+            "summary should not be dropped.\nCombined:\n{combined}"
         );
-        let tools_pos = tools_pos.unwrap();
-        let response_pos = combined
-            .find("response line 39")
-            .expect("previous response should be committed");
-        let usage_pos = combined
-            .find("42 tokens")
-            .expect("usage line should be committed");
-        assert!(
-            prompt_pos < reasoning_pos
-                && reasoning_pos < tools_pos
-                && tools_pos < response_pos
-                && response_pos < usage_pos,
-            "turn should be committed in prompt, reasoning, tools, response, usage order.\nCombined:\n{combined}"
-        );
+
+        // Transcript scrollback must contain the prompt and response, and
+        // must never contain reasoning or tool content.
+        let combined_no_frame = sb.clone();
+        assert!(!combined_no_frame.contains("thinking..."));
+        assert!(!combined_no_frame.contains("Done") && !combined_no_frame.contains("grep"));
+
+        // Reasoning and tools remain live in the visible frame (or were
+        // already previously capped away from it), and are never scrollback.
+        assert!(!sb.contains("thinking..."));
+        assert!(!sb.contains("grep"));
     }
 }

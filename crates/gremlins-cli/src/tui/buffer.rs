@@ -1,39 +1,14 @@
 //! Display buffers for the LiveArea region model.
 //!
-//! The [`ScrollableBuffer`] is the single source of truth for scrollable
-//! transcript content. When its wrapped height exceeds available rows,
-//! [`overflow_split`](ScrollableBuffer::overflow_split) reports which prefix
-//! lines to commit to terminal scrollback. The caller drains those lines,
-//! commits them via [`LiveArea::commit_scrollback`], and renders the
-//! remaining tail. No accumulators — the split is a fresh measurement each
-//! frame.
-//!
-//! ## Pinned boundary
-//!
-//! [`overflow_split`](ScrollableBuffer::overflow_split) takes a pinned
-//! boundary: lines at or after the boundary are never reported as overflow.
-//! This keeps an in-progress turn from ever reaching terminal scrollback —
-//! only completed turns and the separator before a new turn may overflow.
+//! [`LineBuffer`] is a dumb FIFO of styled lines. It has no head policy: it
+//! never drops lines on its own and never reports overflow. What happens to
+//! the head (commit to terminal scrollback, discard, etc.) is decided by the
+//! widget that owns the buffer.
 
 use ratatui::{
     text::Line,
     widgets::{Paragraph, Wrap},
 };
-
-/// Provenance of a line pushed into [`ScrollableBuffer`].
-///
-/// Tagging every push with its origin lets us trace whether content
-/// committed to terminal scrollback came from the FIFO or was pushed
-/// directly from another path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineOrigin {
-    Transcript,
-    Prompt,
-    Reasoning,
-    Tool,
-    Response,
-    Separator,
-}
 
 /// Wrapped height (in rows) of a set of lines at the given width.
 pub fn wrapped_height(lines: &[Line<'static>], width: u16) -> usize {
@@ -52,49 +27,40 @@ pub fn line_wrapped_height(line: &Line<'static>, width: u16) -> usize {
         .line_count(width)
 }
 
-/// A buffer of styled lines that may overflow into terminal scrollback.
-///
-/// The FIFO is the single source of truth. When content exceeds available
-/// rows, [`overflow_split`](Self::overflow_split) reports which prefix
-/// lines to commit to scrollback. The caller drains those lines, commits
-/// them via `LiveArea::commit_scrollback`, and renders the remaining tail.
-/// No accumulators — the split is measured fresh each frame.
-pub struct ScrollableBuffer {
+/// A FIFO of styled lines.
+pub struct LineBuffer {
     lines: Vec<Line<'static>>,
-    /// Provenance tags, one per line. Kept in lockstep with [`lines`](Self::lines).
-    origins: Vec<LineOrigin>,
 }
 
-impl ScrollableBuffer {
+impl LineBuffer {
     pub fn new() -> Self {
-        Self {
-            lines: Vec::new(),
-            origins: Vec::new(),
-        }
+        Self { lines: Vec::new() }
     }
 
-    /// Append a styled line with its provenance tag.
-    pub fn push(&mut self, line: Line<'static>, origin: LineOrigin) {
+    /// Append a styled line.
+    pub fn push(&mut self, line: Line<'static>) {
         self.lines.push(line);
-        self.origins.push(origin);
     }
 
-    /// Insert a styled line at `index`, keeping the origin tag in lockstep.
-    pub fn insert(&mut self, index: usize, line: Line<'static>, origin: LineOrigin) {
+    /// Insert a styled line at `index`.
+    pub fn insert(&mut self, index: usize, line: Line<'static>) {
         self.lines.insert(index, line);
-        self.origins.insert(index, origin);
     }
 
-    /// Remove the line at `index`, returning it (origin tag removed too).
+    /// Remove the line at `index`, returning it.
+    #[allow(dead_code)]
     pub fn remove(&mut self, index: usize) -> Line<'static> {
-        self.origins.remove(index);
         self.lines.remove(index)
     }
 
-    /// Truncate the buffer to `len` lines (and origin tags).
+    /// Remove the first `count` lines.
+    pub fn drain_head(&mut self, count: usize) {
+        self.lines.drain(..count);
+    }
+
+    /// Truncate the buffer to `len` lines.
     pub fn truncate(&mut self, len: usize) {
         self.lines.truncate(len);
-        self.origins.truncate(len);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -116,83 +82,13 @@ impl ScrollableBuffer {
         wrapped_height(&self.lines, width)
     }
 
-    /// Find the prefix of lines that do not fit within `available_rows`.
-    ///
-    /// `pinned` is a line index: lines at or after `pinned` are never
-    /// reported as overflow, so an in-progress turn is never committed to
-    /// terminal scrollback.
-    ///
-    /// Returns `(split_idx, overflow_rows)`:
-    /// - `split_idx`: call [`drain_head`](Self::drain_head) with this count
-    ///   to remove the overflowed lines.
-    /// - `overflow_rows`: wrapped height of the head at `width` — the
-    ///   number of terminal rows to commit to scrollback.
-    ///
-    /// Does not mutate the buffer.
-    pub fn overflow_split(&self, available_rows: u16, width: u16, pinned: usize) -> (usize, u16) {
-        let available = available_rows as usize;
-        let total = self.wrapped_height(width);
-        if total <= available {
-            return (0, 0);
-        }
-        // Never overflow past the pinned boundary.
-        let limit = pinned.min(self.lines.len());
-        let mut dropped = 0usize;
-        let mut drop_count = 0usize;
-        while total - dropped > available && drop_count < limit {
-            dropped += line_wrapped_height(&self.lines[drop_count], width);
-            drop_count += 1;
-        }
-
-        #[cfg(feature = "telemetry")]
-        {
-            let dropped_origins: Vec<LineOrigin> =
-                self.origins.iter().take(drop_count).copied().collect();
-            let previews: Vec<String> = self
-                .lines
-                .iter()
-                .take(drop_count)
-                .map(|l| {
-                    let s = l.to_string();
-                    let truncated: String = s.chars().take(40).collect();
-                    if s.len() > 40 {
-                        format!("{truncated}...")
-                    } else {
-                        truncated
-                    }
-                })
-                .collect();
-            log::debug!(
-                "OVERFLOW_SPLIT available={} width={} lines_total={} wrapped_total={} pinned={} split_idx={} overflow_rows={} origins={:?} previews={:?}",
-                available_rows,
-                width,
-                self.lines.len(),
-                total,
-                pinned,
-                drop_count,
-                dropped,
-                dropped_origins,
-                previews,
-            );
-        }
-
-        (drop_count, dropped.min(u16::MAX as usize) as u16)
-    }
-
-    /// Remove the first `count` lines (and their origin tags).
-    pub fn drain_head(&mut self, count: usize) {
-        self.lines.drain(..count);
-        self.origins.drain(..count);
-    }
-
-    /// Drop all lines and origin tags, resetting to an empty buffer.
+    /// Drop all lines, resetting to an empty buffer.
     pub fn clear(&mut self) {
         self.lines.clear();
-        self.origins.clear();
     }
 }
 
-impl Default for ScrollableBuffer {
+impl Default for LineBuffer {
     fn default() -> Self {
         Self::new()
     }
@@ -212,75 +108,54 @@ mod tests {
     }
 
     #[test]
-    fn scrollable_overflow_split_no_overflow() {
-        let mut buf = ScrollableBuffer::new();
-        buf.push(plain("one"), LineOrigin::Transcript);
-        buf.push(plain("two"), LineOrigin::Transcript);
-        let (split_idx, overflow_rows) = buf.overflow_split(10, 80, 2);
-        assert_eq!(split_idx, 0);
-        assert_eq!(overflow_rows, 0);
-        assert_eq!(buf.visible_lines().len(), 2);
+    fn line_buffer_push_and_visible_lines() {
+        let mut buf = LineBuffer::new();
+        buf.push(plain("one"));
+        buf.push(plain("two"));
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf.visible_lines()[0].to_string(), "one");
+        assert_eq!(buf.wrapped_height(80), 2);
     }
 
     #[test]
-    fn scrollable_overflow_split_and_drain() {
-        let mut buf = ScrollableBuffer::new();
+    fn line_buffer_drain_head() {
+        let mut buf = LineBuffer::new();
         for i in 0..6 {
-            buf.push(plain(&format!("line {i}")), LineOrigin::Transcript);
+            buf.push(plain(&format!("line {i}")));
         }
-        // 6 lines at width 80 = 6 rows, available=4 → overflow 2 rows
-        let (split_idx, overflow_rows) = buf.overflow_split(4, 80, 6);
-        assert_eq!(split_idx, 2);
-        assert_eq!(overflow_rows, 2);
-        // Buffer unchanged before drain.
-        assert_eq!(buf.visible_lines().len(), 6);
-        buf.drain_head(split_idx);
-        assert_eq!(buf.visible_lines().len(), 4);
+        buf.drain_head(2);
+        assert_eq!(buf.len(), 4);
         assert_eq!(buf.visible_lines()[0].to_string(), "line 2");
-        assert_eq!(buf.visible_lines()[3].to_string(), "line 5");
-        // No further overflow.
-        let (split_idx2, _) = buf.overflow_split(4, 80, 4);
-        assert_eq!(split_idx2, 0);
     }
 
     #[test]
-    fn scrollable_overflow_split_wrapping() {
-        let mut buf = ScrollableBuffer::new();
-        buf.push(plain("abcdefghijklmnopqrstuvwxyz"), LineOrigin::Transcript); // 26 chars → 3 rows at width 10
-        let (split_idx, overflow_rows) = buf.overflow_split(2, 10, 1);
-        assert_eq!(overflow_rows, 3);
-        assert_eq!(split_idx, 1);
-        buf.drain_head(split_idx);
-        assert!(buf.is_empty());
+    fn line_buffer_wrapping_uses_wrapped_rows() {
+        let mut buf = LineBuffer::new();
+        buf.push(plain("abcdefghijklmnopqrstuvwxyz")); // 26 chars → 3 rows at width 10
+        assert_eq!(buf.wrapped_height(10), 3);
+        assert_eq!(buf.visible_lines().len(), 1);
     }
 
     #[test]
-    fn overflow_split_respects_pinned_boundary() {
-        let mut buf = ScrollableBuffer::new();
-        for i in 0..6 {
-            buf.push(plain(&format!("line {i}")), LineOrigin::Transcript);
-        }
-        // Pinned at index 3: only lines 0..3 may overflow, so at most 3
-        // lines are reported even though more would fit the budget.
-        let (split_idx, overflow_rows) = buf.overflow_split(1, 80, 3);
-        assert_eq!(split_idx, 3);
-        assert_eq!(overflow_rows, 3);
-        assert_eq!(buf.visible_lines().len(), 6);
-    }
-
-    #[test]
-    fn insert_and_truncate_keep_origins_in_lockstep() {
-        let mut buf = ScrollableBuffer::new();
-        buf.push(plain("a"), LineOrigin::Transcript);
-        buf.push(plain("c"), LineOrigin::Response);
-        buf.insert(1, plain("b"), LineOrigin::Prompt);
+    fn insert_and_truncate_keep_lines_in_order() {
+        let mut buf = LineBuffer::new();
+        buf.push(plain("a"));
+        buf.push(plain("c"));
+        buf.insert(1, plain("b"));
         assert_eq!(buf.len(), 3);
         assert_eq!(buf.visible_lines()[1].to_string(), "b");
         buf.truncate(2);
         assert_eq!(buf.len(), 2);
         assert_eq!(buf.visible_lines()[1].to_string(), "b");
-        // Origins vector must be in lockstep (no panic on drain).
         buf.drain_head(2);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn line_buffer_clear() {
+        let mut buf = LineBuffer::new();
+        buf.push(plain("one"));
+        buf.clear();
         assert!(buf.is_empty());
     }
 }
