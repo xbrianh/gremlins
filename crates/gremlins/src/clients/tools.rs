@@ -564,6 +564,198 @@ fn split_commands(s: &str) -> Vec<String> {
     parts
 }
 
+/// Strip heredoc redirections and their bodies from a command string.
+///
+/// A heredoc body is file *content*, not a path argument the agent is passing
+/// to the shell, so `bash_check` must never tokenize it. Each `<<`/`<<-`
+/// redirection plus its body is replaced with the same inert `_` placeholder
+/// used by [`strip_subshells`], while the rest of the redirection's first line
+/// (such as `> /tmp/out` in `cat <<EOF > /tmp/out`) passes through unchanged.
+fn strip_heredocs(s: &str) -> String {
+    fn copy_single_quoted<I: Iterator<Item = char>>(result: &mut String, chars: &mut I) {
+        loop {
+            match chars.next() {
+                None => break,
+                Some(c) => {
+                    result.push(c);
+                    if c == '\'' {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn copy_double_quoted<I: Iterator<Item = char>>(result: &mut String, chars: &mut I) {
+        loop {
+            match chars.next() {
+                None => break,
+                Some('"') => {
+                    result.push('"');
+                    break;
+                }
+                Some('\\') => {
+                    result.push('\\');
+                    if let Some(c) = chars.next() {
+                        result.push(c);
+                    }
+                }
+                Some(c) => result.push(c),
+            }
+        }
+    }
+
+    // Shell metacharacters that terminate a bare heredoc delimiter word.
+    fn is_delimiter_boundary(c: char) -> bool {
+        c.is_whitespace() || matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')')
+    }
+
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                result.push(ch);
+                copy_single_quoted(&mut result, &mut chars);
+            }
+            '"' => {
+                result.push(ch);
+                copy_double_quoted(&mut result, &mut chars);
+            }
+            '<' => {
+                if chars.peek().copied() != Some('<') {
+                    result.push(ch);
+                    continue;
+                }
+
+                // `<<<` is a here-string, not a heredoc.
+                let mut probe = chars.clone();
+                probe.next(); // past the second `<`
+                if probe.peek().copied() == Some('<') {
+                    result.push(ch);
+                    continue;
+                }
+
+                // Consume the second `<`. Heredoc `<<-` strips leading tabs
+                // from the terminator line.
+                chars.next();
+                let mut strip_tabs = false;
+                if chars.peek().copied() == Some('-') {
+                    chars.next();
+                    strip_tabs = true;
+                }
+
+                // Skip whitespace between the redirection operator and the
+                // delayed delimiter word.
+                while chars.peek().is_some_and(|&c| c == ' ' || c == '\t') {
+                    chars.next();
+                }
+
+                // Resolve the delimiter word (bare or quoted).
+                let mut delimiter = String::new();
+                match chars.peek().copied() {
+                    Some('\'') => {
+                        chars.next(); // opening quote
+                        loop {
+                            match chars.next() {
+                                None => break,
+                                Some('\'') => break,
+                                Some(c) => delimiter.push(c),
+                            }
+                        }
+                    }
+                    Some('"') => {
+                        chars.next(); // opening quote
+                        loop {
+                            match chars.next() {
+                                None => break,
+                                Some('"') => break,
+                                // Double-quoted backslashes only escape a
+                                // small set of characters; everything else
+                                // keeps the backslash. This mirrors
+                                // `shell_tokenize` so the delimiter matches
+                                // the one bash will actually compare against.
+                                Some('\\') => match chars.next() {
+                                    Some(c @ ('$' | '`' | '"' | '\\')) => delimiter.push(c),
+                                    Some(c) => {
+                                        delimiter.push('\\');
+                                        delimiter.push(c);
+                                    }
+                                    None => {}
+                                },
+                                Some(c) => delimiter.push(c),
+                            }
+                        }
+                    }
+                    Some(c) if is_delimiter_boundary(c) => {}
+                    None => {}
+                    Some(_) => loop {
+                        match chars.peek().copied() {
+                            None => break,
+                            Some(c) if is_delimiter_boundary(c) => break,
+                            Some('\\') => {
+                                chars.next();
+                                if let Some(c) = chars.next() {
+                                    delimiter.push(c);
+                                }
+                            }
+                            Some(_) => {
+                                delimiter.push(chars.next().unwrap());
+                            }
+                        }
+                    },
+                }
+
+                // Placeholder for the dropped redirection + body.
+                result.push('_');
+
+                // Preserve the remainder of the heredoc's first line: after
+                // `<<EOF`, `> /tmp/out` is still shell syntax and must be
+                // tokenized and checked.
+                let mut saw_newline = false;
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        saw_newline = true;
+                        break;
+                    }
+                    result.push(c);
+                }
+                if !saw_newline {
+                    // Malformed heredoc: drop to end of input.
+                    return result;
+                }
+
+                // Drop body lines up to and including the terminator line.
+                loop {
+                    let mut line = String::new();
+                    loop {
+                        match chars.next() {
+                            None => return result, // no terminator: drop to end
+                            Some('\n') => break,
+                            Some(c) => line.push(c),
+                        }
+                    }
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                    let candidate = if strip_tabs {
+                        line.trim_start_matches('\t')
+                    } else {
+                        line.as_str()
+                    };
+                    if candidate == delimiter {
+                        break;
+                    }
+                }
+            }
+            _ => result.push(ch),
+        }
+    }
+
+    result
+}
+
 /// Strip `$(...)` and backtick command substitutions from a command string.
 /// Paths inside subshells are runtime-expanded by the shell, not literal
 /// arguments from the agent, so they must not be checked by `bash_check`.
@@ -643,9 +835,10 @@ pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Op
     if let Some(err) = check_cd(roots, s, cwd) {
         return Some(err);
     }
-    // Strip subshells before tokenizing — paths inside `$()` and backticks
-    // are runtime-expanded by the shell, not literal arguments from the agent.
-    let cleaned = strip_subshells(s);
+    // Strip heredoc bodies and subshells before tokenizing. Neither contains
+    // literal path arguments from the agent: heredoc bodies are file content,
+    // and subshell paths are runtime-expanded by the shell.
+    let cleaned = strip_subshells(&strip_heredocs(s));
     // Canonicalize roots once — avoid re-resolving per token.
     let canonical_roots: Vec<PathBuf> = roots.iter().filter_map(|r| normalize_path(r)).collect();
     if canonical_roots.is_empty() {
@@ -2413,6 +2606,68 @@ mod tests {
             Some(&dir),
         )
         .is_none());
+    }
+
+    #[test]
+    fn bash_check_heredoc_body_ignored() {
+        let dir = tmp();
+        // Path-looking tokens in a heredoc body are file content, not
+        // path arguments. None of these may trigger the per-token check.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<'EOF'\n//\n///\n//comment\n//example.com/path\n/\n~\n..\nEOF\n",
+            Some(&dir),
+        )
+        .is_none());
+        // Unquoted delimiter and `<<-` (leading tabs stripped from the
+        // terminator) work too.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<-EOF\n\t//\n\tEOF\n",
+            Some(&dir),
+        )
+        .is_none());
+        // Quoted double-quote delimiter.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<\"EOF\"\n//\nEOF\n",
+            Some(&dir),
+        )
+        .is_none());
+        // Backslash-quoted delimiter.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<\\EOF\n//\nEOF\n",
+            Some(&dir),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn bash_check_heredoc_first_line_redirect_still_checked() {
+        let dir = tmp();
+        // The remainder of the heredoc's first line is shell, not body.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<EOF > /etc/passwd\nhello\nEOF\n",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
+    }
+
+    #[test]
+    fn bash_check_quoted_heredoc_operator_not_treated_as_heredoc() {
+        let dir = tmp();
+        // A quoted `<<` must not swallow the rest of the command, or real
+        // path tokens would escape checking.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "echo \"a << b\" /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
     }
 
     #[test]
