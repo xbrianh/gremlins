@@ -1,129 +1,86 @@
-//! Chat client that sends per-message requests to the daemon.
+//! Chat event types shared with the TUI event loop.
+//!
+//! Events arrive as unsolicited JSON lines on the single persistent
+//! daemon connection and are classified by `tui::client::read_loop`.
 
-use gremlins::executor::socket;
 use serde_json::Value;
-use tokio::io::BufReader;
-use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
-    StreamChunk(String),
-    ReasoningChunk(String),
+    StreamChunk {
+        text: String,
+        turn: Option<String>,
+    },
+    ReasoningChunk {
+        text: String,
+        turn: Option<String>,
+    },
     ToolResult {
         name: String,
         output: String,
+        turn: Option<String>,
     },
     TurnComplete {
-        #[allow(dead_code)]
-        turn: usize,
-        #[allow(dead_code)]
         text: String,
-        #[allow(dead_code)]
         tool_calls: Vec<String>,
+        turn: Option<String>,
     },
     Done {
         text: String,
-        #[allow(dead_code)]
+        /// The `Done` tool's `summary` argument, appended to the turn's
+        /// model text at turn end.
+        summary: String,
         usage: Option<Value>,
+        /// The gremlin id, carried so the TUI can capture it on the first
+        /// turn and reuse it for subsequent messages.
+        id: Option<String>,
+        turn: Option<String>,
     },
     Ended {
         reason: String,
+        /// The gremlin id, carried on terminal payloads so the TUI can
+        /// capture it even when the first turn ends abnormally.
+        id: Option<String>,
+        turn: Option<String>,
     },
-    Error(String),
+    Error {
+        message: String,
+        /// The gremlin id, carried on terminal payloads so the TUI can
+        /// capture it even when the first turn fails.
+        id: Option<String>,
+        turn: Option<String>,
+    },
+    /// The daemon's ack for a chat request carries the gremlin id.
+    /// The TUI stores it so subsequent messages target the same gremlin,
+    /// even if Esc is pressed before Done/Ended arrives — without this
+    /// the next submit would create a second chat gremlin.
+    ChatId {
+        id: String,
+        turn: Option<String>,
+    },
 }
 
-/// Send a chat message and receive stream events until Done.
-///
-/// Uses a fresh connection per message. The daemon processes each
-/// chat request as an ephemeral stage that runs to completion.
-///
-/// `cancel_rx` is a oneshot that the caller fires to cancel the
-/// socket-reader task. When fired, the reader drops `write_half`
-/// so the daemon sees EOF and stops the agent loop immediately.
-pub async fn send_message(
-    text: &str,
-    history: &[Value],
-    cancel_rx: tokio::sync::oneshot::Receiver<()>,
-) -> Result<mpsc::UnboundedReceiver<ChatEvent>, String> {
-    let state_root = gremlins::config::state_root();
-    let stream = socket::connect_socket(&state_root).await?;
-    let (read_half, mut write_half) = stream.into_split();
-
-    // Send the chat request
-    let request = serde_json::json!({
-        "op": "chat",
-        "text": text,
-        "history": history,
-    });
-    socket::write_json_line(&mut write_half, &request).await?;
-
-    let (event_tx, event_rx) = mpsc::unbounded_channel::<ChatEvent>();
-
-    // Keep write_half alive in the spawned task so the daemon does not
-    // see EOF and bail out of the stream-forwarding loop before
-    // producing any events.
-    //
-    // The reader monitors cancel_rx so the caller (Esc) can force-close
-    // the socket by dropping write_half, stopping the agent immediately.
-    tokio::spawn(async move {
-        tokio::pin!(cancel_rx);
-        let _write_half = write_half;
-        let mut reader = BufReader::new(read_half);
-        loop {
-            tokio::select! {
-                result = socket::read_json_line(&mut reader) => {
-                    match result {
-                        Ok(Some(value)) => {
-                            if is_daemon_broadcast(&value) {
-                                continue;
-                            }
-                            let event = parse_chat_event(&value);
-                            let is_terminal = matches!(
-                                &event,
-                                ChatEvent::Done { .. } | ChatEvent::Ended { .. } | ChatEvent::Error(_)
-                            );
-                            let _ = event_tx.send(event);
-                            if is_terminal {
-                                break;
-                            }
-                        }
-                        Ok(None) | Err(_) => {
-                            let _ = event_tx.send(ChatEvent::Ended {
-                                reason: "disconnect".to_string(),
-                            });
-                            break;
-                        }
-                    }
-                }
-                _ = &mut cancel_rx => {
-                    // Esc pressed — drop write_half to close the socket
-                    // so the daemon sees EOF and stops the agent loop.
-                    break;
-                }
-            }
-        }
-    });
-
-    Ok(event_rx)
-}
-
-fn parse_chat_event(value: &Value) -> ChatEvent {
+/// Parse a daemon chat-protocol JSON line into a [`ChatEvent`].
+pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
+    let turn = value.get("turn").and_then(|v| v.as_str()).map(String::from);
     match value.get("type").and_then(|v| v.as_str()) {
-        Some("stream_chunk") => ChatEvent::StreamChunk(
-            value
+        Some("stream_chunk") => Some(ChatEvent::StreamChunk {
+            text: value
                 .get("text")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-        ),
-        Some("reasoning_chunk") => ChatEvent::ReasoningChunk(
-            value
+            turn,
+        }),
+        Some("reasoning_chunk") => Some(ChatEvent::ReasoningChunk {
+            text: value
                 .get("text")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-        ),
-        Some("tool_result") => ChatEvent::ToolResult {
+            turn,
+        }),
+        Some("tool_result") => Some(ChatEvent::ToolResult {
             name: value
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -134,9 +91,9 @@ fn parse_chat_event(value: &Value) -> ChatEvent {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-        },
-        Some("turn_complete") => ChatEvent::TurnComplete {
-            turn: value.get("turn").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            turn,
+        }),
+        Some("turn_complete") => Some(ChatEvent::TurnComplete {
             text: value
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -151,37 +108,90 @@ fn parse_chat_event(value: &Value) -> ChatEvent {
                         .collect()
                 })
                 .unwrap_or_default(),
-        },
-        Some("done") => ChatEvent::Done {
+            turn,
+        }),
+        Some("done") => Some(ChatEvent::Done {
             text: value
                 .get("text")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            summary: value
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             usage: value.get("usage").cloned(),
-        },
-        Some("ended") => ChatEvent::Ended {
+            id: value.get("id").and_then(|v| v.as_str()).map(String::from),
+            turn,
+        }),
+        Some("ended") => Some(ChatEvent::Ended {
             reason: value
                 .get("reason")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-        },
-        Some("error") => ChatEvent::Error(
-            value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error")
-                .to_string(),
-        ),
-        _ => ChatEvent::Error(format!("unexpected event: {value}")),
+            id: value.get("id").and_then(|v| v.as_str()).map(String::from),
+            turn,
+        }),
+        Some("error") => {
+            // Chat-terminal errors carry a gremlin id. Bare `type: "error"`
+            // lines are request/response errors and must stay in the FIFO
+            // response queue, so only classify id-bearing errors as chat.
+            let id = value.get("id").and_then(|v| v.as_str()).map(String::from);
+            id.map(|id| ChatEvent::Error {
+                message: value
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error")
+                    .to_string(),
+                id: Some(id),
+                turn,
+            })
+        }
+        _ => None,
     }
 }
 
-fn is_daemon_broadcast(value: &Value) -> bool {
-    match value.get("type").and_then(|v| v.as_str()) {
-        Some(t) if t.starts_with("run_") => true,
-        Some("event") | Some("stage_transition") | Some("log_line") | Some("bail") => true,
-        _ => false,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_done_carries_summary() {
+        let value = serde_json::json!({
+            "type": "done",
+            "id": "chat-0000",
+            "text": "streamed response",
+            "summary": "answered the question",
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+            "turn": "3",
+        });
+        match parse_chat_event(&value) {
+            Some(ChatEvent::Done {
+                text,
+                summary,
+                id,
+                turn,
+                ..
+            }) => {
+                assert_eq!(text, "streamed response");
+                assert_eq!(summary, "answered the question");
+                assert_eq!(id.as_deref(), Some("chat-0000"));
+                assert_eq!(turn.as_deref(), Some("3"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_done_missing_summary_defaults_to_empty() {
+        let value = serde_json::json!({"type": "done", "text": "hi"});
+        match parse_chat_event(&value) {
+            Some(ChatEvent::Done { summary, .. }) => {
+                assert_eq!(summary, "");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 }

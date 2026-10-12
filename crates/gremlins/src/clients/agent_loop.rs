@@ -14,7 +14,9 @@ use rig_core::streaming::{Item, StreamEvent};
 use tokio::sync::Notify;
 
 use super::backend::{ClientError, RunParams};
-use super::interactive::{InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken};
+use super::interactive::{
+    InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken, StreamEventSender,
+};
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
 use super::tools::{self, ToolContext};
@@ -90,8 +92,9 @@ pub(crate) struct RunContext {
     pub(crate) expected_artifact_paths: Vec<PathBuf>,
     pub(crate) reminder_budget: usize,
     pub(crate) completion_nudge_budget: usize,
-    pub(crate) stream_events:
-        Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
+    pub(crate) stream_events: Option<StreamEventSender>,
+    /// Pre-populated message history carried into the loop's internal history.
+    pub(crate) prepopulated_messages: Option<Vec<Message>>,
 }
 
 pub(crate) struct LoopOpts<'a> {
@@ -173,18 +176,25 @@ pub(crate) async fn run_agent_loop(
     let worktree = tools::worktree_root(cwd.as_deref());
     let audit_log = raw_path.as_ref().map(|p| tools::audit_log_path(p));
     let max_turns = crate::config::max_agent_turns();
-    let mut allowed_roots = vec![worktree];
-    if let Some(ref artifact_dir) = ctx.params.artifact_dir {
-        allowed_roots.push(artifact_dir.clone());
-    }
-    if let Some(scratch) = tools::scratch_root() {
-        allowed_roots.push(scratch);
-    }
+    // When the run requests allow-all, skip building the roots list entirely;
+    // otherwise assemble [worktree, artifact_dir, scratch] as before.
+    let sandbox = if ctx.params.allow_all {
+        tools::SandboxMode::AllowAll
+    } else {
+        let mut allowed_roots = vec![worktree];
+        if let Some(ref artifact_dir) = ctx.params.artifact_dir {
+            allowed_roots.push(artifact_dir.clone());
+        }
+        if let Some(scratch) = tools::scratch_root() {
+            allowed_roots.push(scratch);
+        }
+        tools::SandboxMode::Roots(allowed_roots)
+    };
     let mut tool_ctx = ToolContext {
         cwd: cwd.clone(),
         extra_env,
         base_env: ctx.params.base_env.clone(),
-        allowed_roots,
+        sandbox,
         audit_log,
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
@@ -230,6 +240,7 @@ pub(crate) async fn run_agent_loop(
         &ctx.params.log_tx,
         interactive,
         ctx.stream_events.clone(),
+        ctx.prepopulated_messages.clone(),
     )
     .await
 }
@@ -285,6 +296,7 @@ pub(crate) async fn run_agent_loop_nested(
         0,
         completion_nudge_budget,
         &log_tx,
+        None,
         None,
         None,
     )
@@ -408,15 +420,19 @@ fn usage_stats(
 
 fn completed_run(
     text: Option<String>,
+    summary: Option<String>,
     events: &Option<Vec<serde_json::Value>>,
     usage: UsageStats,
+    messages: Option<Vec<Message>>,
 ) -> CompletedRun {
     CompletedRun {
         exit_code: 0,
         text_result: text,
+        summary,
         events: events.clone(),
         cost_usd: None,
         token_usage: Some(usage),
+        messages,
     }
 }
 
@@ -462,7 +478,8 @@ async fn run_agent_loop_core(
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     interactive: Option<InteractiveSession>,
-    stream_events: Option<tokio::sync::broadcast::Sender<super::interactive::InteractiveEvent>>,
+    stream_events: Option<StreamEventSender>,
+    prepopulated_messages: Option<Vec<Message>>,
 ) -> Result<CompletedRun, ClientError> {
     // Destructure the interactive session into its components so we can
     // thread them independently through the loop.
@@ -475,7 +492,7 @@ async fn run_agent_loop_core(
 
     let original_system_prompt = system_prompt.clone();
     let mut system_prompt = system_prompt;
-    let mut history: Vec<Message> = Vec::new();
+    let mut history: Vec<Message> = prepopulated_messages.unwrap_or_default();
     let mut next_prompt = Message::user(prompt.to_string());
     let mut turns: usize = 0;
     let mut turn_num: usize = 0;
@@ -505,7 +522,8 @@ async fn run_agent_loop_core(
     let mut remaining_turns = max_turns;
     while remaining_turns > 0 {
         if cancel.is_cancelled() {
-            log::debug!("agent_loop: cancelled before turn (label={})", prefix);
+            log::info!("agent_loop: cancelled before turn (label={})", prefix);
+            send_log(log_tx, prefix, "exit: cancelled before turn");
             return Err(ClientError::Runtime {
                 message: "cancelled".into(),
             });
@@ -552,13 +570,22 @@ async fn run_agent_loop_core(
                         evt_tx = Some(session.evt_tx);
                         // Fall through to execute one turn.
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                        send_log(log_tx, prefix, "exit: operator bailed");
+                        return Err(e);
+                    }
                 }
             } else if pause.as_ref().is_some_and(|p| p.is_paused()) {
                 // Pause token was triggered — enter interactive mode.
-                log::debug!(
+                log::info!(
                     "agent_loop: pause token detected at turn boundary (label={})",
                     prefix
+                );
+                send_log(
+                    log_tx,
+                    prefix,
+                    "pause: entering interactive mode (turn boundary)",
                 );
                 if let Some(ref p) = pause {
                     p.reset();
@@ -598,7 +625,11 @@ async fn run_agent_loop_core(
                         evt_tx = Some(session.evt_tx);
                         // Fall through to execute one turn.
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                        send_log(log_tx, prefix, "exit: operator bailed");
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -644,7 +675,8 @@ async fn run_agent_loop_core(
         loop {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
-                    log::debug!("agent_loop: cancelled mid-stream (label={})", prefix);
+                    log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
+                    send_log(log_tx, prefix, "exit: cancelled mid-stream");
                     drop(response);
                     return Err(ClientError::Runtime {
                         message: "cancelled".into(),
@@ -654,7 +686,8 @@ async fn run_agent_loop_core(
                     // Operator triggered debug — cancel the stream and enter
                     // interactive mode. The turn will be re-executed after
                     // the debug session ends.
-                    log::debug!("agent_loop: paused mid-stream (label={})", prefix);
+                    log::info!("agent_loop: paused mid-stream (label={})", prefix);
+                    send_log(log_tx, prefix, "pause: entering interactive mode (mid-stream)");
                     drop(response);
                     paused_mid_stream = true;
                     if let Some(ref p) = pause {
@@ -701,7 +734,11 @@ async fn run_agent_loop_core(
                                 pending_run_one_turn = true;
                                 break; // exit the stream loop, execute one turn
                             }
-                            Err(e) => return Err(e),
+                            Err(e) => {
+                                log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                                send_log(log_tx, prefix, "exit: operator bailed");
+                                return Err(e);
+                            }
                         }
                     }
                     // No interactive session — shouldn't happen, but continue.
@@ -734,17 +771,17 @@ async fn run_agent_loop_core(
                     }
                     last_token = Some(now);
                     // Emit stream deltas via stream_events channel.
-                    // Gate on receiver_count to avoid per-token allocation
-                    // for non-interactive runs with no subscriber.
+                    // Gate on wants_events() before building the event so
+                    // unsubscribed broadcast senders avoid per-token
+                    // allocation; mpsc senders always want events.
                     if let Some(ref se) = stream_events {
-                        if se.receiver_count() > 0 {
+                        if se.wants_events() {
                             match &chunk {
                                 Item::Event(StreamEvent::Text { ref text, .. }) => {
-                                    let _ = se
-                                        .send(InteractiveEvent::StreamChunk { text: text.clone() });
+                                    se.send(InteractiveEvent::StreamChunk { text: text.clone() });
                                 }
                                 Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
-                                    let _ = se.send(InteractiveEvent::ReasoningChunk {
+                                    se.send(InteractiveEvent::ReasoningChunk {
                                         text: text.clone(),
                                     });
                                 }
@@ -754,7 +791,7 @@ async fn run_agent_loop_core(
                                 }) => {
                                     // Emit tool calls as reasoning so they
                                     // appear in the live thought stream.
-                                    let _ = se.send(InteractiveEvent::ReasoningChunk {
+                                    se.send(InteractiveEvent::ReasoningChunk {
                                         text: format_tool_call(tc),
                                     });
                                 }
@@ -794,11 +831,10 @@ async fn run_agent_loop_core(
 
         // Emit TurnComplete via stream_events, before text/tool_calls
         // are consumed by the rest of the turn processing.
-        // Gate on receiver_count to avoid allocation when no subscriber.
         if let Some(ref se) = stream_events {
-            if se.receiver_count() > 0 {
+            if se.wants_events() {
                 log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
-                let _ = se.send(InteractiveEvent::TurnComplete {
+                se.send(InteractiveEvent::TurnComplete {
                     turn: turn_num,
                     text: text.clone(),
                     tool_calls: tool_calls.iter().map(format_tool_call).collect(),
@@ -909,7 +945,7 @@ async fn run_agent_loop_core(
                         }
                         // Budget exhausted — accept anyway. Python
                         // verify_produced catches missing files.
-                        history.push(next_prompt);
+                        history.push(next_prompt.clone());
                         history.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
                     }
                 }
@@ -923,7 +959,7 @@ async fn run_agent_loop_core(
                     .unwrap_or("")
                     .to_string();
                 let result_text = if text.trim().is_empty() && !summary.is_empty() {
-                    summary
+                    summary.clone()
                 } else {
                     text.clone()
                 };
@@ -950,18 +986,39 @@ async fn run_agent_loop_core(
                     );
                 }
                 // Emit Done via stream_events.
-                // Gate on receiver_count so non-interactive runs skip
-                // the allocation.
                 if let Some(ref se) = stream_events {
-                    if se.receiver_count() > 0 {
+                    if se.wants_events() {
                         log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
-                        let _ = se.send(InteractiveEvent::Done {
+                        se.send(InteractiveEvent::Done {
                             text: result_text.clone(),
+                            summary: summary.clone(),
                             usage: Some(usage.clone()),
                         });
                     }
                 }
-                return Ok(completed_run(Some(result_text), captured, usage));
+                // Capture the full message history (prior turns + this final
+                // user prompt + assistant message) so the chat gremlin can
+                // persist complete model context between stages.
+                //
+                // Push a tool_result for Done so the next turn's history
+                // starts from a valid round — OpenAI and Anthropic require
+                // every assistant tool-use message be paired with a matching
+                // tool-result message.
+                let mut messages = history.clone();
+                messages.push(next_prompt.clone());
+                messages.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                messages.push(Message::tool_result(
+                    done_tc.id.clone(),
+                    done_tc.function.name.clone(),
+                    "Done accepted.",
+                ));
+                return Ok(completed_run(
+                    Some(result_text),
+                    Some(summary),
+                    captured,
+                    usage,
+                    Some(messages),
+                ));
             }
             _ => {}
         }
@@ -1070,7 +1127,19 @@ async fn run_agent_loop_core(
                     log_tx,
                 );
             }
-            return Ok(completed_run(Some(final_text), captured, usage));
+            // Capture the full message history (prior turns + this final
+            // user prompt + assistant text) so the chat gremlin persists
+            // complete model context even on the exhausted path.
+            let mut messages = history.clone();
+            messages.push(next_prompt.clone());
+            messages.push(assistant_tool_message(&text, &[]));
+            return Ok(completed_run(
+                Some(final_text),
+                None,
+                captured,
+                usage,
+                Some(messages),
+            ));
         }
 
         history.push(next_prompt.clone());
@@ -1134,7 +1203,8 @@ async fn run_agent_loop_core(
                 // Operator triggered debug mid-tool — drop the join_all future
                 // (cancels pending tool futures). Completed tool side effects
                 // (files written, bash commands run) are not unwound.
-                log::debug!("agent_loop: paused mid-tool (label={})", prefix);
+                log::info!("agent_loop: paused mid-tool (label={})", prefix);
+                send_log(log_tx, prefix, "pause: entering interactive mode (mid-tool)");
                 if let Some(ref p) = pause {
                     p.reset();
                 }
@@ -1183,7 +1253,11 @@ async fn run_agent_loop_core(
                             pending_run_one_turn = true;
                             continue; // re-execute the turn from scratch
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                            send_log(log_tx, prefix, "exit: operator bailed");
+                            return Err(e);
+                        }
                     }
                 }
                 continue;
@@ -1204,16 +1278,15 @@ async fn run_agent_loop_core(
                 }
             }
             // Emit tool result via stream_events.
-            // Gate on receiver_count to avoid allocation when no subscriber.
             if let Some(ref se) = stream_events {
-                if se.receiver_count() > 0 {
+                if se.wants_events() {
                     // For Read, truncate to a reasonable preview.
                     let display = if job.name == "Read" {
                         trunc(&output, 500)
                     } else {
                         trunc(&output, 200)
                     };
-                    let _ = se.send(InteractiveEvent::ToolResult {
+                    se.send(InteractiveEvent::ToolResult {
                         name: job.name.clone(),
                         output: display,
                     });
@@ -1258,14 +1331,24 @@ async fn run_agent_loop_core(
     }
 
     if timed_out {
+        log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
+        send_log(log_tx, prefix, "exit: stream idle timeout");
         return Err(ClientError::Timeout {
             message: "stream idle timeout".into(),
         });
     }
     if let Some(err) = stream_error {
+        log::info!("agent_loop: exit (stream error, label={})", prefix);
+        send_log(log_tx, prefix, "exit: stream error");
         let classify = opts.classify_error.unwrap_or(default_classify);
         return Err(classify(err));
     }
+    log::info!("agent_loop: exit (exceeded max turns, label={})", prefix);
+    send_log(
+        log_tx,
+        prefix,
+        &format!("exit: exceeded max turns ({max_turns})"),
+    );
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
     })
@@ -1779,9 +1862,11 @@ mod tests {
                 gremlin_id: None,
                 log_tx: None,
                 base_env: None,
+                allow_all: false,
                 task_clients: None,
                 cancel_token: None,
                 stream_events: None,
+                prepopulated_messages: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -1789,6 +1874,7 @@ mod tests {
             reminder_budget: 0,
             completion_nudge_budget: 0,
             stream_events: None,
+            prepopulated_messages: None,
         }
     }
 
@@ -1884,6 +1970,95 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e["message"]["content"][0]["type"] == "tool_result"));
+    }
+
+    /// The `Done` summary must survive alongside streamed text: when the
+    /// model streams a final message and then calls `Done(summary)`, the
+    /// returned `CompletedRun` carries both the streamed text (as
+    /// `text_result`) and the summary (as `summary`), distinctly.
+    #[tokio::test]
+    async fn loop_done_summary_survives_alongside_streamed_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-summary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("here is my full answer"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "answered the question"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            model.clone().erase(),
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+        // Streamed text remains authoritative for the response body.
+        assert_eq!(
+            result.text_result.as_deref(),
+            Some("here is my full answer")
+        );
+        // The summary is preserved distinctly, not discarded.
+        assert_eq!(result.summary.as_deref(), Some("answered the question"));
+    }
+
+    /// When the model calls `Done(summary)` without streaming any text, the
+    /// summary still becomes the response (existing fallback preserved), and
+    /// is also carried as the distinct summary field.
+    #[tokio::test]
+    async fn loop_done_summary_fallback_when_no_streamed_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-summary-fb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "did the thing"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            model.clone().erase(),
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("did the thing"));
+        assert_eq!(result.summary.as_deref(), Some("did the thing"));
     }
 
     #[tokio::test]
@@ -3261,7 +3436,7 @@ mod tests {
             cwd: None,
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![],
+            sandbox: tools::SandboxMode::Roots(vec![]),
             audit_log: None,
             allowed_tools: None,
             task_fn: None,
@@ -3320,7 +3495,8 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(evt_tx_clone),
+                Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                None,
             )
             .await
         });
@@ -3373,7 +3549,7 @@ mod tests {
         let mut evt_rx = handle.evt_tx.subscribe();
 
         let mut tool_ctx = test_tool_ctx();
-        tool_ctx.allowed_roots = vec![dir.clone()];
+        tool_ctx.sandbox = tools::SandboxMode::Roots(vec![dir.clone()]);
         let tool_defs = tools::tool_definitions(None);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
@@ -3426,7 +3602,8 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(evt_tx_clone),
+                Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                None,
             )
             .await
         });
@@ -3519,7 +3696,8 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(evt_tx_clone),
+                Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                None,
             )
             .await
         });
@@ -3601,7 +3779,8 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(evt_tx_clone),
+                Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                None,
             )
             .await
         });

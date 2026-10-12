@@ -115,6 +115,9 @@ pub enum InteractiveEvent {
     Done {
         /// Final text result.
         text: String,
+        /// The `Done` tool's `summary` argument, preserved distinctly from
+        /// the streamed text so consumers can append it at turn end.
+        summary: String,
         /// Token usage summary.
         usage: Option<super::protocol::UsageStats>,
     },
@@ -129,6 +132,60 @@ pub enum InteractiveEvent {
         /// How the session ended: "resumed", "bailed", or "disconnect".
         reason: String,
     },
+}
+
+/// Sender for stream events emitted by the agent loop.
+///
+/// The interactive/debug path uses a broadcast sender because it genuinely
+/// has multiple subscribers (the debug supervisor calls `subscribe()`). The
+/// chat path uses a bounded mpsc sender so a single runaway chat can never
+/// exhaust daemon memory — when the channel is full, events are dropped
+/// (the TUI already reconciles from `TurnComplete`).
+#[derive(Clone, Debug)]
+pub enum StreamEventSender {
+    Broadcast(broadcast::Sender<InteractiveEvent>),
+    Mpsc(mpsc::Sender<InteractiveEvent>),
+}
+
+impl StreamEventSender {
+    /// Send one stream event.
+    ///
+    /// The broadcast variant preserves the existing `receiver_count()` gate
+    /// so non-interactive pipeline runs (no subscriber) avoid per-token
+    /// allocation. The mpsc variant uses `try_send`: when the bounded
+    /// channel is full the event is dropped (the TUI reconciles from
+    /// `TurnComplete`).
+    pub(crate) fn send(&self, event: InteractiveEvent) {
+        match self {
+            Self::Broadcast(tx) => {
+                if tx.receiver_count() > 0 {
+                    let _ = tx.send(event);
+                }
+            }
+            Self::Mpsc(tx) => {
+                // Use try_send for all events. Terminal events
+                // (TurnComplete/Done/Ended) are protected from loss by the
+                // TUI's reconciliation from TurnComplete and the safety-net
+                // run_task branch in run_chat_turn's select loop.
+                // blocking_send would panic here because send() is called
+                // from within a tokio async runtime context.
+                let _ = tx.try_send(event);
+            }
+        }
+    }
+
+    /// Whether [`send`](Self::send) will actually deliver an event.
+    ///
+    /// Broadcast senders only deliver when at least one receiver is
+    /// subscribed, so callers can skip building an [`InteractiveEvent`]
+    /// entirely for unsubscribed broadcast senders. Mpsc senders always
+    /// deliver (unbounded sends never block), so they report `true`.
+    pub(crate) fn wants_events(&self) -> bool {
+        match self {
+            Self::Broadcast(tx) => tx.receiver_count() > 0,
+            Self::Mpsc(_) => true,
+        }
+    }
 }
 
 // ── Channel triplet ───────────────────────────────────────────────────────
@@ -420,5 +477,50 @@ mod tests {
             result.is_ok(),
             "cmd_tx.closed() should resolve after session is dropped"
         );
+    }
+
+    /// `wants_events` is false for an unsubscribed broadcast sender and true
+    /// for mpsc, so callers can skip building payloads when nobody listens.
+    #[test]
+    fn stream_event_sender_wants_events() {
+        let (broadcast_tx, _) = broadcast::channel(16);
+        let broadcast_sender = StreamEventSender::Broadcast(broadcast_tx.clone());
+        assert!(!broadcast_sender.wants_events());
+
+        let rx = broadcast_tx.subscribe();
+        assert!(broadcast_sender.wants_events());
+        drop(rx);
+        assert!(!broadcast_sender.wants_events());
+
+        let (mpsc_tx, _mpsc_rx) = mpsc::channel(16);
+        let mpsc_sender = StreamEventSender::Mpsc(mpsc_tx);
+        assert!(mpsc_sender.wants_events());
+    }
+
+    /// A bounded mpsc stream sender drops events when the channel is full;
+    /// the TUI reconciles from `TurnComplete`, so transient stream-chunk
+    /// loss is acceptable.
+    #[tokio::test]
+    async fn mpsc_stream_sender_drops_on_overflow_and_closes() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let sender = StreamEventSender::Mpsc(tx);
+
+        // Fill beyond capacity — the last events are dropped.
+        for i in 0..256 {
+            sender.send(InteractiveEvent::StreamChunk {
+                text: format!("chunk-{i}"),
+            });
+        }
+
+        // Drop the sender so the channel closes after draining buffered
+        // events, rather than blocking forever.
+        drop(sender);
+
+        let mut count = 0;
+        while rx.recv().await.is_some() {
+            count += 1;
+        }
+        assert!(count <= 16, "at most 16 events survive: got {count}");
+        assert!(count > 0, "some events must be delivered");
     }
 }

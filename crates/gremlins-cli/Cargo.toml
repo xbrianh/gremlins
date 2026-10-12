@@ -16,6 +16,12 @@ serde_yaml = "0.9"
 libc = "0.2"
 env_logger = "0.11"
 log = "0.4"
-ratatui = { version = "0.30", default-features = false, features = ["crossterm", "scrolling-regions"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "scrolling-regions", "unstable-rendered-line-info"] }
 crossterm = "0.29"
 tempfile = "3"
+unicode-width = "0.2"
+shlex = "1"
+pulldown-cmark = "0.13"
+
+[features]
+telemetry = []

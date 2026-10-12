@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 
 use crate::artifacts::resolve::ResolveError;
+use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::Client;
 use crate::config;
@@ -361,6 +362,42 @@ async fn run_agent(
         )
     };
 
+    // Chat gremlins pre-populate the agent loop's history from the previous
+    // stage's conversation artifact so full model context flows between turns.
+    // A missing artifact (first turn) yields no prefix. An artifact that
+    // exists but fails to parse is fatal: running with an empty prefix would
+    // then overwrite the unreadable artifact with the new turn's messages,
+    // destroying recoverable history.
+    let prepopulated_messages = if gremlin.state.read_str("kind") == "chat" {
+        match gremlin
+            .state
+            .content("artifact://conversation.json", None)
+            .await
+        {
+            Ok(json) => match messages_from_conversation(&json) {
+                Ok(msgs) => Some(msgs),
+                Err(e) => {
+                    return Err(RunError::Message(format!(
+                        "conversation artifact unparseable; refusing to overwrite with empty history: {e}"
+                    )));
+                }
+            },
+            Err(e) => {
+                if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                    .is_some()
+                {
+                    None // First turn — no artifact yet
+                } else {
+                    return Err(RunError::Message(format!(
+                        "failed to read conversation artifact: {e}"
+                    )));
+                }
+            }
+        }
+    } else {
+        None
+    };
+
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
@@ -390,9 +427,11 @@ async fn run_agent(
         gremlin_id: Some(gremlin.id.to_string()),
         log_tx: gremlin.runtime_config.log_tx.clone(),
         base_env: Some(gremlin.env.clone()),
+        allow_all: prepared.allow_all,
         task_clients,
         cancel_token: gremlin.cancel_token.clone(),
         stream_events: gremlin.runtime_config.stream_events.clone(),
+        prepopulated_messages,
     };
 
     let effective_model = params
@@ -489,6 +528,25 @@ async fn run_agent(
             ("turns".to_string(), usage.turns as i64),
         ]);
         gremlin.state.accumulate_token_usage(&delta);
+    }
+
+    // Chat gremlins persist the agent loop's accumulated message history as a
+    // structured artifact so the next stage can pre-populate its own history
+    // with full model context. On serialize failure, log and leave any prior
+    // artifact untouched rather than erasing it with an empty array.
+    if gremlin.state.read_str("kind") == "chat" {
+        if let Some(messages) = &completed.messages {
+            match serde_json::to_string(messages) {
+                Ok(json) => {
+                    if let Ok(uri) = Uri::parse("artifact://conversation.json") {
+                        let _ = gremlin.state.write_into_registry(&uri, &json).await;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("chat: failed to serialize conversation artifact: {e}");
+                }
+            }
+        }
     }
 
     commit_agent(&prepared, local_registry.as_ref())
@@ -1019,6 +1077,21 @@ impl Gremlin {
     }
 }
 
+/// Reconstruct a `Vec<Message>` from the serialized conversation artifact
+/// (`artifact://conversation.json`). The artifact is a JSON array of rig
+/// `Message` values (role-tagged), so deserialization round-trips all variants
+/// (system, user, assistant with text and tool calls, tool result).
+///
+/// Returns `None` on a parse failure so the caller can distinguish a missing
+/// or unreadable artifact from a genuinely empty history and avoid persisting
+/// an empty prefix over the prior artifact.
+pub(crate) fn messages_from_conversation(
+    json: &str,
+) -> Result<Vec<rig_core::completion::Message>, String> {
+    serde_json::from_str::<Vec<rig_core::completion::Message>>(json)
+        .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
+}
+
 /// Clamp `text` to at most `max` bytes, cutting on a char boundary.
 ///
 /// The Python executor sliced the operator-facing reason (`reason[:200]`) for
@@ -1153,6 +1226,44 @@ mod tests {
         assert_eq!(truncate("abcdef", 3), "abc");
         // "é" is two bytes, so a naive slice at 3 would split it.
         assert_eq!(truncate("aé", 2), "a");
+    }
+
+    /// `messages_from_conversation` must round-trip every `Message` variant
+    /// the chat gremlin persists: system, user, assistant (with text), and
+    /// tool result. The artifact is a JSON array of role-tagged `Message`
+    /// values, so re-serializing the deserialized result must reproduce the
+    /// original bytes exactly.
+    #[test]
+    fn messages_from_conversation_round_trips_all_variants() {
+        use rig_core::completion::message::{CallId, ToolName};
+        use rig_core::completion::Message;
+
+        let messages = vec![
+            Message::System {
+                content: "you are a chat assistant".to_string(),
+            },
+            Message::user("hello".to_string()),
+            crate::clients::agent_loop::assistant_tool_message("hi there", &[]),
+            Message::tool_result(
+                CallId::from_wire("call_1".to_string()),
+                ToolName::new("Read".to_string()).unwrap(),
+                "file contents".to_string(),
+            ),
+        ];
+
+        let json = serde_json::to_string(&messages).unwrap();
+        let round_tripped = messages_from_conversation(&json).expect("must parse");
+        let re_serialized = serde_json::to_string(&round_tripped).unwrap();
+
+        assert_eq!(re_serialized, json, "round-trip must be byte-stable");
+    }
+
+    /// A malformed artifact must yield an error (so the caller refuses to
+    /// run and avoids overwriting good history with an empty prefix).
+    #[test]
+    fn messages_from_conversation_rejects_malformed_json() {
+        assert!(messages_from_conversation("not json").is_err());
+        assert!(messages_from_conversation("{}").is_err());
     }
 
     // --- agent ---

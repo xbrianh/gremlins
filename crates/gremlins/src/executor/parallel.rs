@@ -219,10 +219,18 @@ pub(crate) async fn run_parallel(
 
         // Launch the child via the supervisor — it becomes a first-class
         // gremlin visible in `gremlins ls`.
+        let relay = gremlin
+            .runtime_config
+            .log_tx
+            .as_ref()
+            .map(|tx| supervisor::LogRelay {
+                tx: tx.clone(),
+                prefix: format!("[parallel:{}/{}] ", group_name, child_name),
+            });
         let LaunchResult {
             state_rx,
             gremlin_rx,
-        } = supervisor::launch_child(child_gremlin);
+        } = supervisor::launch_child(child_gremlin, relay);
 
         launched.push(LaunchedChild {
             child_name,
@@ -1063,5 +1071,134 @@ mod tests {
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    // --- Parent log relay ---
+
+    /// Drain `rx` until `deadline`, collecting every line. Used to scan the
+    /// parent's log channel for relayed child lines while ignoring the
+    /// parent's own (unprefixed) lines.
+    async fn drain_log(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+        deadline: std::time::Instant,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(line) => lines.push(line),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        lines
+    }
+
+    #[tokio::test]
+    async fn child_logs_are_relayed_into_parent_log_with_prefix() {
+        let stages = vec![ParallelBuilder::new("group")
+            .error_policy(crate::definition::ErrorPolicy::All)
+            .stage(
+                ExecBuilder::new("a")
+                    .cmds(vec!["true".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .stage(
+                ExecBuilder::new("bad")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
+
+        let (parent_log_tx, mut parent_log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        gremlin.runtime_config.log_tx = Some(parent_log_tx.clone());
+
+        let stage = first_executor_stage(&stages);
+        // ErrorPolicy::All with one failing child keeps group_error None so
+        // `run_parallel` still cleans up successful children (child `a`).
+        let _ = run_parallel(&stage, &mut gremlin, None, None).await;
+
+        // The child's log writer is a separate spawned task; drain the parent
+        // channel briefly so every relayed line is collected.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let lines = drain_log(&mut parent_log_rx, deadline).await;
+
+        // The successful child `a` is cleaned up after fan-in, so its own log
+        // is gone; its lines must still reach the parent channel, prefixed.
+        assert!(
+            lines.iter().any(|l| l.starts_with("[parallel:group/a] ")),
+            "parent log should receive successful child `a`'s lines: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("[parallel:group/bad] ")),
+            "parent log should receive failing child `bad`'s lines: {lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_own_log_file_is_not_prefixed() {
+        let stages = vec![ParallelBuilder::new("group")
+            .error_policy(crate::definition::ErrorPolicy::Any)
+            .stage(
+                ExecBuilder::new("bad")
+                    .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd:true");
+
+        let (parent_log_tx, mut parent_log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        gremlin.runtime_config.log_tx = Some(parent_log_tx.clone());
+
+        let stage = first_executor_stage(&stages);
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        assert!(result.is_err(), "expected failing child, got Ok");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let lines = drain_log(&mut parent_log_rx, deadline).await;
+
+        // Find the relayed lines for the failing child and confirm each
+        // payload is the raw, un-timestamped part (not the child's stamped
+        // line), and that the child's own log text reaches the parent.
+        let relayed: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.strip_prefix("[parallel:group/bad] "))
+            .collect();
+        assert!(
+            !relayed.is_empty(),
+            "parent log should relay `bad`'s line: {lines:?}"
+        );
+        assert!(
+            relayed
+                .iter()
+                .any(|p| p.contains("streaming output started")),
+            "relayed payload should include the raw child part: {relayed:?}"
+        );
+        for payload in &relayed {
+            assert!(
+                !payload.chars().next().is_some_and(|c| c.is_ascii_digit()),
+                "relayed payload must be un-timestamped, got: {payload:?}"
+            );
+        }
+
+        // Failed children keep their state for forensics; their own log file
+        // must stay unprefixed and timestamped.
+        let child_state = StateData::open("gr-test-bad").unwrap();
+        let child_log = std::fs::read_to_string(child_state.state_dir().join("log")).unwrap();
+        assert!(
+            child_log.contains("streaming output started"),
+            "child log should contain its own log lines: {child_log}"
+        );
+        assert!(
+            !child_log.contains("[parallel:group/bad] "),
+            "child log file must not carry the relay prefix: {child_log}"
+        );
     }
 }

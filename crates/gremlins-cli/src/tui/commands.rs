@@ -11,10 +11,12 @@ pub enum CommandResult {
         op: String,
         payload: serde_json::Value,
     },
-    /// Show conversation history (handled by event loop with App state).
-    ShowHistory,
-    /// Truncate conversation history at the given 0-based index.
-    TruncateHistory(usize),
+    /// Toggle the non-blocking gremlins watch table.
+    ToggleWatch,
+    /// Open a single-gremlin log viewer overlay.
+    WatchSingle(String),
+    /// Open an interactive debug session overlay.
+    Debug(String),
 }
 
 /// Parse `input` (minus the leading `/`) and dispatch.
@@ -27,9 +29,11 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
     }
 
     let body = &trimmed[1..]; // strip the leading '/'
-    let mut parts = body.split_whitespace();
-    let cmd = parts.next().unwrap_or("");
-    let args: Vec<&str> = parts.collect();
+                              // Split with shlex to preserve quoted arguments containing spaces.
+    let parts =
+        shlex::split(body).unwrap_or_else(|| body.split_whitespace().map(String::from).collect());
+    let cmd = parts.first().map(|s| s.as_str()).unwrap_or("");
+    let args: Vec<&str> = parts.iter().skip(1).map(|s| s.as_str()).collect();
 
     match cmd {
         "chat" => Some(CommandResult::Lines(vec![
@@ -43,6 +47,33 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
             op: "ls".to_string(),
             payload: serde_json::json!({"op": "ls"}),
         }),
+        "launch" => {
+            let definition = args.first().copied().unwrap_or("");
+            if definition.is_empty() {
+                return Some(CommandResult::Lines(vec![
+                    "> /launch".to_string(),
+                    "usage: /launch <definition> [--key value ...]".to_string(),
+                ]));
+            }
+
+            let raw_args: Vec<String> = args[1..].iter().map(|s| s.to_string()).collect();
+            if let Err(e) = validate_launch_args(&raw_args) {
+                return Some(CommandResult::Lines(vec![
+                    "> /launch".to_string(),
+                    "usage: /launch <definition> [--key value ...]".to_string(),
+                    e,
+                ]));
+            }
+
+            Some(CommandResult::SocketOp {
+                op: "launch".to_string(),
+                payload: serde_json::json!({
+                    "op": "launch",
+                    "definition": definition,
+                    "args": raw_args,
+                }),
+            })
+        }
         "info" => {
             let id = args.first().copied().unwrap_or("");
             if id.is_empty() {
@@ -95,6 +126,23 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 payload: serde_json::json!({"op": "log", "id": id, "follow": true}),
             })
         }
+        "watch" => {
+            if let Some(id) = args.first() {
+                Some(CommandResult::WatchSingle(id.to_string()))
+            } else {
+                Some(CommandResult::ToggleWatch)
+            }
+        }
+        "debug" => {
+            let id = args.first().copied().unwrap_or("");
+            if id.is_empty() {
+                return Some(CommandResult::Lines(vec![
+                    "> /debug".to_string(),
+                    "usage: /debug <id>".to_string(),
+                ]));
+            }
+            Some(CommandResult::Debug(id.to_string()))
+        }
         "model" => Some(CommandResult::Lines(vec![format!(
             "default client: {}",
             gremlins::config::global_config()
@@ -102,35 +150,54 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 .and_then(|c| c.default_client().map(String::from))
                 .unwrap_or_else(|| "(not configured)".to_string())
         )])),
-        "history" => Some(CommandResult::ShowHistory),
-        "rollback" => {
-            let idx: usize = match args.first().and_then(|s| s.parse().ok()) {
-                Some(n) => n,
-                None => {
-                    return Some(CommandResult::Lines(vec![
-                        "usage: /rollback <n> — truncate history at turn n".to_string(),
-                    ]));
-                }
-            };
-            Some(CommandResult::TruncateHistory(idx))
-        }
         _ => Some(CommandResult::Lines(vec![format!(
             "unknown command: /{cmd} — type /help for available commands"
         )])),
     }
 }
 
+/// Validate `--key value` pairs using the same syntax as the CLI `launch`
+/// subcommand. The daemon performs full validation against the definition's
+/// bootstrap sources; this only catches malformed argument syntax locally.
+fn validate_launch_args(raw: &[String]) -> Result<(), String> {
+    let mut i = 0;
+    while i < raw.len() {
+        let key = raw[i]
+            .strip_prefix("--")
+            .ok_or_else(|| format!("expected --key value, got {}", raw[i]))?;
+        if key.is_empty() {
+            return Err("-- with no key name".to_string());
+        }
+        i += 1;
+        if i < raw.len() && !raw[i].starts_with("--") {
+            i += 1;
+        } else {
+            return Err(format!(
+                "--{key} requires a value (found {})",
+                if i < raw.len() {
+                    &raw[i]
+                } else {
+                    "end of arguments"
+                }
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn help_text() -> Vec<String> {
     vec![
         "available commands:".to_string(),
         "  /ls              — list gremlins".to_string(),
+        "  /launch <def>    — start a gremlin".to_string(),
         "  /info <id>       — show gremlin info".to_string(),
         "  /stop <id>       — stop a gremlin".to_string(),
         "  /resume <id>     — resume a gremlin".to_string(),
         "  /log <id>        — show gremlin log".to_string(),
+        "  /watch           — toggle the gremlins watch table".to_string(),
+        "  /watch <id>      — open a single-gremlin log viewer".to_string(),
+        "  /debug <id>      — open an interactive debug session".to_string(),
         "  /model           — show default client".to_string(),
-        "  /history         — show conversation history".to_string(),
-        "  /rollback <n>    — truncate history at turn n".to_string(),
         "  /chat            — chat is always active (type directly)".to_string(),
         "  /clear, /new     — restart chat".to_string(),
         "  /help            — show this help".to_string(),

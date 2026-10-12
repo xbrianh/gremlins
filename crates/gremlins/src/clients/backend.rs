@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rig_core::completion::Message;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
 use super::agent_loop::CancelToken;
-use super::interactive::{InteractiveEvent, InteractiveSession};
+use super::interactive::{InteractiveSession, StreamEventSender};
 use super::protocol::CompletedRun;
 use super::task::TaskModelSelector;
 
@@ -32,6 +33,11 @@ pub struct RunParams {
     /// Base process environment for tool sandboxing.
     /// When set, replaces `std::env::vars()` as the base for bash tool env.
     pub base_env: Option<HashMap<String, String>>,
+    /// Whether this run's agent loop opts out of tool-path sandboxing.
+    /// `false` (the default) enforces `allowed_roots` containment; the chat
+    /// gremlin sets `true` to disable it. The agent loop translates this into
+    /// a [`super::tools::SandboxMode`] when assembling the `ToolContext`.
+    pub(crate) allow_all: bool,
     /// Task-client selector, pre-built by the executor from
     /// `settings.yaml` `task-clients` entries. `None` when no
     /// entries are configured or when the backend cannot serve
@@ -40,9 +46,14 @@ pub struct RunParams {
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
     pub cancel_token: Option<Arc<CancelToken>>,
-    /// Broadcast sender for stream events. When Some, the agent loop emits
+    /// Sender for stream events. When Some, the agent loop emits
     /// every stream event (reasoning, text, tool results, turn complete, done).
-    pub stream_events: Option<tokio::sync::broadcast::Sender<InteractiveEvent>>,
+    pub stream_events: Option<StreamEventSender>,
+    /// Pre-populated message history. When set, the agent loop starts with
+    /// these messages already in its internal history (carrying their original
+    /// roles) instead of building from a bare system-prompt + user-prompt pair.
+    /// The user prompt is still appended as the next user message.
+    pub prepopulated_messages: Option<Vec<Message>>,
 }
 
 impl Clone for RunParams {
@@ -64,9 +75,11 @@ impl Clone for RunParams {
             gremlin_id: self.gremlin_id.clone(),
             log_tx: self.log_tx.clone(),
             base_env: self.base_env.clone(),
+            allow_all: self.allow_all,
             task_clients: self.task_clients.clone(),
             cancel_token: self.cancel_token.clone(),
             stream_events: self.stream_events.clone(),
+            prepopulated_messages: self.prepopulated_messages.clone(),
         }
     }
 }

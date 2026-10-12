@@ -494,7 +494,7 @@ mod tests {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![dir],
+            sandbox: tools::SandboxMode::Roots(vec![dir]),
             audit_log: None,
             allowed_tools: None,
             task_fn: None,

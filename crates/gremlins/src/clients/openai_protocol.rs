@@ -96,6 +96,7 @@ pub(crate) async fn run_openai_compat(
         reminder_budget: crate::config::artifact_reminder_budget(),
         completion_nudge_budget: crate::config::completion_nudge_budget(),
         stream_events: params.stream_events.clone(),
+        prepopulated_messages: params.prepopulated_messages.clone(),
     };
     *state.last_ctx.lock().unwrap() = Some(ctx.clone());
 

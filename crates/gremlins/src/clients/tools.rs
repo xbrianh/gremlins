@@ -17,7 +17,7 @@ pub(crate) const TASK_MAX_PER_TURN: usize = 8;
 const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", "target"];
 
 /// Tools that stay available even when a tool filter is set. `task_fn`
-/// re-applies both the tool filter and `allowed_roots` to every nested agent,
+/// re-applies both the tool filter and the sandbox mode to every nested agent,
 /// so bypassing the filter here cannot escape containment.
 const ALWAYS_AVAILABLE: &[&str] = &["Task", "Done"];
 
@@ -41,12 +41,35 @@ type TaskFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
 /// Callback that `invoke` calls for Task tool invocations.
 pub(crate) type TaskFn = Arc<dyn Fn(String, String) -> TaskFuture + Send + Sync>;
 
+/// How tool-path sandboxing is applied for a stage's agent loop.
+///
+/// `Roots` is the default: every path is canonicalized and must fall under one
+/// of the listed roots (empty roots deny everything). `AllowAll` disables
+/// containment entirely — every check short-circuits to "allowed" without
+/// canonicalizing or comparing paths. It is a hidden, programmatic-only mode
+/// (not exposed in the YAML schema) used by the chat gremlin.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SandboxMode {
+    Roots(Vec<PathBuf>),
+    AllowAll,
+}
+
+impl SandboxMode {
+    /// The containment roots, or `None` when containment is disabled.
+    pub(crate) fn roots(&self) -> Option<&[PathBuf]> {
+        match self {
+            SandboxMode::Roots(roots) => Some(roots),
+            SandboxMode::AllowAll => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ToolContext {
     pub cwd: Option<PathBuf>,
     pub extra_env: Option<HashMap<String, String>>,
     pub(crate) base_env: Option<HashMap<String, String>>,
-    pub(crate) allowed_roots: Vec<PathBuf>,
+    pub(crate) sandbox: SandboxMode,
     pub(crate) audit_log: Option<PathBuf>,
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) task_fn: Option<TaskFn>,
@@ -754,7 +777,8 @@ pub(crate) fn result_status(res: &str) -> &'static str {
 }
 
 fn check_tool(name: &str, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
-    let roots = &ctx.allowed_roots;
+    // AllowAll disables every containment check — no path is ever denied.
+    let roots = ctx.sandbox.roots()?;
     match name {
         "Read" | "Edit" | "Write" => enforce(
             roots,
@@ -804,12 +828,12 @@ fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String
 
 pub(crate) async fn read_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
-    let roots = ctx.allowed_roots.clone();
+    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
-    blocking_string(move || read_sync(cwd.as_deref(), &roots, &args_json)).await
+    blocking_string(move || read_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
 }
 
-fn read_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
+fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -819,8 +843,10 @@ fn read_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         Err(e) => return e,
     };
     let path = resolve(file_path, cwd);
-    if let Some(err) = io_enforce(&path, roots) {
-        return err;
+    if let Some(roots) = roots {
+        if let Some(err) = io_enforce(&path, roots) {
+            return err;
+        }
     }
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -843,9 +869,9 @@ fn read_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
 
 pub(crate) async fn edit_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
-    let roots = ctx.allowed_roots.clone();
+    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
-    blocking_string(move || edit_sync(cwd.as_deref(), &roots, &args_json)).await
+    blocking_string(move || edit_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
 }
 
 fn edit_not_found_diagnostic(
@@ -889,7 +915,7 @@ fn edit_not_found_diagnostic(
     )
 }
 
-fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
+fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -907,8 +933,10 @@ fn edit_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     }
 
     let path = resolve(file_path, cwd);
-    if let Some(err) = io_enforce(&path, roots) {
-        return err;
+    if let Some(roots) = roots {
+        if let Some(err) = io_enforce(&path, roots) {
+            return err;
+        }
     }
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -1042,12 +1070,12 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
 
 pub(crate) async fn write_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
-    let roots = ctx.allowed_roots.clone();
+    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
-    blocking_string(move || write_sync(cwd.as_deref(), &roots, &args_json)).await
+    blocking_string(move || write_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
 }
 
-fn write_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
+fn write_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1061,8 +1089,10 @@ fn write_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String 
         Err(e) => return e,
     };
     let path = resolve(file_path, cwd);
-    if let Some(err) = io_enforce(&path, roots) {
-        return err;
+    if let Some(roots) = roots {
+        if let Some(err) = io_enforce(&path, roots) {
+            return err;
+        }
     }
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -1097,15 +1127,18 @@ fn fnmatch_name(name: &str, pat: &str) -> bool {
 
 fn scan_file(
     path: &Path,
-    roots: &[PathBuf],
+    roots: Option<&[PathBuf]>,
     pattern: &Regex,
     max_matches: usize,
     matches: &mut Vec<String>,
     truncated: &mut bool,
 ) {
     // Skip files that resolve outside any allowed root (e.g. via a symlink).
-    if io_enforce(path, roots).is_some() {
-        return;
+    // `None` roots means containment is disabled (AllowAll).
+    if let Some(roots) = roots {
+        if io_enforce(path, roots).is_some() {
+            return;
+        }
     }
     if is_binary_prefix(path) {
         return;
@@ -1127,7 +1160,7 @@ fn scan_file(
 
 fn walk_grep(
     dir: &Path,
-    roots: &[PathBuf],
+    roots: Option<&[PathBuf]>,
     pattern: &Regex,
     glob_filter: Option<&str>,
     max_matches: usize,
@@ -1173,8 +1206,10 @@ fn walk_grep(
             return;
         }
         // Skip directory symlinks that resolve outside any allowed root.
-        if io_enforce(&d, roots).is_some() {
-            continue;
+        if let Some(roots) = roots {
+            if io_enforce(&d, roots).is_some() {
+                continue;
+            }
         }
         walk_grep(
             &d,
@@ -1190,12 +1225,12 @@ fn walk_grep(
 
 pub(crate) async fn grep_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
-    let roots = ctx.allowed_roots.clone();
+    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
-    blocking_string(move || grep_sync(cwd.as_deref(), &roots, &args_json)).await
+    blocking_string(move || grep_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
 }
 
-fn grep_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
+fn grep_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1226,8 +1261,10 @@ fn grep_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
     let mut truncated = false;
     if base.is_file() {
         let name = base.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if let Some(err) = io_enforce(&base, roots) {
-            return err;
+        if let Some(roots) = roots {
+            if let Some(err) = io_enforce(&base, roots) {
+                return err;
+            }
         }
         if glob_filter.is_none_or(|g| fnmatch_name(name, g)) {
             if is_binary_prefix(&base) {
@@ -1271,12 +1308,12 @@ fn grep_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
 
 pub(crate) async fn glob_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
-    let roots = ctx.allowed_roots.clone();
+    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
-    blocking_string(move || glob_sync(cwd.as_deref(), &roots, &args_json)).await
+    blocking_string(move || glob_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
 }
 
-fn glob_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
+fn glob_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1296,7 +1333,8 @@ fn glob_sync(cwd: Option<&Path>, roots: &[PathBuf], args_json: &str) -> String {
         Ok(paths) => paths
             .filter_map(|p| p.ok())
             // Drop matches that resolve outside any allowed root (e.g. via a symlink).
-            .filter(|p| io_enforce(p, roots).is_none())
+            // `None` roots means containment is disabled (AllowAll).
+            .filter(|p| roots.is_none_or(|roots| io_enforce(p, roots).is_none()))
             .map(|p| p.display().to_string())
             .collect(),
         Err(e) => return format!("Error: {e}"),
@@ -1764,7 +1802,7 @@ mod tests {
             cwd: Some(cwd.to_path_buf()),
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![cwd.to_path_buf()],
+            sandbox: SandboxMode::Roots(vec![cwd.to_path_buf()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: None,
@@ -1875,7 +1913,7 @@ mod tests {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![dir.clone()],
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: None,
@@ -1901,7 +1939,7 @@ mod tests {
             cwd: None,
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![std::env::current_dir().unwrap()],
+            sandbox: SandboxMode::Roots(vec![std::env::current_dir().unwrap()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: None,
@@ -2525,7 +2563,7 @@ mod tests {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![dir.clone()],
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
             audit_log: None,
             allowed_tools: Some(vec!["Read".into()]),
             task_fn: None,
@@ -2784,7 +2822,7 @@ mod tests {
             "edits": [{"old_string": "fn alpha() {}", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("Error: old_string not found"));
         assert!(result.contains("fn alpha() {}"));
     }
@@ -2798,7 +2836,7 @@ mod tests {
             "edits": [{"old_string": "fn alpha() {\n  x = 1\n}", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("did you mean to match"));
         assert!(result.contains("fn alpha"));
     }
@@ -2812,7 +2850,7 @@ mod tests {
             "edits": [{"old_string": "", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("old_string is empty"));
     }
 
@@ -2826,7 +2864,7 @@ mod tests {
             "edits": [{"old_string": "\n  fn alpha() {}", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("first line is empty"));
     }
 
@@ -2842,7 +2880,7 @@ mod tests {
             "edits": [{"old_string": old, "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("old_string not found"));
         // The needle should be truncated to 80 chars, not 80 bytes.
         // 100 é's is 200 bytes, so untruncated needle would be 200 bytes.
@@ -2860,7 +2898,7 @@ mod tests {
             "edits": [{"old_string": "fn alpha() {\n  x = 1\n}", "new_string": ""}]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("did you mean to match"));
         // Must not panic on byte-slice boundary.
     }
@@ -2879,7 +2917,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            edit_sync(Some(&dir), std::slice::from_ref(&dir), &args),
+            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
             "OK"
         );
         assert_eq!(
@@ -2900,7 +2938,7 @@ mod tests {
             ]
         })
         .to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("overlap"));
     }
 
@@ -2909,7 +2947,7 @@ mod tests {
         let dir = tmp();
         std::fs::write(dir.join("x.txt"), "x\n").unwrap();
         let args = serde_json::json!({"file_path": "x.txt", "edits": []}).to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("no edits provided"));
     }
 
@@ -2918,7 +2956,7 @@ mod tests {
         let dir = tmp();
         std::fs::write(dir.join("x.txt"), "x\n").unwrap();
         let args = serde_json::json!({"file_path": "x.txt"}).to_string();
-        let result = edit_sync(Some(&dir), std::slice::from_ref(&dir), &args);
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("missing 'edits'"));
     }
 
@@ -2931,7 +2969,7 @@ mod tests {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![dir.clone()],
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: None,
@@ -2955,7 +2993,7 @@ mod tests {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![dir.clone()],
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: Some(task_fn),
@@ -2978,7 +3016,7 @@ mod tests {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![dir.clone()],
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: Some(task_fn),
@@ -3002,7 +3040,7 @@ mod tests {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![dir.clone()],
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: Some(task_fn),
@@ -3134,7 +3172,7 @@ mod tests {
 
     // Integration: multi-root containment with worktree + scratch.
     // Regression guard for the executor wiring that sets GREMLINS_SCRATCH_DIR
-    // and assembles allowed_roots = [worktree, scratch].
+    // and assembles the sandbox roots = [worktree, scratch].
     #[test]
     fn multi_root_io_enforce_allows_scratch_denies_elsewhere() {
         let worktree = tmp();
@@ -3353,7 +3391,7 @@ mod tests {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![dir.clone()],
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: Some(task_fn),
@@ -3370,5 +3408,115 @@ mod tests {
             !result.contains("Tool output exceeded the limit"),
             "Task must not trigger cap message"
         );
+    }
+
+    // --- Part 6: SandboxMode (AllowAll) tests ---
+
+    fn allow_all_ctx(cwd: &Path) -> ToolContext {
+        ToolContext {
+            cwd: Some(cwd.to_path_buf()),
+            extra_env: None,
+            base_env: None,
+            sandbox: SandboxMode::AllowAll,
+            audit_log: None,
+            allowed_tools: None,
+            task_fn: None,
+            audit_lock: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_all_permits_out_of_roots_read() {
+        let dir = tmp();
+        let outside = dir.parent().unwrap().join(format!(
+            "gremlins-allowall-read-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "top secret").unwrap();
+
+        let c = allow_all_ctx(&dir);
+        let args = serde_json::json!({"file_path": secret.to_str().unwrap()}).to_string();
+        let result = invoke("Read", &c, &args).await;
+        assert_eq!(
+            result, "top secret",
+            "AllowAll must permit out-of-roots read"
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_all_permits_out_of_roots_write() {
+        let dir = tmp();
+        let outside = dir.parent().unwrap().join(format!(
+            "gremlins-allowall-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        let target = outside.join("new.txt");
+
+        let c = allow_all_ctx(&dir);
+        let args =
+            serde_json::json!({"file_path": target.to_str().unwrap(), "content": "hi"}).to_string();
+        let result = invoke("Write", &c, &args).await;
+        assert_eq!(result, "OK", "AllowAll must permit out-of-roots write");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
+    }
+
+    #[tokio::test]
+    async fn allow_all_permits_out_of_roots_bash() {
+        let dir = tmp();
+        let c = allow_all_ctx(&dir);
+        // /etc/passwd is outside every root; bash_check must not deny it.
+        let args = serde_json::json!({"command": "cat /etc/passwd"}).to_string();
+        let result = invoke("Bash", &c, &args).await;
+        assert!(
+            !result.contains("outside sandbox"),
+            "AllowAll must bypass bash_check, got: {result}"
+        );
+        // The command must actually run and succeed, not merely fail in some
+        // other way (e.g. "invalid sandbox root" from empty roots).
+        assert!(
+            result.contains("root:"),
+            "AllowAll bash must read /etc/passwd, got: {result}"
+        );
+        assert!(
+            !result.starts_with("[exit"),
+            "AllowAll bash must exit 0, got: {result}"
+        );
+    }
+
+    #[test]
+    fn empty_roots_still_deny_io_enforce() {
+        let dir = tmp();
+        let f = dir.join("a.txt");
+        std::fs::write(&f, "x").unwrap();
+        // Empty roots must continue to mean "deny all", not "allow all".
+        let err = io_enforce(&f, &[]).unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_roots_still_deny_enforce() {
+        let dir = tmp();
+        let err = enforce(&[], dir.join("a.txt").to_str().unwrap(), None).unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_roots_still_deny_bash_check() {
+        let dir = tmp();
+        // Empty roots fail closed in bash_check ("invalid sandbox root"),
+        // never "allow all".
+        let err = bash_check(&[], "cat /etc/passwd", Some(&dir)).unwrap();
+        assert!(err.contains("invalid sandbox root"), "got: {err}");
     }
 }

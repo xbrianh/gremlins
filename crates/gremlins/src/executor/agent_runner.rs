@@ -9,6 +9,12 @@ use crate::definition::Agent;
 use crate::executor::state::StateStore;
 use crate::executor::vars;
 
+/// Hidden, programmatic-only option key that disables tool-path sandboxing for
+/// a stage's agent loop. Not part of `FRAMEWORK_KEYS`, not documented in any
+/// schema, and not surfaced in tool descriptions. It is read only here and set
+/// only by the chat gremlin builder.
+pub(crate) const SANDBOX_ALLOW_ALL_KEY: &str = "sandbox_allow_all";
+
 // ---------------------------------------------------------------------------
 // AgentPrepared — fully resolved pre-run state
 // ---------------------------------------------------------------------------
@@ -24,6 +30,9 @@ pub struct AgentPrepared {
     pub expected_artifact_paths: Vec<String>,
     pub cwd: String,
     pub artifact_dir: String,
+    /// Whether the stage opted out of tool-path sandboxing via the hidden
+    /// [`SANDBOX_ALLOW_ALL_KEY`] option.
+    pub allow_all: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +152,17 @@ pub async fn prepare_agent(
 
     let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
 
+    // Read the hidden sandbox opt-out. It is honored only when the
+    // gremlin's kind is "chat" (set programmatically by the chat builder,
+    // never by user YAML), so containment cannot be disabled by arbitrary
+    // user-defined stages.
+    let allow_all = framework_subs.get("kind").map(|s| s.as_str()) == Some("chat")
+        && agent
+            .options
+            .get(SANDBOX_ALLOW_ALL_KEY)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
     Ok(AgentPrepared {
         name: name.clone(),
         prompt,
@@ -152,6 +172,7 @@ pub async fn prepare_agent(
         expected_artifact_paths,
         cwd: String::new(),
         artifact_dir: String::new(),
+        allow_all,
     })
 }
 

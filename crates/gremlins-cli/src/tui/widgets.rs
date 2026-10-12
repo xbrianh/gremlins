@@ -1,307 +1,1876 @@
+//! LiveArea rendering widgets.
+//!
+//! The LiveArea screen is composed of a transcript widget (the single
+//! styled FIFO), an input bar, an info bar, and overlay widgets. Each
+//! widget is behind the [`LiveAreaWidget`] trait, owns its own rendering
+//! buffers, and knows how to lay itself out (via
+//! [`LiveAreaWidget::min_height`] and [`LiveAreaWidget::flexible`]) and paint
+//! itself (via [`LiveAreaWidget::render`]).
+//!
+//! [`LiveArea::compose`](crate::tui::screen::LiveArea::compose) iterates the
+//! widgets top-to-bottom, splits the screen by their minimum heights and
+//! flexibility, and collects any overflow lines returned by the transcript
+//! widget. Widgets
+//! never commit scrollback themselves — that remains the caller's
+//! responsibility.
+
+use std::cell::Cell;
+use std::collections::HashMap;
+
 use ratatui::{
-    prelude::Rect,
+    buffer::Buffer,
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
-    Frame,
+    widgets::{Paragraph, Widget, Wrap},
 };
 
-/// Minimum height of the stream section when response is present.
-const STREAM_MIN: u16 = 5;
-/// Number of stream lines to keep when freezing.
-const FREEZE_STREAM_LINES: usize = 3;
-
-/// Frozen content: `(response_lines, stream_tail)`.
-pub type FrozenLines = (Vec<(String, Style)>, Vec<(String, Style)>);
-
-/// A widget whose height can change dynamically during streaming.
+use crate::tui::app::{ActiveRun, Overlay};
+use crate::tui::buffer::{line_wrapped_height, wrapped_height, LineBuffer};
+use crate::tui::markdown;
+/// Shared read-only state handed to each widget's [`LiveAreaWidget::render`]
+/// and [`LiveAreaWidget::min_height`].
 ///
-/// Implementations drive viewport resizing: when `height()` changes,
-/// the event loop calls `set_viewport_height` to grow or shrink the
-/// inline terminal viewport.
-pub trait DynamicWidget {
-    /// Current height in rows given the terminal width and available height (0 when empty).
-    fn height(&self, width: u16, available: u16) -> u16;
-    /// True when there is no content to render.
-    fn is_empty(&self) -> bool;
-    /// Render into the given area. The widget may use internal scrolling
-    /// when content exceeds the allocated height.
-    fn render(&self, frame: &mut Frame, area: Rect);
-    /// Freeze content for scrollback, then clear both buffers.
-    ///
-    /// Returns `(response_lines, stream_tail)` where response lines carry
-    /// plain [`Style::default()`] and stream tail lines carry dark gray
-    /// italic style with 2-space indent.
-    fn freeze(&mut self) -> FrozenLines;
+/// Stateless widgets (input bar, info bar) read their content from here
+/// rather than owning buffers of their own. Overlay widgets observe what is
+/// on screen (the active overlay mode and the daemon-derived run table).
+pub struct RenderContext<'a> {
+    /// Current input-bar text.
+    pub input: &'a str,
+    /// Cursor byte index into `input`.
+    pub cursor: usize,
+    /// Gremlin id currently being followed, if any.
+    pub following_log: Option<&'a str>,
+    /// Cached active-gremlin count string.
+    pub gremlin_count: &'a str,
+    /// Cached project name.
+    pub project_name: &'a str,
+    /// The active overlay mode, if any. Overlay widgets read this to decide
+    /// whether they are occluded by a blocking overlay.
+    pub overlay: Option<&'a Overlay>,
+    /// The daemon-derived run table (source of truth for the watch widget).
+    pub active_runs: &'a HashMap<String, ActiveRun>,
+    /// Height of the content region (viewport minus the fixed bars).
+    pub content_height: u16,
 }
 
-/// A dual-section streaming widget that routes model output into two
-/// independent buffers:
-///
-/// - **Stream section** (top): reasoning chunks and tool results, styled
-///   dark gray italic with 2-space indent.
-/// - **Response section** (bottom): model text deltas, plain terminal style.
-///
-/// The response section gets priority in fluid height allocation. The
-/// stream section never goes below [`STREAM_MIN`] when the response
-/// section is present.
-pub struct SplitWidget {
-    /// Reasoning + tool result lines (already styled).
-    stream_lines: Vec<Line<'static>>,
-    /// Model text lines (plain style applied at render time).
-    response_lines: Vec<Line<'static>>,
-    /// Partial-line accumulator for `push_response_text`.
-    partial: String,
-    /// Partial-line accumulator for `push_stream_text`.
-    stream_partial: String,
-}
-
-/// Wrapped-row helper: computes total wrapped rows for a buffer of [`Line`]s
-/// plus an optional partial string, at the given width. Uses the same
-/// `chars.div_ceil(width)` formula as [`App::scrollback_height`].
-fn wrapped_rows(lines: &[Line], partial: &str, width: u16) -> u16 {
-    let wrap_width = (width as usize).max(1);
-    let mut total: u16 = 0;
-    for line in lines {
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        let chars = text.chars().count();
-        let rows = if chars == 0 {
-            1
-        } else {
-            chars.div_ceil(wrap_width)
-        };
-        total = total.saturating_add(rows as u16);
+impl<'a> RenderContext<'a> {
+    /// Whether a blocking overlay is currently active. When true, the
+    /// content widgets (transcript) collapse to zero height so the blocking
+    /// overlay occupies the whole content region.
+    pub fn blocking_overlay(&self) -> bool {
+        self.overlay.as_ref().is_some_and(|o| o.is_blocking())
     }
-    if !partial.is_empty() {
-        let chars = partial.chars().count();
-        let rows = if chars == 0 {
-            1
-        } else {
-            chars.div_ceil(wrap_width)
-        };
-        total = total.saturating_add(rows as u16);
-    }
-    total
 }
 
-impl SplitWidget {
+/// A single LiveArea rendering region.
+///
+/// Widgets are laid out top-to-bottom in the order they appear in the
+/// widget vec. Each reports its minimum height via
+/// [`min_height`](Self::min_height), whether it may absorb leftover rows via
+/// [`flexible`](Self::flexible), and paints itself into the region it is
+/// assigned by [`render`](Self::render).
+pub trait LiveAreaWidget {
+    /// The fewest rows this widget can tolerate at the given width and render
+    /// context. This is the floor the priority system shrinks down to.
+    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16;
+
+    /// Whether this widget may absorb leftover rows in the expand pass.
+    /// Defaults to `false`.
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        false
+    }
+
+    /// Bring this widget's buffer into its final state for the frame. This
+    /// is the single place content is mutated before measurement: the
+    /// transcript rebuilds a dirty response region into its FIFO, and the
+    /// reasoning widget flushes its trailing partial into a completed line.
+    /// Defaults to a no-op.
+    fn finalize(&mut self, _width: u16) {}
+
+    /// Render this widget into `area`. This is paint-only: overflow is
+    /// reported separately via [`take_overflow`](Self::take_overflow).
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext);
+
+    /// Drain and return any lines that do not fit in `available_rows` at
+    /// the given width. The widget decides what happens to its head.
+    fn take_overflow(&mut self, _available_rows: u16, _width: u16) -> Vec<Line<'static>> {
+        Vec::new()
+    }
+
+    /// Downcast helper for locating a concrete widget in the stack.
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Mutable downcast helper.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
+    /// Layout priority when the viewport is too short for every widget's
+    /// requested height. **Lower value is downsized first.** The input bar
+    /// returns the highest value so it is the last widget to lose rows.
+    fn size_priority(&self) -> i32 {
+        0
+    }
+
+    /// The height this widget *wants* at the given width, given the current
+    /// render context. Flexible widgets distinguish "how much I want" from
+    /// "how little I can tolerate" (their minimum height): the desired
+    /// height is what they report when space is plentiful, while the
+    /// minimum is what they shrink down to when space is contested. Defaults
+    /// to the widget's minimum height.
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        self.min_height(width, ctx)
+    }
+
+    /// Ordering for committing overflow to scrollback. **Lower value is
+    /// committed first.** Only the transcript produces overflow today, but
+    /// the integer gives `compose` a deterministic ordering if more than
+    /// one widget ever does.
+    fn overflow_priority(&self) -> i32 {
+        0
+    }
+
+    /// The maximum height this widget may be allocated, as a first-class
+    /// layout constraint. Defaults to `u16::MAX` (uncapped). The input bar
+    /// caps at 5 rows and the watch table caps at half the content region.
+    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+        u16::MAX
+    }
+}
+
+/// Emit the `as_any`/`as_any_mut` trait method bodies for a widget impl.
+/// Place inside an `impl LiveAreaWidget for X { ... }` block.
+macro_rules! as_any_methods {
+    () => {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    };
+}
+
+/// The transcript: a single styled FIFO plus the current turn's draft state.
+///
+/// This is the only widget that can overflow. Its
+/// [`take_overflow`](TranscriptWidget::take_overflow) splits the FIFO head
+/// off into overflow lines when the combined content exceeds the region's
+/// height, respecting the pinned turn boundary so an in-progress turn never
+/// reaches terminal scrollback.
+pub struct TranscriptWidget {
+    /// The single styled FIFO — the only thing `render` reads.
+    scrollable: LineBuffer,
+    /// Raw response accumulator (for reconciliation).
+    response_accumulator: String,
+    /// FIFO index where the current turn starts (the pinned boundary).
+    turn_start: Option<usize>,
+    /// FIFO index where the response region starts.
+    response_start: Option<usize>,
+    /// Whether the response region needs re-rendering into the FIFO.
+    response_dirty: bool,
+    /// Cached wrapped desired height `(width, height)` for the pinned turn,
+    /// invalidated whenever the FIFO, accumulator, or width changes.
+    desired_cache: Cell<Option<(u16, u16)>>,
+}
+
+impl TranscriptWidget {
     pub fn new() -> Self {
         Self {
-            stream_lines: Vec::new(),
-            response_lines: Vec::new(),
+            scrollable: LineBuffer::new(),
+            response_accumulator: String::new(),
+            turn_start: None,
+            response_start: None,
+            response_dirty: false,
+            desired_cache: Cell::new(None),
+        }
+    }
+
+    /// Invalidate the cached desired height after any content mutation.
+    fn invalidate_desired_cache(&self) {
+        self.desired_cache.set(None);
+    }
+
+    /// Append a system message. When a turn is active, the message is
+    /// inserted before the pinned turn; otherwise it is appended with
+    /// blank-line padding from the previous entry.
+    pub fn push_transcript_line(&mut self, line: String) {
+        self.invalidate_desired_cache();
+        let styled = Line::from(Span::styled(line, Style::default()));
+        self.push_styled_line(styled);
+    }
+
+    /// Push a pre-styled line into the FIFO with the same insertion logic
+    /// as `push_transcript_line`.
+    pub fn push_styled_line(&mut self, styled: Line<'static>) {
+        self.invalidate_desired_cache();
+        match self.turn_start {
+            Some(t) => {
+                let mut inserted = 0usize;
+                self.scrollable.insert(t, styled);
+                inserted += 1;
+                if t > 0 {
+                    self.scrollable.insert(t, Line::from(""));
+                    inserted += 1;
+                }
+                self.turn_start = Some(t + inserted);
+                if let Some(r) = &mut self.response_start {
+                    *r += inserted;
+                }
+            }
+            None => {
+                if !self.scrollable.is_empty() {
+                    self.scrollable.push(Line::from(""));
+                    self.scrollable.push(Line::from(""));
+                }
+                self.scrollable.push(styled);
+            }
+        }
+    }
+
+    /// Start a new turn with the given prompt: push a separator and the
+    /// markdown-rendered prompt, then pin the turn start.
+    pub fn submit_prompt(&mut self, prompt: String) {
+        self.invalidate_desired_cache();
+        if !self.scrollable.is_empty() {
+            self.scrollable.push(Line::from(""));
+        }
+        // Pin the turn at the first prompt line, so the leading separator
+        // (which belongs to the *previous* turn) may still overflow.
+        let start = self.scrollable.len();
+        for line in render_prompt(&prompt) {
+            self.scrollable.push(line);
+        }
+        self.turn_start = Some(start);
+        self.response_start = None;
+        self.response_accumulator.clear();
+        self.response_dirty = false;
+    }
+
+    /// Append streaming response text.
+    pub fn push_response(&mut self, text: &str) {
+        self.invalidate_desired_cache();
+        if self.response_start.is_none() {
+            self.response_start = Some(self.scrollable.len());
+        }
+        self.response_accumulator.push_str(text);
+        self.response_dirty = true;
+    }
+
+    /// Replace the entire response text.
+    pub fn replace_response(&mut self, text: &str) {
+        self.invalidate_desired_cache();
+        if self.response_start.is_none() {
+            self.response_start = Some(self.scrollable.len());
+        }
+        self.response_accumulator.clear();
+        self.response_accumulator.push_str(text);
+        self.response_dirty = true;
+    }
+
+    /// Whether the streaming response is empty.
+    pub fn response_is_empty(&self) -> bool {
+        self.response_accumulator.is_empty()
+    }
+
+    /// Borrow the raw response accumulator.
+    #[cfg(test)]
+    pub fn response_accumulator(&self) -> &str {
+        &self.response_accumulator
+    }
+
+    /// Reconcile the streamed response against authoritative full text.
+    pub fn reconcile_response(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.invalidate_desired_cache();
+
+        if self.response_accumulator.ends_with(text) {
+            return;
+        }
+
+        if self.response_start.is_none() {
+            self.response_start = Some(self.scrollable.len());
+        }
+
+        if self.response_accumulator.is_empty() {
+            self.response_accumulator.push_str(text);
+            self.response_dirty = true;
+            return;
+        }
+
+        // Walk char boundaries only (never slice mid-codepoint), finding the
+        // smallest start whose suffix is a prefix of `text` — i.e. the
+        // largest overlap.
+        let overlap = self
+            .response_accumulator
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(self.response_accumulator.len()))
+            .find(|&start| text.starts_with(&self.response_accumulator[start..]))
+            .map(|start| self.response_accumulator.len() - start)
+            .unwrap_or(0);
+        self.response_accumulator
+            .truncate(self.response_accumulator.len() - overlap);
+        self.response_accumulator.push_str(text);
+        self.response_dirty = true;
+    }
+
+    /// Whether a current turn is active (pinned).
+    pub fn has_current_turn(&self) -> bool {
+        self.turn_start.is_some()
+    }
+
+    /// Unpin the current turn and clear its draft state. The content is
+    /// already in the FIFO.
+    pub fn finish_turn(&mut self) {
+        self.rebuild_response();
+        self.invalidate_desired_cache();
+        self.turn_start = None;
+        self.response_start = None;
+        self.response_dirty = false;
+        self.response_accumulator.clear();
+    }
+
+    /// Discard the current turn: truncate the FIFO back to the turn start
+    /// and clear the draft state.
+    pub fn clear_current_turn(&mut self) {
+        self.invalidate_desired_cache();
+        if let Some(t) = self.turn_start {
+            self.scrollable.truncate(t);
+            // The separator before the turn (pushed by `submit_prompt`) is
+            // left behind by the truncation; drop it so Esc leaves no stray
+            // blank line.
+            if t > 0 && self.scrollable.len() == t {
+                if let Some(last) = self.scrollable.visible_lines().last() {
+                    if last.to_string().is_empty() {
+                        self.scrollable.truncate(t - 1);
+                    }
+                }
+            }
+        }
+        self.turn_start = None;
+        self.response_start = None;
+        self.response_dirty = false;
+        self.response_accumulator.clear();
+    }
+
+    /// Clear the scrollable FIFO.
+    pub fn clear_scrollable(&mut self) {
+        self.invalidate_desired_cache();
+        self.scrollable.clear();
+        self.turn_start = None;
+        self.response_start = None;
+        self.response_dirty = false;
+        self.response_accumulator.clear();
+    }
+
+    /// Re-render the response region into the FIFO if dirty.
+    fn rebuild_response(&mut self) {
+        if !self.response_dirty {
+            return;
+        }
+        self.invalidate_desired_cache();
+        self.response_dirty = false;
+        let start = self.response_start.unwrap_or(self.scrollable.len());
+        self.scrollable.truncate(start);
+        for line in markdown::render(&self.response_accumulator, Style::default()) {
+            self.scrollable.push(line);
+        }
+    }
+
+    /// Wrapped height of the pinned current turn (prompt plus response) at
+    /// the given width. This is the transcript's shrink floor: allocation
+    /// must never clip the in-progress turn that `take_overflow` refuses to
+    /// scroll away.
+    fn pinned_turn_height(&self, width: u16) -> u16 {
+        let start = self.turn_start.unwrap_or(self.scrollable.len());
+        let lines = self.scrollable.visible_lines();
+        let current: Vec<Line<'static>> = lines[start..].to_vec();
+        (wrapped_height(&current, width).min(u16::MAX as usize)) as u16
+    }
+
+    /// Wrapped height of the full FIFO (completed history plus the pinned
+    /// current turn) at the given width. Measurement happens on finalized
+    /// content, so no prediction of a dirty response region is needed.
+    fn desired_height(&self, width: u16) -> u16 {
+        if let Some((w, h)) = self.desired_cache.get() {
+            if w == width {
+                return h;
+            }
+        }
+        let h = (self.scrollable.wrapped_height(width).min(u16::MAX as usize)) as u16;
+        self.desired_cache.set(Some((width, h)));
+        h
+    }
+
+    /// Drain the head of the transcript FIFO that does not fit in
+    /// `available_rows`. Lines at or after the pinned turn are never
+    /// reported as overflow, keeping an in-progress turn on screen.
+    pub fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+        self.invalidate_desired_cache();
+        let pinned = self.turn_start.unwrap_or(self.scrollable.len());
+        let (_overflow_rows, overflow_lines): (_, Vec<_>) =
+            split_overflow(&self.scrollable, available_rows, width, pinned);
+        if overflow_lines.is_empty() {
+            return Vec::new();
+        }
+
+        let drained = overflow_lines.len();
+        self.scrollable.drain_head(drained);
+        if let Some(t) = &mut self.turn_start {
+            *t = t.saturating_sub(drained);
+        }
+        if let Some(r) = &mut self.response_start {
+            *r = r.saturating_sub(drained);
+        }
+        overflow_lines
+    }
+}
+
+impl Default for TranscriptWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Render a prompt as markdown with a `> ` marker on the first line and
+/// continuation lines indented.
+fn render_prompt(prompt: &str) -> Vec<Line<'static>> {
+    let marker_style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let lines = markdown::render(prompt, text_style);
+    let mut out = Vec::with_capacity(lines.len());
+    for (i, line) in lines.into_iter().enumerate() {
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        if i == 0 {
+            spans.push(Span::styled("> ", marker_style));
+        } else {
+            spans.push(Span::styled("  ", marker_style));
+        }
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
+    out
+}
+
+/// Find a prefix of `buffer` that does not fit within `available_rows`.
+///
+/// Lines at or after `pinned` are never included, so an in-progress turn is
+/// never committed to scrollback. Returns the number of overflowing wrapped
+/// rows and the actual head lines (in render order).
+fn split_overflow(
+    buffer: &LineBuffer,
+    available_rows: u16,
+    width: u16,
+    pinned: usize,
+) -> (usize, Vec<Line<'static>>) {
+    let available = available_rows as usize;
+    let total = buffer.wrapped_height(width);
+    if total <= available {
+        return (0, Vec::new());
+    }
+
+    let limit = pinned.min(buffer.len());
+    let mut dropped = 0usize;
+    let mut drop_count = 0usize;
+    while total - dropped > available && drop_count < limit {
+        dropped += line_wrapped_height(&buffer.visible_lines()[drop_count], width);
+        drop_count += 1;
+    }
+
+    if drop_count == 0 {
+        return (0, Vec::new());
+    }
+
+    let overflow_lines = buffer.visible_lines()[..drop_count].to_vec();
+    (dropped, overflow_lines)
+}
+
+/// Trims a live-tail buffer to the rows that fit in `available_rows`,
+/// wrapping-aware, discarding the head. Returns nothing: the head is never
+/// committed to terminal scrollback.
+fn trim_to_tail(buffer: &mut LineBuffer, available_rows: u16, width: u16) {
+    if available_rows == 0 || width == 0 {
+        buffer.clear();
+        return;
+    }
+
+    let available = available_rows as usize;
+    let total = buffer.wrapped_height(width);
+    if total <= available {
+        return;
+    }
+
+    let mut drop_count = 0usize;
+    let mut dropped = 0usize;
+    while total - dropped > available && drop_count < buffer.len() {
+        dropped += line_wrapped_height(&buffer.visible_lines()[drop_count], width);
+        drop_count += 1;
+    }
+    buffer.drain_head(drop_count);
+}
+
+/// Live tail for reasoning text. Accumulates partial chunks into complete
+/// lines and renders them unstyled, growing freely with its content.
+pub struct ReasoningWidget {
+    lines: LineBuffer,
+    partial: String,
+}
+
+impl ReasoningWidget {
+    pub fn new() -> Self {
+        Self {
+            lines: LineBuffer::new(),
             partial: String::new(),
-            stream_partial: String::new(),
         }
     }
 
-    /// Compute (stream_h, response_h) given terminal width and available height.
-    ///
-    /// Response gets priority. Stream never goes below `STREAM_MIN` when
-    /// response is present. Returns (0, 0) when both buffers are empty.
-    pub fn layout(&self, width: u16, available: u16) -> (u16, u16) {
-        let stream_content = wrapped_rows(&self.stream_lines, &self.stream_partial, width);
-        let response_content = wrapped_rows(&self.response_lines, &self.partial, width);
-
-        if stream_content == 0 && response_content == 0 {
-            return (0, 0);
-        }
-
-        if available == 0 {
-            return (0, 0);
-        }
-
-        if response_content == 0 {
-            // Only stream content: give it what we have.
-            return (stream_content.min(available), 0);
-        }
-
-        if stream_content == 0 {
-            // Only response content: give it what we have.
-            return (0, response_content.min(available));
-        }
-
-        // Both present. Response gets priority.
-        // Stream floor: STREAM_MIN, but not more than content or
-        // available-1 (leave at least 1 row for response).
-        let stream_floor = STREAM_MIN
-            .min(stream_content)
-            .min(available.saturating_sub(1));
-
-        // Give response as much as possible after reserving stream floor.
-        let response_h = response_content.min(available.saturating_sub(stream_floor));
-        let stream_h = (available.saturating_sub(response_h)).min(stream_content);
-
-        (stream_h, response_h)
-    }
-
-    /// Push a styled line to the stream section.
-    ///
-    /// Flushes any pending partial stream text first so tool-result
-    /// lines appear after preceding reasoning fragments, not before.
-    pub fn push_stream(&mut self, line: Line<'static>) {
-        self.flush_stream_partial();
-        self.stream_lines.push(line);
-    }
-
-    /// Push raw text to the stream section, handling partial lines.
-    /// Completed lines are styled with `style` and indented 2 spaces.
-    pub fn push_stream_text(&mut self, text: &str, style: Style) {
-        self.stream_partial.push_str(text);
-        while let Some(newline_pos) = self.stream_partial.find('\n') {
-            let line: String = self.stream_partial[..newline_pos].into();
-            self.stream_partial = self.stream_partial[newline_pos + 1..].into();
-            self.stream_lines
-                .push(Line::from(Span::styled(format!("  {line}"), style)));
-        }
-    }
-
-    /// Drain any remaining stream partial text as a final stream line.
-    fn flush_stream_partial(&mut self) {
-        if !self.stream_partial.is_empty() {
-            let remaining = std::mem::take(&mut self.stream_partial);
-            let style = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC);
-            self.stream_lines
-                .push(Line::from(Span::styled(format!("  {remaining}"), style)));
-        }
-    }
-
-    /// Push model text. Accumulates partial lines, emits completed
-    /// `Line`s to `response_lines` with default style.
-    pub fn push_response_text(&mut self, text: &str) {
+    /// Append reasoning text (may be a partial chunk). Completed lines are
+    /// pushed into the buffer; the trailing partial is kept as a live line.
+    pub fn push_reasoning_text(&mut self, text: &str) {
         self.partial.push_str(text);
         while let Some(newline_pos) = self.partial.find('\n') {
             let line: String = self.partial[..newline_pos].into();
             self.partial = self.partial[newline_pos + 1..].into();
-            self.response_lines
-                .push(Line::from(Span::styled(line, Style::default())));
+            self.lines.push(
+                Line::from(line).style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            );
         }
     }
 
-    /// Replace the entire response buffer with canonical text.
-    /// Used after a broadcast lag — the streamed chunks are incomplete
-    /// and the Done.text is authoritative.
-    pub fn replace_response(&mut self, text: &str) {
-        self.response_lines.clear();
-        self.partial.clear();
-        self.push_response_text(text);
+    /// Flush the trailing partial (if any) into a completed line.
+    #[allow(dead_code)]
+    pub fn flush_reasoning(&mut self) {
+        if !self.partial.is_empty() {
+            let line = std::mem::take(&mut self.partial);
+            self.lines.push(
+                Line::from(line).style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            );
+        }
     }
 
-    /// Drain any remaining partial text as a final response line.
-    pub fn flush_partial(&mut self) {
+    /// Reset the live region for a new turn.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.partial.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty() && self.partial.is_empty()
+    }
+
+    /// Desired height: the full wrapped content height (uncapped).
+    fn desired_rows(&self, width: u16) -> u16 {
+        if self.is_empty() {
+            return 0;
+        }
+        (wrapped_height(&self.rendered_lines(), width).min(u16::MAX as usize)) as u16
+    }
+
+    fn rendered_lines(&self) -> Vec<Line<'static>> {
+        let mut out = self.lines.visible_lines().to_vec();
         if !self.partial.is_empty() {
-            let remaining = std::mem::take(&mut self.partial);
-            self.response_lines
-                .push(Line::from(Span::styled(remaining, Style::default())));
+            out.push(
+                Line::from(self.partial.clone()).style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            );
+        }
+        out
+    }
+}
+
+impl Default for ReasoningWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveAreaWidget for ReasoningWidget {
+    as_any_methods!();
+
+    fn size_priority(&self) -> i32 {
+        5
+    }
+
+    fn min_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
+        self.desired_rows(width).min(5)
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
+    }
+
+    fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
+        self.desired_rows(width)
+    }
+
+    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+        u16::MAX
+    }
+
+    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+        // Keep the visible tail; the head is discarded, never committed to
+        // terminal scrollback.
+        let rendered = self.rendered_lines();
+        let total = wrapped_height(&rendered, width);
+        if total > available_rows as usize {
+            // Rebuild `lines` from the rendered tail.
+            let mut drop_count = 0usize;
+            let mut dropped = 0usize;
+            while total - dropped > available_rows as usize && drop_count < rendered.len() {
+                dropped += line_wrapped_height(&rendered[drop_count], width);
+                drop_count += 1;
+            }
+            if drop_count == 0 {
+                return Vec::new();
+            }
+            // Drop the first `drop_count` source lines. Partial lines are
+            // always at the tail, so only buffer lines are dropped.
+            let drop_from_buffer = drop_count.min(self.lines.len());
+            self.lines.drain_head(drop_from_buffer);
+            if drop_count > drop_from_buffer {
+                self.partial.clear();
+            }
+        }
+        Vec::new()
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        let lines = self.rendered_lines();
+        if !lines.is_empty() {
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .render(area, buf);
         }
     }
 }
 
-impl DynamicWidget for SplitWidget {
-    fn height(&self, width: u16, available: u16) -> u16 {
-        let (sh, rh) = self.layout(width, available);
-        sh + rh
+/// Live tail for tool-call events. Owns a FIFO of unstyled tool-name lines,
+/// growing freely with its content.
+pub struct ToolEventsWidget {
+    lines: LineBuffer,
+}
+
+impl ToolEventsWidget {
+    pub fn new() -> Self {
+        Self {
+            lines: LineBuffer::new(),
+        }
     }
 
-    fn is_empty(&self) -> bool {
-        self.stream_lines.is_empty()
-            && self.response_lines.is_empty()
-            && self.partial.is_empty()
-            && self.stream_partial.is_empty()
+    /// Append a tool-name line.
+    pub fn push_tool(&mut self, name: &str) {
+        self.lines.push(
+            Line::from(name.to_string()).style(
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        );
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
-        let (stream_h, response_h) = self.layout(area.width, area.height);
+    /// Reset the live region for a new turn.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
 
-        if stream_h == 0 && response_h == 0 {
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Desired height: the full wrapped content height (uncapped).
+    fn desired_rows(&self, width: u16) -> u16 {
+        if self.is_empty() {
+            return 0;
+        }
+        (self.lines.wrapped_height(width).min(u16::MAX as usize)) as u16
+    }
+}
+
+impl Default for ToolEventsWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveAreaWidget for ToolEventsWidget {
+    as_any_methods!();
+
+    fn size_priority(&self) -> i32 {
+        1
+    }
+
+    fn min_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
+        self.desired_rows(width).min(5)
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
+    }
+
+    fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
+        self.desired_rows(width)
+    }
+
+    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+        u16::MAX
+    }
+
+    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+        trim_to_tail(&mut self.lines, available_rows, width);
+        Vec::new()
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        let tail = self.lines.visible_lines().to_vec();
+        if !tail.is_empty() {
+            Paragraph::new(tail)
+                .wrap(Wrap { trim: false })
+                .render(area, buf);
+        }
+    }
+}
+
+impl LiveAreaWidget for TranscriptWidget {
+    as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        10
+    }
+
+    fn overflow_priority(&self) -> i32 {
+        0
+    }
+
+    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        // When a blocking overlay is active, collapse to zero so the overlay
+        // occupies the whole content region.
+        if ctx.blocking_overlay() {
+            return 0;
+        }
+        // Shrink floor: the pinned current turn must stay on screen. The
+        // transcript fills whatever remains above that floor.
+        self.pinned_turn_height(width)
+    }
+
+    fn flexible(&self, ctx: &RenderContext) -> bool {
+        // When a blocking overlay is active the transcript collapses to zero
+        // and must not absorb leftover rows, mirroring the old `Length(0)`
+        // (inflexible) vs `Min` (flexible) split.
+        !ctx.blocking_overlay()
+    }
+
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        if ctx.blocking_overlay() {
+            return 0;
+        }
+        self.desired_height(width)
+    }
+
+    fn finalize(&mut self, _width: u16) {
+        self.rebuild_response();
+    }
+
+    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+        self.take_overflow(available_rows, width)
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        let tail = self.scrollable.visible_lines().to_vec();
+        if !tail.is_empty() {
+            let paragraph = Paragraph::new(tail).wrap(Wrap { trim: false });
+            paragraph.render(area, buf);
+        }
+    }
+}
+
+/// The input bar. Wraps its text at the current width and grows up to 5
+/// rows. Owns the vertical scroll offset so the cursor stays visible within
+/// the wrapped view. Text is wrapped at the terminal width (the only mode
+/// `Paragraph` supports with `Wrap { trim: false }`), so there is no
+/// horizontal scroll: a row is never wider than the viewport.
+pub struct InputBarWidget {
+    /// Vertical scroll offset (in wrapped rows) across the wrapped view.
+    v_scroll: u16,
+}
+
+impl InputBarWidget {
+    pub fn new() -> Self {
+        Self { v_scroll: 0 }
+    }
+
+    /// The wrapped rows of the input text (prompt + text) at `width`,
+    /// uncapped.
+    pub fn wrapped_rows(&self, width: u16, input: &str) -> u16 {
+        let text = Self::full_line(input);
+        (wrapped_height(&[text], width).max(1).min(u16::MAX as usize)) as u16
+    }
+
+    /// Build the full styled line: prompt + input text.
+    fn full_line(input: &str) -> Line<'static> {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::raw(input.to_string()),
+        ])
+    }
+
+    /// Compute the cursor's (row, column) within the wrapped view.
+    ///
+    /// The cursor cell is located by rendering the input through the same
+    /// `Paragraph::wrap(Wrap { trim: false })` path the input bar paints with,
+    /// with the grapheme at the cursor's byte offset styled with a marker
+    /// style that cannot occur in the input. Because the text is unchanged,
+    /// the wrapping — including word breaks at spaces — is identical to the
+    /// real line, and the styled grapheme lands exactly on the cell where the
+    /// next keystroke inserts. At end of input a single-cell sentinel is
+    /// appended and parked on the last cell of the final row so the cursor
+    /// never addresses a row past the wrapped content. When the grapheme at
+    /// the cursor is dropped by the wrapper (a space at a wrap boundary, or a
+    /// zero-width character), the cursor falls back to the end of the
+    /// preceding text.
+    fn cursor_position(cursor: usize, input: &str, width: u16) -> (u16, u16) {
+        if width == 0 {
+            return (0, 0);
+        }
+
+        if cursor == input.len() {
+            return Self::end_of_text_position(input, width);
+        }
+
+        let ch = input[cursor..]
+            .chars()
+            .next()
+            .expect("cursor < input.len()");
+        let len = ch.len_utf8();
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Self::prompt_span());
+        if cursor > 0 {
+            spans.push(Span::raw(input[..cursor].to_string()));
+        }
+        spans.push(Span::styled(ch.to_string(), Self::marker_style()));
+        spans.push(Span::raw(input[cursor + len..].to_string()));
+
+        if let Some(pos) = Self::locate_marker(Line::from(spans), width) {
+            return pos;
+        }
+
+        // The styled grapheme was dropped by the wrapper. The cursor sits just
+        // before it, i.e. at the end of the preceding text.
+        Self::end_of_text_position(&input[..cursor], width)
+    }
+
+    /// Cursor position at the very end of `input` (just past the last char).
+    fn end_of_text_position(input: &str, width: u16) -> (u16, u16) {
+        let full_rows = wrapped_height(&[Self::full_line(input)], width).max(1) as u16;
+
+        let spans: Vec<Span<'static>> = vec![
+            Self::prompt_span(),
+            Span::raw(input.to_string()),
+            Span::styled("\u{E000}", Self::marker_style()),
+        ];
+
+        let marker =
+            Self::locate_marker(Line::from(spans), width).unwrap_or((full_rows - 1, width - 1));
+
+        // Park at the end of the last row if the sentinel wrapped past the
+        // wrapped content (the cursor would otherwise address a row that does
+        // not exist in the input bar).
+        if marker.0 >= full_rows {
+            (full_rows - 1, width - 1)
+        } else {
+            marker
+        }
+    }
+
+    /// The prompt span shared by the input bar's real rendering.
+    fn prompt_span() -> Span<'static> {
+        Span::styled("> ", Style::default().fg(Color::Cyan))
+    }
+
+    /// A style that cannot occur in the input (raw/default) or the prompt.
+    fn marker_style() -> Style {
+        Style::default().fg(Color::Magenta)
+    }
+
+    /// Render `line` at `width` and return the (row, col) of the marker-style
+    /// cell, if present.
+    fn locate_marker(line: Line<'static>, width: u16) -> Option<(u16, u16)> {
+        let rows = wrapped_height(std::slice::from_ref(&line), width).max(1) as u16;
+        let area = Rect::new(0, 0, width, rows);
+        let mut buf = Buffer::empty(area);
+        Paragraph::new(line)
+            .wrap(Wrap { trim: false })
+            .render(area, &mut buf);
+
+        // Compare on the foreground color rather than full `Style` equality:
+        // ratatui patches the cell style with `bg(Color::Reset)` and
+        // `underline_color(Color::Reset)` defaults, so the rendered style never
+        // equals the marker style verbatim. Magenta is unique to the marker.
+        for y in 0..rows {
+            for x in 0..width {
+                if buf[(x, y)].style().fg == Some(Color::Magenta) {
+                    return Some((y, x));
+                }
+            }
+        }
+        None
+    }
+
+    /// Reconcile the vertical scroll offset so the cursor (at byte index
+    /// `cursor` into `input`) is visible within a `rows`-tall window.
+    pub fn ensure_cursor_visible(&mut self, cursor: usize, input: &str, width: u16, rows: u16) {
+        if width == 0 || rows == 0 {
+            return;
+        }
+        let (row, _) = Self::cursor_position(cursor, input, width);
+
+        // Keep the cursor's row within [v_scroll, v_scroll + rows).
+        if row < self.v_scroll {
+            self.v_scroll = row;
+        } else if row >= self.v_scroll + rows {
+            self.v_scroll = row.saturating_sub(rows - 1);
+        }
+    }
+
+    /// Reset the vertical scroll offset (e.g. after history recall or resize).
+    pub fn reset_scroll(&mut self) {
+        self.v_scroll = 0;
+    }
+}
+
+impl Default for InputBarWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveAreaWidget for InputBarWidget {
+    as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        100
+    }
+
+    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        // Minimum: the wrapped content, capped at 5 rows. The bar is not
+        // shrunk below its visible text unless the viewport cannot fit it.
+        self.wrapped_rows(width, ctx.input).min(5)
+    }
+
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        self.wrapped_rows(width, ctx.input)
+    }
+
+    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+        5
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
+        let width = area.width;
+        if width == 0 {
             return;
         }
 
-        // Split area vertically: stream on top, response on bottom.
-        let mut y = area.y;
-        let mut remaining_h = area.height;
+        // Build the wrapped paragraph, then slice out the visible vertical
+        // window so the cursor stays in view.
+        let paragraph = Paragraph::new(Self::full_line(ctx.input)).wrap(Wrap { trim: false });
 
-        if stream_h > 0 {
-            let mut lines = self.stream_lines.clone();
-            if !self.stream_partial.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    self.stream_partial.as_str(),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )));
+        // Render into a full-width buffer at the paragraph's natural height,
+        // then copy the visible window into `area`.
+        let full_rows = wrapped_height(&[Self::full_line(ctx.input)], width).max(1) as u16;
+        let full_area = Rect::new(0, 0, width, full_rows);
+        let mut full_buf = Buffer::empty(full_area);
+        paragraph.render(full_area, &mut full_buf);
+
+        // Copy the visible vertical window.
+        for y in 0..area.height {
+            let src_y = self.v_scroll + y;
+            if src_y >= full_rows {
+                break;
             }
-            let stream_area = Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: stream_h.min(remaining_h),
-            };
-            let total_wrapped =
-                wrapped_rows(&self.stream_lines, &self.stream_partial, area.width) as usize;
-            let scroll = total_wrapped.saturating_sub(stream_area.height as usize) as u16;
-            let paragraph = Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0));
-            frame.render_widget(paragraph, stream_area);
-            y += stream_area.height;
-            remaining_h = remaining_h.saturating_sub(stream_area.height);
+            for x in 0..width {
+                let cell = full_buf[(x, src_y)].clone();
+                buf[(area.x + x, area.y + y)] = cell;
+            }
         }
 
-        if response_h > 0 && remaining_h > 0 {
-            let mut lines = self.response_lines.clone();
-            if !self.partial.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    self.partial.as_str(),
-                    Style::default(),
-                )));
+        // Draw the cursor cell at the current cursor position, only when it
+        // falls inside the visible window.
+        let cursor = ctx.cursor.min(ctx.input.len());
+        // Reconcile the vertical scroll against the *actual* allocated height
+        // (which may be smaller than the requested 5-row cap when the viewport
+        // is short), so the cursor stays visible even after shrinking.
+        self.ensure_cursor_visible(cursor, ctx.input, width, area.height);
+        let (row, col_in_row) = Self::cursor_position(cursor, ctx.input, width);
+        let vis_row = row.checked_sub(self.v_scroll);
+        if let Some(vis_row) = vis_row {
+            if vis_row < area.height && col_in_row < width {
+                let cell = &mut buf[(area.x + col_in_row, area.y + vis_row)];
+                cell.set_style(Style::default().bg(Color::White));
             }
-            let response_area = Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: response_h.min(remaining_h),
+        }
+    }
+}
+
+/// The info bar. Stateless — reads display state from the render context.
+pub struct InfoBarWidget;
+
+impl LiveAreaWidget for InfoBarWidget {
+    as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        90
+    }
+
+    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
+        1
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
+        let mut spans = vec![
+            Span::styled("gremlins tui", Style::default().fg(Color::Cyan)),
+            Span::raw(" · "),
+            Span::styled(
+                format!("{} gremlins", ctx.gremlin_count),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" · "),
+            Span::styled(
+                format!("project: {}", ctx.project_name),
+                Style::default().fg(Color::Magenta),
+            ),
+        ];
+
+        if let Some(id) = ctx.following_log {
+            spans.push(Span::raw(" · "));
+            spans.push(Span::styled(
+                format!("following: {id}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+
+        spans.push(Span::raw("  |  "));
+        spans.push(Span::styled("Ctrl+G", Style::default().fg(Color::Green)));
+        spans.push(Span::raw(" editor  "));
+        spans.push(Span::styled("/help", Style::default().fg(Color::Green)));
+
+        let paragraph = Paragraph::new(Line::from(spans));
+        paragraph.render(area, buf);
+    }
+}
+
+/// The non-blocking gremlins watch table overlay.
+///
+/// Renders a table of active gremlin runs (id, status, stage, definition,
+/// project) plus a status-count footer. It owns no mutable buffers — all
+/// data is read from the render context. Its constraint reserves an upper
+/// portion of the layout and it returns no overflow.
+pub struct WatchTableWidget;
+
+impl WatchTableWidget {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Desired height: the table header + one row per run + footer.
+    fn desired_height(&self, ctx: &RenderContext) -> u16 {
+        let rows = ctx.active_runs.len().max(1) as u16;
+        // header + rows + footer.
+        rows + 2
+    }
+}
+
+impl Default for WatchTableWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveAreaWidget for WatchTableWidget {
+    as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        50
+    }
+
+    fn min_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
+        if ctx.blocking_overlay() {
+            return 0;
+        }
+        // Real minimum: just the header row. The half-region cap lives in
+        // `max_height`, so the minimum can never exceed it.
+        1
+    }
+
+    fn desired_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
+        self.desired_height(ctx)
+    }
+
+    fn max_height(&self, ctx: &RenderContext) -> u16 {
+        // Cap at half the content region so the transcript below stays
+        // visible.
+        (ctx.content_height / 2).max(1)
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        let header_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        lines.push(Line::from(Span::styled(
+            "  ID        STATUS    STAGE       DEFINITION",
+            header_style,
+        )));
+
+        let mut runs: Vec<(&String, &ActiveRun)> = ctx.active_runs.iter().collect();
+        runs.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (id, run) in runs {
+            let status_style = match run.status.as_str() {
+                "running" => Style::default().fg(Color::Green),
+                "failed" => Style::default().fg(Color::Red),
+                "stopped" => Style::default().fg(Color::Yellow),
+                _ => Style::default().fg(Color::DarkGray),
             };
-            let total_wrapped =
-                wrapped_rows(&self.response_lines, &self.partial, area.width) as usize;
-            let scroll = total_wrapped.saturating_sub(response_area.height as usize) as u16;
-            let paragraph = Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0));
-            frame.render_widget(paragraph, response_area);
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(id.clone(), Style::default().fg(Color::White)),
+                Span::raw("  "),
+                Span::styled(run.status.clone(), status_style),
+                Span::raw("  "),
+                Span::styled(run.stage.clone(), Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(run.definition.clone(), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+
+        let running = ctx
+            .active_runs
+            .values()
+            .filter(|r| r.status == "running")
+            .count();
+        let total = ctx.active_runs.len();
+        lines.push(Line::from(Span::styled(
+            format!("  {running} running · {total} total"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        if !lines.is_empty() {
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            paragraph.render(area, buf);
+        }
+    }
+}
+
+/// The blocking single-gremlin log viewer overlay.
+///
+/// Owns the target gremlin id and its log-line buffer. Renders a header and
+/// a tail-anchored log view. Its constraint fills the content area above the
+/// fixed input/info bars and it returns no overflow.
+pub struct WatchSingleWidget {
+    id: String,
+    log_lines: Vec<String>,
+}
+
+impl WatchSingleWidget {
+    pub fn new(id: String) -> Self {
+        Self {
+            id,
+            log_lines: Vec::new(),
         }
     }
 
-    fn freeze(&mut self) -> FrozenLines {
-        self.flush_partial();
-        self.flush_stream_partial();
+    /// Append a log line.
+    pub fn push_line(&mut self, line: String) {
+        self.log_lines.push(line);
+    }
+}
 
-        // Response lines: plain style.
-        let response_lines: Vec<(String, Style)> = std::mem::take(&mut self.response_lines)
-            .into_iter()
-            .map(|line| {
-                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                (text, Style::default())
-            })
-            .collect();
+impl LiveAreaWidget for WatchSingleWidget {
+    as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        50
+    }
 
-        // Stream tail: last FREEZE_STREAM_LINES, dark gray italic.
-        // Lines are already indented by the caller; do not add extra indent.
-        let stream_style = Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC);
-        let take_count = self.stream_lines.len().min(FREEZE_STREAM_LINES);
-        let start = self.stream_lines.len() - take_count;
-        let stream_tail: Vec<(String, Style)> = self.stream_lines[start..]
+    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
+        // Fills the entire content area above the fixed bars.
+        0
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        let header = Line::from(vec![
+            Span::styled(
+                "following: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                self.id.clone(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]);
+
+        let mut lines: Vec<Line<'static>> = vec![header];
+        lines.push(Line::from(""));
+
+        // Tail-anchored: keep only the last `area.height - 2` lines.
+        let body_rows = area.height.saturating_sub(2) as usize;
+        let start = self.log_lines.len().saturating_sub(body_rows);
+        for line in &self.log_lines[start..] {
+            lines.push(Line::from(Span::styled(
+                line.clone(),
+                Style::default().fg(Color::White),
+            )));
+        }
+
+        if !lines.is_empty() {
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            paragraph.render(area, buf);
+        }
+    }
+}
+
+/// The blocking interactive debug session overlay.
+///
+/// Owns the target id, prompt text, output scrollback, and connection state
+/// (`connecting`/`connected`). Renders a header, output scrollback, and the
+/// debug prompt above the fixed input/info bars. It returns no overflow.
+pub struct DebugWidget {
+    id: String,
+    input: String,
+    history: Vec<String>,
+    connecting: bool,
+    connected: bool,
+}
+
+impl DebugWidget {
+    pub fn new(id: String) -> Self {
+        Self {
+            id,
+            input: String::new(),
+            history: Vec::new(),
+            connecting: true,
+            connected: false,
+        }
+    }
+
+    /// Mutable debug-prompt input.
+    pub fn prompt_mut(&mut self) -> &mut String {
+        &mut self.input
+    }
+
+    /// Take the debug prompt for submission.
+    pub fn take_prompt(&mut self) -> String {
+        std::mem::take(&mut self.input)
+    }
+
+    /// Append a line to the debug output scrollback.
+    pub fn push_output(&mut self, line: String) {
+        self.history.push(line);
+    }
+
+    /// Whether the debug socket is open but `ready` has not arrived yet.
+    pub fn connecting(&self) -> bool {
+        self.connecting
+    }
+
+    /// Whether the debug socket session is still connected.
+    pub fn connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Set the connected flag. Setting `false` also clears the connecting
+    /// flag so a session that never became ready is reported as ended.
+    pub fn set_connected(&mut self, connected: bool) {
+        self.connected = connected;
+        if !connected {
+            self.connecting = false;
+        }
+    }
+
+    /// Mark the session as connected (clears the connecting flag).
+    pub fn mark_ready(&mut self) {
+        self.connecting = false;
+        self.connected = true;
+    }
+}
+
+impl LiveAreaWidget for DebugWidget {
+    as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        50
+    }
+
+    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
+        // Fills the entire content area above the fixed bars.
+        0
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        let status = if self.connecting {
+            "connecting…"
+        } else if self.connected {
+            "connected"
+        } else {
+            "ended"
+        };
+        let status_style = if self.connecting {
+            Style::default().fg(Color::Yellow)
+        } else if self.connected {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+
+        let header = Line::from(vec![
+            Span::styled(
+                "debug: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                self.id.clone(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(status, status_style),
+        ]);
+
+        let mut lines: Vec<Line<'static>> = vec![header];
+        lines.push(Line::from(""));
+
+        // Output scrollback, tail-anchored. Reserve 2 rows for the prompt
+        // line at the bottom.
+        let prompt_rows = 2u16;
+        let body_rows = area.height.saturating_sub(2 + prompt_rows) as usize;
+        let start = self.history.len().saturating_sub(body_rows);
+        for line in &self.history[start..] {
+            lines.push(Line::from(Span::styled(
+                line.clone(),
+                Style::default().fg(Color::White),
+            )));
+        }
+
+        // Debug prompt line.
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("debug> ", Style::default().fg(Color::Cyan)),
+            Span::styled(self.input.clone(), Style::default().fg(Color::White)),
+        ]));
+
+        if !lines.is_empty() {
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            paragraph.render(area, buf);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_response_fills_dropped_suffix_without_touching_prior_turns() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_response("first turn\n");
+        transcript.push_response("second tur");
+
+        transcript.reconcile_response("second turn complete");
+
+        assert_eq!(
+            transcript.response_accumulator,
+            "first turn\nsecond turn complete"
+        );
+    }
+
+    #[test]
+    fn reconcile_response_keeps_complete_streamed_text() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_response("first turn\nsecond turn complete");
+
+        transcript.reconcile_response("second turn complete");
+
+        assert_eq!(
+            transcript.response_accumulator,
+            "first turn\nsecond turn complete"
+        );
+    }
+
+    #[test]
+    fn reconcile_response_appends_when_buffer_is_empty() {
+        let mut transcript = TranscriptWidget::new();
+
+        transcript.reconcile_response("complete turn");
+
+        assert_eq!(transcript.response_accumulator, "complete turn");
+    }
+
+    #[test]
+    fn reconcile_response_ignores_empty_authoritative_text() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_response("streamed");
+
+        transcript.reconcile_response("");
+
+        assert_eq!(transcript.response_accumulator, "streamed");
+    }
+
+    #[test]
+    fn submit_prompt_pins_turn_and_renders_markdown() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("**bold** prompt".to_string());
+        assert!(transcript.has_current_turn());
+        let lines = transcript.scrollable.visible_lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].to_string(), "> bold prompt");
+    }
+
+    #[test]
+    fn clear_current_turn_truncates_to_turn_start() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_transcript_line("prior".to_string());
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("response");
+        transcript.clear_current_turn();
+        assert!(!transcript.has_current_turn());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["prior"]);
+    }
+
+    #[test]
+    fn finish_turn_unpins_and_keeps_content_split_across_widgets() {
+        let mut transcript = TranscriptWidget::new();
+        let mut reasoning = ReasoningWidget::new();
+        let mut tools = ToolEventsWidget::new();
+
+        transcript.submit_prompt("hi".to_string());
+        reasoning.push_reasoning_text("thinking\n");
+        tools.push_tool("Done");
+        transcript.push_response("**answer**");
+        transcript.finish_turn();
+
+        assert!(!transcript.has_current_turn());
+        let transcript_text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
             .iter()
-            .map(|line| {
-                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                (text, stream_style)
-            })
+            .map(|l| l.to_string())
             .collect();
+        assert_eq!(transcript_text, vec!["> hi", "answer"]);
+        assert!(!transcript_text.contains(&"thinking".to_string()));
+        assert!(!transcript_text.contains(&"Done".to_string()));
 
-        self.stream_lines.clear();
-        (response_lines, stream_tail)
+        let reasoning_text: Vec<String> = reasoning
+            .rendered_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(reasoning_text, vec!["thinking"]);
+
+        let tool_text: Vec<String> = tools
+            .lines
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(tool_text, vec!["Done"]);
+    }
+
+    #[test]
+    fn transcript_line_inserted_before_pinned_turn() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+        transcript.push_transcript_line("system note".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        // "system note" appears above the pinned turn.
+        assert_eq!(text[0], "system note");
+        assert!(text.contains(&"> hi".to_string()));
+    }
+
+    #[test]
+    fn take_overflow_never_drains_pinned_turn() {
+        let mut transcript = TranscriptWidget::new();
+        // Completed turn that may overflow.
+        transcript.push_transcript_line("prior".to_string());
+        // In-progress turn: pinned at the prompt line.
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+        LiveAreaWidget::finalize(&mut transcript, 80);
+
+        // Only 1 row available; the pinned prompt/response must stay put.
+        let overflow = transcript.take_overflow(1, 80);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.contains(&"> hi".to_string()),
+            "pinned turn must never be drained: {text:?}"
+        );
+        assert!(
+            text.contains(&"resp".to_string()),
+            "pinned turn must never be drained: {text:?}"
+        );
+        // Only the pre-turn separator/prior line may overflow.
+        assert!(!overflow.is_empty());
+    }
+
+    #[test]
+    fn take_overflow_respects_pinned_boundary_with_wrapping() {
+        let mut transcript = TranscriptWidget::new();
+        // A long prior line that wraps to many rows.
+        transcript.push_transcript_line("abcdefghijklmnopqrstuvwxyz".to_string());
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+        LiveAreaWidget::finalize(&mut transcript, 10);
+
+        // Width 10: the prior line wraps to 3 rows. With 1 available row,
+        // overflow would want to drop the wrapped prior line, but the pinned
+        // turn boundary caps the drain at the prompt line.
+        let overflow = transcript.take_overflow(1, 10);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.contains(&"> hi".to_string()),
+            "pinned turn must never be drained: {text:?}"
+        );
+        assert!(
+            text.contains(&"resp".to_string()),
+            "pinned turn must never be drained: {text:?}"
+        );
+        assert!(!overflow.is_empty());
+    }
+
+    #[test]
+    fn finalize_rebuilds_dirty_response_before_measuring() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("short");
+        // Reconcile to a much longer response, leaving the region dirty.
+        transcript.reconcile_response("a much longer response body that wraps");
+
+        // Finalize rebuilds the dirty response into the FIFO before
+        // measurement/overflow.
+        LiveAreaWidget::finalize(&mut transcript, 10);
+        let _ = transcript.take_overflow(2, 10);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.iter().any(|l| l.contains("longer response")),
+            "dirty response must be rebuilt before overflow split: {text:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_response_handles_multibyte_char_boundaries() {
+        let mut transcript = TranscriptWidget::new();
+        // Stream a partial response ending mid-multibyte, then reconcile with
+        // authoritative text that shares a multibyte suffix.
+        transcript.push_response("héllo wörld");
+        transcript.reconcile_response("wörld done");
+        assert_eq!(transcript.response_accumulator, "héllo wörld done");
+    }
+
+    #[test]
+    fn reasoning_partial_is_visible_in_reasoning_widget() {
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("thinking");
+        // The partial reasoning line must be visible before any newline.
+        let text: Vec<String> = reasoning
+            .rendered_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text.contains(&"thinking".to_string()), "{text:?}");
+    }
+
+    #[test]
+    fn tool_line_after_response_is_preserved_in_separate_widget() {
+        let mut transcript = TranscriptWidget::new();
+        let mut tools = ToolEventsWidget::new();
+
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("streamed");
+        // A tool call arriving after response streaming began is stored in
+        // the tool events widget and must not be erased when the response
+        // region is rebuilt.
+        tools.push_tool("grep");
+        transcript.reconcile_response("streamed complete");
+        transcript.finish_turn();
+
+        let transcript_text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            transcript_text.contains(&"streamed complete".to_string()),
+            "{transcript_text:?}"
+        );
+        assert!(!transcript_text.contains(&"grep".to_string()));
+
+        let tool_text: Vec<String> = tools
+            .lines
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(tool_text.contains(&"grep".to_string()), "{tool_text:?}");
+    }
+
+    #[test]
+    fn reasoning_widget_take_overflow_trims_wrapped_lines_to_cap() {
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n"); // 26 chars → 3 rows at width 10
+        reasoning.flush_reasoning();
+
+        let overflow = reasoning.take_overflow(2, 10);
+        assert!(overflow.is_empty());
+
+        // The single long line wraps to 3 rows and cannot fit in 2 visible
+        // rows, so the live tail discards it entirely.
+        assert!(reasoning.rendered_lines().is_empty());
+        assert_eq!(reasoning.desired_rows(10), 0);
+    }
+
+    #[test]
+    fn tool_events_widget_trims_to_visible_tail_discarding_head() {
+        let mut tools = ToolEventsWidget::new();
+        for i in 0..6 {
+            tools.push_tool(&format!("tool-{i}"));
+        }
+
+        let overflow = tools.take_overflow(2, 80);
+        assert!(overflow.is_empty());
+
+        let text: Vec<String> = tools
+            .lines
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(text, vec!["tool-4", "tool-5"]);
+    }
+
+    #[test]
+    fn live_tail_widgets_collapse_to_zero_height_when_empty() {
+        let reasoning = ReasoningWidget::new();
+        let tools = ToolEventsWidget::new();
+        assert_eq!(reasoning.desired_rows(80), 0);
+        assert_eq!(reasoning.min_height(80, &input_ctx("", 0)), 0);
+        assert!(reasoning.flexible(&input_ctx("", 0)));
+        assert_eq!(tools.min_height(80, &input_ctx("", 0)), 0);
+        assert!(tools.flexible(&input_ctx("", 0)));
+    }
+
+    #[test]
+    fn live_tail_widgets_report_uncapped_desired_height() {
+        let mut reasoning = ReasoningWidget::new();
+        for i in 0..10 {
+            reasoning.push_reasoning_text(&format!("reasoning line {i}\n"));
+        }
+        // 10 lines, uncapped: desired height is 10, not 5.
+        assert_eq!(reasoning.desired_rows(80), 10);
+        assert_eq!(reasoning.min_height(80, &input_ctx("", 0)), 5);
+        assert!(reasoning.flexible(&input_ctx("", 0)));
+        assert_eq!(reasoning.max_height(&input_ctx("", 0)), u16::MAX);
+
+        let mut tools = ToolEventsWidget::new();
+        for i in 0..10 {
+            tools.push_tool(&format!("tool-{i}"));
+        }
+        assert_eq!(tools.desired_rows(80), 10);
+        assert_eq!(tools.min_height(80, &input_ctx("", 0)), 5);
+        assert!(tools.flexible(&input_ctx("", 0)));
+        assert_eq!(tools.max_height(&input_ctx("", 0)), u16::MAX);
+    }
+
+    #[test]
+    fn live_tail_widgets_floor_is_wrapped_rows_capped_at_5() {
+        // A single long line that wraps to 3 rows at width 10 must report a
+        // floor of 3, not 1 (raw line count) or 5 (the cap).
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(reasoning.desired_rows(10), 3);
+        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 3);
+
+        let mut tools = ToolEventsWidget::new();
+        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(tools.desired_rows(10), 3);
+        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 3);
+
+        // A long line wrapping past 5 rows caps the floor at 5.
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
+        assert_eq!(reasoning.desired_rows(10), 6);
+        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 5);
+
+        let mut tools = ToolEventsWidget::new();
+        tools.push_tool("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
+        assert_eq!(tools.desired_rows(10), 6);
+        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 5);
+    }
+
+    // ── input bar cursor positioning ────────────────────────────
+
+    fn input_ctx<'a>(input: &'a str, cursor: usize) -> RenderContext<'a> {
+        static EMPTY: std::sync::OnceLock<HashMap<String, ActiveRun>> = std::sync::OnceLock::new();
+        RenderContext {
+            input,
+            cursor,
+            following_log: None,
+            gremlin_count: "0",
+            project_name: "",
+            overlay: None,
+            active_runs: EMPTY.get_or_init(HashMap::new),
+            content_height: 0,
+        }
+    }
+
+    #[test]
+    fn cursor_position_uses_display_width_for_wide_chars() {
+        // "😀" is 2 cells wide; "é" is 1 cell. Prompt is 2 cells.
+        // input = "😀" → cursor at end = col 2 + 2 = 4.
+        assert_eq!(InputBarWidget::cursor_position(4, "😀", 10), (0, 4));
+        // input = "a😀" → cursor after 'a' (byte 1) = col 2 + 1 = 3.
+        assert_eq!(InputBarWidget::cursor_position(1, "a😀", 10), (0, 3));
+        // cursor after 😀 (byte 5) = col 2 + 1 + 2 = 5.
+        assert_eq!(InputBarWidget::cursor_position(5, "a😀", 10), (0, 5));
+    }
+
+    #[test]
+    fn cursor_position_wraps_at_width() {
+        // width 5, prompt 2 cells. "abcd" is a single word that word-wraps as
+        // "> " / "abcd", so every character lands on row 1.
+        assert_eq!(InputBarWidget::cursor_position(1, "abcd", 5), (1, 1));
+        // Cursor after "abc" (byte 3) but more text follows → before 'd'.
+        assert_eq!(InputBarWidget::cursor_position(3, "abcd", 5), (1, 3));
+        // "abcd" → cursor at end, just past 'd'.
+        assert_eq!(InputBarWidget::cursor_position(4, "abcd", 5), (1, 4));
+    }
+
+    #[test]
+    fn cursor_position_word_wraps_at_space_boundary() {
+        // "hello world" at width 7 wraps as "> hello" / "world" (word wrap),
+        // not "> hello" / " world" (linear wrap): the space at the boundary
+        // is dropped. The cursor at end of input lands immediately after
+        // "world".
+        assert_eq!(
+            InputBarWidget::cursor_position(11, "hello world", 7),
+            (1, 5)
+        );
+        // At width 5 it wraps to three rows; the cursor parks at the end of
+        // the final "world" row.
+        assert_eq!(
+            InputBarWidget::cursor_position(11, "hello world", 5),
+            (2, 4)
+        );
+    }
+
+    #[test]
+    fn cursor_position_on_wrap_space_parks_at_word_end() {
+        // Cursor on the space that word-wrap drops (byte 5 in "hello world"
+        // at width 7). The space occupies no cell, so the cursor sits at the
+        // end of the preceding word "hello", which fills row 0 exactly.
+        assert_eq!(InputBarWidget::cursor_position(5, "hello world", 7), (0, 6));
+    }
+
+    #[test]
+    fn cursor_position_mid_word_after_wrap() {
+        // Cursor inside the word that follows a wrap boundary (byte 8 is the
+        // 'r' in "world"), which lands on row 1 col 2.
+        assert_eq!(InputBarWidget::cursor_position(8, "hello world", 7), (1, 2));
+    }
+
+    #[test]
+    fn cursor_position_ignores_marker_chars_in_input() {
+        // The cursor is located by style, not symbol, so an input that already
+        // contains the former marker characters ("😀", U+E000) cannot collide.
+        assert_eq!(InputBarWidget::cursor_position(1, "a😀b", 10), (0, 3));
+        assert_eq!(InputBarWidget::cursor_position(1, "a\u{E000}b", 10), (0, 3));
+    }
+
+    #[test]
+    fn cursor_position_parks_at_end_of_full_row() {
+        // width 5, prompt 2 cells, input "abc" fills exactly 5 cells.
+        // Cursor at end-of-input on a wrap boundary must park on (0, 4),
+        // not address a non-existent row 1.
+        assert_eq!(InputBarWidget::cursor_position(3, "abc", 5), (0, 4));
+    }
+
+    #[test]
+    fn cursor_position_zero_width_does_not_panic() {
+        assert_eq!(InputBarWidget::cursor_position(0, "", 0), (0, 0));
+        assert_eq!(InputBarWidget::cursor_position(3, "abc", 0), (0, 0));
+    }
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_past_five_rows() {
+        let mut bar = InputBarWidget::new();
+        // width 5, prompt 2 cells. 30 chars → col 32 → row 6 (col_in_row 2).
+        let input = "x".repeat(30);
+        bar.ensure_cursor_visible(input.len(), &input, 5, 5);
+        // Cursor row 6 must be within [v_scroll, v_scroll + 5).
+        assert!(bar.v_scroll <= 6 && 6 < bar.v_scroll + 5);
+        assert_eq!(bar.v_scroll, 2);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_zero_width_does_not_panic() {
+        let mut bar = InputBarWidget::new();
+        bar.ensure_cursor_visible(0, "", 0, 5);
+        bar.ensure_cursor_visible(3, "abc", 0, 5);
+    }
+
+    #[test]
+    fn render_draws_cursor_only_when_visible() {
+        let mut bar = InputBarWidget::new();
+        let area = Rect::new(0, 0, 5, 1);
+        let mut buf = Buffer::empty(area);
+        let ctx = input_ctx("abc", 3); // cursor at end, parked at (0,4)
+        bar.render(area, &mut buf, &ctx);
+        assert_eq!(buf[(4, 0)].style().bg, Some(Color::White));
+        assert_ne!(buf[(0, 0)].style().bg, Some(Color::White));
     }
 }
