@@ -605,151 +605,287 @@ fn strip_heredocs(s: &str) -> String {
         }
     }
 
+    // Copy a balanced `open`..`close` region verbatim (no heredoc detection
+    // inside), skipping quoted spans so nested delimiters are not miscounted.
+    fn copy_balanced<I: Iterator<Item = char>>(
+        result: &mut String,
+        chars: &mut I,
+        open: char,
+        close: char,
+    ) {
+        let mut depth = 1u32;
+        while depth > 0 {
+            match chars.next() {
+                None => break,
+                Some(c) if c == '\'' => {
+                    result.push(c);
+                    copy_single_quoted(result, chars);
+                }
+                Some(c) if c == '"' => {
+                    result.push(c);
+                    copy_double_quoted(result, chars);
+                }
+                Some(c) if c == open => {
+                    depth += 1;
+                    result.push(c);
+                }
+                Some(c) if c == close => {
+                    depth -= 1;
+                    result.push(c);
+                }
+                Some(c) => result.push(c),
+            }
+        }
+    }
+
     // Shell metacharacters that terminate a bare heredoc delimiter word.
     fn is_delimiter_boundary(c: char) -> bool {
         c.is_whitespace() || matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')')
     }
 
+    // Read a heredoc delimiter word, applying bash quote removal so that
+    // `$'EOF'`, `EOF'x'`, `"EOF"`, `\EOF`, and bare `EOF` all resolve to the
+    // delimiter bash will actually compare against the terminator line.
+    fn read_delimiter_word(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
+        let mut value = String::new();
+        loop {
+            match chars.peek().copied() {
+                None => break,
+                Some(c) if is_delimiter_boundary(c) => break,
+                Some('\'') => {
+                    chars.next();
+                    loop {
+                        match chars.next() {
+                            None => break,
+                            Some('\'') => break,
+                            Some(c) => value.push(c),
+                        }
+                    }
+                }
+                Some('"') => {
+                    chars.next();
+                    loop {
+                        match chars.next() {
+                            None => break,
+                            Some('"') => break,
+                            Some('\\') => match chars.next() {
+                                Some(c @ ('$' | '`' | '"' | '\\')) => value.push(c),
+                                Some(c) => {
+                                    value.push('\\');
+                                    value.push(c);
+                                }
+                                None => {}
+                            },
+                            Some(c) => value.push(c),
+                        }
+                    }
+                }
+                Some('$') => {
+                    let mut probe = chars.clone();
+                    probe.next(); // `$`
+                    if probe.peek().copied() == Some('\'') {
+                        // ANSI-C quoting `$'...'`.
+                        *chars = probe;
+                        chars.next(); // opening `'`
+                        loop {
+                            match chars.next() {
+                                None => break,
+                                Some('\'') => break,
+                                Some('\\') => match chars.next() {
+                                    Some('n') => value.push('\n'),
+                                    Some('t') => value.push('\t'),
+                                    Some('r') => value.push('\r'),
+                                    Some('\\') => value.push('\\'),
+                                    Some('\'') => value.push('\''),
+                                    Some('"') => value.push('"'),
+                                    Some(c) => value.push(c),
+                                    None => {}
+                                },
+                                Some(c) => value.push(c),
+                            }
+                        }
+                    } else {
+                        chars.next();
+                        value.push('$');
+                    }
+                }
+                Some('\\') => {
+                    chars.next();
+                    if let Some(c) = chars.next() {
+                        value.push(c);
+                    }
+                }
+                Some(_) => value.push(chars.next().unwrap()),
+            }
+        }
+        value
+    }
+
+    // Drop body lines for each pending heredoc, in order, up to and including
+    // the terminator line. Emits a single newline so the following command is
+    // not glued onto the heredoc's header line.
+    fn skip_heredoc_bodies(
+        chars: &mut std::iter::Peekable<std::str::Chars>,
+        pending: &mut Vec<(String, bool)>,
+        result: &mut String,
+    ) {
+        for (delimiter, strip_tabs) in pending.drain(..) {
+            loop {
+                let mut line = String::new();
+                loop {
+                    match chars.next() {
+                        None => return, // no terminator: drop to end of input
+                        Some('\n') => break,
+                        Some(c) => line.push(c),
+                    }
+                }
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                let candidate = if strip_tabs {
+                    line.trim_start_matches('\t')
+                } else {
+                    line.as_str()
+                };
+                if candidate == delimiter {
+                    break;
+                }
+            }
+        }
+        result.push('\n');
+    }
+
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
+    // Delimiters awaiting their bodies, in order of appearance.
+    let mut pending: Vec<(String, bool)> = Vec::new();
+    // Whether the next `#` would start a comment (i.e. we are at a word start).
+    let mut word_start = true;
 
     while let Some(ch) = chars.next() {
         match ch {
             '\'' => {
                 result.push(ch);
                 copy_single_quoted(&mut result, &mut chars);
+                word_start = false;
             }
             '"' => {
                 result.push(ch);
                 copy_double_quoted(&mut result, &mut chars);
+                word_start = false;
+            }
+            '\\' => {
+                // Backslash escapes the next character, so `\<<` is not a
+                // heredoc operator.
+                result.push(ch);
+                if let Some(c) = chars.next() {
+                    result.push(c);
+                }
+                word_start = false;
+            }
+            '#' if word_start => {
+                // Comment through end of line.
+                result.push(ch);
+                for c in chars.by_ref() {
+                    result.push(c);
+                    if c == '\n' {
+                        break;
+                    }
+                }
+                word_start = true;
+            }
+            '$' => {
+                let mut probe = chars.clone();
+                match probe.next() {
+                    // `$(` subshell and `$((` arithmetic: copy verbatim so a
+                    // `<<` inside (e.g. a bitwise shift) is not a heredoc.
+                    Some('(') => {
+                        result.push('$');
+                        result.push('(');
+                        chars = probe;
+                        copy_balanced(&mut result, &mut chars, '(', ')');
+                        word_start = false;
+                    }
+                    // `${...}` parameter expansion: `<<` inside is not a heredoc.
+                    Some('{') => {
+                        result.push('$');
+                        result.push('{');
+                        chars = probe;
+                        copy_balanced(&mut result, &mut chars, '{', '}');
+                        word_start = false;
+                    }
+                    _ => {
+                        result.push(ch);
+                        word_start = false;
+                    }
+                }
+            }
+            '(' => {
+                if chars.peek().copied() == Some('(') {
+                    // `((` arithmetic command: `<<` inside is a shift, not a
+                    // heredoc.
+                    result.push('(');
+                    chars.next();
+                    result.push('(');
+                    copy_balanced(&mut result, &mut chars, '(', ')');
+                    word_start = false;
+                } else {
+                    result.push(ch);
+                    word_start = true;
+                }
             }
             '<' => {
                 if chars.peek().copied() != Some('<') {
                     result.push(ch);
+                    word_start = true;
                     continue;
                 }
 
-                // `<<<` is a here-string, not a heredoc.
+                // `<<<` is a here-string, not a heredoc: emit all three `<`
+                // and keep scanning.
                 let mut probe = chars.clone();
                 probe.next(); // past the second `<`
                 if probe.peek().copied() == Some('<') {
-                    result.push(ch);
+                    result.push('<');
+                    result.push('<');
+                    result.push('<');
+                    chars = probe;
+                    chars.next(); // past the third `<`
+                    word_start = true;
                     continue;
                 }
 
-                // Consume the second `<`. Heredoc `<<-` strips leading tabs
-                // from the terminator line.
+                // Heredoc: consume the second `<` and an optional `-` (which
+                // strips leading tabs from the terminator line).
                 chars.next();
                 let mut strip_tabs = false;
                 if chars.peek().copied() == Some('-') {
                     chars.next();
                     strip_tabs = true;
                 }
-
-                // Skip whitespace between the redirection operator and the
-                // delayed delimiter word.
                 while chars.peek().is_some_and(|&c| c == ' ' || c == '\t') {
                     chars.next();
                 }
-
-                // Resolve the delimiter word (bare or quoted).
-                let mut delimiter = String::new();
-                match chars.peek().copied() {
-                    Some('\'') => {
-                        chars.next(); // opening quote
-                        loop {
-                            match chars.next() {
-                                None => break,
-                                Some('\'') => break,
-                                Some(c) => delimiter.push(c),
-                            }
-                        }
-                    }
-                    Some('"') => {
-                        chars.next(); // opening quote
-                        loop {
-                            match chars.next() {
-                                None => break,
-                                Some('"') => break,
-                                // Double-quoted backslashes only escape a
-                                // small set of characters; everything else
-                                // keeps the backslash. This mirrors
-                                // `shell_tokenize` so the delimiter matches
-                                // the one bash will actually compare against.
-                                Some('\\') => match chars.next() {
-                                    Some(c @ ('$' | '`' | '"' | '\\')) => delimiter.push(c),
-                                    Some(c) => {
-                                        delimiter.push('\\');
-                                        delimiter.push(c);
-                                    }
-                                    None => {}
-                                },
-                                Some(c) => delimiter.push(c),
-                            }
-                        }
-                    }
-                    Some(c) if is_delimiter_boundary(c) => {}
-                    None => {}
-                    Some(_) => loop {
-                        match chars.peek().copied() {
-                            None => break,
-                            Some(c) if is_delimiter_boundary(c) => break,
-                            Some('\\') => {
-                                chars.next();
-                                if let Some(c) = chars.next() {
-                                    delimiter.push(c);
-                                }
-                            }
-                            Some(_) => {
-                                delimiter.push(chars.next().unwrap());
-                            }
-                        }
-                    },
-                }
-
-                // Placeholder for the dropped redirection + body.
+                let delimiter = read_delimiter_word(&mut chars);
                 result.push('_');
-
-                // Preserve the remainder of the heredoc's first line: after
-                // `<<EOF`, `> /tmp/out` is still shell syntax and must be
-                // tokenized and checked.
-                let mut saw_newline = false;
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        saw_newline = true;
-                        break;
-                    }
-                    result.push(c);
-                }
-                if !saw_newline {
-                    // Malformed heredoc: drop to end of input.
-                    return result;
-                }
-
-                // Drop body lines up to and including the terminator line.
-                loop {
-                    let mut line = String::new();
-                    loop {
-                        match chars.next() {
-                            None => return result, // no terminator: drop to end
-                            Some('\n') => break,
-                            Some(c) => line.push(c),
-                        }
-                    }
-                    if line.ends_with('\r') {
-                        line.pop();
-                    }
-                    let candidate = if strip_tabs {
-                        line.trim_start_matches('\t')
-                    } else {
-                        line.as_str()
-                    };
-                    if candidate == delimiter {
-                        break;
-                    }
-                }
+                pending.push((delimiter, strip_tabs));
+                word_start = false;
             }
-            _ => result.push(ch),
+            '\n' => {
+                result.push('\n');
+                if !pending.is_empty() {
+                    skip_heredoc_bodies(&mut chars, &mut pending, &mut result);
+                }
+                word_start = true;
+            }
+            c if c.is_whitespace() => {
+                result.push(c);
+                word_start = true;
+            }
+            c => {
+                result.push(c);
+                word_start = matches!(c, ';' | '&' | '|' | ')' | '>');
+            }
         }
     }
 
@@ -2668,6 +2804,112 @@ mod tests {
         )
         .unwrap();
         assert!(err.contains("outside sandbox"));
+    }
+
+    #[test]
+    fn bash_check_command_after_heredoc_terminator_checked() {
+        let dir = tmp();
+        // A path command after a closed heredoc must still be denied.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<EOF\nhello\nEOF\ncat /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
+    }
+
+    #[test]
+    fn bash_check_multiple_heredocs_all_bodies_ignored() {
+        let dir = tmp();
+        // Two heredocs on one command line: both bodies are stripped, and a
+        // path command after both terminators is still checked.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<A <<B\n//bodyA\nA\n//bodyB\nB\n",
+            Some(&dir),
+        )
+        .is_none());
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<A <<B\n//bodyA\nA\n//bodyB\nB\ncat /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
+    }
+
+    #[test]
+    fn bash_check_here_string_not_treated_as_heredoc() {
+        let dir = tmp();
+        // `<<<` is a here-string; a path after it must still be checked.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<< /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
+    }
+
+    #[test]
+    fn bash_check_shift_operator_not_treated_as_heredoc() {
+        let dir = tmp();
+        // `<<` inside arithmetic and parameter expansions is a bitwise shift,
+        // not a heredoc; a following path command must still be checked.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "echo $((1<<2))\ncat /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "echo ${arr[1<<2]}\ncat /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
+    }
+
+    #[test]
+    fn bash_check_escaped_and_comment_heredoc_operator_not_heredoc() {
+        let dir = tmp();
+        // A backslash-escaped `<<` and a word-initial `# <<` comment must not
+        // swallow the rest of the command.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "echo \\<<EOF\ncat /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "echo hi # <<EOF\ncat /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"));
+    }
+
+    #[test]
+    fn bash_check_ansi_c_quoted_delimiter() {
+        let dir = tmp();
+        // `$'EOF'` and mixed-quote delimiters resolve to the real terminator.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<$'EOF'\n//\nEOF\n",
+            Some(&dir),
+        )
+        .is_none());
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cat <<EOF'x'\n//\nEOFx\n",
+            Some(&dir),
+        )
+        .is_none());
     }
 
     #[test]
