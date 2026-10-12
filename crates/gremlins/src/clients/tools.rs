@@ -564,98 +564,247 @@ fn split_commands(s: &str) -> Vec<String> {
     parts
 }
 
-/// Strip heredoc redirections and their bodies from a command string.
-///
-/// A heredoc body is file *content*, not a path argument the agent is passing
-/// to the shell, so `bash_check` must never tokenize it. Each `<<`/`<<-`
-/// redirection plus its body is replaced with the same inert `_` placeholder
-/// used by [`strip_subshells`], while the rest of the redirection's first line
-/// (such as `> /tmp/out` in `cat <<EOF > /tmp/out`) passes through unchanged.
-fn strip_heredocs(s: &str) -> String {
-    fn copy_single_quoted<I: Iterator<Item = char>>(result: &mut String, chars: &mut I) {
-        loop {
-            match chars.next() {
-                None => break,
-                Some(c) => {
-                    result.push(c);
-                    if c == '\'' {
-                        break;
-                    }
+/// A heredoc redirection whose body has not yet been consumed.
+#[derive(Debug, Default)]
+struct Heredoc {
+    delimiter: String,
+    strip_tabs: bool,
+}
+
+/// Shell metacharacters that terminate a bare heredoc delimiter word.
+fn is_delimiter_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')')
+}
+
+/// A stateful scanner that copies a bash command while removing heredoc
+/// redirections and their bodies. Keeping the scanner as a type — rather than
+/// one long free function — makes the shell-state transitions (quoting,
+/// comment, expansion, heredoc, body) independently testable.
+struct HeredocStripper<'a> {
+    chars: std::iter::Peekable<std::str::Chars<'a>>,
+    result: String,
+    pending: Vec<Heredoc>,
+    /// Whether the next `#` would start a comment (i.e. we are at a word start).
+    word_start: bool,
+}
+
+impl<'a> HeredocStripper<'a> {
+    fn new(s: &'a str) -> Self {
+        Self {
+            chars: s.chars().peekable(),
+            result: String::with_capacity(s.len()),
+            pending: Vec::new(),
+            word_start: true,
+        }
+    }
+
+    fn strip(mut self) -> String {
+        while let Some(ch) = self.chars.next() {
+            self.step(ch);
+        }
+        self.result
+    }
+
+    fn step(&mut self, ch: char) {
+        match ch {
+            '\'' => {
+                self.result.push(ch);
+                self.copy_quoted_body('\'');
+                self.word_start = false;
+            }
+            '"' => {
+                self.result.push(ch);
+                self.copy_quoted_body('"');
+                self.word_start = false;
+            }
+            '\\' => {
+                // Backslash escapes the next character, so `\<<` is not a
+                // heredoc operator.
+                self.copy_escaped(ch);
+                self.word_start = false;
+            }
+            '#' if self.word_start => {
+                self.copy_comment();
+                self.word_start = true;
+            }
+            '$' => self.copy_dollar(),
+            '(' => {
+                if self.chars.peek().copied() == Some('(') {
+                    // `((` arithmetic command: `<<` inside is a shift, not a
+                    // heredoc.
+                    self.result.push(ch);
+                    self.copy_balanced('(', ')');
+                    self.word_start = false;
+                } else {
+                    self.result.push(ch);
+                    self.word_start = true;
                 }
+            }
+            '<' => self.copy_less_than(),
+            '\n' => {
+                self.result.push(ch);
+                if !self.pending.is_empty() {
+                    self.skip_heredoc_bodies();
+                }
+                self.word_start = true;
+            }
+            c if c.is_whitespace() => {
+                self.result.push(c);
+                self.word_start = true;
+            }
+            c => {
+                self.result.push(c);
+                self.word_start = matches!(c, ';' | '&' | '|' | ')' | '>');
             }
         }
     }
 
-    fn copy_double_quoted<I: Iterator<Item = char>>(result: &mut String, chars: &mut I) {
+    fn copy_escaped(&mut self, ch: char) {
+        self.result.push(ch);
+        if let Some(escaped) = self.chars.next() {
+            self.result.push(escaped);
+        }
+    }
+
+    /// Copy the remainder of a quoted span whose opening quote has already
+    /// been written. Backslashes are literal in single quotes; in double
+    /// quotes they escape the following character.
+    fn copy_quoted_body(&mut self, quote: char) {
         loop {
-            match chars.next() {
+            match self.chars.next() {
                 None => break,
-                Some('"') => {
-                    result.push('"');
+                Some(c) if c == quote => {
+                    self.result.push(c);
                     break;
                 }
-                Some('\\') => {
-                    result.push('\\');
-                    if let Some(c) = chars.next() {
-                        result.push(c);
+                Some('\\') if quote == '"' => {
+                    self.result.push('\\');
+                    if let Some(escaped) = self.chars.next() {
+                        self.result.push(escaped);
                     }
                 }
-                Some(c) => result.push(c),
+                Some(c) => self.result.push(c),
             }
         }
     }
 
-    // Copy a balanced `open`..`close` region verbatim (no heredoc detection
-    // inside), skipping quoted spans so nested delimiters are not miscounted.
-    fn copy_balanced<I: Iterator<Item = char>>(
-        result: &mut String,
-        chars: &mut I,
-        open: char,
-        close: char,
-    ) {
+    /// Copy a balanced `open`..`close` region verbatim (no heredoc detection
+    /// inside), skipping quoted spans so nested delimiters are not miscounted.
+    /// A backslash escapes the following character, so an escaped `close` is
+    /// copied without changing the nesting depth.
+    fn copy_balanced(&mut self, open: char, close: char) {
         let mut depth = 1u32;
         while depth > 0 {
-            match chars.next() {
+            match self.chars.next() {
                 None => break,
                 Some(c) if c == '\'' => {
-                    result.push(c);
-                    copy_single_quoted(result, chars);
+                    self.result.push(c);
+                    self.copy_quoted_body('\'');
                 }
                 Some(c) if c == '"' => {
-                    result.push(c);
-                    copy_double_quoted(result, chars);
+                    self.result.push(c);
+                    self.copy_quoted_body('"');
                 }
+                Some('\\') => self.copy_escaped('\\'),
                 Some(c) if c == open => {
                     depth += 1;
-                    result.push(c);
+                    self.result.push(c);
                 }
                 Some(c) if c == close => {
                     depth -= 1;
-                    result.push(c);
+                    self.result.push(c);
                 }
-                Some(c) => result.push(c),
+                Some(c) => self.result.push(c),
             }
         }
     }
 
-    // Shell metacharacters that terminate a bare heredoc delimiter word.
-    fn is_delimiter_boundary(c: char) -> bool {
-        c.is_whitespace() || matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')')
+    fn copy_comment(&mut self) {
+        self.result.push('#');
+        for c in self.chars.by_ref() {
+            self.result.push(c);
+            if c == '\n' {
+                break;
+            }
+        }
     }
 
-    // Read a heredoc delimiter word, applying bash quote removal so that
-    // `$'EOF'`, `EOF'x'`, `"EOF"`, `\EOF`, and bare `EOF` all resolve to the
-    // delimiter bash will actually compare against the terminator line.
-    fn read_delimiter_word(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
+    fn copy_dollar(&mut self) {
+        let mut probe = self.chars.clone();
+        match probe.next() {
+            // `$(` subshell and `$((` arithmetic: copy verbatim so a `<<`
+            // inside (e.g. a bitwise shift) is not a heredoc.
+            Some('(') => {
+                self.result.push('$');
+                self.result.push('(');
+                self.chars = probe;
+                self.copy_balanced('(', ')');
+                self.word_start = false;
+            }
+            // `${...}` parameter expansion: `<<` inside is not a heredoc.
+            Some('{') => {
+                self.result.push('$');
+                self.result.push('{');
+                self.chars = probe;
+                self.copy_balanced('{', '}');
+                self.word_start = false;
+            }
+            _ => {
+                self.result.push('$');
+                self.word_start = false;
+            }
+        }
+    }
+
+    fn copy_less_than(&mut self) {
+        if self.chars.peek().copied() != Some('<') {
+            self.result.push('<');
+            self.word_start = true;
+            return;
+        }
+
+        // `<<<` is a here-string, not a heredoc: emit all three `<` and keep
+        // scanning.
+        let mut probe = self.chars.clone();
+        probe.next(); // past the second `<`
+        if probe.peek().copied() == Some('<') {
+            self.result.push_str("<<<");
+            self.chars = probe;
+            self.chars.next(); // past the third `<`
+            self.word_start = true;
+            return;
+        }
+
+        // Heredoc: consume the second `<` and an optional `-` (which strips
+        // leading tabs from the terminator line).
+        self.chars.next();
+        let mut heredoc = Heredoc::default();
+        if self.chars.peek().copied() == Some('-') {
+            self.chars.next();
+            heredoc.strip_tabs = true;
+        }
+        while self.chars.peek().is_some_and(|&c| c == ' ' || c == '\t') {
+            self.chars.next();
+        }
+        heredoc.delimiter = self.read_delimiter_word();
+        self.result.push('_');
+        self.pending.push(heredoc);
+        self.word_start = false;
+    }
+
+    /// Read a heredoc delimiter word, applying bash quote removal so that
+    /// `$'EOF'`, `EOF'x'`, `"EOF"`, `\EOF`, and bare `EOF` all resolve to
+    /// the delimiter bash will actually compare against the terminator line.
+    fn read_delimiter_word(&mut self) -> String {
         let mut value = String::new();
         loop {
-            match chars.peek().copied() {
+            match self.chars.peek().copied() {
                 None => break,
                 Some(c) if is_delimiter_boundary(c) => break,
                 Some('\'') => {
-                    chars.next();
+                    self.chars.next();
                     loop {
-                        match chars.next() {
+                        match self.chars.next() {
                             None => break,
                             Some('\'') => break,
                             Some(c) => value.push(c),
@@ -663,12 +812,12 @@ fn strip_heredocs(s: &str) -> String {
                     }
                 }
                 Some('"') => {
-                    chars.next();
+                    self.chars.next();
                     loop {
-                        match chars.next() {
+                        match self.chars.next() {
                             None => break,
                             Some('"') => break,
-                            Some('\\') => match chars.next() {
+                            Some('\\') => match self.chars.next() {
                                 Some(c @ ('$' | '`' | '"' | '\\')) => value.push(c),
                                 Some(c) => {
                                     value.push('\\');
@@ -681,17 +830,17 @@ fn strip_heredocs(s: &str) -> String {
                     }
                 }
                 Some('$') => {
-                    let mut probe = chars.clone();
+                    let mut probe = self.chars.clone();
                     probe.next(); // `$`
                     if probe.peek().copied() == Some('\'') {
                         // ANSI-C quoting `$'...'`.
-                        *chars = probe;
-                        chars.next(); // opening `'`
+                        self.chars = probe;
+                        self.chars.next(); // opening `'`
                         loop {
-                            match chars.next() {
+                            match self.chars.next() {
                                 None => break,
                                 Some('\'') => break,
-                                Some('\\') => match chars.next() {
+                                Some('\\') => match self.chars.next() {
                                     Some('n') => value.push('\n'),
                                     Some('t') => value.push('\t'),
                                     Some('r') => value.push('\r'),
@@ -705,35 +854,31 @@ fn strip_heredocs(s: &str) -> String {
                             }
                         }
                     } else {
-                        chars.next();
+                        self.chars.next();
                         value.push('$');
                     }
                 }
                 Some('\\') => {
-                    chars.next();
-                    if let Some(c) = chars.next() {
+                    self.chars.next();
+                    if let Some(c) = self.chars.next() {
                         value.push(c);
                     }
                 }
-                Some(_) => value.push(chars.next().unwrap()),
+                Some(_) => value.push(self.chars.next().unwrap()),
             }
         }
         value
     }
 
-    // Drop body lines for each pending heredoc, in order, up to and including
-    // the terminator line. Emits a single newline so the following command is
-    // not glued onto the heredoc's header line.
-    fn skip_heredoc_bodies(
-        chars: &mut std::iter::Peekable<std::str::Chars>,
-        pending: &mut Vec<(String, bool)>,
-        result: &mut String,
-    ) {
-        for (delimiter, strip_tabs) in pending.drain(..) {
+    /// Drop body lines for each pending heredoc, in order, up to and
+    /// including the terminator line. Emits a single newline so a following
+    /// command is not glued onto the heredoc's header line.
+    fn skip_heredoc_bodies(&mut self) {
+        for heredoc in self.pending.drain(..) {
             loop {
                 let mut line = String::new();
                 loop {
-                    match chars.next() {
+                    match self.chars.next() {
                         None => return, // no terminator: drop to end of input
                         Some('\n') => break,
                         Some(c) => line.push(c),
@@ -742,154 +887,29 @@ fn strip_heredocs(s: &str) -> String {
                 if line.ends_with('\r') {
                     line.pop();
                 }
-                let candidate = if strip_tabs {
+                let candidate = if heredoc.strip_tabs {
                     line.trim_start_matches('\t')
                 } else {
                     line.as_str()
                 };
-                if candidate == delimiter {
+                if candidate == heredoc.delimiter {
                     break;
                 }
             }
         }
-        result.push('\n');
+        self.result.push('\n');
     }
+}
 
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    // Delimiters awaiting their bodies, in order of appearance.
-    let mut pending: Vec<(String, bool)> = Vec::new();
-    // Whether the next `#` would start a comment (i.e. we are at a word start).
-    let mut word_start = true;
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\'' => {
-                result.push(ch);
-                copy_single_quoted(&mut result, &mut chars);
-                word_start = false;
-            }
-            '"' => {
-                result.push(ch);
-                copy_double_quoted(&mut result, &mut chars);
-                word_start = false;
-            }
-            '\\' => {
-                // Backslash escapes the next character, so `\<<` is not a
-                // heredoc operator.
-                result.push(ch);
-                if let Some(c) = chars.next() {
-                    result.push(c);
-                }
-                word_start = false;
-            }
-            '#' if word_start => {
-                // Comment through end of line.
-                result.push(ch);
-                for c in chars.by_ref() {
-                    result.push(c);
-                    if c == '\n' {
-                        break;
-                    }
-                }
-                word_start = true;
-            }
-            '$' => {
-                let mut probe = chars.clone();
-                match probe.next() {
-                    // `$(` subshell and `$((` arithmetic: copy verbatim so a
-                    // `<<` inside (e.g. a bitwise shift) is not a heredoc.
-                    Some('(') => {
-                        result.push('$');
-                        result.push('(');
-                        chars = probe;
-                        copy_balanced(&mut result, &mut chars, '(', ')');
-                        word_start = false;
-                    }
-                    // `${...}` parameter expansion: `<<` inside is not a heredoc.
-                    Some('{') => {
-                        result.push('$');
-                        result.push('{');
-                        chars = probe;
-                        copy_balanced(&mut result, &mut chars, '{', '}');
-                        word_start = false;
-                    }
-                    _ => {
-                        result.push(ch);
-                        word_start = false;
-                    }
-                }
-            }
-            '(' => {
-                if chars.peek().copied() == Some('(') {
-                    // `((` arithmetic command: `<<` inside is a shift, not a
-                    // heredoc.
-                    result.push('(');
-                    chars.next();
-                    result.push('(');
-                    copy_balanced(&mut result, &mut chars, '(', ')');
-                    word_start = false;
-                } else {
-                    result.push(ch);
-                    word_start = true;
-                }
-            }
-            '<' => {
-                if chars.peek().copied() != Some('<') {
-                    result.push(ch);
-                    word_start = true;
-                    continue;
-                }
-
-                // `<<<` is a here-string, not a heredoc: emit all three `<`
-                // and keep scanning.
-                let mut probe = chars.clone();
-                probe.next(); // past the second `<`
-                if probe.peek().copied() == Some('<') {
-                    result.push('<');
-                    result.push('<');
-                    result.push('<');
-                    chars = probe;
-                    chars.next(); // past the third `<`
-                    word_start = true;
-                    continue;
-                }
-
-                // Heredoc: consume the second `<` and an optional `-` (which
-                // strips leading tabs from the terminator line).
-                chars.next();
-                let mut strip_tabs = false;
-                if chars.peek().copied() == Some('-') {
-                    chars.next();
-                    strip_tabs = true;
-                }
-                while chars.peek().is_some_and(|&c| c == ' ' || c == '\t') {
-                    chars.next();
-                }
-                let delimiter = read_delimiter_word(&mut chars);
-                result.push('_');
-                pending.push((delimiter, strip_tabs));
-                word_start = false;
-            }
-            '\n' => {
-                result.push('\n');
-                if !pending.is_empty() {
-                    skip_heredoc_bodies(&mut chars, &mut pending, &mut result);
-                }
-                word_start = true;
-            }
-            c if c.is_whitespace() => {
-                result.push(c);
-                word_start = true;
-            }
-            c => {
-                result.push(c);
-                word_start = matches!(c, ';' | '&' | '|' | ')' | '>');
-            }
-        }
-    }
-
-    result
+/// Strip heredoc redirections and their bodies from a command string.
+///
+/// A heredoc body is file *content*, not a path argument the agent is passing
+/// to the shell, so `bash_check` must never tokenize it. Each `<<`/`<<-`
+/// redirection plus its body is replaced with the same inert `_` placeholder
+/// used by [`strip_subshells`], while the rest of the redirection's first line
+/// (such as `> /tmp/out` in `cat <<EOF > /tmp/out`) passes through unchanged.
+fn strip_heredocs(s: &str) -> String {
+    HeredocStripper::new(s).strip()
 }
 
 /// Strip `$(...)` and backtick command substitutions from a command string.
@@ -2942,6 +2962,25 @@ mod tests {
         assert!(
             err.contains("outside sandbox"),
             "literal /etc/passwd after subshell must be caught: {err}"
+        );
+    }
+
+    #[test]
+    fn strip_heredocs_copied_dollar_param_region_skips_escaped_close() {
+        // A backslash-escaped close delimiter must not terminate the
+        // ${...} copy. Previously `${unset:-\} << x}` returned at the
+        // escaped `}`, classified the inner `<<` as a heredoc, and swallowed
+        // the following path-bearing command.
+        let dir = tmp();
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "echo ${unset:-\\} << x}\ncat /etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(
+            err.contains("outside sandbox"),
+            "trailing /etc/passwd after escaped-close parameter expansion must be caught: {err}"
         );
     }
 
