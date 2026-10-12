@@ -515,7 +515,8 @@ async fn run_agent_loop_core(
     let mut remaining_turns = max_turns;
     while remaining_turns > 0 {
         if cancel.is_cancelled() {
-            log::debug!("agent_loop: cancelled before turn (label={})", prefix);
+            log::info!("agent_loop: cancelled before turn (label={})", prefix);
+            send_log(log_tx, prefix, "exit: cancelled before turn");
             return Err(ClientError::Runtime {
                 message: "cancelled".into(),
             });
@@ -562,13 +563,22 @@ async fn run_agent_loop_core(
                         evt_tx = Some(session.evt_tx);
                         // Fall through to execute one turn.
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                        send_log(log_tx, prefix, "exit: operator bailed");
+                        return Err(e);
+                    }
                 }
             } else if pause.as_ref().is_some_and(|p| p.is_paused()) {
                 // Pause token was triggered — enter interactive mode.
-                log::debug!(
+                log::info!(
                     "agent_loop: pause token detected at turn boundary (label={})",
                     prefix
+                );
+                send_log(
+                    log_tx,
+                    prefix,
+                    "pause: entering interactive mode (turn boundary)",
                 );
                 if let Some(ref p) = pause {
                     p.reset();
@@ -608,7 +618,11 @@ async fn run_agent_loop_core(
                         evt_tx = Some(session.evt_tx);
                         // Fall through to execute one turn.
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                        send_log(log_tx, prefix, "exit: operator bailed");
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -654,7 +668,8 @@ async fn run_agent_loop_core(
         loop {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
-                    log::debug!("agent_loop: cancelled mid-stream (label={})", prefix);
+                    log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
+                    send_log(log_tx, prefix, "exit: cancelled mid-stream");
                     drop(response);
                     return Err(ClientError::Runtime {
                         message: "cancelled".into(),
@@ -664,7 +679,8 @@ async fn run_agent_loop_core(
                     // Operator triggered debug — cancel the stream and enter
                     // interactive mode. The turn will be re-executed after
                     // the debug session ends.
-                    log::debug!("agent_loop: paused mid-stream (label={})", prefix);
+                    log::info!("agent_loop: paused mid-stream (label={})", prefix);
+                    send_log(log_tx, prefix, "pause: entering interactive mode (mid-stream)");
                     drop(response);
                     paused_mid_stream = true;
                     if let Some(ref p) = pause {
@@ -711,7 +727,11 @@ async fn run_agent_loop_core(
                                 pending_run_one_turn = true;
                                 break; // exit the stream loop, execute one turn
                             }
-                            Err(e) => return Err(e),
+                            Err(e) => {
+                                log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                                send_log(log_tx, prefix, "exit: operator bailed");
+                                return Err(e);
+                            }
                         }
                     }
                     // No interactive session — shouldn't happen, but continue.
@@ -1166,7 +1186,8 @@ async fn run_agent_loop_core(
                 // Operator triggered debug mid-tool — drop the join_all future
                 // (cancels pending tool futures). Completed tool side effects
                 // (files written, bash commands run) are not unwound.
-                log::debug!("agent_loop: paused mid-tool (label={})", prefix);
+                log::info!("agent_loop: paused mid-tool (label={})", prefix);
+                send_log(log_tx, prefix, "pause: entering interactive mode (mid-tool)");
                 if let Some(ref p) = pause {
                     p.reset();
                 }
@@ -1215,7 +1236,11 @@ async fn run_agent_loop_core(
                             pending_run_one_turn = true;
                             continue; // re-execute the turn from scratch
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                            send_log(log_tx, prefix, "exit: operator bailed");
+                            return Err(e);
+                        }
                     }
                 }
                 continue;
@@ -1289,14 +1314,24 @@ async fn run_agent_loop_core(
     }
 
     if timed_out {
+        log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
+        send_log(log_tx, prefix, "exit: stream idle timeout");
         return Err(ClientError::Timeout {
             message: "stream idle timeout".into(),
         });
     }
     if let Some(err) = stream_error {
+        log::info!("agent_loop: exit (stream error, label={})", prefix);
+        send_log(log_tx, prefix, "exit: stream error");
         let classify = opts.classify_error.unwrap_or(default_classify);
         return Err(classify(err));
     }
+    log::info!("agent_loop: exit (exceeded max turns, label={})", prefix);
+    send_log(
+        log_tx,
+        prefix,
+        &format!("exit: exceeded max turns ({max_turns})"),
+    );
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
     })
