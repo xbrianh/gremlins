@@ -23,14 +23,34 @@ pub struct PathOverrides {
     pub scratch_root: Option<PathBuf>,
 }
 
-fn parse_path_overrides(paths: &HashMap<String, String>) -> PathOverrides {
-    PathOverrides {
-        state_root: paths.get("state-root").map(PathBuf::from),
-        work_root: paths.get("work-root").map(PathBuf::from),
-        config_root: paths.get("config-root").map(PathBuf::from),
-        project_root: paths.get("project-root").map(PathBuf::from),
-        overlay_dir: paths.get("overlay-dir").map(PathBuf::from),
-        scratch_root: paths.get("scratch-root").map(PathBuf::from),
+/// The `paths` section of settings.yaml.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PathsSection {
+    #[serde(rename = "state-root", default)]
+    state_root: Option<StrictString>,
+    #[serde(rename = "work-root", default)]
+    work_root: Option<StrictString>,
+    #[serde(rename = "config-root", default)]
+    config_root: Option<StrictString>,
+    #[serde(rename = "project-root", default)]
+    project_root: Option<StrictString>,
+    #[serde(rename = "overlay-dir", default)]
+    overlay_dir: Option<StrictString>,
+    #[serde(rename = "scratch-root", default)]
+    scratch_root: Option<StrictString>,
+}
+
+impl From<PathsSection> for PathOverrides {
+    fn from(paths: PathsSection) -> Self {
+        PathOverrides {
+            state_root: paths.state_root.map(|s| PathBuf::from(s.0)),
+            work_root: paths.work_root.map(|s| PathBuf::from(s.0)),
+            config_root: paths.config_root.map(|s| PathBuf::from(s.0)),
+            project_root: paths.project_root.map(|s| PathBuf::from(s.0)),
+            overlay_dir: paths.overlay_dir.map(|s| PathBuf::from(s.0)),
+            scratch_root: paths.scratch_root.map(|s| PathBuf::from(s.0)),
+        }
     }
 }
 
@@ -40,6 +60,7 @@ fn parse_path_overrides(paths: &HashMap<String, String>) -> PathOverrides {
 
 /// Settings for the Azure OpenAI backend, read from settings.yaml.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AzureOpenAiSettings {
     #[serde(default)]
     pub auth: Option<StrictString>,
@@ -140,6 +161,7 @@ impl<'de> Deserialize<'de> for StrictString {
 
 /// Typed structure for settings.yaml deserialization.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConfigFile {
     #[serde(rename = "default-client")]
     default_client: Option<StrictString>,
@@ -152,7 +174,7 @@ struct ConfigFile {
     default_task_clients: Option<IndexMap<String, StrictString>>,
     #[serde(rename = "client-profiles")]
     client_profiles: Option<IndexMap<String, ProfileFile>>,
-    paths: Option<HashMap<String, StrictString>>,
+    paths: Option<PathsSection>,
     #[serde(rename = "azure-openai", default)]
     azure_openai: Option<AzureOpenAiSettings>,
     #[serde(rename = "max-tool-output-bytes", default)]
@@ -161,6 +183,7 @@ struct ConfigFile {
 
 /// A single `client-profiles` entry as it appears in `settings.yaml`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProfileFile {
     client: Option<StrictString>,
     #[serde(rename = "task-clients", default)]
@@ -251,15 +274,7 @@ impl Config {
         let (exact_stage_clients, prefix_stage_clients) =
             parse_stage_clients(stage_clients.as_ref());
 
-        let path_overrides = cfg_file
-            .paths
-            .as_ref()
-            .map(|m| {
-                let string_map: HashMap<String, String> =
-                    m.iter().map(|(k, v)| (k.clone(), v.0.clone())).collect();
-                parse_path_overrides(&string_map)
-            })
-            .unwrap_or_default();
+        let path_overrides = cfg_file.paths.map(PathOverrides::from).unwrap_or_default();
 
         let max_tool_output_bytes = cfg_file
             .max_tool_output_bytes
@@ -907,6 +922,84 @@ mod tests {
     // -----------------------------------------------------------------------
     // Config parsing tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_config_denies_unknown_top_level_key() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-client: "a:b"
+not-a-key: 1"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_denies_unknown_key_in_profile() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"client-profiles:
+  demo:
+    client: "a:b"
+    not-a-key: 1"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_denies_unknown_key_under_paths() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"paths:
+  state-root: /tmp/gremlins-state
+  not-a-key: 1"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_denies_unknown_key_under_azure_openai() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"azure-openai:
+  endpoint: https://example.com
+  not-a-key: 1"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_accepts_closed_paths_section() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"paths:
+  state-root: /tmp/gremlins-state
+  work-root: /tmp/gremlins-work
+  config-root: /tmp/gremlins-config
+  project-root: /tmp/gremlins-project
+  overlay-dir: /tmp/gremlins-overlay
+  scratch-root: /tmp/gremlins-scratch"#,
+        ));
+        let overrides = Config::load().unwrap().path_overrides;
+        assert_eq!(
+            overrides.state_root,
+            Some(PathBuf::from("/tmp/gremlins-state"))
+        );
+        assert_eq!(
+            overrides.work_root,
+            Some(PathBuf::from("/tmp/gremlins-work"))
+        );
+        assert_eq!(
+            overrides.config_root,
+            Some(PathBuf::from("/tmp/gremlins-config"))
+        );
+        assert_eq!(
+            overrides.project_root,
+            Some(PathBuf::from("/tmp/gremlins-project"))
+        );
+        assert_eq!(
+            overrides.overlay_dir,
+            Some(PathBuf::from("/tmp/gremlins-overlay"))
+        );
+        assert_eq!(
+            overrides.scratch_root,
+            Some(PathBuf::from("/tmp/gremlins-scratch"))
+        );
+    }
 
     #[test]
     fn test_config_default_client() {
