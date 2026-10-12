@@ -213,6 +213,7 @@ pub(crate) async fn run_agent_loop(
         model_name.clone(),
         idle_timeout,
         max_turns,
+        ctx.params.max_retries,
         ctx.completion_nudge_budget,
         ctx.params.log_tx.clone(),
         opts.max_tokens,
