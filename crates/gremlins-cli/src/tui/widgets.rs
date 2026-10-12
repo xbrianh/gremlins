@@ -705,30 +705,105 @@ impl InputBarWidget {
 
     /// Compute the cursor's (row, column) within the wrapped view.
     ///
-    /// The column is a *display* column (using `unicode-width`), matching the
-    /// wrapping `Paragraph` uses, so wide characters advance the cursor by
-    /// their full cell width. When the cursor sits exactly at a wrap boundary
-    /// at the end of the input (no following character to occupy the next
-    /// row), it is parked on the last cell of the current row so it is always
-    /// rendered.
+    /// The cursor cell is located by rendering the input through the same
+    /// `Paragraph::wrap(Wrap { trim: false })` path the input bar paints with,
+    /// with the grapheme at the cursor's byte offset styled with a marker
+    /// style that cannot occur in the input. Because the text is unchanged,
+    /// the wrapping — including word breaks at spaces — is identical to the
+    /// real line, and the styled grapheme lands exactly on the cell where the
+    /// next keystroke inserts. At end of input a single-cell sentinel is
+    /// appended and parked on the last cell of the final row so the cursor
+    /// never addresses a row past the wrapped content. When the grapheme at
+    /// the cursor is dropped by the wrapper (a space at a wrap boundary, or a
+    /// zero-width character), the cursor falls back to the end of the
+    /// preceding text.
     fn cursor_position(cursor: usize, input: &str, width: u16) -> (u16, u16) {
         if width == 0 {
             return (0, 0);
         }
-        let w = width as usize;
-        // Prompt is 2 cells wide.
-        let col = 2usize + unicode_width::UnicodeWidthStr::width(&input[..cursor]);
-        let row = (col / w) as u16;
-        let col_in_row = (col % w) as u16;
 
-        // At the end of input on an exact wrap boundary, the cursor would
-        // address a row past the wrapped content. Park it on the previous
-        // row's last cell instead.
-        if cursor == input.len() && col_in_row == 0 && row > 0 {
-            (row - 1, width - 1)
-        } else {
-            (row, col_in_row)
+        if cursor == input.len() {
+            return Self::end_of_text_position(input, width);
         }
+
+        let ch = input[cursor..]
+            .chars()
+            .next()
+            .expect("cursor < input.len()");
+        let len = ch.len_utf8();
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Self::prompt_span());
+        if cursor > 0 {
+            spans.push(Span::raw(input[..cursor].to_string()));
+        }
+        spans.push(Span::styled(ch.to_string(), Self::marker_style()));
+        spans.push(Span::raw(input[cursor + len..].to_string()));
+
+        if let Some(pos) = Self::locate_marker(Line::from(spans), width) {
+            return pos;
+        }
+
+        // The styled grapheme was dropped by the wrapper. The cursor sits just
+        // before it, i.e. at the end of the preceding text.
+        Self::end_of_text_position(&input[..cursor], width)
+    }
+
+    /// Cursor position at the very end of `input` (just past the last char).
+    fn end_of_text_position(input: &str, width: u16) -> (u16, u16) {
+        let full_rows = wrapped_height(&[Self::full_line(input)], width).max(1) as u16;
+
+        let spans: Vec<Span<'static>> = vec![
+            Self::prompt_span(),
+            Span::raw(input.to_string()),
+            Span::styled("\u{E000}", Self::marker_style()),
+        ];
+
+        let marker =
+            Self::locate_marker(Line::from(spans), width).unwrap_or((full_rows - 1, width - 1));
+
+        // Park at the end of the last row if the sentinel wrapped past the
+        // wrapped content (the cursor would otherwise address a row that does
+        // not exist in the input bar).
+        if marker.0 >= full_rows {
+            (full_rows - 1, width - 1)
+        } else {
+            marker
+        }
+    }
+
+    /// The prompt span shared by the input bar's real rendering.
+    fn prompt_span() -> Span<'static> {
+        Span::styled("> ", Style::default().fg(Color::Cyan))
+    }
+
+    /// A style that cannot occur in the input (raw/default) or the prompt.
+    fn marker_style() -> Style {
+        Style::default().fg(Color::Magenta)
+    }
+
+    /// Render `line` at `width` and return the (row, col) of the marker-style
+    /// cell, if present.
+    fn locate_marker(line: Line<'static>, width: u16) -> Option<(u16, u16)> {
+        let rows = wrapped_height(std::slice::from_ref(&line), width).max(1) as u16;
+        let area = Rect::new(0, 0, width, rows);
+        let mut buf = Buffer::empty(area);
+        Paragraph::new(line)
+            .wrap(Wrap { trim: false })
+            .render(area, &mut buf);
+
+        // Compare on the foreground color rather than full `Style` equality:
+        // ratatui patches the cell style with `bg(Color::Reset)` and
+        // `underline_color(Color::Reset)` defaults, so the rendered style never
+        // equals the marker style verbatim. Magenta is unique to the marker.
+        for y in 0..rows {
+            for x in 0..width {
+                if buf[(x, y)].style().fg == Some(Color::Magenta) {
+                    return Some((y, x));
+                }
+            }
+        }
+        None
     }
 
     /// Reconcile the vertical scroll offset so the cursor (at byte index
@@ -1503,12 +1578,54 @@ mod tests {
 
     #[test]
     fn cursor_position_wraps_at_width() {
-        // width 5, prompt 2 cells. "abc" → col 5 → row 1 col 0 (mid-text).
-        assert_eq!(InputBarWidget::cursor_position(1, "abcd", 5), (0, 3));
-        // Cursor after "abc" (byte 3) but more text follows → row 1 col 0.
-        assert_eq!(InputBarWidget::cursor_position(3, "abcd", 5), (1, 0));
-        // "abcd" → col 6 → row 1 col 1.
-        assert_eq!(InputBarWidget::cursor_position(4, "abcd", 5), (1, 1));
+        // width 5, prompt 2 cells. "abcd" is a single word that word-wraps as
+        // "> " / "abcd", so every character lands on row 1.
+        assert_eq!(InputBarWidget::cursor_position(1, "abcd", 5), (1, 1));
+        // Cursor after "abc" (byte 3) but more text follows → before 'd'.
+        assert_eq!(InputBarWidget::cursor_position(3, "abcd", 5), (1, 3));
+        // "abcd" → cursor at end, just past 'd'.
+        assert_eq!(InputBarWidget::cursor_position(4, "abcd", 5), (1, 4));
+    }
+
+    #[test]
+    fn cursor_position_word_wraps_at_space_boundary() {
+        // "hello world" at width 7 wraps as "> hello" / "world" (word wrap),
+        // not "> hello" / " world" (linear wrap): the space at the boundary
+        // is dropped. The cursor at end of input lands immediately after
+        // "world".
+        assert_eq!(
+            InputBarWidget::cursor_position(11, "hello world", 7),
+            (1, 5)
+        );
+        // At width 5 it wraps to three rows; the cursor parks at the end of
+        // the final "world" row.
+        assert_eq!(
+            InputBarWidget::cursor_position(11, "hello world", 5),
+            (2, 4)
+        );
+    }
+
+    #[test]
+    fn cursor_position_on_wrap_space_parks_at_word_end() {
+        // Cursor on the space that word-wrap drops (byte 5 in "hello world"
+        // at width 7). The space occupies no cell, so the cursor sits at the
+        // end of the preceding word "hello", which fills row 0 exactly.
+        assert_eq!(InputBarWidget::cursor_position(5, "hello world", 7), (0, 6));
+    }
+
+    #[test]
+    fn cursor_position_mid_word_after_wrap() {
+        // Cursor inside the word that follows a wrap boundary (byte 8 is the
+        // 'r' in "world"), which lands on row 1 col 2.
+        assert_eq!(InputBarWidget::cursor_position(8, "hello world", 7), (1, 2));
+    }
+
+    #[test]
+    fn cursor_position_ignores_marker_chars_in_input() {
+        // The cursor is located by style, not symbol, so an input that already
+        // contains the former marker characters ("😀", U+E000) cannot collide.
+        assert_eq!(InputBarWidget::cursor_position(1, "a😀b", 10), (0, 3));
+        assert_eq!(InputBarWidget::cursor_position(1, "a\u{E000}b", 10), (0, 3));
     }
 
     #[test]
