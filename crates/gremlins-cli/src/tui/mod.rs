@@ -1244,6 +1244,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // screen) so it is displayed as part of the turn.
                         live_area.finish_response(&text, &summary);
 
+                        // Commit the turn's prompt, reasoning, and tools
+                        // first so the finished response lands after them in
+                        // the FIFO, then flatten the response itself.
+                        live_area.finish_turn();
+
                         // Build usage summary line.
                         if let Some(usage) = usage {
                             if let (Some(prompt), Some(completion)) = (
@@ -1286,6 +1291,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         app.active_request = false;
                         active_turn = None;
                         let msg = format!("chat ended: {reason}");
+                        live_area.finish_turn();
                         live_area.push_transcript_line(msg);
 
                         // Repaint immediately so the ended state is visible
@@ -1302,6 +1308,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         app.active_request = false;
                         active_turn = None;
                         let full = format!("chat error: {msg}");
+                        live_area.finish_turn();
                         live_area.push_transcript_line(full);
 
                         // Repaint immediately so the error state is visible

@@ -181,6 +181,7 @@ impl TranscriptWidget {
     }
 
     /// Borrow the streaming response text.
+    #[cfg(test)]
     pub fn response_text(&self) -> &str {
         &self.response_text
     }
@@ -209,6 +210,30 @@ impl TranscriptWidget {
     /// Clear the scrollable FIFO.
     pub fn clear_scrollable(&mut self) {
         self.scrollable.clear();
+    }
+
+    /// Move the current `response_text` into the scrollable FIFO as
+    /// `FlattenedResponse` lines (preceded by a blank separator when the
+    /// FIFO is non-empty), then clear `response_text`.
+    pub fn flatten_response(&mut self) {
+        if self.response_text.is_empty() {
+            return;
+        }
+
+        if !self.scrollable.is_empty() {
+            self.scrollable.push(Line::from(""), LineOrigin::Separator);
+        }
+
+        let response_lines: Vec<String> =
+            self.response_text.lines().map(|s| s.to_string()).collect();
+        for line_str in response_lines {
+            self.scrollable.push(
+                Line::from(Span::styled(line_str, Style::default())),
+                LineOrigin::FlattenedResponse,
+            );
+        }
+
+        self.response_text.clear();
     }
 
     /// Reconcile the streamed response against authoritative full text.
@@ -1085,6 +1110,47 @@ mod tests {
         transcript.reconcile_response("");
 
         assert_eq!(transcript.response_text(), "streamed");
+    }
+
+    #[test]
+    fn flatten_response_moves_full_response_into_scrollable() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_response("line one\nline two\nline three");
+
+        transcript.flatten_response();
+
+        assert!(transcript.response_is_empty());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(
+            text,
+            vec!["line one", "line two", "line three"],
+            "full response should be flattened into the FIFO"
+        );
+    }
+
+    #[test]
+    fn flatten_response_prepends_separator_when_fifo_nonempty() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_line(Line::from(Span::raw("prior turn")), LineOrigin::Transcript);
+        transcript.push_response("response");
+
+        transcript.flatten_response();
+
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(
+            text,
+            vec!["prior turn", "", "response"],
+            "a blank separator should precede the flattened response"
+        );
+    }
+
+    #[test]
+    fn flatten_response_empty_is_noop() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.flatten_response();
+        assert!(transcript.scrollable.is_empty());
     }
 
     // ── separator accounting ────────────────────────────────────

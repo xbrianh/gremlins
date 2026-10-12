@@ -110,7 +110,7 @@ impl<B: Backend> LiveArea<B> {
             if h == 0 {
                 return Ok(0);
             }
-            h.min(self.scrollable_rows() as usize) as u16
+            h.min(u16::MAX as usize) as u16
         };
 
         log::debug!(
@@ -145,38 +145,52 @@ impl<B: Backend> LiveArea<B> {
             );
         }
 
-        // Write cells directly to the terminal.
-        let mut cells: Vec<(u16, u16, &Cell)> = Vec::new();
-        for y in 0..height {
-            for x in 0..width {
-                cells.push((x, y, &tmp[(x, y)]));
-            }
-        }
-        self.backend
-            .draw(cells.into_iter())
-            .map_err(|e| io::Error::other(e.to_string()))?;
-
-        // Push to terminal scrollback.
+        // The terminal scroll region is only `region_rows` tall, so a
+        // single draw+scroll can commit at most that many rows. Commit the
+        // overflow in chunks so a response taller than the viewport is
+        // preserved in full instead of being clipped.
         let region_rows = self.scrollable_rows();
-        self.backend
-            .scroll_region_up(0..region_rows, height)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let mut committed = 0u16;
+        while committed < height {
+            let chunk = (height - committed).min(region_rows);
+            if chunk == 0 {
+                break;
+            }
 
-        // Keep prev buffer in lockstep with the terminal.
-        shift_buffer_up(&mut self.prev, region_rows, height);
+            // Write this chunk at the top of the scroll region.
+            let mut cells: Vec<(u16, u16, &Cell)> = Vec::new();
+            for y in 0..chunk {
+                for x in 0..width {
+                    cells.push((x, y, &tmp[(x, committed + y)]));
+                }
+            }
+            self.backend
+                .draw(cells.into_iter())
+                .map_err(|e| io::Error::other(e.to_string()))?;
 
-        // Capture for tests.
-        for y in 0..height {
-            let row: String = (0..width as usize)
-                .map(|x| tmp[(x as u16, y)].symbol())
-                .collect();
-            self.scrollback_log.push(trim_trailing_whitespace(&row));
+            // Push the chunk into terminal scrollback.
+            self.backend
+                .scroll_region_up(0..region_rows, chunk)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+
+            // Keep prev buffer in lockstep with the terminal.
+            shift_buffer_up(&mut self.prev, region_rows, chunk);
+
+            // Capture for tests.
+            for y in 0..chunk {
+                let row: String = (0..width as usize)
+                    .map(|x| tmp[(x as u16, committed + y)].symbol())
+                    .collect();
+                self.scrollback_log.push(trim_trailing_whitespace(&row));
+            }
+
+            committed += chunk;
         }
 
         self.backend
             .flush()
             .map_err(|e| io::Error::other(e.to_string()))?;
-        Ok(height)
+        Ok(committed)
     }
 
     /// Render one frame.
@@ -417,71 +431,11 @@ impl<B: Backend> LiveArea<B> {
     /// Flatten the current turn into the transcript and start a new turn
     /// with the given prompt.
     pub fn submit_prompt(&mut self, prompt: String) {
-        let width = self.cols;
-
-        // Gather the ephemeral tails first (they borrow `self` independently
-        // of the transcript), so we can then mutate the transcript alone.
-        let prev_prompt = self.transcript_mut().take_prompt();
-        self.reasoning_mut().flush();
-        let reasoning_tail = self.reasoning_mut().take_tail(width);
-        let tools_tail = self.tools_mut().take_tail(width);
+        self.flatten_turn_prefix();
 
         let transcript = self.transcript_mut();
-        if let Some(prev_prompt) = prev_prompt {
-            let prompt_style = Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD);
-            let marker_style = Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD);
-
-            if !transcript.is_empty() {
-                transcript.push_separator();
-                transcript.push_separator();
-            }
-
-            transcript.push_line(
-                Line::from(vec![
-                    Span::styled("> ", marker_style),
-                    Span::styled(prev_prompt, prompt_style),
-                ]),
-                LineOrigin::FlattenedPrompt,
-            );
-
-            if !reasoning_tail.is_empty() {
-                transcript.push_separator();
-                for line in reasoning_tail {
-                    transcript.push_line(line, LineOrigin::FlattenedReasoning);
-                }
-            }
-
-            if !tools_tail.is_empty() {
-                transcript.push_separator();
-                for line in tools_tail {
-                    transcript.push_line(line, LineOrigin::FlattenedTools);
-                }
-            }
-
-            if !transcript.response_is_empty() {
-                transcript.push_separator();
-                let response_lines: Vec<String> = transcript
-                    .response_text()
-                    .lines()
-                    .map(|s| s.to_string())
-                    .collect();
-                for line_str in response_lines {
-                    transcript.push_line(
-                        Line::from(Span::styled(line_str, Style::default())),
-                        LineOrigin::FlattenedResponse,
-                    );
-                }
-            }
-        }
-
         transcript.set_prompt(prompt);
         transcript.clear_response();
-        self.reasoning_mut().clear();
-        self.tools_mut().clear();
     }
 
     /// Reconcile the input bar's scroll offsets so the cursor stays visible
@@ -527,6 +481,69 @@ impl<B: Backend> LiveArea<B> {
     /// authoritative full text from `TurnComplete`.
     pub fn reconcile_response(&mut self, text: &str) {
         self.transcript_mut().reconcile_response(text);
+    }
+
+    /// Commit the current turn's prompt, reasoning, and tools into the
+    /// transcript FIFO, then clear those buffers.
+    pub fn flatten_turn_prefix(&mut self) {
+        let width = self.cols;
+
+        let prev_prompt = self.transcript_mut().take_prompt();
+        self.reasoning_mut().flush();
+        let reasoning_tail = self.reasoning_mut().take_tail(width);
+        let tools_tail = self.tools_mut().take_tail(width);
+
+        let transcript = self.transcript_mut();
+        if let Some(prev_prompt) = prev_prompt {
+            let prompt_style = Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD);
+            let marker_style = Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD);
+
+            if !transcript.is_empty() {
+                transcript.push_separator();
+                transcript.push_separator();
+            }
+
+            transcript.push_line(
+                Line::from(vec![
+                    Span::styled("> ", marker_style),
+                    Span::styled(prev_prompt, prompt_style),
+                ]),
+                LineOrigin::FlattenedPrompt,
+            );
+
+            if !reasoning_tail.is_empty() {
+                transcript.push_separator();
+                for line in reasoning_tail {
+                    transcript.push_line(line, LineOrigin::FlattenedReasoning);
+                }
+            }
+
+            if !tools_tail.is_empty() {
+                transcript.push_separator();
+                for line in tools_tail {
+                    transcript.push_line(line, LineOrigin::FlattenedTools);
+                }
+            }
+        }
+
+        self.reasoning_mut().clear();
+        self.tools_mut().clear();
+    }
+
+    /// Flatten the current response into the transcript FIFO.
+    pub fn flatten_response(&mut self) {
+        self.transcript_mut().flatten_response();
+    }
+
+    /// Commit the current turn (prompt, reasoning, tools, and response)
+    /// into the transcript FIFO.
+    pub fn finish_turn(&mut self) {
+        self.flatten_turn_prefix();
+        self.flatten_response();
     }
 
     /// Whether the current turn has any content.
@@ -1385,5 +1402,79 @@ mod tests {
         live.finish_response("streamed response", "");
 
         assert_eq!(live.response_text(), "streamed response");
+    }
+
+    #[test]
+    fn flatten_response_commits_tall_response_to_scrollback() {
+        let cols: u16 = 40;
+        let rows: u16 = 8;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.push_transcript_line("banner".to_string());
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking...");
+        live_area.flush_reasoning();
+        live_area.push_tool("Done");
+        live_area.push_tool("grep");
+
+        // A response far taller than the viewport.
+        let body: String = (0..40)
+            .map(|i| format!("response line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        live_area.replace_response(&body);
+        live_area.finish_response(&body, "final summary line");
+
+        // Turn end: commit prompt/reasoning/tools, then the response.
+        live_area.finish_turn();
+        live_area.push_transcript_line("42 tokens".to_string());
+
+        live_area.compose(&app).unwrap();
+
+        // The tail (including the summary) must be present in the rendered
+        // frame or the scrollback log, not dropped.
+        let visible = dump_buffer(live_area.backend().buffer());
+        let sb = live_area.scrollback().join("\n");
+        assert!(
+            visible.contains("final summary line") || sb.contains("final summary line"),
+            "summary should not be dropped.\nFrame:\n{visible}\nScrollback:\n{sb}"
+        );
+
+        // Submitting the next prompt must not re-append the previous turn's
+        // prompt/reasoning/tools after the response.
+        live_area.submit_prompt("next".to_string());
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        let sb = live_area.scrollback().join("\n");
+        let combined = format!("{sb}\n{visible}");
+        let prompt_pos = combined
+            .find("> hi")
+            .expect("previous prompt should be committed");
+        let reasoning_pos = combined
+            .find("thinking...")
+            .expect("previous reasoning should be committed");
+        let tools_pos = combined.find("  Done");
+        assert!(
+            tools_pos.is_some(),
+            "previous tools should be committed.\nCombined:\n{combined}"
+        );
+        let tools_pos = tools_pos.unwrap();
+        let response_pos = combined
+            .find("response line 39")
+            .expect("previous response should be committed");
+        let usage_pos = combined
+            .find("42 tokens")
+            .expect("usage line should be committed");
+        assert!(
+            prompt_pos < reasoning_pos
+                && reasoning_pos < tools_pos
+                && tools_pos < response_pos
+                && response_pos < usage_pos,
+            "turn should be committed in prompt, reasoning, tools, response, usage order.\nCombined:\n{combined}"
+        );
     }
 }
