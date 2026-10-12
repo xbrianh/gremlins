@@ -300,8 +300,14 @@ fn make_task_runner_at_depth(
                 &work_root, &scratch,
             ));
 
+            // The parent backends validate `max_retries` before starting a run,
+            // so this is normally already bounded. Clamp defensively anyway:
+            // task runners are stored closures and shouldn't be able to panic
+            // from a mis-sliced backoff schedule if a caller ever constructs one
+            // independently.
+            let retry_budget = max_retries.min(retry::STREAM_IDLE_BACKOFF.len());
             let result = retry::with_retry(
-                &retry::STREAM_IDLE_BACKOFF[..max_retries],
+                &retry::STREAM_IDLE_BACKOFF[..retry_budget],
                 |e: &ClientError| {
                     matches!(
                         e,
@@ -317,7 +323,7 @@ fn make_task_runner_at_depth(
                     log::warn!(
                         "{child_prefix}stream {cause}, retrying in {wait}s ({}/{})...",
                         attempt + 1,
-                        max_retries
+                        retry_budget
                     );
                 },
                 || {
@@ -662,11 +668,10 @@ mod tests {
         let model = MockCompletionModel::from_stream_turns([
             vec![MockStreamEvent::error("http://429: slow down")],
             vec![MockStreamEvent::error("http://429: slow down")],
-        ])
-        .erase();
+        ]);
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
-            model,
+            model.clone().erase(),
             None,
             None,
             cancel,
@@ -688,6 +693,11 @@ mod tests {
         assert!(
             output.starts_with("Task error: "),
             "exhausted retries must remain in the tool result, got: {output}"
+        );
+        assert_eq!(
+            model.requests().len(),
+            2,
+            "exhausted retries must perform one retry after the initial attempt"
         );
     }
 
