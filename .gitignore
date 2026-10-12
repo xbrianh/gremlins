@@ -13,5 +13,6 @@ plans/completed/
 *.dSYM/
 *.crate
 rig-core-extracted/
+ratatui-src/
 
 /.gremlins/env
