@@ -596,6 +596,13 @@ mod tests {
 
     /// When every attempt fails retryably, the Task still returns a string
     /// result (not an unwinding error) so the parent sees `Task error: …`.
+    ///
+    /// The inner agent loop now retries 429s at the turn boundary (3 slots in
+    /// `TURN_RETRY_BACKOFF`), and the task runner's `with_retry` is a secondary
+    /// net (1 slot here via `max_retries=1`). With the mock repeating its last
+    /// 429 turn once the script is exhausted, each nested-loop invocation makes
+    /// 4 requests (initial + 3 turn-level retries), and `with_retry` re-invokes
+    /// the loop once more: 8 requests total.
     #[tokio::test(start_paused = true)]
     async fn make_task_runner_exhausts_retries_as_string() {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -630,10 +637,12 @@ mod tests {
             output.starts_with("Task error: "),
             "exhausted retries must remain in the tool result, got: {output}"
         );
+        // Inner loop: 3 turn-level retries (4 attempts) before giving up;
+        // with_retry then re-invokes the loop once (4 more attempts).
         assert_eq!(
             model.requests().len(),
-            2,
-            "exhausted retries must perform one retry after the initial attempt"
+            8,
+            "turn-level retries plus the with_retry safety net must both fire"
         );
     }
 

@@ -19,6 +19,7 @@ use super::interactive::{
 };
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
+use super::retry::TURN_RETRY_BACKOFF;
 use super::tools::{self, ToolContext};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
@@ -51,6 +52,16 @@ pub(crate) fn default_classify(err: ProviderError) -> ClientError {
 }
 
 pub(crate) const DEFAULT_TEMPERATURE: f64 = 0.4;
+
+/// Classify a provider error and report whether it is retryable at the turn
+/// boundary (429 / 5xx / no-HTTP-status mid-stream drops). Reuses the same
+/// `default_classify` (or the caller-supplied classifier) used for the
+/// terminal error path, so the retry decision stays consistent with what the
+/// backend would otherwise surface.
+fn is_retryable(err: &ProviderError, opts: &LoopOpts<'_>) -> bool {
+    let classify = opts.classify_error.unwrap_or(default_classify);
+    matches!(classify(err.clone()), ClientError::ApiServerError { .. })
+}
 
 #[derive(Debug)]
 pub struct CancelToken {
@@ -497,6 +508,7 @@ async fn run_agent_loop_core(
     let mut next_prompt = Message::user(prompt.to_string());
     let mut turns: usize = 0;
     let mut turn_num: usize = 0;
+    let mut turn_retries: usize = 0;
     let mut final_text = String::new();
     let mut timed_out = false;
     let mut stream_error: Option<ProviderError> = None;
@@ -658,6 +670,22 @@ async fn run_agent_loop_core(
         let mut response = match model.stream(builder) {
             Ok(s) => s,
             Err(e) => {
+                // Retryable (429/5xx) error before streaming began — back off
+                // and re-execute this same turn with history intact.
+                if turn_retries < TURN_RETRY_BACKOFF.len() && is_retryable(&e, opts) {
+                    let wait = TURN_RETRY_BACKOFF[turn_retries];
+                    turn_retries += 1;
+                    log::warn!(
+                        "agent_loop: retryable stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
+                    );
+                    send_log(
+                        log_tx,
+                        prefix,
+                        &format!("retry: transient error, backing off {wait}s"),
+                    );
+                    tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                    continue;
+                }
                 stream_error = Some(e);
                 break;
             }
@@ -672,6 +700,7 @@ async fn run_agent_loop_core(
         let mut ended = false;
         let mut turn_usage: Option<Usage> = None;
         let mut paused_mid_stream = false;
+        let mut retry_turn = false;
 
         loop {
             let item = tokio::select! {
@@ -762,6 +791,24 @@ async fn run_agent_loop_core(
                     break;
                 }
                 Ok(Some(Err(e))) => {
+                    // Retryable (429/5xx) error delivered mid-stream — back off
+                    // and re-execute this same turn with history intact.
+                    if turn_retries < TURN_RETRY_BACKOFF.len() && is_retryable(&e, opts) {
+                        let wait = TURN_RETRY_BACKOFF[turn_retries];
+                        turn_retries += 1;
+                        log::warn!(
+                            "agent_loop: retryable mid-stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
+                        );
+                        send_log(
+                            log_tx,
+                            prefix,
+                            &format!("retry: transient error, backing off {wait}s"),
+                        );
+                        drop(response);
+                        retry_turn = true;
+                        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                        break;
+                    }
                     stream_error = Some(e);
                     break;
                 }
@@ -809,6 +856,13 @@ async fn run_agent_loop_core(
             // Stream was interrupted by pause — skip post-stream processing.
             // The turn loop will re-enter at the top and either continue
             // (if Resumed) or execute one turn (if RunOneTurn).
+            continue;
+        }
+
+        if retry_turn {
+            // Stream was interrupted by a retryable error — re-execute this
+            // same turn. History and next_prompt are untouched (the builder
+            // cloned both), so the retry picks up exactly where it left off.
             continue;
         }
 
@@ -885,6 +939,7 @@ async fn run_agent_loop_core(
         }
 
         turn_num += 1;
+        turn_retries = 0;
 
         // ---- completion decision ----
         // Solo Done is the only valid completion signal. Mixed Done + other
@@ -1968,6 +2023,84 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e["message"]["content"][0]["type"] == "tool_result"));
+    }
+
+    /// A 429 on turn N must back off and retry turn N in place — not restart
+    /// the loop from turn 0 — and `turn_num` must count only completed turns.
+    #[tokio::test(start_paused = true)]
+    async fn loop_429_retries_same_turn_without_losing_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-429-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "content").unwrap();
+
+        // Turn 0: Read tool call (completes).
+        // Turn 1 attempt 1: 429 mid-stream error (retried).
+        // Turn 1 attempt 2: Done (completes).
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({ "file_path": f.to_str().unwrap() }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![rig_core::test_utils::MockStreamEvent::error(
+                "http://429: slow down",
+            )],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("recovered"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({ "summary": "done" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "read then finish",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // Skip past the turn-level backoff (2s for the first retry).
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let result = handle.await.unwrap().unwrap();
+
+        assert_eq!(result.text_result.as_deref(), Some("recovered"));
+
+        // Three requests: turn 0, turn 1 (429), turn 1 retry (Done).
+        assert_eq!(model.requests().len(), 3);
+
+        // The retried turn must carry the prior turn's history — the Read
+        // tool result from turn 0 must still be present in the final request.
+        let reqs = model.requests();
+        let final_req = reqs.last().unwrap();
+        let history = format!("{:?}", final_req.chat_history);
+        assert!(
+            history.contains("x.txt"),
+            "retried turn must retain turn 0 history, got: {history}"
+        );
+
+        // turn_num counts completed turns only: turn 0 + turn 1 = 2, not 3.
+        let usage = result.token_usage.unwrap();
+        assert_eq!(usage.turns, 2, "turn_num must exclude the retried attempt");
     }
 
     /// The `Done` summary must survive alongside streamed text: when the
