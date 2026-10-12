@@ -460,7 +460,13 @@ impl ReasoningWidget {
         while let Some(newline_pos) = self.partial.find('\n') {
             let line: String = self.partial[..newline_pos].into();
             self.partial = self.partial[newline_pos + 1..].into();
-            self.lines.push(Line::from(line));
+            self.lines.push(
+                Line::from(line).style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            );
         }
     }
 
@@ -469,7 +475,13 @@ impl ReasoningWidget {
     pub fn flush_reasoning(&mut self) {
         if !self.partial.is_empty() {
             let line = std::mem::take(&mut self.partial);
-            self.lines.push(Line::from(line));
+            self.lines.push(
+                Line::from(line).style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            );
         }
     }
 
@@ -493,7 +505,13 @@ impl ReasoningWidget {
     fn rendered_lines(&self) -> Vec<Line<'static>> {
         let mut out = self.lines.visible_lines().to_vec();
         if !self.partial.is_empty() {
-            out.push(Line::from(self.partial.clone()));
+            out.push(
+                Line::from(self.partial.clone()).style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            );
         }
         out
     }
@@ -562,9 +580,15 @@ impl ToolEventsWidget {
         }
     }
 
-    /// Append a tool-name line, unstyled.
+    /// Append a tool-name line.
     pub fn push_tool(&mut self, name: &str) {
-        self.lines.push(Line::from(name.to_string()));
+        self.lines.push(
+            Line::from(name.to_string()).style(
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        );
     }
 
     /// Reset the live region for a new turn.
