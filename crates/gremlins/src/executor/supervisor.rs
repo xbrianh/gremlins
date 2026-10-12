@@ -2216,22 +2216,36 @@ async fn run_chat_turn(
                 // `gremlin.runtime_config.stream_events` stays alive
                 // (held by the now-completed JoinHandle's Gremlin),
                 // so `stream_rx` would block forever without this branch.
-                let message = match task_result {
-                    Ok((Ok(()), _gremlin)) => {
-                        "agent completed without terminal event".to_string()
+                let (gremlin_for_reinsert, message) = match task_result {
+                    Ok((Ok(()), gremlin)) => {
+                        (Some(gremlin), "agent completed without terminal event".to_string())
                     }
-                    Ok((Err(e), _gremlin)) => {
-                        format!("agent error: {e}")
+                    Ok((Err(e), gremlin)) => {
+                        (Some(gremlin), format!("agent error: {e}"))
                     }
                     Err(join_err) => {
-                        if join_err.is_panic() {
+                        let msg = if join_err.is_panic() {
                             "agent panicked".to_string()
                         } else {
                             format!("agent task cancelled: {join_err}")
-                        }
+                        };
+                        (None, msg)
                     }
                 };
-                finish(&id, &mut run_task, &turn_cancel, &chat_state, &done).await;
+                // Re-insert the gremlin (if we have one) and clear the
+                // in-flight turn. Do NOT call finish() here — run_task
+                // was already polled to completion by the select, and
+                // awaiting it again is undefined.
+                if let Some(g) = gremlin_for_reinsert {
+                    reinsert_chat_gremlin(&id, g, &chat_state).await;
+                }
+                let mut state = chat_state.lock().await;
+                if let Some(cur) = &state.current {
+                    if Arc::ptr_eq(&cur.cancel, &turn_cancel) {
+                        state.current = None;
+                    }
+                }
+                done.notify_one();
                 let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": message}));
                 let _ = writer.write_json_line(&payload).await;
                 return;

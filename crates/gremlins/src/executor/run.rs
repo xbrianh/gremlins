@@ -364,15 +364,26 @@ async fn run_agent(
 
     // Chat gremlins pre-populate the agent loop's history from the previous
     // stage's conversation artifact so full model context flows between turns.
-    // A missing artifact (first turn) or an unreadable one yields no prefix;
-    // a parse failure is logged by `messages_from_conversation`.
+    // A missing artifact (first turn) yields no prefix. An artifact that
+    // exists but fails to parse is fatal: running with an empty prefix would
+    // then overwrite the unreadable artifact with the new turn's messages,
+    // destroying recoverable history.
     let prepopulated_messages = if gremlin.state.read_str("kind") == "chat" {
-        gremlin
+        match gremlin
             .state
             .content("artifact://conversation.json", None)
             .await
-            .ok()
-            .and_then(|json| messages_from_conversation(&json))
+        {
+            Ok(json) => match messages_from_conversation(&json) {
+                Ok(msgs) => Some(msgs),
+                Err(e) => {
+                    return Err(RunError::Message(format!(
+                        "conversation artifact unparseable; refusing to overwrite with empty history: {e}"
+                    )));
+                }
+            },
+            Err(_) => None, // First turn — no artifact yet
+        }
     } else {
         None
     };
@@ -1064,14 +1075,11 @@ impl Gremlin {
 /// Returns `None` on a parse failure so the caller can distinguish a missing
 /// or unreadable artifact from a genuinely empty history and avoid persisting
 /// an empty prefix over the prior artifact.
-pub(crate) fn messages_from_conversation(json: &str) -> Option<Vec<rig_core::completion::Message>> {
-    match serde_json::from_str::<Vec<rig_core::completion::Message>>(json) {
-        Ok(messages) => Some(messages),
-        Err(e) => {
-            log::warn!("chat: failed to parse conversation artifact: {e}");
-            None
-        }
-    }
+pub(crate) fn messages_from_conversation(
+    json: &str,
+) -> Result<Vec<rig_core::completion::Message>, String> {
+    serde_json::from_str::<Vec<rig_core::completion::Message>>(json)
+        .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
 }
 
 /// Clamp `text` to at most `max` bytes, cutting on a char boundary.
@@ -1240,13 +1248,12 @@ mod tests {
         assert_eq!(re_serialized, json, "round-trip must be byte-stable");
     }
 
-    /// A malformed artifact must yield `None` (so the caller leaves the prior
-    /// artifact untouched) rather than an empty prefix that would be persisted
-    /// over good history on the next turn.
+    /// A malformed artifact must yield an error (so the caller refuses to
+    /// run and avoids overwriting good history with an empty prefix).
     #[test]
     fn messages_from_conversation_rejects_malformed_json() {
-        assert!(messages_from_conversation("not json").is_none());
-        assert!(messages_from_conversation("{}").is_none());
+        assert!(messages_from_conversation("not json").is_err());
+        assert!(messages_from_conversation("{}").is_err());
     }
 
     // --- agent ---

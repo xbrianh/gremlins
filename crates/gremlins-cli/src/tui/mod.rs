@@ -88,7 +88,7 @@ fn send_chat_input(
                     let _ = chat_tx.send(ChatEvent::Error {
                         message: msg,
                         id: None,
-                        turn: None,
+                        turn: Some(turn_id.clone()),
                     });
                 } else if let Some(id) = resp.get("id").and_then(|v| v.as_str()) {
                     // The ack carries the gremlin id (created on the first
@@ -105,7 +105,7 @@ fn send_chat_input(
                 let _ = chat_tx.send(ChatEvent::Error {
                     message: e,
                     id: None,
-                    turn: None,
+                    turn: Some(turn_id.clone()),
                 });
             }
         }

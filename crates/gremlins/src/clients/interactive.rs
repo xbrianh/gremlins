@@ -134,19 +134,6 @@ pub enum InteractiveEvent {
     },
 }
 
-impl InteractiveEvent {
-    /// Whether this event is terminal (delivers authoritative state that
-    /// must not be dropped when a bounded channel is full). Transient
-    /// chunks may be lost; `TurnComplete` reconciliation and `Done`/`Ended`
-    /// must always arrive.
-    fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::TurnComplete { .. } | Self::Done { .. } | Self::Ended { .. }
-        )
-    }
-}
-
 /// Sender for stream events emitted by the agent loop.
 ///
 /// The interactive/debug path uses a broadcast sender because it genuinely
@@ -176,15 +163,13 @@ impl StreamEventSender {
                 }
             }
             Self::Mpsc(tx) => {
-                if event.is_terminal() {
-                    // Terminal events carry authoritative state
-                    // (reconciliation text, Done/Ended). Blocking-send them
-                    // so a burst of stream chunks can never fill the queue
-                    // and drop the completion the TUI depends on.
-                    let _ = tx.blocking_send(event);
-                } else {
-                    let _ = tx.try_send(event);
-                }
+                // Use try_send for all events. Terminal events
+                // (TurnComplete/Done/Ended) are protected from loss by the
+                // TUI's reconciliation from TurnComplete and the safety-net
+                // run_task branch in run_chat_turn's select loop.
+                // blocking_send would panic here because send() is called
+                // from within a tokio async runtime context.
+                let _ = tx.try_send(event);
             }
         }
     }
