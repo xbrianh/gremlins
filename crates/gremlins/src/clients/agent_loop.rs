@@ -703,6 +703,10 @@ async fn run_agent_loop_core(
                             message: "cancelled".into(),
                         });
                     }
+                    // Preserve the pending one-turn state so the retry
+                    // re-executes this turn instead of re-entering
+                    // interactive_loop when in debug mode.
+                    pending_run_one_turn = true;
                     continue;
                 }
                 stream_error = Some(e);
@@ -891,6 +895,9 @@ async fn run_agent_loop_core(
             // Stream was interrupted by a retryable error — re-execute this
             // same turn. History and next_prompt are untouched (the builder
             // cloned both), so the retry picks up exactly where it left off.
+            // Preserve the pending one-turn state so the retry re-executes
+            // this turn instead of re-entering interactive_loop in debug mode.
+            pending_run_one_turn = true;
             continue;
         }
 
@@ -2144,6 +2151,142 @@ mod tests {
         // turn_num counts completed turns only: turn 0 + turn 1 = 2, not 3.
         let usage = result.token_usage.unwrap();
         assert_eq!(usage.turns, 2, "turn_num must exclude the retried attempt");
+    }
+
+    /// A wire that fails `encode` once — a request error with no HTTP status,
+    /// which `default_classify` treats as retryable — then delegates to
+    /// [`MockScript`]. Exercises the `model.stream(builder)` `Err(e)` branch,
+    /// which the mid-stream 429 tests never reach.
+    #[derive(Clone)]
+    struct FailingOnceWire {
+        inner: rig_core::test_utils::MockScript,
+        failed: Arc<AtomicBool>,
+    }
+
+    impl rig_core::wire::Wire for FailingOnceWire {
+        type Op = Completion;
+        type Payload = CompletionRequest;
+        type Frame = rig_core::test_utils::MockFrame;
+        type Decoder<'id> = rig_core::test_utils::MockDecoder<'id>;
+
+        fn describe(&self) -> rig_core::wire::Descriptor<'_> {
+            self.inner.describe()
+        }
+
+        fn encode(
+            &self,
+            request: rig_core::wire::Request<Self>,
+            mode: rig_core::wire::Mode,
+        ) -> Result<Self::Payload, rig_core::error::EncodeError> {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                return Err(rig_core::error::EncodeError::request(
+                    "transient encode failure",
+                ));
+            }
+            self.inner.encode(request, mode)
+        }
+
+        fn decoder<'id>(&self) -> Self::Decoder<'id> {
+            self.inner.decoder()
+        }
+    }
+
+    /// A transport that records each request and answers with a single `Done`
+    /// turn, so the retried attempt can be observed to succeed.
+    #[derive(Clone)]
+    struct RecordingDoneTransport {
+        requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+    }
+
+    impl rig_core::driver::Transport<FailingOnceWire> for RecordingDoneTransport {
+        fn send(
+            &self,
+            request: CompletionRequest,
+            _exchange: rig_core::driver::Exchange,
+        ) -> rig_core::driver::Opening<rig_core::test_utils::MockFrame> {
+            self.requests.lock().unwrap().push(request);
+            rig_core::driver::Opening::ready(rig_core::driver::Opened::new(futures::stream::iter(
+                [
+                    Ok(rig_core::test_utils::MockFrame::Event(
+                        rig_core::test_utils::MockStreamEvent::tool_call(
+                            "done1",
+                            "Done",
+                            serde_json::json!({"summary": "done"}),
+                        ),
+                    )),
+                    Ok(rig_core::test_utils::MockFrame::Event(
+                        rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+                    )),
+                ],
+            )))
+        }
+    }
+
+    /// An immediate `model.stream(builder)` failure — a request error with no
+    /// HTTP status, which `default_classify` treats as retryable — must back
+    /// off and re-execute the same turn, then succeed. This exercises the
+    /// `Err(e)` branch of the stream-open match, distinct from mid-stream
+    /// errors.
+    #[tokio::test(start_paused = true)]
+    async fn loop_immediate_stream_error_retries_same_turn() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-immediate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let model = rig_core::driver::Model::new(
+            FailingOnceWire {
+                inner: rig_core::test_utils::MockScript::default(),
+                failed: Arc::new(AtomicBool::new(false)),
+            },
+            RecordingDoneTransport {
+                requests: requests.clone(),
+            },
+        )
+        .erase();
+
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone(),
+            "finish",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // Skip past the first turn-level backoff (2s).
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let result = handle.await.unwrap().unwrap();
+
+        assert_eq!(result.text_result.as_deref(), Some("done"));
+
+        // The failed encode never reaches the transport; only the retried
+        // attempt does, and it must carry the original prompt.
+        let recorded = requests.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "only the retried attempt reaches the transport"
+        );
+        let history = format!("{:?}", recorded[0].chat_history);
+        assert!(
+            history.contains("finish"),
+            "retried request must carry the original prompt, got: {history}"
+        );
+
+        // turn_num counts completed turns only: the failed attempt is excluded.
+        let usage = result.token_usage.unwrap();
+        assert_eq!(usage.turns, 1, "turn_num must exclude the retried attempt");
     }
 
     /// A cancel token set during the turn-level backoff must abandon the
