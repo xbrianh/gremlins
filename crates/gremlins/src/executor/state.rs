@@ -239,12 +239,6 @@ pub trait StateStore: Send + Sync + Debug {
     fn artifact_dir(&self) -> PathBuf {
         PathBuf::new()
     }
-
-    /// Check whether a file exists at `path` (empty files are valid).
-    #[deprecated]
-    async fn has_file(&self, path: &str) -> bool {
-        tokio::fs::metadata(path).await.is_ok()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -657,10 +651,6 @@ impl FileSystemStateStore {
 
     pub async fn keys(&self) -> Vec<String> {
         self.read_registry_json().await.into_keys().collect()
-    }
-
-    pub async fn has_file(&self, path: &str) -> bool {
-        tokio::fs::metadata(path).await.is_ok()
     }
 
     /// Merge that prefers a direct file copy when `other` is also a
@@ -1217,11 +1207,6 @@ impl StateStore for FileSystemStateStore {
     fn artifact_dir(&self) -> PathBuf {
         self.artifact_dir()
     }
-
-    #[allow(deprecated)]
-    async fn has_file(&self, path: &str) -> bool {
-        self.has_file(path).await
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1395,11 +1380,6 @@ impl StateStore for ScopedFileSystemStateStore {
     #[allow(deprecated)]
     fn artifact_dir(&self) -> PathBuf {
         self.inner.artifact_dir()
-    }
-
-    #[allow(deprecated)]
-    async fn has_file(&self, path: &str) -> bool {
-        self.inner.has_file(path).await
     }
 }
 
@@ -1599,10 +1579,6 @@ impl StateData {
         keys: &[String],
     ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
         self.store.checkout_registry(keys).await
-    }
-
-    pub async fn has_file(&self, path: &str) -> bool {
-        self.store.has_file(path).await
     }
 
     // --- methods with guards that stay on StateData ---
@@ -2834,7 +2810,7 @@ mod tests {
         assert!(!localized.artifact_dir().starts_with(store.artifact_dir()));
     }
 
-    // --- artifact_dir / has_file tests ---
+    // --- artifact_dir tests ---
 
     #[tokio::test]
     async fn test_filesystem_artifact_dir() {
