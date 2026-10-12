@@ -7,34 +7,31 @@ use rig_core::operation::Completion;
 
 use super::backend::ClientError;
 use super::retry;
+use super::task_kind::TaskKind;
 use super::tools::{self, ToolContext};
 
-/// Build a [`TaskModelSelector`] from the raw `task-clients` config maps and
-/// a backend that can resolve `provider:model` specs into live models.
+/// Build a [`TaskModelSelector`] from the raw `task-clients` config map and a
+/// backend that can resolve `provider:model` specs into live models.
 ///
-/// Returns `None` when both maps are empty (the common case) or when the
-/// backend cannot serve any of the configured entries.
+/// Returns `None` when the map is empty (the common case) or when the backend
+/// cannot serve any of the configured entries.
 pub(crate) fn build_task_selector(
     backend: std::sync::Arc<dyn crate::clients::backend::Backend>,
-    exact: &HashMap<String, String>,
-    prefix: &HashMap<String, String>,
+    by_kind: &HashMap<TaskKind, String>,
 ) -> Option<TaskModelSelector<DynModel<Completion>>> {
-    if exact.is_empty() && prefix.is_empty() {
+    if by_kind.is_empty() {
         return None;
     }
     // Verify the backend can resolve at least one configured entry.
-    let any_resolvable = exact
+    let any_resolvable = by_kind
         .values()
-        .chain(prefix.values())
         .any(|spec| backend.make_model(spec).is_some());
     if !any_resolvable {
         return None;
     }
-    let exact = exact.clone();
-    let prefix = prefix.clone();
+    let by_kind = by_kind.clone();
     TaskModelSelector::new(
-        exact,
-        prefix,
+        by_kind,
         Arc::new(move |spec: &str| backend.make_model(spec)),
     )
 }
@@ -47,30 +44,18 @@ const MAX_DEPTH: u32 = 3;
 pub(crate) type TaskModelFactory<M = DynModel<Completion>> =
     Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
 
-/// Lookup maps for `task-clients`, already lowercased at parse time. Shared
-/// behind an `Arc` so a Task fan-out clones one pointer per invocation rather
-/// than the whole map.
+/// Lookup map for `task-clients`, keyed by the exact [`TaskKind`] spelling.
+/// Shared behind an `Arc` so a Task fan-out clones one pointer per invocation
+/// rather than the whole map.
 #[derive(Debug)]
 struct TaskClientOverrides {
-    exact: HashMap<String, String>,
-    prefix: HashMap<String, String>,
+    by_kind: HashMap<TaskKind, String>,
 }
 
 impl TaskClientOverrides {
-    /// The spec configured for `description`, if any. An exact key wins over any
-    /// prefix; among matching prefixes the longest wins. Lookup is
-    /// case-insensitive — keys were lowercased at parse time, so only the
-    /// description is folded here.
-    fn spec_for(&self, description: &str) -> Option<&str> {
-        let desc = description.to_lowercase();
-        if let Some(spec) = self.exact.get(&desc) {
-            return Some(spec);
-        }
-        self.prefix
-            .iter()
-            .filter(|(prefix, _)| desc.starts_with(prefix.as_str()))
-            .max_by_key(|(prefix, _)| prefix.len())
-            .map(|(_, spec)| spec.as_str())
+    /// The spec configured for `kind`, if any. Lookup is an exact key match.
+    fn spec_for(&self, kind: TaskKind) -> Option<&str> {
+        self.by_kind.get(&kind).map(|s| s.as_str())
     }
 }
 
@@ -95,34 +80,33 @@ impl<M> std::fmt::Debug for TaskModelSelector<M> {
 }
 
 impl<M: Clone> TaskModelSelector<M> {
-    /// Assemble a selector from parsed config. Returns `None` when both maps are
+    /// Assemble a selector from parsed config. Returns `None` when the map is
     /// empty — the common case, where nothing ever needs building.
     pub(crate) fn new(
-        exact: HashMap<String, String>,
-        prefix: HashMap<String, String>,
+        by_kind: HashMap<TaskKind, String>,
         factory: TaskModelFactory<M>,
     ) -> Option<Self> {
-        if exact.is_empty() && prefix.is_empty() {
+        if by_kind.is_empty() {
             return None;
         }
         Some(Self {
-            overrides: Arc::new(TaskClientOverrides { exact, prefix }),
+            overrides: Arc::new(TaskClientOverrides { by_kind }),
             factory,
         })
     }
 
-    /// The model for a Task described by `description`, or a clone of
-    /// `default_model` when no entry matches or when the matching entry names
-    /// a provider this backend cannot serve.
+    /// The model for a Task of `kind`, or a clone of `default_model` when no
+    /// entry matches or when the matching entry names a provider this backend
+    /// cannot serve.
     ///
     /// Returns `(model, spec_string)` where `spec_string` is the matched
     /// `task-clients` entry (for logging), or `None` when no entry matched or
     /// the factory could not build a model for the matched spec.
-    fn model_for(&self, description: &str, default_model: &M) -> (M, Option<String>)
+    fn model_for(&self, kind: TaskKind, default_model: &M) -> (M, Option<String>)
     where
         M: Clone,
     {
-        match self.overrides.spec_for(description) {
+        match self.overrides.spec_for(kind) {
             Some(spec) => match (self.factory)(spec) {
                 Some(m) => (m, Some(spec.to_string())),
                 None => (default_model.clone(), None),
@@ -171,7 +155,7 @@ fn task_prefix(base: &str, chain: &str) -> String {
 /// a nested agent loop.
 ///
 /// `task_model_selector` carries the `task-clients` configuration, so each
-/// invocation resolves its own model from its own `description`. `None` means
+/// invocation resolves its own model from its own `kind`. `None` means
 /// no overrides are configured.
 ///
 /// Recursive tasks are supported and bounded by `MAX_DEPTH`. Depth is a
@@ -235,7 +219,7 @@ fn make_task_runner_at_depth(
     max_tokens: Option<u64>,
     skip_temperature: bool,
 ) -> tools::TaskFn {
-    Arc::new(move |description: String, task: String| {
+    Arc::new(move |kind: TaskKind, task: String| {
         let model = model.clone();
         let task_model_selector = task_model_selector.clone();
         let tool_filter = tool_filter.clone();
@@ -253,9 +237,9 @@ fn make_task_runner_at_depth(
             }
 
             // A selector, when configured, may swap in a different model based
-            // on this task's own `description`; otherwise the parent's stands.
+            // on this task's own `kind`; otherwise the parent's stands.
             let (selected_model, _selected_spec) = match &task_model_selector {
-                Some(selector) => selector.model_for(&description, &model),
+                Some(selector) => selector.model_for(kind, &model),
                 None => (model.clone(), None),
             };
             // Use the model's own id() when available; fall back to the
@@ -349,14 +333,8 @@ fn make_task_runner_at_depth(
             match result {
                 Ok(completed) => {
                     let out = completed.text_result.unwrap_or_default();
-                    let desc_preview = if description.is_empty() {
-                        "(empty)".to_string()
-                    } else {
-                        tools::preview_str(&description, 80)
-                    };
                     log::info!(
-                        "task complete: desc={desc_q} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?} has_done_header={has_done} has_md_header={has_md}",
-                        desc_q = desc_preview,
+                        "task complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?} has_done_header={has_done} has_md_header={has_md}",
                         p_len = task.len(),
                         p_preview = tools::preview_str(&task, 120),
                         o_len = out.len(),
@@ -410,26 +388,21 @@ mod tests {
     }
 
     #[test]
-    fn task_client_overrides_match_case_insensitively() {
+    fn task_client_overrides_match_by_kind() {
         let overrides = TaskClientOverrides {
-            exact: HashMap::from([("scout".into(), "openai:mini".into())]),
-            prefix: HashMap::from([
-                ("sc".into(), "openai:sc".into()),
-                ("impl".into(), "openai:short".into()),
-                ("implement".into(), "openai:gpt-4o".into()),
+            by_kind: HashMap::from([
+                (TaskKind::Scout, "openai:mini".into()),
+                (TaskKind::Implement, "openai:gpt-4o".into()),
             ]),
         };
 
-        // An exact key wins over any matching prefix; the description is folded
-        // so the key's case doesn't matter.
-        assert_eq!(overrides.spec_for("Scout"), Some("openai:mini"));
-        // Among matching prefixes the longest wins.
+        assert_eq!(overrides.spec_for(TaskKind::Scout), Some("openai:mini"));
         assert_eq!(
-            overrides.spec_for("Implementation of x"),
+            overrides.spec_for(TaskKind::Implement),
             Some("openai:gpt-4o")
         );
         // Nothing matches.
-        assert_eq!(overrides.spec_for("review"), None);
+        assert_eq!(overrides.spec_for(TaskKind::Review), None);
     }
 
     #[test]
@@ -437,14 +410,13 @@ mod tests {
         let factory: TaskModelFactory<String> =
             Arc::new(|spec: &str| Some(format!("built:{spec}")));
         let selector = TaskModelSelector::new(
-            HashMap::from([("scout".into(), "openai:mini".into())]),
-            HashMap::new(),
+            HashMap::from([(TaskKind::Scout, "openai:mini".into())]),
             factory,
         )
         .expect("a non-empty task-clients map yields a selector");
 
         assert_eq!(
-            selector.model_for("Scout", &"default".to_string()),
+            selector.model_for(TaskKind::Scout, &"default".to_string()),
             (
                 "built:openai:mini".to_string(),
                 Some("openai:mini".to_string())
@@ -452,7 +424,7 @@ mod tests {
         );
         // No match — the default model stands.
         assert_eq!(
-            selector.model_for("review", &"default".to_string()),
+            selector.model_for(TaskKind::Review, &"default".to_string()),
             ("default".to_string(), None)
         );
     }
@@ -461,58 +433,22 @@ mod tests {
     fn task_model_selector_falls_back_when_factory_returns_none() {
         let factory: TaskModelFactory<String> = Arc::new(|_spec: &str| None);
         let selector = TaskModelSelector::new(
-            HashMap::from([("scout".into(), "openai:mini".into())]),
-            HashMap::new(),
+            HashMap::from([(TaskKind::Scout, "openai:mini".into())]),
             factory,
         )
         .expect("a non-empty map yields a selector");
 
         // Spec matches but factory returns None — fall back to default.
         assert_eq!(
-            selector.model_for("Scout", &"default".to_string()),
+            selector.model_for(TaskKind::Scout, &"default".to_string()),
             ("default".to_string(), None)
-        );
-    }
-
-    #[test]
-    fn task_model_selector_precedence_is_provider_agnostic() {
-        // Precedence (exact > longest prefix) is resolved on raw entries
-        // before the factory sees a spec.  A factory that only serves one
-        // provider must not leak a lower-precedence match for another
-        // provider when the winner is unsupported.
-        let served = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let factory: TaskModelFactory<String> = {
-            let served = served.clone();
-            Arc::new(move |spec: &str| {
-                served.lock().unwrap().push(spec.to_string());
-                // Only serve "openai" provider.
-                spec.strip_prefix("openai:")
-                    .map(|model| format!("built:{model}"))
-            })
-        };
-        let selector = TaskModelSelector::new(
-            HashMap::from([("scout".into(), "openrouter:gpt-4o-mini".into())]),
-            HashMap::from([("s".into(), "openai:gpt-4o".into())]),
-            factory,
-        )
-        .expect("configured");
-
-        // "Scout" has an exact match — the factory receives the openrouter
-        // spec, returns None, and we fall back to default.  The lower-priority
-        // prefix "s*" must not be exposed.
-        let result = selector.model_for("Scout", &"default".to_string());
-        assert_eq!(result, ("default".to_string(), None));
-        assert_eq!(
-            served.lock().unwrap().as_slice(),
-            &["openrouter:gpt-4o-mini"],
-            "only the winning spec should be presented to the factory"
         );
     }
 
     #[test]
     fn task_model_selector_is_none_when_unconfigured() {
         let factory: TaskModelFactory<String> = Arc::new(|_: &str| Some(String::new()));
-        assert!(TaskModelSelector::new(HashMap::new(), HashMap::new(), factory).is_none());
+        assert!(TaskModelSelector::new(HashMap::new(), factory).is_none());
     }
 
     fn depth_test_ctx() -> ToolContext {
@@ -566,7 +502,7 @@ mod tests {
         );
 
         // First invocation: depth 0 < 3, should succeed.
-        let output = runner("label".into(), "first call".into()).await;
+        let output = runner(TaskKind::Scout, "first call".into()).await;
         assert!(
             !output.contains("max depth"),
             "depth 0 should not hit guard, got: {output}"
@@ -608,7 +544,7 @@ mod tests {
             false,
         );
 
-        let blocked = runner("label".into(), "too deep".into()).await;
+        let blocked = runner(TaskKind::Scout, "too deep".into()).await;
         assert!(
             blocked.contains("max depth (3) exceeded"),
             "call at MAX_DEPTH should be rejected, got: {blocked}"
@@ -648,7 +584,7 @@ mod tests {
             false,
         );
 
-        let handle = tokio::spawn(runner("label".into(), "transient".into()));
+        let handle = tokio::spawn(runner(TaskKind::Scout, "transient".into()));
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let output = handle.await.unwrap();
         assert!(
@@ -687,7 +623,7 @@ mod tests {
             false,
         );
 
-        let handle = tokio::spawn(runner("label".into(), "exhaust".into()));
+        let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into()));
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let output = handle.await.unwrap();
         assert!(
@@ -748,7 +684,7 @@ mod tests {
         // Ten concurrent siblings at depth 0 — none should be rejected as
         // "max depth" even though they overlap in time.
         let handles: Vec<_> = (0..10)
-            .map(|i| tokio::spawn(runner.clone()(format!("label {i}"), format!("call {i}"))))
+            .map(|i| tokio::spawn(runner.clone()(TaskKind::Scout, format!("call {i}"))))
             .collect();
         for h in handles {
             let out = h.await.unwrap();
@@ -818,7 +754,7 @@ mod tests {
                 rig_core::test_utils::MockStreamEvent::tool_call(
                     "c1",
                     "Task",
-                    serde_json::json!({"description": "child", "prompt": "child task"}),
+                    serde_json::json!({"kind": "Scout", "prompt": "child task"}),
                 ),
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ]
@@ -859,7 +795,7 @@ mod tests {
         #[test]
         fn task_prefix_wraps_a_single_segment_at_depth_one() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("only")]);
-            block_on(runner("label".into(), "task".into()));
+            block_on(runner(TaskKind::Scout, "task".into()));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
@@ -880,7 +816,7 @@ mod tests {
         fn nested_task_prefix_appends_to_the_parent_chain() {
             let (runner, mut log_rx) =
                 runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
-            block_on(runner("label".into(), "task".into()));
+            block_on(runner(TaskKind::Scout, "task".into()));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
@@ -902,8 +838,8 @@ mod tests {
         fn sibling_invocations_get_distinct_segments() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
             block_on(async {
-                runner("one".into(), "one".into()).await;
-                runner("two".into(), "two".into()).await;
+                runner(TaskKind::Scout, "one".into()).await;
+                runner(TaskKind::Scout, "two".into()).await;
             });
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));

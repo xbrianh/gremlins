@@ -12,5 +12,6 @@ pub mod protocol;
 pub(crate) mod retry;
 pub(crate) mod stream_json;
 pub(crate) mod task;
+pub(crate) mod task_kind;
 pub(crate) mod token_provider;
 pub(crate) mod tools;

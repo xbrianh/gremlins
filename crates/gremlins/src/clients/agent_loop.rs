@@ -1449,7 +1449,7 @@ pub(crate) fn key_arg(args: &serde_json::Value) -> String {
             "pattern",
             "url",
             "output_file",
-            "description",
+            "kind",
         ] {
             if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
@@ -1469,7 +1469,7 @@ pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
             "command",
             "pattern",
             "path",
-            "description",
+            "kind",
             "url",
             "output_file",
         ] {
@@ -1778,10 +1778,7 @@ mod tests {
     #[test]
     fn ledger_key_arg_covers_extra_fields_and_truncates() {
         assert_eq!(ledger_key_arg(&serde_json::json!({"path": "/tmp"})), "/tmp");
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"description": "fix it"})),
-            "fix it"
-        );
+        assert_eq!(ledger_key_arg(&serde_json::json!({"kind": "Fix"})), "Fix");
         assert_eq!(ledger_key_arg(&serde_json::json!({"pattern": ""})), "");
         let long = ledger_key_arg(&serde_json::json!({"command": "x".repeat(200)}));
         assert_eq!(long.chars().count(), 80);
@@ -3019,7 +3016,7 @@ mod tests {
             turn.push(rig_core::test_utils::MockStreamEvent::tool_call(
                 format!("c{i}"),
                 "Task",
-                serde_json::json!({"description": format!("d{i}"), "prompt": format!("p{i}")}),
+                serde_json::json!({"kind": "Scout", "prompt": format!("p{i}")}),
             ));
         }
         turn.push(rig_core::test_utils::MockStreamEvent::final_response_with_default_usage());
@@ -3086,7 +3083,7 @@ mod tests {
         assert_eq!(rejected, 1, "only the call past the cap is rejected");
     }
 
-    /// A `task-clients` entry matching the task's `description` must swap in the
+    /// A `task-clients` entry matching the task's `kind` must swap in the
     /// model the factory builds, and nothing else about the Task call changes.
     #[tokio::test]
     async fn task_clients_override_selects_the_task_model() {
@@ -3098,7 +3095,7 @@ mod tests {
             MockStreamEvent::tool_call(
                 id,
                 "Task",
-                serde_json::json!({"description": "Scout", "prompt": "look around"}),
+                serde_json::json!({"kind": "Scout", "prompt": "look around"}),
             )
         };
         let done_call = |id: &str, summary: &str| {
@@ -3130,8 +3127,10 @@ mod tests {
         });
 
         let selector = super::super::task::TaskModelSelector::new(
-            HashMap::from([("scout".to_string(), "openai:mini".to_string())]),
-            HashMap::new(),
+            HashMap::from([(
+                super::super::task_kind::TaskKind::Scout,
+                "openai:mini".to_string(),
+            )]),
             factory,
         )
         .expect("a configured task-clients map yields a selector");
@@ -3184,7 +3183,7 @@ mod tests {
             .expect("task result must reach the parent history");
         assert!(
             task_result.contains("# Scout"),
-            "task result should carry its description header, got: {task_result}"
+            "task result should carry its kind header, got: {task_result}"
         );
     }
 
@@ -3295,7 +3294,7 @@ mod tests {
             MockStreamEvent::tool_call(
                 id,
                 "Task",
-                serde_json::json!({"description": "Scout", "prompt": "look"}),
+                serde_json::json!({"kind": "Scout", "prompt": "look"}),
             )
         };
         let done_call = |id: &str, summary: &str| {
@@ -3323,8 +3322,10 @@ mod tests {
             Arc::new(move |_spec: &str| Some(child_handle.clone().erase()));
 
         let selector = super::super::task::TaskModelSelector::new(
-            HashMap::from([("scout".to_string(), "openai:mini".to_string())]),
-            HashMap::new(),
+            HashMap::from([(
+                super::super::task_kind::TaskKind::Scout,
+                "openai:mini".to_string(),
+            )]),
             factory,
         )
         .expect("configured");
