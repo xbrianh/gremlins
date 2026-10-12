@@ -74,7 +74,7 @@ run()
 4. Set `app.active_request = true`, store `app.pending_user_message`
 5. Spawn a task that sends `{"op": "chat", "text", "id"}` via the persistent `DaemonClient` (Esc sends `{"op": "cancel_chat"}`)
 6. `ChatEvent::ReasoningChunk` → `live_area.push_reasoning_text()` (accumulates partials, flushes on newline)
-7. `ChatEvent::ToolResult` → `live_area.push_tool()`
+7. `ChatEvent::ToolResult` → matched and logged only (no rendering); `ChatEvent::TurnComplete` is the sole source of rich tool-event lines
 8. `ChatEvent::StreamChunk` → `live_area.push_response()` (accumulates raw response, marks the response region dirty)
 9. `ChatEvent::Done` → reconcile the raw response accumulator with `Done.text` (use summary only if nothing streamed), then `live_area.finish_turn()` unpins the turn and clears its draft state
 10. `Esc` during active request → abort chat task, send `cancel_chat`, `live_area.clear_current_turn()` truncates the FIFO back to the turn start

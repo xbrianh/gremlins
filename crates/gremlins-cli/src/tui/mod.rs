@@ -1270,8 +1270,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         live_area.push_reasoning_text(&text);
                     }
                     ChatEvent::ToolResult { name, .. } => {
+                        // The bare tool name is intentionally not rendered here;
+                        // `ChatEvent::TurnComplete` is the sole source of rich
+                        // tool-event lines. The event is still matched (and logged)
+                        // because other consumers rely on its payload.
                         log::debug!("ToolResult name={name}");
-                        live_area.push_tool(&name);
                     }
                     ChatEvent::TurnComplete { text, tool_calls, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
