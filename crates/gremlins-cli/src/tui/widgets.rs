@@ -34,6 +34,8 @@ use crate::tui::buffer::{wrapped_height, BoundedBuffer, LineOrigin, ScrollableBu
 pub struct RenderContext<'a> {
     /// Current input-bar text.
     pub input: &'a str,
+    /// Cursor byte index into `input`.
+    pub cursor: usize,
     /// Gremlin id currently being followed, if any.
     pub following_log: Option<&'a str>,
     /// Cached active-gremlin count string.
@@ -78,6 +80,21 @@ pub trait LiveAreaWidget {
 
     /// Mutable downcast helper.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
+    /// Layout priority when the viewport is too short for every widget's
+    /// requested height. **Lower value is downsized first.** The input bar
+    /// returns the highest value so it is the last widget to lose rows.
+    fn size_priority(&self) -> i32 {
+        0
+    }
+
+    /// Ordering for committing overflow to scrollback. **Lower value is
+    /// committed first.** Only the transcript produces overflow today, but
+    /// the integer gives `compose` a deterministic ordering if more than
+    /// one widget ever does.
+    fn overflow_priority(&self) -> i32 {
+        0
+    }
 }
 
 /// Emit the `as_any`/`as_any_mut` trait method bodies for a widget impl.
@@ -227,6 +244,14 @@ impl Default for TranscriptWidget {
 
 impl LiveAreaWidget for TranscriptWidget {
     as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        0
+    }
+
+    fn overflow_priority(&self) -> i32 {
+        0
+    }
+
     fn height_constraint(&self, _width: u16, ctx: &RenderContext) -> Constraint {
         // When a blocking overlay is active, collapse to zero so the overlay
         // occupies the whole content region.
@@ -420,6 +445,10 @@ impl Default for ReasoningWidget {
 
 impl LiveAreaWidget for ReasoningWidget {
     as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        10
+    }
+
     fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
         if ctx.blocking_overlay() {
             return Constraint::Length(0);
@@ -485,6 +514,10 @@ impl Default for ToolsWidget {
 
 impl LiveAreaWidget for ToolsWidget {
     as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        10
+    }
+
     fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
         if ctx.blocking_overlay() {
             return Constraint::Length(0);
@@ -505,27 +538,146 @@ impl LiveAreaWidget for ToolsWidget {
     }
 }
 
-/// The input bar. Stateless — reads the current input from the render
-/// context.
-pub struct InputBarWidget;
+/// The input bar. Wraps its text at the current width and grows up to 5
+/// rows. Owns the vertical scroll offset so the cursor stays visible within
+/// the wrapped view. Text is wrapped at the terminal width (the only mode
+/// `Paragraph` supports with `Wrap { trim: false }`), so there is no
+/// horizontal scroll: a row is never wider than the viewport.
+pub struct InputBarWidget {
+    /// Vertical scroll offset (in wrapped rows) across the wrapped view.
+    v_scroll: u16,
+}
+
+impl InputBarWidget {
+    pub fn new() -> Self {
+        Self { v_scroll: 0 }
+    }
+
+    /// The wrapped rows of the input text (prompt + text) at `width`.
+    pub fn wrapped_rows(&self, width: u16, input: &str) -> u16 {
+        let text = Self::full_line(input);
+        let rows = wrapped_height(&[text], width).max(1);
+        rows.min(5) as u16
+    }
+
+    /// Build the full styled line: prompt + input text.
+    fn full_line(input: &str) -> Line<'static> {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::raw(input.to_string()),
+        ])
+    }
+
+    /// Compute the cursor's (row, column) within the wrapped view.
+    ///
+    /// The column is a *display* column (using `unicode-width`), matching the
+    /// wrapping `Paragraph` uses, so wide characters advance the cursor by
+    /// their full cell width. When the cursor sits exactly at a wrap boundary
+    /// at the end of the input (no following character to occupy the next
+    /// row), it is parked on the last cell of the current row so it is always
+    /// rendered.
+    fn cursor_position(cursor: usize, input: &str, width: u16) -> (u16, u16) {
+        if width == 0 {
+            return (0, 0);
+        }
+        let w = width as usize;
+        // Prompt is 2 cells wide.
+        let col = 2usize + unicode_width::UnicodeWidthStr::width(&input[..cursor]);
+        let row = (col / w) as u16;
+        let col_in_row = (col % w) as u16;
+
+        // At the end of input on an exact wrap boundary, the cursor would
+        // address a row past the wrapped content. Park it on the previous
+        // row's last cell instead.
+        if cursor == input.len() && col_in_row == 0 && row > 0 {
+            (row - 1, width - 1)
+        } else {
+            (row, col_in_row)
+        }
+    }
+
+    /// Reconcile the vertical scroll offset so the cursor (at byte index
+    /// `cursor` into `input`) is visible within a `rows`-tall window.
+    pub fn ensure_cursor_visible(&mut self, cursor: usize, input: &str, width: u16, rows: u16) {
+        if width == 0 || rows == 0 {
+            return;
+        }
+        let (row, _) = Self::cursor_position(cursor, input, width);
+
+        // Keep the cursor's row within [v_scroll, v_scroll + rows).
+        if row < self.v_scroll {
+            self.v_scroll = row;
+        } else if row >= self.v_scroll + rows {
+            self.v_scroll = row.saturating_sub(rows - 1);
+        }
+    }
+
+    /// Reset the vertical scroll offset (e.g. after history recall or resize).
+    pub fn reset_scroll(&mut self) {
+        self.v_scroll = 0;
+    }
+}
+
+impl Default for InputBarWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl LiveAreaWidget for InputBarWidget {
     as_any_methods!();
-    fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
-        Constraint::Length(1)
+    fn size_priority(&self) -> i32 {
+        100
+    }
+
+    fn height_constraint(&self, width: u16, ctx: &RenderContext) -> Constraint {
+        Constraint::Length(self.wrapped_rows(width, ctx.input))
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) -> Vec<Line<'static>> {
-        let prompt = Span::styled("> ", Style::default().fg(Color::Cyan));
+        let width = area.width;
+        if width == 0 {
+            return Vec::new();
+        }
 
-        let text = Line::from(vec![
-            prompt,
-            Span::raw(ctx.input),
-            Span::styled(" ", Style::default().bg(Color::White)),
-        ]);
+        // Build the wrapped paragraph, then slice out the visible vertical
+        // window so the cursor stays in view.
+        let paragraph = Paragraph::new(Self::full_line(ctx.input)).wrap(Wrap { trim: false });
 
-        let paragraph = Paragraph::new(text);
-        paragraph.render(area, buf);
+        // Render into a full-width buffer at the paragraph's natural height,
+        // then copy the visible window into `area`.
+        let full_rows = wrapped_height(&[Self::full_line(ctx.input)], width).max(1) as u16;
+        let full_area = Rect::new(0, 0, width, full_rows);
+        let mut full_buf = Buffer::empty(full_area);
+        paragraph.render(full_area, &mut full_buf);
+
+        // Copy the visible vertical window.
+        for y in 0..area.height {
+            let src_y = self.v_scroll + y;
+            if src_y >= full_rows {
+                break;
+            }
+            for x in 0..width {
+                let cell = full_buf[(x, src_y)].clone();
+                buf[(area.x + x, area.y + y)] = cell;
+            }
+        }
+
+        // Draw the cursor cell at the current cursor position, only when it
+        // falls inside the visible window.
+        let cursor = ctx.cursor.min(ctx.input.len());
+        // Reconcile the vertical scroll against the *actual* allocated height
+        // (which may be smaller than the requested 5-row cap when the viewport
+        // is short), so the cursor stays visible even after shrinking.
+        self.ensure_cursor_visible(cursor, ctx.input, width, area.height);
+        let (row, col_in_row) = Self::cursor_position(cursor, ctx.input, width);
+        let vis_row = row.checked_sub(self.v_scroll);
+        if let Some(vis_row) = vis_row {
+            if vis_row < area.height && col_in_row < width {
+                let cell = &mut buf[(area.x + col_in_row, area.y + vis_row)];
+                cell.set_style(Style::default().bg(Color::White));
+            }
+        }
 
         Vec::new()
     }
@@ -536,6 +688,10 @@ pub struct InfoBarWidget;
 
 impl LiveAreaWidget for InfoBarWidget {
     as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        90
+    }
+
     fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
         Constraint::Length(1)
     }
@@ -606,6 +762,10 @@ impl Default for WatchTableWidget {
 
 impl LiveAreaWidget for WatchTableWidget {
     as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        50
+    }
+
     fn height_constraint(&self, _width: u16, ctx: &RenderContext) -> Constraint {
         if ctx.blocking_overlay() {
             return Constraint::Length(0);
@@ -694,6 +854,10 @@ impl WatchSingleWidget {
 
 impl LiveAreaWidget for WatchSingleWidget {
     as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        50
+    }
+
     fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
         // Fills the entire content area above the fixed bars.
         Constraint::Min(0)
@@ -802,6 +966,10 @@ impl DebugWidget {
 
 impl LiveAreaWidget for DebugWidget {
     as_any_methods!();
+    fn size_priority(&self) -> i32 {
+        50
+    }
+
     fn height_constraint(&self, _width: u16, _ctx: &RenderContext) -> Constraint {
         // Fills the entire content area above the fixed bars.
         Constraint::Min(0)
@@ -927,6 +1095,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let ctx = RenderContext {
             input: "",
+            cursor: 0,
             following_log: None,
             gremlin_count: "0",
             project_name: "",
@@ -1002,5 +1171,85 @@ mod tests {
         assert!(rows[2].contains("> hi"), "{rows:?}");
         assert!(rows[3].is_empty(), "separator should be blank, {rows:?}");
         assert!(rows[4].contains("resp"), "{rows:?}");
+    }
+
+    // ── input bar cursor positioning ────────────────────────────
+
+    fn input_ctx<'a>(input: &'a str, cursor: usize) -> RenderContext<'a> {
+        static EMPTY: std::sync::OnceLock<HashMap<String, ActiveRun>> = std::sync::OnceLock::new();
+        RenderContext {
+            input,
+            cursor,
+            following_log: None,
+            gremlin_count: "0",
+            project_name: "",
+            overlay: None,
+            active_runs: EMPTY.get_or_init(HashMap::new),
+            content_height: 0,
+        }
+    }
+
+    #[test]
+    fn cursor_position_uses_display_width_for_wide_chars() {
+        // "😀" is 2 cells wide; "é" is 1 cell. Prompt is 2 cells.
+        // input = "😀" → cursor at end = col 2 + 2 = 4.
+        assert_eq!(InputBarWidget::cursor_position(4, "😀", 10), (0, 4));
+        // input = "a😀" → cursor after 'a' (byte 1) = col 2 + 1 = 3.
+        assert_eq!(InputBarWidget::cursor_position(1, "a😀", 10), (0, 3));
+        // cursor after 😀 (byte 5) = col 2 + 1 + 2 = 5.
+        assert_eq!(InputBarWidget::cursor_position(5, "a😀", 10), (0, 5));
+    }
+
+    #[test]
+    fn cursor_position_wraps_at_width() {
+        // width 5, prompt 2 cells. "abc" → col 5 → row 1 col 0 (mid-text).
+        assert_eq!(InputBarWidget::cursor_position(1, "abcd", 5), (0, 3));
+        // Cursor after "abc" (byte 3) but more text follows → row 1 col 0.
+        assert_eq!(InputBarWidget::cursor_position(3, "abcd", 5), (1, 0));
+        // "abcd" → col 6 → row 1 col 1.
+        assert_eq!(InputBarWidget::cursor_position(4, "abcd", 5), (1, 1));
+    }
+
+    #[test]
+    fn cursor_position_parks_at_end_of_full_row() {
+        // width 5, prompt 2 cells, input "abc" fills exactly 5 cells.
+        // Cursor at end-of-input on a wrap boundary must park on (0, 4),
+        // not address a non-existent row 1.
+        assert_eq!(InputBarWidget::cursor_position(3, "abc", 5), (0, 4));
+    }
+
+    #[test]
+    fn cursor_position_zero_width_does_not_panic() {
+        assert_eq!(InputBarWidget::cursor_position(0, "", 0), (0, 0));
+        assert_eq!(InputBarWidget::cursor_position(3, "abc", 0), (0, 0));
+    }
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_past_five_rows() {
+        let mut bar = InputBarWidget::new();
+        // width 5, prompt 2 cells. 30 chars → col 32 → row 6 (col_in_row 2).
+        let input = "x".repeat(30);
+        bar.ensure_cursor_visible(input.len(), &input, 5, 5);
+        // Cursor row 6 must be within [v_scroll, v_scroll + 5).
+        assert!(bar.v_scroll <= 6 && 6 < bar.v_scroll + 5);
+        assert_eq!(bar.v_scroll, 2);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_zero_width_does_not_panic() {
+        let mut bar = InputBarWidget::new();
+        bar.ensure_cursor_visible(0, "", 0, 5);
+        bar.ensure_cursor_visible(3, "abc", 0, 5);
+    }
+
+    #[test]
+    fn render_draws_cursor_only_when_visible() {
+        let mut bar = InputBarWidget::new();
+        let area = Rect::new(0, 0, 5, 1);
+        let mut buf = Buffer::empty(area);
+        let ctx = input_ctx("abc", 3); // cursor at end, parked at (0,4)
+        bar.render(area, &mut buf, &ctx);
+        assert_eq!(buf[(4, 0)].style().bg, Some(Color::White));
+        assert_ne!(buf[(0, 0)].style().bg, Some(Color::White));
     }
 }

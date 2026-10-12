@@ -24,7 +24,7 @@ use crossterm::{
 use ratatui::{
     backend::{Backend, ClearType, CrosstermBackend},
     buffer::{Buffer, Cell},
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
@@ -57,6 +57,9 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     /// reasoning, tools, input bar, info bar. Overlays are pushed/popped at
     /// the top of the stack.
     widgets: Vec<Box<dyn LiveAreaWidget>>,
+    /// Rows occupied by the bottom bars (input + info) in the most recent
+    /// frame. These rows are excluded from the scrollback region.
+    reserved_rows: u16,
 }
 
 impl<B: Backend> LiveArea<B> {
@@ -78,9 +81,10 @@ impl<B: Backend> LiveArea<B> {
                 Box::new(TranscriptWidget::new()),
                 Box::new(ReasoningWidget::new()),
                 Box::new(ToolsWidget::new()),
-                Box::new(InputBarWidget),
+                Box::new(InputBarWidget::new()),
                 Box::new(InfoBarWidget),
             ],
+            reserved_rows: RESERVED_ROWS,
         }
     }
 
@@ -221,25 +225,29 @@ impl<B: Backend> LiveArea<B> {
         &self.backend
     }
 
-    /// Rows that participate in scrollback. The bottom [`RESERVED_ROWS`] are
-    /// kept out of the scrolling region.
+    /// Rows that participate in scrollback. The bottom bars (input + info)
+    /// are kept out of the scrolling region; their combined height is
+    /// tracked each frame in [`Self::reserved_rows`].
     pub fn scrollable_rows(&self) -> u16 {
-        self.rows.saturating_sub(RESERVED_ROWS)
+        self.rows.saturating_sub(self.reserved_rows)
     }
 
     /// Compose and paint a full frame.
     ///
-    /// Reserves the bottom [`RESERVED_ROWS`] for the input and info bars
-    /// (the last two widgets in the stack), then lays the remaining content
-    /// widgets out top-to-bottom in a single ratatui layout pass using each
-    /// widget's `height_constraint`. Only the transcript widget may return
-    /// overflow; overlay widgets always return an empty overflow `Vec`.
-    /// Collapsed (zero-height) chunks are skipped so a blocking overlay or
-    /// a short viewport never commits transcript overflow.
+    /// Lays all widgets out top-to-bottom in a single priority-aware pass.
+    /// Each widget reports a requested height via `height_constraint`; when
+    /// the sum exceeds the viewport, fixed-height widgets are shrunk in
+    /// ascending `size_priority` order (lowest first) until the layout fits.
+    /// Flexible (`Min`) widgets absorb the remaining rows. Only the
+    /// transcript widget may return overflow; overlay widgets always return
+    /// an empty overflow `Vec`. Collapsed (zero-height) chunks are skipped
+    /// so a blocking overlay or a short viewport never commits transcript
+    /// overflow.
     pub fn compose(&mut self, app: &App) -> io::Result<()> {
         let gremlin_count = app.gremlin_count_str();
         let ctx = RenderContext {
             input: &app.input,
+            cursor: app.input_cursor,
             following_log: app.following_log.as_deref(),
             gremlin_count: &gremlin_count,
             project_name: app.project_name_str(),
@@ -249,52 +257,94 @@ impl<B: Backend> LiveArea<B> {
         };
 
         let width = self.cols;
-        let area = Rect::new(0, 0, self.cols, self.rows);
 
-        // Reserve the bottom two rows for the fixed input/info bars first,
-        // so their `Length(1)` constraints can never be compressed by the
-        // variable-height content widgets above them. `commit_scrollback`
-        // scrolls everything above `RESERVED_ROWS`, so the bars must always
-        // land in those unscrolled rows.
-        let bar_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(area);
-        let content_area = bar_chunks[0];
+        // ── Priority-aware layout pass ────────────────────────────
+        //
+        // For each widget, resolve its constraint into a minimum height and
+        // a flexibility flag. Fixed widgets (`Length`/`Max`/`Ratio`/
+        // `Percentage`) request an exact height; flexible widgets (`Min`/
+        // `Fill`) request a minimum and absorb slack. When the sum of
+        // minimums exceeds the viewport, fixed widgets are shrunk in
+        // ascending `size_priority` order (lowest first) until it fits.
+        let n = self.widgets.len();
+        let mut min_heights = vec![0u16; n];
+        let mut flexible = vec![false; n];
+        let mut fixed_total = 0u16;
 
-        // The input and info bars are the last two widgets in the stack.
-        let split = self.widgets.len() - 2;
-        let (content_widgets, bar_widgets) = self.widgets.split_at_mut(split);
-
-        // Lay out the content widgets within the remaining rect.
-        let constraints: Vec<Constraint> = content_widgets
-            .iter()
-            .map(|w| w.height_constraint(width, &ctx))
-            .collect();
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(constraints)
-            .split(content_area);
-
-        let mut overflow = Vec::new();
-        for (widget, chunk) in content_widgets.iter_mut().zip(chunks.iter()) {
-            if chunk.height == 0 {
-                continue;
-            }
-            overflow.extend(widget.render(*chunk, &mut self.curr, &ctx));
+        for (i, w) in self.widgets.iter().enumerate() {
+            let c = w.height_constraint(width, &ctx);
+            let (h, flex) = constraint_height(c, self.rows);
+            min_heights[i] = h;
+            flexible[i] = flex;
+            fixed_total += h;
         }
 
-        // Render the fixed bars unconditionally.
-        for (widget, chunk) in bar_widgets.iter_mut().zip(bar_chunks[1..].iter()) {
-            widget.render(*chunk, &mut self.curr, &ctx);
+        // Shrink fixed widgets (ascending size priority) when over budget.
+        if fixed_total > self.rows {
+            let mut order: Vec<usize> = (0..n).filter(|&i| !flexible[i]).collect();
+            order.sort_by_key(|&i| self.widgets[i].size_priority());
+            for &i in &order {
+                if fixed_total <= self.rows {
+                    break;
+                }
+                let excess = fixed_total - self.rows;
+                let shrink = min_heights[i].min(excess);
+                min_heights[i] -= shrink;
+                fixed_total -= shrink;
+            }
+        }
+
+        // Distribute remaining rows to flexible widgets (on top of their
+        // minimums).
+        let mut heights = min_heights.clone();
+        let remaining = self.rows.saturating_sub(fixed_total);
+        let flex_count = flexible.iter().filter(|&&f| f).count();
+        if flex_count > 0 {
+            let per = remaining / flex_count as u16;
+            let mut extra = remaining % flex_count as u16;
+            for i in 0..n {
+                if flexible[i] {
+                    heights[i] += per;
+                    if extra > 0 {
+                        heights[i] += 1;
+                        extra -= 1;
+                    }
+                }
+            }
+        }
+
+        // The bottom bars (input + info) are always the last two widgets.
+        // Track their combined height so the scroll region excludes them.
+        self.reserved_rows = if n >= 2 {
+            heights[n - 2] + heights[n - 1]
+        } else {
+            0
+        };
+
+        // ── Render each widget into its allocated chunk ──────────
+        //
+        // Overflow is collected per-widget with its `overflow_priority` so
+        // that, if more than one widget ever produces overflow, the lines
+        // are committed in a deterministic order (lowest priority first).
+        let mut overflow: Vec<(i32, Line<'static>)> = Vec::new();
+        let mut y = 0u16;
+        for (i, widget) in self.widgets.iter_mut().enumerate() {
+            let h = heights[i];
+            if h == 0 {
+                continue;
+            }
+            let chunk = Rect::new(0, y, width, h);
+            y += h;
+            let prio = widget.overflow_priority();
+            for line in widget.render(chunk, &mut self.curr, &ctx) {
+                overflow.push((prio, line));
+            }
         }
 
         if !overflow.is_empty() {
-            self.commit_scrollback(&overflow, self.cols)?;
+            overflow.sort_by_key(|(prio, _)| *prio);
+            let lines: Vec<Line<'static>> = overflow.into_iter().map(|(_, l)| l).collect();
+            self.commit_scrollback(&lines, self.cols)?;
         }
 
         self.draw(|_| {})
@@ -341,6 +391,13 @@ impl<B: Backend> LiveArea<B> {
             .iter_mut()
             .find_map(|w| w.as_any_mut().downcast_mut::<ToolsWidget>())
             .expect("tools widget present")
+    }
+
+    fn input_bar_mut(&mut self) -> &mut InputBarWidget {
+        self.widgets
+            .iter_mut()
+            .find_map(|w| w.as_any_mut().downcast_mut::<InputBarWidget>())
+            .expect("input bar widget present")
     }
 
     fn watch_single_mut(&mut self) -> Option<&mut WatchSingleWidget> {
@@ -425,6 +482,19 @@ impl<B: Backend> LiveArea<B> {
         transcript.clear_response();
         self.reasoning_mut().clear();
         self.tools_mut().clear();
+    }
+
+    /// Reconcile the input bar's scroll offsets so the cursor stays visible
+    /// after a cursor move or text edit.
+    pub fn ensure_input_cursor_visible(&mut self, cursor: usize, input: &str, width: u16) {
+        let rows = self.input_bar_mut().wrapped_rows(width, input);
+        self.input_bar_mut()
+            .ensure_cursor_visible(cursor, input, width, rows);
+    }
+
+    /// Reset the input bar's scroll offsets (e.g. after history recall).
+    pub fn reset_input_scroll(&mut self) {
+        self.input_bar_mut().reset_scroll();
     }
 
     /// Flush the reasoning partial buffer (if any) into a completed
@@ -616,6 +686,28 @@ impl LiveArea<CrosstermBackend<Stdout>> {
 /// Trim trailing whitespace from a single row captured for scrollback.
 fn trim_trailing_whitespace(s: &str) -> String {
     s.trim_end().to_string()
+}
+
+/// Resolve a ratatui [`Constraint`] into a minimum height and a flexibility
+/// flag. Fixed constraints (`Length`/`Max`/`Ratio`/`Percentage`) request an
+/// exact height; flexible constraints (`Min`/`Fill`) request a minimum and
+/// absorb slack.
+fn constraint_height(c: Constraint, rows: u16) -> (u16, bool) {
+    match c {
+        Constraint::Length(n) => (n, false),
+        Constraint::Max(n) => (n, false),
+        Constraint::Ratio(num, den) => {
+            let r = if den == 0 {
+                0.0
+            } else {
+                num as f32 / den as f32
+            };
+            ((rows as f32 * r) as u16, false)
+        }
+        Constraint::Percentage(p) => (rows.saturating_mul(p) / 100, false),
+        Constraint::Min(n) => (n, true),
+        Constraint::Fill(_) => (0, true),
+    }
 }
 
 /// Scroll the top `region_rows` rows of `buf` up by `amount`, clearing the

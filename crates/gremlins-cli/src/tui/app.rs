@@ -10,6 +10,8 @@ use std::collections::HashMap;
 pub struct App {
     /// Current text in the input bar.
     pub input: String,
+    /// Cursor byte index into `input` (always on a `char` boundary).
+    pub input_cursor: usize,
     /// Live gremlin state: id → run details.
     pub active_runs: HashMap<String, ActiveRun>,
     /// Cached project name for the info bar.
@@ -93,6 +95,7 @@ impl App {
 
         Self {
             input: String::new(),
+            input_cursor: 0,
             active_runs: HashMap::new(),
             project_name,
             following_log: None,
@@ -249,6 +252,84 @@ impl App {
         self.overlay = Some(Overlay::Debug);
     }
 
+    // ── Cursor editing helpers ────────────────────────────────────
+
+    /// Move the cursor one grapheme/char left, clamped to a `char` boundary.
+    pub fn cursor_left(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let mut idx = self.input_cursor;
+        idx -= 1;
+        while idx > 0 && !self.input.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        self.input_cursor = idx;
+    }
+
+    /// Move the cursor one grapheme/char right, clamped to a `char` boundary.
+    pub fn cursor_right(&mut self) {
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        let mut idx = self.input_cursor;
+        idx += 1;
+        while idx < self.input.len() && !self.input.is_char_boundary(idx) {
+            idx += 1;
+        }
+        self.input_cursor = idx;
+    }
+
+    /// Jump the cursor to the start of the line.
+    pub fn cursor_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    /// Jump the cursor to the end of the line.
+    pub fn cursor_end(&mut self) {
+        self.input_cursor = self.input.len();
+    }
+
+    /// Insert `ch` at the cursor, keeping the cursor on a `char` boundary.
+    pub fn insert_char(&mut self, ch: char) {
+        let idx = self.input_cursor.min(self.input.len());
+        self.input.insert(idx, ch);
+        self.input_cursor = idx + ch.len_utf8();
+    }
+
+    /// Delete the character *before* the cursor (backspace).
+    pub fn delete_before_cursor(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let mut start = self.input_cursor;
+        start -= 1;
+        while start > 0 && !self.input.is_char_boundary(start) {
+            start -= 1;
+        }
+        self.input.drain(start..self.input_cursor);
+        self.input_cursor = start;
+    }
+
+    /// Delete the character *at* the cursor (delete key).
+    pub fn delete_at_cursor(&mut self) {
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        let mut end = self.input_cursor;
+        end += 1;
+        while end < self.input.len() && !self.input.is_char_boundary(end) {
+            end += 1;
+        }
+        self.input.drain(self.input_cursor..end);
+    }
+
+    /// Reset the cursor to the end of the current input (e.g. after history
+    /// recall or editor write-back).
+    pub fn reset_cursor_to_end(&mut self) {
+        self.input_cursor = self.input.len();
+    }
+
     // ── Input history helpers ───────────────────────────────────────
 
     /// Append a submitted input to history and reset the cursor.
@@ -286,5 +367,114 @@ impl App {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_moves_left_right_on_char_boundaries() {
+        let mut app = App::new();
+        app.input = "aé😀b".to_string();
+        app.input_cursor = app.input.len();
+
+        app.cursor_left(); // before 'b'
+        assert_eq!(app.input_cursor, "aé😀".len());
+        app.cursor_left(); // before 😀
+        assert_eq!(app.input_cursor, "aé".len());
+        app.cursor_left(); // before é
+        assert_eq!(app.input_cursor, "a".len());
+        app.cursor_left(); // before 'a'
+        assert_eq!(app.input_cursor, 0);
+        app.cursor_left(); // clamped
+        assert_eq!(app.input_cursor, 0);
+
+        app.cursor_right(); // after 'a'
+        assert_eq!(app.input_cursor, "a".len());
+        app.cursor_right(); // after é
+        assert_eq!(app.input_cursor, "aé".len());
+        app.cursor_right(); // after 😀
+        assert_eq!(app.input_cursor, "aé😀".len());
+        app.cursor_right(); // after 'b'
+        assert_eq!(app.input_cursor, "aé😀b".len());
+        app.cursor_right(); // clamped
+        assert_eq!(app.input_cursor, "aé😀b".len());
+    }
+
+    #[test]
+    fn insert_at_cursor_keeps_utf8_boundary() {
+        let mut app = App::new();
+        app.input = "ab".to_string();
+        app.input_cursor = 1;
+
+        app.insert_char('😀');
+        assert_eq!(app.input, "a😀b");
+        assert_eq!(app.input_cursor, "a😀".len());
+        assert!(app.input.is_char_boundary(app.input_cursor));
+    }
+
+    #[test]
+    fn backspace_deletes_char_before_cursor() {
+        let mut app = App::new();
+        app.input = "aé😀b".to_string();
+        app.input_cursor = app.input.len();
+
+        app.delete_before_cursor(); // delete 'b'
+        assert_eq!(app.input, "aé😀");
+        assert_eq!(app.input_cursor, "aé😀".len());
+
+        app.delete_before_cursor(); // delete 😀
+        assert_eq!(app.input, "aé");
+        assert_eq!(app.input_cursor, "aé".len());
+
+        app.delete_before_cursor(); // delete é
+        assert_eq!(app.input, "a");
+        assert_eq!(app.input_cursor, "a".len());
+
+        app.delete_before_cursor(); // delete 'a'
+        assert_eq!(app.input, "");
+        assert_eq!(app.input_cursor, 0);
+
+        app.delete_before_cursor(); // no-op at start
+        assert_eq!(app.input, "");
+        assert_eq!(app.input_cursor, 0);
+    }
+
+    #[test]
+    fn delete_removes_char_at_cursor() {
+        let mut app = App::new();
+        app.input = "aé😀b".to_string();
+        app.input_cursor = "a".len();
+
+        app.delete_at_cursor(); // delete é
+        assert_eq!(app.input, "a😀b");
+        assert_eq!(app.input_cursor, "a".len());
+
+        app.delete_at_cursor(); // delete 😀
+        assert_eq!(app.input, "ab");
+        assert_eq!(app.input_cursor, "a".len());
+
+        app.delete_at_cursor(); // delete 'b'
+        assert_eq!(app.input, "a");
+        assert_eq!(app.input_cursor, "a".len());
+
+        app.delete_at_cursor(); // no-op at end
+        assert_eq!(app.input, "a");
+        assert_eq!(app.input_cursor, "a".len());
+    }
+
+    #[test]
+    fn home_end_jump_to_ends() {
+        let mut app = App::new();
+        app.input = "hello".to_string();
+        app.input_cursor = 2;
+
+        app.cursor_home();
+        assert_eq!(app.input_cursor, 0);
+
+        app.cursor_end();
+        assert_eq!(app.input_cursor, "hello".len());
     }
 }

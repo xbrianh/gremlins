@@ -565,7 +565,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             // fresh text isn't treated as a history
                                             // position.
                                             app.input = text;
+                                            app.reset_cursor_to_end();
                                             app.history_cursor = None;
+                                            live_area.ensure_input_cursor_visible(
+                                                app.input_cursor,
+                                                &app.input,
+                                                app.width,
+                                            );
                                         }
                                         Ok(None) => {
                                             // Editor aborted without changes; leave
@@ -617,6 +623,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
 
                             app.input.clear();
+                            app.input_cursor = 0;
+                            live_area.reset_input_scroll();
                             // If a chat request is in-flight, cancel it on the
                             // daemon. Do not abort `chat_task` — it may be
                             // inside `send_request`, and aborting mid-write
@@ -657,6 +665,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
 
                             let input = std::mem::take(&mut app.input);
+                            app.input_cursor = 0;
+                            live_area.reset_input_scroll();
                             if input.is_empty() {
                                 continue;
                             }
@@ -805,6 +815,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             });
                                         }
                                         app.input.clear();
+                                        app.input_cursor = 0;
+                                        live_area.reset_input_scroll();
                                         app.active_request = false;
                                         active_turn = None;
                                     }
@@ -874,20 +886,85 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 )?;
                             }
                         }
+                        KeyCode::Left => {
+                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                continue;
+                            }
+                            app.cursor_left();
+                            live_area.ensure_input_cursor_visible(
+                                app.input_cursor,
+                                &app.input,
+                                app.width,
+                            );
+                        }
+                        KeyCode::Right => {
+                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                continue;
+                            }
+                            app.cursor_right();
+                            live_area.ensure_input_cursor_visible(
+                                app.input_cursor,
+                                &app.input,
+                                app.width,
+                            );
+                        }
+                        KeyCode::Home => {
+                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                continue;
+                            }
+                            app.cursor_home();
+                            live_area.ensure_input_cursor_visible(
+                                app.input_cursor,
+                                &app.input,
+                                app.width,
+                            );
+                        }
+                        KeyCode::End => {
+                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                continue;
+                            }
+                            app.cursor_end();
+                            live_area.ensure_input_cursor_visible(
+                                app.input_cursor,
+                                &app.input,
+                                app.width,
+                            );
+                        }
                         KeyCode::Backspace => {
                             if let Some(prompt) = live_area.debug_prompt_mut() {
                                 prompt.pop();
                             } else {
-                                app.input.pop();
+                                app.delete_before_cursor();
+                                live_area.ensure_input_cursor_visible(
+                                    app.input_cursor,
+                                    &app.input,
+                                    app.width,
+                                );
                             }
+                        }
+                        KeyCode::Delete => {
+                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                continue;
+                            }
+                            app.delete_at_cursor();
+                            live_area.ensure_input_cursor_visible(
+                                app.input_cursor,
+                                &app.input,
+                                app.width,
+                            );
                         }
                         KeyCode::Char(ch) => {
                             if let Some(prompt) = live_area.debug_prompt_mut() {
                                 prompt.push(ch);
                             } else {
-                                app.input.push(ch);
+                                app.insert_char(ch);
                                 // Typing a fresh character resets history navigation.
                                 app.history_cursor = None;
+                                live_area.ensure_input_cursor_visible(
+                                    app.input_cursor,
+                                    &app.input,
+                                    app.width,
+                                );
                             }
                         }
                         KeyCode::Up => {
@@ -895,6 +972,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if !app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
                                 if let Some(entry) = app.history_up().map(|s| s.to_string()) {
                                     app.input = entry;
+                                    app.reset_cursor_to_end();
+                                    live_area.ensure_input_cursor_visible(
+                                        app.input_cursor,
+                                        &app.input,
+                                        app.width,
+                                    );
                                 }
                             }
                         }
@@ -903,6 +986,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             // cursor is already `None` (fresh line), leave it.
                             && app.history_cursor.is_some() => {
                                 app.input = app.history_down().unwrap_or("").to_string();
+                                app.reset_cursor_to_end();
+                                live_area.ensure_input_cursor_visible(
+                                    app.input_cursor,
+                                    &app.input,
+                                    app.width,
+                                );
                             }
                         _ => {}
                     },
