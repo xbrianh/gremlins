@@ -80,9 +80,6 @@ struct ConnectionChatState {
     ids: HashSet<String>,
     /// The in-flight chat turn, if any.
     current: Option<CurrentTurn>,
-    /// Set when the owning connection exits. Once set, turns drop their
-    /// gremlin instead of re-inserting it.
-    abandoned: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -399,14 +396,14 @@ async fn handle_connection(
     // half or linger waiting for broadcasts after the client is gone.
     event_handle.abort();
 
-    // Mark the connection abandoned and cancel the in-flight turn.
-    // Chat gremlins outlive any single socket connection, so the
-    // owning connection just abandons its ids — the gremlins
-    // themselves stay live for the next reconnection.
-    // Cleanup only happens on explicit `stop`.
-    let mut state = chat_state.lock().await;
-    state.abandoned = true;
-    if let Some(cur) = state.current.take() {
+    // Cancel the in-flight turn (if any) without removing `current`.
+    // Chat gremlins outlive any single socket connection — the gremlin
+    // remains in the global map for reconnection. The turn's `finish`
+    // re-inserts it, and the `done` Notify stays live so a reconnecting
+    // client can wait for re-insertion instead of getting `unknown
+    // chat gremlin`. Cleanup only happens on explicit `stop`.
+    let state = chat_state.lock().await;
+    if let Some(cur) = &state.current {
         cur.cancel.cancel();
     }
 
@@ -1921,7 +1918,7 @@ async fn handle_chat(
                 }
                 let wait = {
                     let state = chat_state.lock().await;
-                    if state.abandoned || !state.ids.contains(&id) {
+                    if !state.ids.contains(&id) {
                         None
                     } else {
                         state.current.as_ref().map(|c| Arc::clone(&c.done))
@@ -2035,7 +2032,7 @@ async fn handle_chat(
 }
 
 /// Re-insert a finished turn's gremlin, or drop it if the connection no
-/// longer owns it (abandoned or stopped). Runs under the connection-state
+/// longer owns it (stopped). Runs under the connection-state
 /// lock so the check-and-insert is atomic with teardown/`stop`.
 ///
 /// Returns `true` if the gremlin was re-inserted.
@@ -2045,7 +2042,7 @@ async fn reinsert_chat_gremlin(
     chat_state: &Arc<tokio::sync::Mutex<ConnectionChatState>>,
 ) -> bool {
     let state = chat_state.lock().await;
-    if state.abandoned || !state.ids.contains(id) {
+    if !state.ids.contains(id) {
         drop(gremlin);
         return false;
     }
@@ -2138,9 +2135,16 @@ async fn run_chat_turn(
     }
 
     // Forward stream events until a terminal event, a write error, or a
-    // cancellation.
+    // cancellation. The `biased` select gives stream events priority over
+    // run-task completion: when `run_stage` returns normally, Done/Ended
+    // is already in the channel and is delivered first. When `run_stage`
+    // returns an error without emitting a terminal event, the channel
+    // has no more events and the run-task arm fires as a safety net,
+    // preventing the TUI from staying permanently `active_request`.
     loop {
         tokio::select! {
+            biased;
+
             result = stream_rx.recv() => {
                 match result {
                     Some(InteractiveEvent::StreamChunk { text }) => {
@@ -2200,6 +2204,35 @@ async fn run_chat_turn(
                 // done/error is suppressed because we return here.
                 finish(&id, &mut run_task, &turn_cancel, &chat_state, &done).await;
                 let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}));
+                let _ = writer.write_json_line(&payload).await;
+                return;
+            }
+
+            task_result = &mut run_task => {
+                // The run task finished without a terminal event on the
+                // stream channel. This is the error path: `run_stage`
+                // returned Err, the agent panicked, or the task was
+                // cancelled. The mpsc sender inside
+                // `gremlin.runtime_config.stream_events` stays alive
+                // (held by the now-completed JoinHandle's Gremlin),
+                // so `stream_rx` would block forever without this branch.
+                let message = match task_result {
+                    Ok((Ok(()), _gremlin)) => {
+                        "agent completed without terminal event".to_string()
+                    }
+                    Ok((Err(e), _gremlin)) => {
+                        format!("agent error: {e}")
+                    }
+                    Err(join_err) => {
+                        if join_err.is_panic() {
+                            "agent panicked".to_string()
+                        } else {
+                            format!("agent task cancelled: {join_err}")
+                        }
+                    }
+                };
+                finish(&id, &mut run_task, &turn_cancel, &chat_state, &done).await;
+                let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": message}));
                 let _ = writer.write_json_line(&payload).await;
                 return;
             }

@@ -90,6 +90,15 @@ fn send_chat_input(
                         id: None,
                         turn: None,
                     });
+                } else if let Some(id) = resp.get("id").and_then(|v| v.as_str()) {
+                    // The ack carries the gremlin id (created on the first
+                    // turn). Route it back to the event loop so `app.chat_id`
+                    // is stored before Esc/resubmit can race the terminal
+                    // Done/Ended event.
+                    let _ = chat_tx.send(ChatEvent::ChatId {
+                        id: id.to_string(),
+                        turn: Some(turn_id.clone()),
+                    });
                 }
             }
             Err(e) => {
@@ -1257,7 +1266,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     | ChatEvent::TurnComplete { turn, .. }
                     | ChatEvent::Done { turn, .. }
                     | ChatEvent::Ended { turn, .. }
-                    | ChatEvent::Error { turn, .. } => turn.clone(),
+                    | ChatEvent::Error { turn, .. }
+                    | ChatEvent::ChatId { turn, .. } => turn.clone(),
                 };
                 if let (Some(active), Some(ev)) = (&active_turn, &event_turn) {
                     if active != ev {
@@ -1276,12 +1286,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         live_area.push_reasoning_text(&text);
                     }
                     ChatEvent::ToolResult { name, output, .. } => {
-                        if !output.is_empty() {
-                            log::debug!("ToolResult name={name} output_len={}", output.len());
-                            live_area.push_tool(&format!("{name}: {}", output));
-                        } else {
-                            log::debug!("ToolResult name={name}");
-                        }
+                        // The bare tool result is intentionally not rendered;
+                        // `ChatEvent::TurnComplete` is the sole source of
+                        // tool-event lines, enriched with call arguments.
+                        // The event is still matched (and logged) because
+                        // other consumers rely on its payload.
+                        log::debug!("ToolResult name={name} output_len={}", output.len());
                     }
                     ChatEvent::TurnComplete { text, tool_calls, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
@@ -1293,8 +1303,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // loop, so only the current turn's trailing slice is repaired.
                         live_area.reconcile_response(&text);
                         // Record tool calls so they appear in the transcript rather
-                        // than being silently lost.
+                        // than being silently lost. Read/Edit calls are filtered per
+                        // DESIGN.md § 8.2.1: they're noisy file-access tools whose
+                        // output belongs in the transcript, not the live tool tail.
                         for tc in &tool_calls {
+                            if tc.starts_with("Read") || tc.starts_with("Edit") {
+                                continue;
+                            }
                             live_area.push_tool(tc);
                         }
                     }
@@ -1391,6 +1406,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // Repaint immediately so the error state is visible
                         // without waiting for the next input event.
                         live_area.compose(&app)?;
+                    }
+                    ChatEvent::ChatId { id, .. } => {
+                        // Store the gremlin id immediately from the ack so
+                        // Esc + resubmit targets the same chat gremlin rather
+                        // than creating a second one.
+                        log::debug!("ChatId captured: {id}");
+                        app.chat_id = Some(id);
                     }
                 }
             }

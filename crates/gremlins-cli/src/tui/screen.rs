@@ -539,11 +539,14 @@ impl<B: Backend> LiveArea<B> {
         // Drain reasoning and tool-event content into the transcript so
         // they survive into the next frame and are preserved when the
         // next prompt clears the live widgets.
+        //
+        // Insert before the response region (not at `turn_start`) so the
+        // completed turn orders as prompt → reasoning/tools → response.
         for line in self.reasoning_mut().take_lines() {
-            self.transcript_mut().push_styled_line(line);
+            self.transcript_mut().insert_before_response(line);
         }
         for line in self.tool_events_mut().take_lines() {
-            self.transcript_mut().push_styled_line(line);
+            self.transcript_mut().insert_before_response(line);
         }
         self.transcript_mut().finish_turn();
     }
@@ -1565,8 +1568,10 @@ mod tests {
         live_area.replace_response(&body);
         live_area.finish_response(&body, "final summary line");
 
-        // Turn end: commit the transcript response. Reasoning and tools stay
-        // in their own live-tail widgets and never reach transcript scrollback.
+        // Turn end: commit the transcript response. Reasoning and tools
+        // are drained into the transcript between the prompt and the
+        // response via `insert_before_response`, producing the correct
+        // prompt → reasoning/tools → response order.
         live_area.finish_turn();
         live_area.push_transcript_line("42 tokens".to_string());
 
@@ -1582,15 +1587,20 @@ mod tests {
             "summary should not be dropped.\nCombined:\n{combined}"
         );
 
-        // Transcript scrollback must contain the prompt and response, and
-        // must never contain reasoning or tool content.
-        let combined_no_frame = sb.clone();
-        assert!(!combined_no_frame.contains("thinking..."));
-        assert!(!combined_no_frame.contains("Done") && !combined_no_frame.contains("grep"));
-
-        // Reasoning and tools remain live in the visible frame (or were
-        // already previously capped away from it), and are never scrollback.
-        assert!(!sb.contains("thinking..."));
-        assert!(!sb.contains("grep"));
+        // Reasoning and tool lines are now part of the transcript FIFO
+        // (inserted between prompt and response). They may appear in
+        // scrollback when content overflows; the key invariant is that
+        // the prompt precedes them in the combined output.
+        let prompt_in_sb = sb.contains("hi");
+        let reasoning_in_sb = sb.contains("thinking...");
+        if prompt_in_sb && reasoning_in_sb {
+            // If both are in scrollback, prompt must come first.
+            let prompt_pos = sb.find("hi").unwrap();
+            let reasoning_pos = sb.find("thinking...").unwrap();
+            assert!(
+                prompt_pos < reasoning_pos,
+                "prompt must precede reasoning in scrollback"
+            );
+        }
     }
 }

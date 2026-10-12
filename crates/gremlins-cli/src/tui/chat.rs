@@ -50,6 +50,14 @@ pub enum ChatEvent {
         id: Option<String>,
         turn: Option<String>,
     },
+    /// The daemon's ack for a chat request carries the gremlin id.
+    /// The TUI stores it so subsequent messages target the same gremlin,
+    /// even if Esc is pressed before Done/Ended arrives — without this
+    /// the next submit would create a second chat gremlin.
+    ChatId {
+        id: String,
+        turn: Option<String>,
+    },
 }
 
 /// Parse a daemon chat-protocol JSON line into a [`ChatEvent`].

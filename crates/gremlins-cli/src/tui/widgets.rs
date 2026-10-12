@@ -228,6 +228,22 @@ impl TranscriptWidget {
         }
     }
 
+    /// Insert a pre-styled line between the prompt and the response, so
+    /// finalized reasoning and tool lines land in the correct
+    /// prompt → reasoning/tools → response order rather than being
+    /// inserted before the prompt at `turn_start`.
+    pub fn insert_before_response(&mut self, styled: Line<'static>) {
+        self.invalidate_desired_cache();
+        let pos = self.response_start.unwrap_or(self.scrollable.len());
+        // Blank separator first, then the styled line, both before the
+        // response region.
+        self.scrollable.insert(pos, Line::from(""));
+        self.scrollable.insert(pos + 1, styled);
+        if let Some(r) = &mut self.response_start {
+            *r += 2;
+        }
+    }
+
     /// Start a new turn with the given prompt: push a separator and the
     /// markdown-rendered prompt, then pin the turn start.
     pub fn submit_prompt(&mut self, prompt: String) {
