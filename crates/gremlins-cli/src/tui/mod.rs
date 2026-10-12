@@ -1336,9 +1336,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // screen) so it is displayed as part of the turn.
                         live_area.finish_response(&text, &summary);
 
-                        // Commit the turn's prompt, reasoning, and tools
-                        // first so the finished response lands after them in
-                        // the FIFO, then flatten the response itself.
+                        // Unpin the turn and clear its draft state so the
+                        // finished response is committed to the transcript.
                         live_area.finish_turn();
 
                         // Build usage summary line.

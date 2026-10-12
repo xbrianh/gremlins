@@ -228,22 +228,6 @@ impl TranscriptWidget {
         }
     }
 
-    /// Insert a pre-styled line between the prompt and the response, so
-    /// finalized reasoning and tool lines land in the correct
-    /// prompt → reasoning/tools → response order rather than being
-    /// inserted before the prompt at `turn_start`.
-    pub fn insert_before_response(&mut self, styled: Line<'static>) {
-        self.invalidate_desired_cache();
-        let pos = self.response_start.unwrap_or(self.scrollable.len());
-        // Blank separator first, then the styled line, both before the
-        // response region.
-        self.scrollable.insert(pos, Line::from(""));
-        self.scrollable.insert(pos + 1, styled);
-        if let Some(r) = &mut self.response_start {
-            *r += 2;
-        }
-    }
-
     /// Start a new turn with the given prompt: push a separator and the
     /// markdown-rendered prompt, then pin the turn start.
     pub fn submit_prompt(&mut self, prompt: String) {
@@ -585,15 +569,6 @@ impl ReasoningWidget {
         self.partial.clear();
     }
 
-    /// Drain all completed lines and the trailing partial (if any) into
-    /// a `Vec` of styled lines, then clear the buffer.
-    pub fn take_lines(&mut self) -> Vec<Line<'static>> {
-        self.flush_reasoning();
-        let lines = self.lines.visible_lines().to_vec();
-        self.clear();
-        lines
-    }
-
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty() && self.partial.is_empty()
     }
@@ -714,13 +689,6 @@ impl ToolEventsWidget {
     /// Reset the live region for a new turn.
     pub fn clear(&mut self) {
         self.lines.clear();
-    }
-
-    /// Drain all styled tool lines and clear the buffer.
-    pub fn take_lines(&mut self) -> Vec<Line<'static>> {
-        let lines = self.lines.visible_lines().to_vec();
-        self.clear();
-        lines
     }
 
     pub fn is_empty(&self) -> bool {

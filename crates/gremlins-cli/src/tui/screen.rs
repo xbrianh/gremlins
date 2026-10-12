@@ -533,21 +533,10 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().reconcile_response(text);
     }
 
-    /// Unpin the current turn and clear its draft state. The content is
-    /// already in the FIFO.
+    /// Unpin the current turn and clear its draft state. Reasoning and
+    /// tool-event content stays in its own widgets (it is not flattened
+    /// into the transcript); the next prompt clears those widgets.
     pub fn finish_turn(&mut self) {
-        // Drain reasoning and tool-event content into the transcript so
-        // they survive into the next frame and are preserved when the
-        // next prompt clears the live widgets.
-        //
-        // Insert before the response region (not at `turn_start`) so the
-        // completed turn orders as prompt → reasoning/tools → response.
-        for line in self.reasoning_mut().take_lines() {
-            self.transcript_mut().insert_before_response(line);
-        }
-        for line in self.tool_events_mut().take_lines() {
-            self.transcript_mut().insert_before_response(line);
-        }
         self.transcript_mut().finish_turn();
     }
 
@@ -1563,9 +1552,7 @@ mod tests {
         live_area.finish_response(&body, "final summary line");
 
         // Turn end: commit the transcript response. Reasoning and tools
-        // are drained into the transcript between the prompt and the
-        // response via `insert_before_response`, producing the correct
-        // prompt → reasoning/tools → response order.
+        // stay in their own widgets (not flattened into the transcript).
         live_area.finish_turn();
         live_area.push_transcript_line("42 tokens".to_string());
 
@@ -1581,20 +1568,15 @@ mod tests {
             "summary should not be dropped.\nCombined:\n{combined}"
         );
 
-        // Reasoning and tool lines are now part of the transcript FIFO
-        // (inserted between prompt and response). They may appear in
-        // scrollback when content overflows; the key invariant is that
-        // the prompt precedes them in the combined output.
-        let prompt_in_sb = sb.contains("hi");
-        let reasoning_in_sb = sb.contains("thinking...");
-        if prompt_in_sb && reasoning_in_sb {
-            // If both are in scrollback, prompt must come first.
-            let prompt_pos = sb.find("hi").unwrap();
-            let reasoning_pos = sb.find("thinking...").unwrap();
-            assert!(
-                prompt_pos < reasoning_pos,
-                "prompt must precede reasoning in scrollback"
-            );
-        }
+        // Reasoning and tool lines remain in their own widgets and are
+        // never committed to terminal scrollback.
+        assert!(
+            !sb.contains("thinking..."),
+            "reasoning must not be flattened into the transcript/scrollback.\nScrollback:\n{sb}"
+        );
+        assert!(
+            !sb.contains("grep"),
+            "tool events must not be flattened into the transcript/scrollback.\nScrollback:\n{sb}"
+        );
     }
 }

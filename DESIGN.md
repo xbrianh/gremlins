@@ -769,9 +769,9 @@ vanish.
 The current turn's reasoning and active-tool output are separate widgets, each
 owning a `BoundedBuffer` capped at 5 visible rows. They sit between the
 transcript and the input bar and grow only while a turn is streaming. When
-empty they report `Length(0)` and consume no space. On turn completion their
-tails are flattened into the transcript and the buffers reset for the next
-turn.
+empty they report `Length(0)` and consume no space. Their content stays in
+these widgets for the life of the turn; it is not flattened into the
+transcript. The buffers are reset when the next prompt is submitted.
 
 #### 8.2.3 System content
 
