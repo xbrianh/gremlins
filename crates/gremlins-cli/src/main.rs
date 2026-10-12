@@ -24,6 +24,10 @@ mod tui;
 #[derive(Parser)]
 #[command(name = "gremlins", about = "AI-backed gremlin definition runner")]
 struct Cli {
+    /// Increase log verbosity (once for info, twice for debug).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
     #[command(subcommand)]
     command: Option<Cmds>,
 }
@@ -107,12 +111,28 @@ enum Cmds {
 
 #[tokio::main]
 async fn main() {
-    env_logger::Builder::from_env(env_logger::Env::new().filter_or("GREMLINS_LOG_LEVEL", "info"))
-        .format_timestamp_millis()
-        .write_style(env_logger::WriteStyle::Never)
-        .init();
-
     let cli = Cli::parse();
+
+    // Compute the default log level from the parsed command and flag.
+    // `serve` (the executor daemon) keeps `info` — its stderr goes to
+    // executor.log, not the terminal. Every other command defaults to
+    // `warn` (silent for info) unless -v/-vv raises it.
+    let default_level = match &cli.command {
+        Some(Cmds::Serve { .. }) => "info",
+        _ => match cli.verbose {
+            0 => "warn",
+            1 => "info",
+            _ => "debug",
+        },
+    };
+
+    env_logger::Builder::from_env(
+        env_logger::Env::new().filter_or("GREMLINS_LOG_LEVEL", default_level),
+    )
+    .format_timestamp_millis()
+    .write_style(env_logger::WriteStyle::Never)
+    .init();
+
     let result = match cli.command {
         Some(Cmds::Launch {
             definition,
