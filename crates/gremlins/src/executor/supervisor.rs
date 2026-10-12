@@ -1888,6 +1888,7 @@ async fn handle_chat(
     let stage = match crate::builders::AgentBuilder::new("chat")
         .prompt(text)
         .option("system_prompt", CHAT_SYSTEM_PROMPT)
+        .option(crate::executor::agent_runner::SANDBOX_ALLOW_ALL_KEY, true)
         .build()
     {
         Ok(s) => s,

@@ -33,6 +33,11 @@ pub struct RunParams {
     /// Base process environment for tool sandboxing.
     /// When set, replaces `std::env::vars()` as the base for bash tool env.
     pub base_env: Option<HashMap<String, String>>,
+    /// Whether this run's agent loop opts out of tool-path sandboxing.
+    /// `false` (the default) enforces `allowed_roots` containment; the chat
+    /// gremlin sets `true` to disable it. The agent loop translates this into
+    /// a [`super::tools::SandboxMode`] when assembling the `ToolContext`.
+    pub(crate) allow_all: bool,
     /// Task-client selector, pre-built by the executor from
     /// `settings.yaml` `task-clients` entries. `None` when no
     /// entries are configured or when the backend cannot serve
@@ -70,6 +75,7 @@ impl Clone for RunParams {
             gremlin_id: self.gremlin_id.clone(),
             log_tx: self.log_tx.clone(),
             base_env: self.base_env.clone(),
+            allow_all: self.allow_all,
             task_clients: self.task_clients.clone(),
             cancel_token: self.cancel_token.clone(),
             stream_events: self.stream_events.clone(),

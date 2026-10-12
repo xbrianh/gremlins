@@ -176,18 +176,25 @@ pub(crate) async fn run_agent_loop(
     let worktree = tools::worktree_root(cwd.as_deref());
     let audit_log = raw_path.as_ref().map(|p| tools::audit_log_path(p));
     let max_turns = crate::config::max_agent_turns();
-    let mut allowed_roots = vec![worktree];
-    if let Some(ref artifact_dir) = ctx.params.artifact_dir {
-        allowed_roots.push(artifact_dir.clone());
-    }
-    if let Some(scratch) = tools::scratch_root() {
-        allowed_roots.push(scratch);
-    }
+    // When the run requests allow-all, skip building the roots list entirely;
+    // otherwise assemble [worktree, artifact_dir, scratch] as before.
+    let sandbox = if ctx.params.allow_all {
+        tools::SandboxMode::AllowAll
+    } else {
+        let mut allowed_roots = vec![worktree];
+        if let Some(ref artifact_dir) = ctx.params.artifact_dir {
+            allowed_roots.push(artifact_dir.clone());
+        }
+        if let Some(scratch) = tools::scratch_root() {
+            allowed_roots.push(scratch);
+        }
+        tools::SandboxMode::Roots(allowed_roots)
+    };
     let mut tool_ctx = ToolContext {
         cwd: cwd.clone(),
         extra_env,
         base_env: ctx.params.base_env.clone(),
-        allowed_roots,
+        sandbox,
         audit_log,
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
@@ -1845,6 +1852,7 @@ mod tests {
                 gremlin_id: None,
                 log_tx: None,
                 base_env: None,
+                allow_all: false,
                 task_clients: None,
                 cancel_token: None,
                 stream_events: None,
@@ -3418,7 +3426,7 @@ mod tests {
             cwd: None,
             extra_env: None,
             base_env: None,
-            allowed_roots: vec![],
+            sandbox: tools::SandboxMode::Roots(vec![]),
             audit_log: None,
             allowed_tools: None,
             task_fn: None,
@@ -3531,7 +3539,7 @@ mod tests {
         let mut evt_rx = handle.evt_tx.subscribe();
 
         let mut tool_ctx = test_tool_ctx();
-        tool_ctx.allowed_roots = vec![dir.clone()];
+        tool_ctx.sandbox = tools::SandboxMode::Roots(vec![dir.clone()]);
         let tool_defs = tools::tool_definitions(None);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);

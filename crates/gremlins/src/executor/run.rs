@@ -406,6 +406,7 @@ async fn run_agent(
         gremlin_id: Some(gremlin.id.to_string()),
         log_tx: gremlin.runtime_config.log_tx.clone(),
         base_env: Some(gremlin.env.clone()),
+        allow_all: prepared.allow_all,
         task_clients,
         cancel_token: gremlin.cancel_token.clone(),
         stream_events: gremlin.runtime_config.stream_events.clone(),
