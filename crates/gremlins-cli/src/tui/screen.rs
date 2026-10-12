@@ -579,6 +579,12 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().clear_scrollable();
     }
 
+    /// Clear the live reasoning and tool-event widgets.
+    pub fn clear_live_widgets(&mut self) {
+        self.reasoning_mut().clear();
+        self.tool_events_mut().clear();
+    }
+
     /// Append a system message to the transcript with default style and
     /// blank-line padding from the previous entry.
     pub fn push_transcript_line(&mut self, line: String) {

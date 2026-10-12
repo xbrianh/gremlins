@@ -846,6 +846,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // UI no longer shows the old conversation
                                         // after the daemon has discarded it.
                                         live_area.clear_transcript();
+                                        // Clear the live reasoning/tool widgets.
+                                        live_area.clear_live_widgets();
                                         // Cancel any in-flight turn on the daemon
                                         // (do not abort `chat_task` mid-write).
                                         if app.active_request {
