@@ -620,12 +620,6 @@ impl LiveAreaWidget for ReasoningWidget {
         self.desired_rows(width)
     }
 
-    fn finalize(&mut self, _width: u16) {
-        // Flush the trailing partial into a completed line so measurement
-        // and painting see the same finalized content.
-        self.flush_reasoning();
-    }
-
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
         // Keep the visible tail; the head is discarded, never committed to
         // terminal scrollback.
