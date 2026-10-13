@@ -13,6 +13,7 @@ use super::task_kind::TaskKind;
 
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
+const WEBSEARCH_TIMEOUT_SECS: u64 = 30;
 /// Cap on Task calls spawned from a single model message. Without this, one
 /// response could fan out unbounded child loops and overflow the context.
 pub(crate) const TASK_MAX_PER_TURN: usize = 8;
@@ -1163,6 +1164,8 @@ fn check_tool(name: &str, ctx: &ToolContext, args: &serde_json::Value) -> Option
             args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
             ctx.cwd.as_deref(),
         ),
+        // Network I/O has no filesystem path to sandbox.
+        "WebSearch" => None,
         _ => None,
     }
 }
@@ -1482,6 +1485,74 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     }
 }
 
+pub(crate) async fn websearch_invoke(ctx: &ToolContext, args_json: &str) -> String {
+    let args = match parse_args(args_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let url = match req_str(&args, "url") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let timeout_secs = args
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(WEBSEARCH_TIMEOUT_SECS)
+        .clamp(1, 3600);
+    let mut cmd = Command::new("curl");
+    cmd.arg("-sL")
+        .arg("--max-time")
+        .arg(timeout_secs.to_string())
+        .arg(url);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
+    if let Some(cwd) = &ctx.cwd {
+        cmd.current_dir(cwd);
+    }
+    if let Some(base) = &ctx.base_env {
+        let mut env = base.clone();
+        if let Some(extra) = &ctx.extra_env {
+            env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        cmd.env_clear().envs(env);
+    } else if let Some(extra) = &ctx.extra_env {
+        let mut env: HashMap<String, String> = std::env::vars().collect();
+        env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+        cmd.env_clear().envs(env);
+    }
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return format!("Error: {e}"),
+    };
+    #[cfg(unix)]
+    let mut process_group_guard = ProcessGroupGuard::new(child.id());
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+        Err(_) => "[timeout]".into(),
+        Ok(Err(e)) => {
+            #[cfg(unix)]
+            process_group_guard.disarm();
+            format!("Error: {e}")
+        }
+        Ok(Ok(output)) => {
+            #[cfg(unix)]
+            process_group_guard.disarm();
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            if output.status.success() {
+                text.trim().to_string()
+            } else {
+                format!("[exit {}]\n{}", output.status.code().unwrap_or(1), text.trim())
+            }
+        }
+    }
+}
+
 pub(crate) async fn write_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.sandbox.roots().map(|r| r.to_vec());
@@ -1773,6 +1844,7 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str)>> {
         "Glob" => Some(vec![("pattern", "string")]),
         "Task" => Some(vec![("kind", "string"), ("prompt", "string")]),
         "Done" => Some(vec![("summary", "string")]),
+        "WebSearch" => Some(vec![("url", "string"), ("timeout", "integer")]),
         _ => None,
     }
 }
@@ -1934,6 +2006,7 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
         "Write" => write_invoke(ctx, args_json).await,
         "Grep" => grep_invoke(ctx, args_json).await,
         "Glob" => glob_invoke(ctx, args_json).await,
+        "WebSearch" => websearch_invoke(ctx, args_json).await,
         "Task" => {
             if let Some(f) = &ctx.task_fn {
                 let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -1988,7 +2061,7 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
     // Task and Done are excluded: Task manages its own context, Done is tiny.
     // Edit and Write always return tiny results.
     let cap = crate::config::max_tool_output_bytes();
-    if cap > 0 && matches!(name, "Read" | "Bash" | "Grep" | "Glob") && res.len() as u64 > cap {
+    if cap > 0 && matches!(name, "Read" | "Bash" | "Grep" | "Glob" | "WebSearch") && res.len() as u64 > cap {
         return format!(
             "Tool output exceeded the limit ({} bytes, cap is {}). Try a narrower approach:\n\
 - Bash: pipe through `head`, filter with `grep`, or target a specific file.\n\
@@ -2142,6 +2215,25 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
                     }
                 },
                 "required": ["pattern"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: "WebSearch".into(),
+            description: "Fetch a web page and extract its text via `curl -sL`. Returns the body text capped at a byte limit. Use this to look up documentation, check package versions, or read external references. Default timeout is 30 seconds.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch (e.g. https://example.com/page)"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (optional, default 30)"
+                    }
+                },
+                "required": ["url"],
                 "additionalProperties": false
             }),
         },
@@ -2591,7 +2683,7 @@ mod tests {
     #[test]
     fn tool_definitions_filter() {
         let all = tool_definitions(None);
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 9);
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         // Task and Done are always available regardless of the filter.

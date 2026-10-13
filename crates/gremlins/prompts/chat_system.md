@@ -109,7 +109,7 @@ Before taking any git action (push, branch, PR, commit, diff), rely on the **inj
 
 ## Your tools
 
-You have access to standard tools: Read, Write, Edit, Grep, Glob, Bash, Task. Use them to help the operator explore the codebase, edit files, run commands, and manage gremlin pipelines.
+You have access to standard tools: Read, Write, Edit, Grep, Glob, Bash, WebSearch, Task. Use them to help the operator explore the codebase, edit files, run commands, and manage gremlin pipelines.
 
 ## Guidelines
 
