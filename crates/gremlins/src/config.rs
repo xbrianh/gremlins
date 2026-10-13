@@ -404,7 +404,7 @@ pub fn parse_task_clients_map(
         let Some(kind) = TaskKind::parse(key) else {
             return Err(ConfigError::TaskClients(format!(
                 "unknown task-clients key {key:?}: expected one of {}",
-                TaskKind::ALL
+                TaskKind::CONFIGURABLE
                     .iter()
                     .map(|k| k.as_str())
                     .collect::<Vec<_>>()
@@ -436,7 +436,7 @@ fn validate_task_clients_keys<'a>(
         if TaskKind::parse(key).is_none() {
             return Err(ConfigError::TaskClients(format!(
                 "unknown task-clients key {key:?}: expected one of {}",
-                TaskKind::ALL
+                TaskKind::CONFIGURABLE
                     .iter()
                     .map(|k| k.as_str())
                     .collect::<Vec<_>>()

@@ -59,6 +59,20 @@ impl TaskKind {
         }
     }
 
+    /// The canonical spellings that may be configured through `task-clients`.
+    /// `Fork` is intentionally excluded: it always inherits the parent model
+    /// and is rejected as a configuration key.
+    pub const CONFIGURABLE: [TaskKind; 8] = [
+        TaskKind::Scout,
+        TaskKind::Implement,
+        TaskKind::Research,
+        TaskKind::Verify,
+        TaskKind::Fix,
+        TaskKind::Review,
+        TaskKind::Write,
+        TaskKind::Refactor,
+    ];
+
     /// The nine canonical spellings, in declaration order.
     pub const ALL: [TaskKind; 9] = [
         TaskKind::Scout,
@@ -103,5 +117,14 @@ mod tests {
     fn fork_spelling() {
         assert_eq!(TaskKind::parse("Fork"), Some(TaskKind::Fork));
         assert_eq!(TaskKind::Fork.as_str(), "Fork");
+    }
+
+    #[test]
+    fn configurable_excludes_fork() {
+        assert_eq!(TaskKind::CONFIGURABLE.len(), 8);
+        assert!(!TaskKind::CONFIGURABLE.contains(&TaskKind::Fork));
+        for kind in TaskKind::CONFIGURABLE {
+            assert_eq!(TaskKind::parse(kind.as_str()), Some(kind));
+        }
     }
 }

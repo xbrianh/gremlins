@@ -1895,7 +1895,12 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
                             .join(", ")
                     );
                 };
-                let out = f(kind, prompt.to_string(), ctx.parent_history.clone()).await;
+                let history = if kind == TaskKind::Fork {
+                    ctx.parent_history.clone()
+                } else {
+                    None
+                };
+                let out = f(kind, prompt.to_string(), history).await;
                 // Label the result so concurrent Task outputs can be told apart.
                 let final_output = format!("# {kind}\n\n{out}");
                 log::info!(
@@ -2105,7 +2110,7 @@ message to finish. The summary parameter briefly describes what you accomplished
     });
     all.push(ToolDefinition {
         name: "Task".into(),
-        description: format!("Delegate a self-contained task to a worker with a clean conversation context. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message. Returns the worker's final text output. The Fork kind preserves the parent conversation context instead of starting clean."),
+        description: format!("Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message. Returns the worker's final text output."),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -2119,7 +2124,7 @@ message to finish. The summary parameter briefly describes what you accomplished
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Full task briefing for the worker. The worker starts with a clean conversation context and sees nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field."
+                    "description": "Full task briefing for the worker. Non-Fork kinds start with a clean conversation context and see nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field. The Fork kind inherits the parent conversation history before this prompt."
                 }
             },
             "required": ["kind", "prompt"],

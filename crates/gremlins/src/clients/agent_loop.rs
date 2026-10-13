@@ -28,6 +28,13 @@ fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &st
     }
 }
 
+fn task_kind_is_fork(args: &serde_json::Value) -> bool {
+    args.get("kind")
+        .and_then(|v| v.as_str())
+        .and_then(super::task_kind::TaskKind::parse)
+        == Some(super::task_kind::TaskKind::Fork)
+}
+
 pub(crate) type ErrorClassifier = fn(ProviderError) -> ClientError;
 
 pub(crate) fn default_classify(err: ProviderError) -> ClientError {
@@ -1292,6 +1299,20 @@ async fn run_agent_loop_core(
             ));
         }
 
+        let fork_batch = tool_calls
+            .iter()
+            .any(|tc| tc.function.name == "Task" && task_kind_is_fork(&tc.function.arguments));
+        // A Fork child inherits the conversation that led up to this turn,
+        // including the user message being answered. The current assistant
+        // tool-call message is intentionally *not* part of the snapshot:
+        // including it without its still-unknown tool results would leave an
+        // unmatched assistant tool-use in the child's transcript.
+        let fork_parent_history = fork_batch.then(|| {
+            let mut snapshot = history.clone();
+            snapshot.push(next_prompt.clone());
+            snapshot
+        });
+
         history.push(next_prompt.clone());
         history.push(assistant_tool_message(&text, &tool_calls));
 
@@ -1333,10 +1354,7 @@ async fn run_agent_loop_core(
         // Wrapped in a tokio::select! with maybe_pause so the operator can
         // interrupt a long-running tool batch.
         let mut tool_ctx = tool_ctx.clone();
-        // Give every tool invocation in this batch a point-in-time clone of
-        // the parent conversation. Fork uses it to seed the child agent;
-        // other tools ignore it.
-        tool_ctx.parent_history = Some(history.clone());
+        tool_ctx.parent_history = fork_parent_history;
         let ctx = tool_ctx.clone();
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;

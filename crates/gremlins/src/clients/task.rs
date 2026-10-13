@@ -293,7 +293,7 @@ fn make_task_runner_at_depth(
                 };
 
                 let prepopulated_messages = if kind == TaskKind::Fork {
-                    parent_history.clone()
+                    parent_history
                 } else {
                     None
                 };
@@ -505,6 +505,75 @@ mod tests {
                 other => panic!("task must inject a system prompt, got: {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn fork_inherits_parent_history_and_parent_model() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let ctx = depth_test_ctx();
+        let child = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("fork reply"),
+            MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "fork reply"}),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+
+        let factory_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let factory_flag = factory_called.clone();
+        let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
+            factory_flag.store(true, Ordering::SeqCst);
+            None
+        });
+        let selector = TaskModelSelector::new(
+            HashMap::from([(TaskKind::Scout, "openai:mini".into())]),
+            factory,
+        )
+        .expect("a configured task-clients map yields a selector");
+
+        let cancel = super::super::agent_loop::CancelToken::new();
+        let runner = make_task_runner(
+            child.clone().erase(),
+            Some(selector),
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            "model".into(),
+            5.0,
+            10,
+            0,
+            None,
+            None,
+            false,
+        );
+
+        let parent_history = vec![Message::user("earlier parent turn".to_string())];
+        let output = runner(TaskKind::Fork, "child task".into(), Some(parent_history)).await;
+
+        assert_eq!(output, "fork reply");
+        // Fork must bypass task-clients entirely, even when another kind is
+        // configured with an override.
+        assert!(
+            !factory_called.load(Ordering::SeqCst),
+            "Fork must never consult the task-clients factory"
+        );
+
+        // The child's first request must carry the inherited parent turn
+        // followed by the fork prompt as the next user message.
+        let requests = child.requests();
+        let child_history = format!("{:?}", requests[0].chat_history);
+        assert!(
+            child_history.contains("earlier parent turn"),
+            "fork child must be seeded with parent history, got: {child_history}"
+        );
+        assert!(
+            child_history.contains("child task"),
+            "fork prompt must follow inherited history, got: {child_history}"
+        );
     }
 
     #[tokio::test]
