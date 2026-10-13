@@ -2943,3 +2943,45 @@ fn validate_launch_inputs(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::create_chat_gremlin;
+    use crate::builders::{AgentBuilder, DefinitionBuilder};
+
+    /// The chat gremlin must anchor against the caller-supplied project root:
+    /// it is recorded in `state.json` and `gremlin.cwd()` resolves to it even
+    /// though the gremlin has no worktree.
+    #[test]
+    fn create_chat_gremlin_seeds_project_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("operator-project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = tmp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let stage = AgentBuilder::new("chat").prompt("hello").build().unwrap();
+        let definition = DefinitionBuilder::new("chat", "cmd:echo")
+            .stage(stage)
+            .build()
+            .unwrap();
+
+        let gremlin =
+            create_chat_gremlin(&definition, "cmd:echo", &state_root, &project_root).unwrap();
+
+        assert_eq!(
+            gremlin.state.read_str("project_root"),
+            project_root.to_string_lossy().into_owned(),
+            "state.json must record the operator's project root"
+        );
+        assert_eq!(
+            gremlin.cwd(),
+            project_root,
+            "gremlin.cwd() must resolve to the project root"
+        );
+        assert!(
+            gremlin.workdir.is_none(),
+            "chat gremlins must not have a worktree"
+        );
+    }
+}

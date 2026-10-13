@@ -225,23 +225,56 @@ pub(crate) fn build_workspace_preamble(cwd: &str) -> String {
 // Chat repository context
 // ---------------------------------------------------------------------------
 
+/// Hard deadline for a single git subprocess. A stalled `git` (index lock,
+/// fsmonitor, huge status) is killed and its section omitted rather than
+/// hanging the chat turn.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Per-section line and byte caps, plus a top-level listing entry cap. These
+/// keep the snapshot small enough that it cannot crowd out the operator's
+/// actual message.
+const MAX_SECTION_LINES: usize = 40;
+const MAX_SECTION_BYTES: usize = 4000;
+const MAX_LISTING_ENTRIES: usize = 200;
+
 /// Run a git command with `cwd` and return its trimmed stdout, or `None` on
 /// any failure (missing binary, not a repo, detached/broken state, permission
-/// problem). Never panics, never surfaces raw git errors.
+/// problem, timeout). Never panics, never surfaces raw git errors. A
+/// successful command with empty stdout returns `Some("")` so callers can
+/// distinguish "clean" from "failed".
 fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new("git")
         .args(args)
         .current_dir(cwd)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
+
+    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut out = String::new();
+                child.stdout.take()?.read_to_string(&mut out).ok()?;
+                return Some(out.trim().to_string());
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
     }
 }
 
@@ -251,52 +284,126 @@ fn is_git_repo(cwd: &str) -> bool {
     git_output(cwd, &["rev-parse", "--is-inside-work-tree"]).as_deref() == Some("true")
 }
 
+/// Truncate a multi-line section to `max_lines` lines and `max_bytes` bytes,
+/// appending a marker when anything was dropped. Returns the (possibly
+/// truncated) text.
+fn cap_section(text: &str, max_lines: usize, max_bytes: usize) -> String {
+    let mut truncated = false;
+
+    let lines: Vec<&str> = text.lines().collect();
+    let mut kept: Vec<&str> = lines;
+    if kept.len() > max_lines {
+        kept.truncate(max_lines);
+        truncated = true;
+    }
+
+    let mut out = kept.join("\n");
+    if out.len() > max_bytes {
+        let mut end = max_bytes;
+        while end > 0 && !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        truncated = true;
+    }
+
+    if truncated {
+        out.push_str("\n[truncated]");
+    }
+    out
+}
+
 /// A bounded, read-only snapshot of the repository context for a chat turn.
 ///
 /// Git sections are gated behind a single `rev-parse --is-inside-work-tree`
 /// check and are omitted (never an error) when the directory is not a git
-/// repository, `git` is missing, or any individual command fails. The
-/// top-level directory/file listing is produced independently of git and
-/// includes every visible entry — non-code files are listed by name, never
-/// read into the prompt.
+/// repository, `git` is missing, or any individual command fails or times
+/// out. The top-level directory/file listing is produced independently of git
+/// and includes every visible entry — non-code files are listed by name,
+/// never read into the prompt.
 pub(crate) fn build_chat_context(cwd: &str) -> String {
     let mut sections: Vec<String> = Vec::new();
 
     if is_git_repo(cwd) {
         if let Some(branch) = git_output(cwd, &["branch", "--show-current"]) {
-            sections.push(format!("Current branch: {branch}"));
+            if !branch.is_empty() {
+                sections.push(format!("Current branch: {branch}"));
+            }
         }
 
-        if let Some(remotes) = git_output(cwd, &["remote", "-v"]) {
-            sections.push(format!("Remotes:\n{remotes}"));
+        // Remote names only: `git remote -v` URLs can embed PATs or other
+        // userinfo, so we never copy URLs into the prompt.
+        if let Some(remotes) = git_output(cwd, &["remote"]) {
+            if !remotes.is_empty() {
+                sections.push(format!(
+                    "Remotes:\n{}",
+                    cap_section(&remotes, MAX_SECTION_LINES, MAX_SECTION_BYTES)
+                ));
+            }
         }
 
-        if let Some(status) = git_output(cwd, &["status", "--short"]) {
-            sections.push(format!("Git status (short):\n{status}"));
+        // `--branch` always emits a `##` line (including ahead/behind), so a
+        // clean tree still shows a status line. `--no-optional-locks` (a
+        // global option, before the subcommand) keeps the command read-only:
+        // it never takes the index lock or rewrites the index.
+        if let Some(status) = git_output(
+            cwd,
+            &["--no-optional-locks", "status", "--short", "--branch"],
+        ) {
+            if !status.is_empty() {
+                sections.push(format!(
+                    "Git status (short):\n{}",
+                    cap_section(&status, MAX_SECTION_LINES, MAX_SECTION_BYTES)
+                ));
+            }
         }
 
         if let Some(log) = git_output(cwd, &["log", "--oneline", "-n", "5"]) {
-            sections.push(format!("Recent commits:\n{log}"));
+            if !log.is_empty() {
+                sections.push(format!(
+                    "Recent commits:\n{}",
+                    cap_section(&log, MAX_SECTION_LINES, MAX_SECTION_BYTES)
+                ));
+            }
         }
 
-        // Diff stat against upstream/base when available.
-        if let Some(stat) = git_output(cwd, &["diff", "--stat", "@{upstream}"]) {
-            if !stat.trim().is_empty() {
-                sections.push(format!("Diff stat vs upstream:\n{stat}"));
-            }
+        if let Some(stat) = diff_stat(cwd) {
+            sections.push(format!(
+                "Diff stat vs base:\n{}",
+                cap_section(&stat, MAX_SECTION_LINES, MAX_SECTION_BYTES)
+            ));
         }
     }
 
     if let Some(listing) = top_level_listing(cwd) {
-        sections.push(format!("Top-level directory listing:\n{listing}"));
+        sections.push(format!(
+            "Top-level directory listing:\n{}",
+            cap_section(&listing, MAX_SECTION_LINES, MAX_SECTION_BYTES)
+        ));
     }
 
     sections.join("\n\n")
 }
 
+/// Diff stat against a base ref. Prefers the branch's upstream (the common
+/// "push this and open a PR" case has none yet), then falls back to
+/// `origin/HEAD`, `main`, and `master` in order. Returns the first non-empty
+/// stat, or `None` when no base ref exists.
+fn diff_stat(cwd: &str) -> Option<String> {
+    for base in ["@{upstream}", "origin/HEAD", "main", "master"] {
+        if let Some(stat) = git_output(cwd, &["diff", "--stat", base]) {
+            if !stat.is_empty() {
+                return Some(stat);
+            }
+        }
+    }
+    None
+}
+
 /// A bounded listing of the top-level entries in `cwd`, each tagged by file
 /// type (directory / file / symlink). Every visible entry is included; no
-/// source-code or known-language filtering is applied.
+/// source-code or known-language filtering is applied. The entry count is
+/// capped so a huge directory cannot crowd out the operator's message.
 fn top_level_listing(cwd: &str) -> Option<String> {
     let entries = std::fs::read_dir(cwd).ok()?;
     let mut rows: Vec<String> = Vec::new();
@@ -316,6 +423,11 @@ fn top_level_listing(cwd: &str) -> Option<String> {
         return None;
     }
     rows.sort();
+    if rows.len() > MAX_LISTING_ENTRIES {
+        let dropped = rows.len() - MAX_LISTING_ENTRIES;
+        rows.truncate(MAX_LISTING_ENTRIES);
+        rows.push(format!("[truncated: {dropped} more entries]"));
+    }
     Some(rows.join("\n"))
 }
 
@@ -883,14 +995,14 @@ mod tests {
 
     // ---- build_chat_context tests ----
 
-    /// Run `git` in `dir`, ignoring failures (e.g. git unavailable).
-    fn git(dir: &std::path::Path, args: &[&str]) -> bool {
-        std::process::Command::new("git")
+    /// Run `git` in `dir`, returning an error on failure (e.g. git missing).
+    fn git(dir: &std::path::Path, args: &[&str]) -> std::io::Result<()> {
+        let status = std::process::Command::new("git")
             .args(args)
             .current_dir(dir)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .status()?;
+        assert!(status.success(), "git {args:?} failed in {dir:?}");
+        Ok(())
     }
 
     #[test]
@@ -898,26 +1010,43 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        if !git(&repo, &["init", "-q"]) {
-            eprintln!("git unavailable; skipping chat_context_in_git_repo");
-            return;
-        }
-        git(&repo, &["config", "user.email", "t@t"]);
-        git(&repo, &["config", "user.name", "t"]);
+        // Fail (not skip) when git is unavailable: this test requires git.
+        git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        git(&repo, &["config", "user.email", "t@t"]).unwrap();
+        git(&repo, &["config", "user.name", "t"]).unwrap();
         std::fs::write(repo.join("README.md"), "# hi\n").unwrap();
         std::fs::write(repo.join("notes.txt"), "notes\n").unwrap();
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-qm", "init"]);
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["commit", "-qm", "init"]).unwrap();
+        git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/org/repo.git",
+            ],
+        )
+        .unwrap();
+        // Uncommitted change so `git diff --stat` against the base is non-empty.
+        std::fs::write(repo.join("README.md"), "# hi\nchanged\n").unwrap();
 
         let cwd = repo.to_string_lossy().into_owned();
         let ctx = build_chat_context(&cwd);
 
-        assert!(ctx.contains("Current branch:"), "ctx: {ctx}");
+        assert!(ctx.contains("Current branch: main"), "ctx: {ctx}");
+        assert!(ctx.contains("Remotes:\norigin"), "ctx: {ctx}");
+        assert!(ctx.contains("Git status (short):"), "ctx: {ctx}");
+        assert!(ctx.contains("## main"), "ctx: {ctx}");
         assert!(ctx.contains("Recent commits:"), "ctx: {ctx}");
+        assert!(ctx.contains("Diff stat vs base:"), "ctx: {ctx}");
+        assert!(ctx.contains("README.md"), "ctx: {ctx}");
         assert!(ctx.contains("Top-level directory listing:"), "ctx: {ctx}");
         // Non-code files are listed by name, not filtered out.
         assert!(ctx.contains("notes.txt"), "ctx: {ctx}");
         assert!(ctx.contains("README.md"), "ctx: {ctx}");
+        // Remote URLs must never leak into the prompt (only names are emitted).
+        assert!(!ctx.contains("https://example.com"), "ctx: {ctx}");
     }
 
     #[test]
@@ -937,6 +1066,7 @@ mod tests {
         assert!(!ctx.contains("Recent commits:"), "ctx: {ctx}");
         assert!(!ctx.contains("Git status"), "ctx: {ctx}");
         assert!(!ctx.contains("Remotes:"), "ctx: {ctx}");
+        assert!(!ctx.contains("Diff stat"), "ctx: {ctx}");
         // The listing is still produced, with non-code files included.
         assert!(ctx.contains("Top-level directory listing:"), "ctx: {ctx}");
         assert!(ctx.contains("a.md"), "ctx: {ctx}");
@@ -949,5 +1079,62 @@ mod tests {
     fn chat_context_nonexistent_dir_is_empty() {
         let ctx = build_chat_context("/nonexistent/gremlins/chat/root");
         assert!(ctx.is_empty(), "ctx should be empty, got: {ctx}");
+    }
+
+    /// A failing `git` on PATH (or a missing one) must degrade exactly like a
+    /// non-git directory: every git section omitted, listing still produced.
+    #[test]
+    fn chat_context_stubbed_failing_git_omits_git_sections() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.md"), "n").unwrap();
+
+        // A `git` stub that always fails.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let stub = bin.join("git");
+        std::fs::write(&stub, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH");
+        let new_path = format!(
+            "{}{}{}",
+            bin.display(),
+            std::path::MAIN_SEPARATOR,
+            old_path
+                .as_deref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        );
+        std::env::set_var("PATH", &new_path);
+        let _guard = PathGuard(old_path);
+
+        let cwd = dir.to_string_lossy().into_owned();
+        let ctx = build_chat_context(&cwd);
+
+        assert!(!ctx.contains("Current branch:"), "ctx: {ctx}");
+        assert!(!ctx.contains("Remotes:"), "ctx: {ctx}");
+        assert!(!ctx.contains("Git status"), "ctx: {ctx}");
+        assert!(!ctx.contains("Recent commits:"), "ctx: {ctx}");
+        assert!(!ctx.contains("Diff stat"), "ctx: {ctx}");
+        assert!(ctx.contains("Top-level directory listing:"), "ctx: {ctx}");
+        assert!(ctx.contains("note.md"), "ctx: {ctx}");
+    }
+
+    /// Restores `PATH` on drop so the stubbed-git test cannot leak its
+    /// process-global mutation into other tests.
+    struct PathGuard(Option<std::ffi::OsString>);
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
     }
 }
