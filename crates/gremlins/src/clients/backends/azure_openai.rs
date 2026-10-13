@@ -437,6 +437,16 @@ mod tests {
         guard
     }
 
+    /// Write a `providers.yaml` into the sandbox config dir and return its path.
+    fn write_providers_yaml(contents: &str) -> std::path::PathBuf {
+        let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
+        let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let path = config_dir.join("providers.yaml");
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
     #[test]
     fn build_rejects_missing_endpoint() {
         let _guard = isolated_env();
@@ -515,14 +525,7 @@ mod tests {
         guard.set("GREMLINS_AZURE_OPENAI_API_KEY", "env-api-key");
 
         // Write a providers.yaml — env var should win over it.
-        let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
-        let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("providers.yaml"),
-            r#"{"azure-openai": {"api-key": "providers-yaml-key"}}"#,
-        )
-        .unwrap();
+        write_providers_yaml(r#"{"azure-openai": {"api-key": "providers-yaml-key"}}"#);
 
         let method = crate::clients::config::azure_auth_method(
             "GREMLINS_AZURE_OPENAI_AUTH",
@@ -534,6 +537,26 @@ mod tests {
         assert!(
             matches!(method, ProviderAuth::ApiKey(k) if k == "env-api-key"),
             "GREMLINS_AZURE_OPENAI_API_KEY env var should win over providers.yaml"
+        );
+    }
+
+    #[test]
+    fn auth_precedence_providers_yaml_when_env_unset() {
+        let _guard = isolated_env();
+
+        // No env vars set — the api-key must come from providers.yaml.
+        write_providers_yaml(r#"{"azure-openai": {"api-key": "providers-yaml-key"}}"#);
+
+        let method = crate::clients::config::azure_auth_method(
+            "GREMLINS_AZURE_OPENAI_AUTH",
+            "azure-openai",
+            "GREMLINS_AZURE_OPENAI_TOKEN",
+            "GREMLINS_AZURE_OPENAI_API_KEY",
+        )
+        .unwrap();
+        assert!(
+            matches!(method, ProviderAuth::ApiKey(k) if k == "providers-yaml-key"),
+            "providers.yaml api-key should be used when no env var is set"
         );
     }
 
@@ -565,6 +588,55 @@ mod tests {
             &indexmap::IndexMap::new(),
         );
         assert!(result.is_ok(), "build should succeed with custom api version");
+    }
+
+    #[test]
+    fn endpoint_from_providers_yaml() {
+        let _guard = isolated_env();
+
+        // No env vars set — endpoint must come from providers.yaml.
+        write_providers_yaml(
+            r#"{"azure-openai": {"endpoint": "https://example.openai.azure.com", "api-key": "fake-key"}}"#,
+        );
+
+        let result = AzureOpenAiBackend::build(
+            "gpt-4o",
+            &HashMap::new(),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(
+            result.is_ok(),
+            "build should succeed with endpoint + api-key from providers.yaml"
+        );
+    }
+
+    #[test]
+    fn api_version_from_providers_yaml() {
+        let _guard = isolated_env();
+
+        write_providers_yaml(
+            r#"{"azure-openai": {"endpoint": "https://example.openai.azure.com", "api-version": "2025-01-01", "api-key": "fake-key"}}"#,
+        );
+
+        let version = crate::clients::config::api_version(
+            "GREMLINS_AZURE_OPENAI_API_VERSION",
+            "azure-openai",
+            "2024-10-21",
+        );
+        assert_eq!(version, "2025-01-01", "api-version should come from providers.yaml");
+    }
+
+    #[test]
+    fn api_version_defaults_when_absent() {
+        let _guard = isolated_env();
+
+        // No env var and no providers.yaml entry — default must apply.
+        let version = crate::clients::config::api_version(
+            "GREMLINS_AZURE_OPENAI_API_VERSION",
+            "azure-openai",
+            "2024-10-21",
+        );
+        assert_eq!(version, "2024-10-21", "api-version should default to 2024-10-21");
     }
 
     #[test]
@@ -745,14 +817,7 @@ mod tests {
         guard.set("GREMLINS_AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
         guard.set("GREMLINS_AZURE_OPENAI_AUTH", "cli");
 
-        let sandbox_root = std::env::var("GREMLINS_SANDBOX_ROOT").unwrap();
-        let config_dir = std::path::PathBuf::from(&sandbox_root).join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("providers.yaml"),
-            r#"{"azure-openai": {"azure": {"auth": "managed-identity"}}}"#,
-        )
-        .unwrap();
+        write_providers_yaml(r#"{"azure-openai": {"azure": {"auth": "managed-identity"}}}"#);
 
         let method = crate::clients::config::azure_auth_method(
             "GREMLINS_AZURE_OPENAI_AUTH",
@@ -764,6 +829,26 @@ mod tests {
         assert!(
             matches!(method, ProviderAuth::Cli),
             "GREMLINS_AZURE_OPENAI_AUTH env var should win over providers.yaml"
+        );
+    }
+
+    #[test]
+    fn auth_method_providers_yaml_when_env_unset() {
+        let _guard = isolated_env();
+
+        // No env vars set — the nested azure.auth must come from providers.yaml.
+        write_providers_yaml(r#"{"azure-openai": {"azure": {"auth": "managed-identity"}}}"#);
+
+        let method = crate::clients::config::azure_auth_method(
+            "GREMLINS_AZURE_OPENAI_AUTH",
+            "azure-openai",
+            "GREMLINS_AZURE_OPENAI_TOKEN",
+            "GREMLINS_AZURE_OPENAI_API_KEY",
+        )
+        .unwrap();
+        assert!(
+            matches!(method, ProviderAuth::ManagedIdentity),
+            "providers.yaml azure.auth should be used when no env var is set"
         );
     }
 
