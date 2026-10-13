@@ -54,6 +54,8 @@ pub struct RenderContext<'a> {
     pub active_runs: &'a HashMap<String, ActiveRun>,
     /// Height of the content region (viewport minus the fixed bars).
     pub content_height: u16,
+    /// Inline completion preview suffix (paint-only, never submitted).
+    pub completion_preview: Option<&'a str>,
 }
 
 impl<'a> RenderContext<'a> {
@@ -1036,10 +1038,10 @@ impl InputBarWidget {
         Self { v_scroll: 0 }
     }
 
-    /// The wrapped rows of the input text (prompt + text) at `width`,
-    /// uncapped.
-    pub fn wrapped_rows(&self, width: u16, input: &str) -> u16 {
-        let text = Self::full_line(input, width);
+    /// The wrapped rows of the input text (prompt + text + optional preview)
+    /// at `width`, uncapped.
+    pub fn wrapped_rows(&self, width: u16, input: &str, preview: Option<&str>) -> u16 {
+        let text = Self::preview_line(Self::full_line(input, width), preview, width);
         (wrapped_height(&[text], width).max(1).min(u16::MAX as usize)) as u16
     }
 
@@ -1059,6 +1061,25 @@ impl InputBarWidget {
             ),
             Span::raw(input.to_string()),
         ])
+    }
+
+    /// Extend the real input line with a dimmed inline preview suffix.
+    ///
+    /// The preview is paint-only: it never changes the buffer, cursor, or
+    /// wrapping measurements beyond what the full candidate path would
+    /// occupy.
+    fn preview_line(base: Line<'static>, preview: Option<&str>, _width: u16) -> Line<'static> {
+        let Some(preview) = preview.filter(|p| !p.is_empty()) else {
+            return base;
+        };
+        let mut spans = base.spans;
+        spans.push(Span::styled(
+            preview.to_string(),
+            Style::default()
+                .fg(DEFAULT_THEME.subtle)
+                .add_modifier(Modifier::DIM),
+        ));
+        Line::from(spans)
     }
 
     /// Compute the cursor's (row, column) within the wrapped view.
@@ -1205,11 +1226,12 @@ impl LiveAreaWidget for InputBarWidget {
     fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         // Minimum: the wrapped content, capped at 5 rows. The bar is not
         // shrunk below its visible text unless the viewport cannot fit it.
-        self.wrapped_rows(width, ctx.input).min(5)
+        self.wrapped_rows(width, ctx.input, ctx.completion_preview)
+            .min(5)
     }
 
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
-        self.wrapped_rows(width, ctx.input)
+        self.wrapped_rows(width, ctx.input, ctx.completion_preview)
     }
 
     fn max_height(&self, _ctx: &RenderContext) -> u16 {
@@ -1222,14 +1244,22 @@ impl LiveAreaWidget for InputBarWidget {
             return;
         }
 
-        // Build the wrapped paragraph, then slice out the visible vertical
-        // window so the cursor stays in view.
-        let paragraph =
-            Paragraph::new(Self::full_line(ctx.input, width)).wrap(Wrap { trim: false });
+        // Build the full styled line, adding the paint-only preview suffix
+        // immediately after the real input. Measurement now includes the
+        // preview so the extended line is allocated enough rows; cursor
+        // position is still computed from `ctx.input` alone.
+        let preview_line = Self::preview_line(
+            Self::full_line(ctx.input, width),
+            ctx.completion_preview,
+            width,
+        );
+        let paragraph = Paragraph::new(preview_line).wrap(Wrap { trim: false });
 
         // Render into a full-width buffer at the paragraph's natural height,
         // then copy the visible window into `area`.
-        let full_rows = wrapped_height(&[Self::full_line(ctx.input, width)], width).max(1) as u16;
+        let full_rows = self
+            .wrapped_rows(width, ctx.input, ctx.completion_preview)
+            .max(1);
         let full_area = Rect::new(0, 0, width, full_rows);
         let mut full_buf = Buffer::empty(full_area);
         paragraph.render(full_area, &mut full_buf);
@@ -1337,6 +1367,8 @@ impl LiveAreaWidget for InfoBarWidget {
         spans.push(Span::styled("  ", band));
         spans.push(Span::styled("Ctrl+G", malachite));
         spans.push(Span::styled(" editor  ", ivory));
+        spans.push(Span::styled("Tab", malachite));
+        spans.push(Span::styled(" filepath  ", ivory));
         spans.push(Span::styled("/help", malachite));
 
         let paragraph = Paragraph::new(Line::from(spans)).style(band);
@@ -2303,6 +2335,7 @@ mod tests {
             overlay: None,
             active_runs: EMPTY.get_or_init(HashMap::new),
             content_height: 0,
+            completion_preview: None,
         }
     }
 

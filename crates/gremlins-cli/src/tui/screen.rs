@@ -276,6 +276,7 @@ impl<B: Backend> LiveArea<B> {
             overlay: app.overlay.as_ref(),
             active_runs: &app.active_runs,
             content_height: self.scrollable_rows(),
+            completion_preview: app.completion_preview_suffix(),
         };
 
         let width = self.cols;
@@ -490,7 +491,7 @@ impl<B: Backend> LiveArea<B> {
     /// Reconcile the input bar's scroll offsets so the cursor stays visible
     /// after a cursor move or text edit.
     pub fn ensure_input_cursor_visible(&mut self, cursor: usize, input: &str, width: u16) {
-        let rows = self.input_bar_mut().wrapped_rows(width, input).min(5);
+        let rows = self.input_bar_mut().wrapped_rows(width, input, None).min(5);
         self.input_bar_mut()
             .ensure_cursor_visible(cursor, input, width, rows);
     }

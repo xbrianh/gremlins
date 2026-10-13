@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::tui::completion::CompletionState;
+
 /// Application state for the TUI.
 ///
 /// Pure display state, no I/O and no widget ownership. Owned by the event
@@ -32,6 +34,9 @@ pub struct App {
     pub history_cursor: Option<usize>,
     /// Terminal width cached for buffer trimming. Updated before each frame.
     pub width: u16,
+    /// Active filepath-completion state for the main input bar. The state is
+    /// inert (no filesystem access); the completion module owns all I/O.
+    pub completion: Option<CompletionState>,
 }
 
 /// One tracked gremlin run.
@@ -105,6 +110,7 @@ impl App {
             input_history: Vec::new(),
             history_cursor: None,
             width: 80,
+            completion: None,
         }
     }
 
@@ -252,6 +258,56 @@ impl App {
         self.overlay = Some(Overlay::Debug);
     }
 
+    // ── Completion helpers ──────────────────────────────────────
+
+    /// Store a fresh completion state.
+    pub fn set_completion(&mut self, state: CompletionState) {
+        self.completion = Some(state);
+    }
+
+    /// Advance to the next completion candidate.
+    pub fn completion_advance(&mut self) {
+        if let Some(state) = &mut self.completion {
+            state.advance();
+        }
+    }
+
+    /// Rewind to the previous completion candidate.
+    pub fn completion_rewind(&mut self) {
+        if let Some(state) = &mut self.completion {
+            state.rewind();
+        }
+    }
+
+    /// Drop any active completion state.
+    pub fn clear_completion(&mut self) {
+        self.completion = None;
+    }
+
+    /// Update the active completion's replaced span to the given range.
+    /// Used after each candidate/prefix insert so the next Tab/BackTab
+    /// replaces exactly the text that was inserted.
+    pub fn update_completion_span(&mut self, span: std::ops::Range<usize>) {
+        if let Some(state) = &mut self.completion {
+            state.span = span;
+        }
+    }
+
+    /// Derive the paint-only suffix for the currently selected completion
+    /// candidate: the untyped remainder that appears dimmed after the real
+    /// input. Returns `None` when completion is inactive or the current
+    /// candidate no longer extends the replaced path word.
+    pub fn completion_preview_suffix(&self) -> Option<&str> {
+        let state = self.completion.as_ref()?;
+        let candidate = state.current();
+        // The candidate replaces the path word at `state.span`, which may be
+        // preceded by command/argument text. Compare against that slice (the
+        // currently inserted text) rather than the whole input buffer.
+        let inserted = self.input.get(state.span.start..state.span.end)?;
+        let suffix = candidate.strip_prefix(inserted)?;
+        (!suffix.is_empty()).then_some(suffix)
+    }
+
     // ── Cursor editing helpers ────────────────────────────────────
 
     /// Move the cursor one grapheme/char left, clamped to a `char` boundary.
@@ -322,6 +378,16 @@ impl App {
             end += 1;
         }
         self.input.drain(self.input_cursor..end);
+    }
+
+    /// Replace the completion span with `replacement` and move the cursor to
+    /// the end of the replacement. The span must lie on `char` boundaries.
+    pub fn replace_input_span(&mut self, span: std::ops::Range<usize>, replacement: String) {
+        debug_assert!(self.input.is_char_boundary(span.start));
+        debug_assert!(self.input.is_char_boundary(span.end));
+        let end = span.end.min(self.input.len());
+        self.input.replace_range(span.start..end, &replacement);
+        self.input_cursor = span.start + replacement.len();
     }
 
     /// Reset the cursor to the end of the current input (e.g. after history
