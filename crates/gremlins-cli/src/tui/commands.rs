@@ -189,7 +189,7 @@ fn help_text() -> Vec<String> {
     vec![
         "available commands:".to_string(),
         "  /ls              — list gremlins".to_string(),
-        "  /launch <def>    — start a gremlin".to_string(),
+        "  /launch <definition> — start a gremlin".to_string(),
         "  /info <id>       — show gremlin info".to_string(),
         "  /stop <id>       — stop a gremlin".to_string(),
         "  /resume <id>     — resume a gremlin".to_string(),
@@ -207,9 +207,44 @@ fn help_text() -> Vec<String> {
         "  Ctrl+C           — exit".to_string(),
         "  Ctrl+D (empty)   — exit".to_string(),
         "  Ctrl+L           — redraw screen".to_string(),
-        "  Esc              — clear input".to_string(),
-        "  Ctrl+G           — editor (stub)".to_string(),
+        "  Esc              — clear input / cancel in-flight chat".to_string(),
+        "  Ctrl+G           — open external editor".to_string(),
         "".to_string(),
         "scrolling: use terminal scrollback / tmux copy mode".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drift check with the chat system prompt's TUI self-knowledge section.
+    /// `/help` and the agent prompt must enumerate the same command names.
+    #[test]
+    fn help_text_lists_all_tui_slash_commands() {
+        let commands: Vec<String> = help_text()
+            .into_iter()
+            .filter(|line| line.contains('/'))
+            .map(|line| line.trim_start().to_string())
+            .collect();
+
+        let help_names = [
+            "/ls", "/launch", "/info", "/stop", "/resume", "/log", "/watch", "/debug", "/model",
+            "/chat", "/clear", "/new", "/help", "/quit",
+        ];
+
+        for cmd in help_names {
+            assert!(
+                commands.iter().any(|l| l.contains(cmd)),
+                "/help must list {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_text_editor_hint_describes_real_external_editor() {
+        let text = help_text().join("\n");
+        assert!(text.contains("Ctrl+G") && text.contains("external editor"));
+        assert!(!text.contains("(stub)"));
+    }
 }
