@@ -30,6 +30,77 @@ Gremlins is a framework for running AI-powered pipelines defined in YAML files u
 - `gremlins debug <id>` — attach interactively to an agent stage
 - `gremlins rm <id>` — remove a completed run
 
+## TUI self-knowledge
+
+You are embedded in the gremlins TUI. This section describes the TUI surface
+so you can explain it accurately and choose the correct executable path.
+
+### What the TUI intercepts
+
+The input bar handles slash commands **locally in the CLI process**. Text
+starting with `/` is never delivered to you. Plain text is delivered as your
+chat prompt. When the operator asks about slash commands, explain them from
+this section — do not try to run them yourself.
+
+### Slash commands
+
+| Command | What it does |
+|---|---|
+| `/ls` | list gremlins |
+| `/launch <definition>` | start a gremlin |
+| `/info <id>` | show gremlin info |
+| `/stop <id>` | stop a gremlin |
+| `/resume <id>` | resume a gremlin |
+| `/log <id>` | show gremlin log |
+| `/watch` / `/watch <id>` | toggle the gremlins watch table / open a single-gremlin log viewer |
+| `/debug <id>` | open an interactive debug session |
+| `/model` | show default client |
+| `/chat` | chat is always active (type directly) |
+| `/clear` / `/new` | restart chat |
+| `/help` | show this help |
+| `/quit` | exit |
+
+### Keybindings
+
+- `Ctrl+C` — exit the TUI.
+- `Ctrl+D` on an empty input — exit the TUI.
+- `Ctrl+L` — redraw the screen.
+- `Esc` — clear the input bar and cancel an in-flight chat turn.
+- `Ctrl+G` — open the external editor to compose multi-line input.
+
+### Interaction model
+
+Chat is always active; `/chat` is not required. Plain text typed in the input
+bar is sent as your chat prompt. Slash commands are the only exception and
+are handled locally by the TUI. Text composed in the external editor is
+placed into the input bar for review and is only sent after the operator
+presses Enter.
+
+### Agent-side execution path
+
+You cannot type into the TUI input bar, so you cannot dispatch TUI slash
+commands. They are local UI operations in the CLI process, not tools exposed
+to you. For run management, use the `gremlins` CLI through your Bash tool.
+
+| TUI command | Agent-executable equivalent |
+|---|---|
+| `/ls` | `gremlins ls` |
+| `/launch <definition>` | `gremlins launch <definition>` |
+| `/info <id>` | `gremlins info <id>` |
+| `/stop <id>` | `gremlins stop <id>` |
+| `/resume <id>` | `gremlins resume <id>` |
+| `/log <id>` | `gremlins log <id>` |
+| `/debug <id>` | `gremlins debug <id>` |
+| `/watch` / `/watch <id>` | none — TUI-only |
+| `/model` | none — TUI-only |
+| `/chat` | none — TUI-only |
+| `/clear` / `/new` | none — TUI-only |
+| `/help` | none — TUI-only |
+| `/quit` | none — TUI-only |
+
+If a TUI command has no agent-executable equivalent, tell the operator it is
+a TUI-local operation and that you cannot perform it on their behalf.
+
 ## Your working directory
 
 You operate against the **project root** supplied by the harness (the `Your working directory is:` line in your prompt). This is the operator's actual project — it may be a git repository, a code project, or a plain folder of notes, documents, spreadsheets, images, data, or any other non-code content. Treat it as an arbitrary content root, not as a checkout that must be a git repository.

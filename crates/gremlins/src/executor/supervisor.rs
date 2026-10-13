@@ -2951,6 +2951,47 @@ mod tests {
     use super::create_chat_gremlin;
     use crate::builders::{AgentBuilder, DefinitionBuilder};
 
+    /// The chat system prompt must teach the agent about the TUI surface it
+    /// is embedded in. This test is the drift check between the bundled
+    /// prompt and the TUI `/help` output: both must name the same commands.
+    #[test]
+    fn chat_system_prompt_documents_tui_surface() {
+        let prompt = super::CHAT_SYSTEM_PROMPT;
+
+        assert!(
+            prompt.contains("## TUI self-knowledge"),
+            "the chat prompt must contain the TUI self-knowledge section"
+        );
+        assert!(
+            prompt.contains("## Agent-side execution path"),
+            "the chat prompt must document the CLI execution path"
+        );
+
+        for cmd in [
+            "/ls", "/launch", "/info", "/stop", "/resume", "/log", "/watch", "/debug", "/model",
+            "/chat", "/clear", "/new", "/help", "/quit",
+        ] {
+            assert!(
+                prompt.contains(cmd),
+                "chat prompt must document the slash command {cmd}"
+            );
+        }
+
+        assert!(prompt.contains("`gremlins ls`"), "must map /ls to the CLI");
+        assert!(
+            prompt.contains("none — TUI-only"),
+            "must mark TUI-only commands as having no agent path"
+        );
+        assert!(
+            prompt.contains("`Ctrl+G`") && prompt.contains("external editor"),
+            "must document the external editor keybinding"
+        );
+        assert!(
+            prompt.contains("`Esc`") && prompt.contains("cancel an in-flight chat turn"),
+            "must document Esc's clear/cancel behavior"
+        );
+    }
+
     /// The chat gremlin must anchor against the caller-supplied project root:
     /// it is recorded in `state.json` and `gremlin.cwd()` resolves to it even
     /// though the gremlin has no worktree.
