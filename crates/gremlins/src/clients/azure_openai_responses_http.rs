@@ -18,9 +18,11 @@
 //! deployment-in-URL routing, delete this file and revert the call sites in
 //! `backends/azure_openai.rs`.
 
+use std::fmt::Write as _;
 use std::future::Future;
 
 use bytes::Bytes;
+use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use http::{Request, Response};
 use rig_core::http_client::{
     DynHttpClient, Error, HttpClientExt, LazyBody, MultipartForm, Result, StreamingResponse,
@@ -92,13 +94,18 @@ impl AzureResponsesHttpClient {
             )))
         })?;
 
-        let path = parts.uri.path().to_string();
+        let deployment = model.trim_matches('/');
+        if deployment.is_empty() {
+            return Err(Error::instance(std::io::Error::other(
+                "Azure OpenAI Responses request body has an empty top-level `model` field",
+            )));
+        }
+
         let uri: http::Uri = format!(
-            "{}/openai/deployments/{}{}?api-version={}",
+            "{}/openai/deployments/{}/responses?api-version={}",
             endpoint.trim_end_matches('/'),
-            model.trim_start_matches('/'),
-            path,
-            api_version,
+            percent_encode_path_segment(deployment),
+            percent_encode_path_segment(api_version),
         )
         .parse()
         .map_err(|e| {
@@ -107,9 +114,28 @@ impl AzureResponsesHttpClient {
             )))
         })?;
 
+        // The body was reserialized without `model`, so any framing headers
+        // supplied by the caller no longer match the bytes that will be sent.
+        parts.headers.remove(CONTENT_LENGTH);
+        parts.headers.remove(TRANSFER_ENCODING);
+
         parts.uri = uri;
         Ok(Request::from_parts(parts, Bytes::from(body)))
     }
+}
+
+/// Percent-encode a URL path segment or query value, keeping only RFC 3986
+/// unreserved characters unescaped.
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            write!(&mut encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    encoded
 }
 
 impl HttpClientExt for AzureResponsesHttpClient {
@@ -169,6 +195,7 @@ impl HttpClientExt for AzureResponsesHttpClient {
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
+    use std::time::Duration;
 
     // ── construction ─────────────────────────────────────────────────
 
@@ -193,6 +220,9 @@ mod tests {
     /// finish cleanly.
     fn read_request(listener: std::net::TcpListener) -> CapturedRequest {
         let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
 
         // One BufReader for the whole read: a second reader would drop any
         // body bytes the first one buffered via read-ahead, leaving
@@ -266,12 +296,15 @@ mod tests {
             .uri(format!("{endpoint}/responses"))
             .header("x-test-header", "keep-me")
             .header("content-type", "application/json")
+            .header("content-length", "9999")
             .body(serde_json::to_vec(&body).unwrap())
             .unwrap();
 
         let jh = std::thread::spawn(move || read_request(listener));
-        let _ = runtime().block_on(wrapper.send::<_, bytes::Bytes>(req));
+        let response = runtime().block_on(wrapper.send::<_, bytes::Bytes>(req));
         let captured = jh.join().unwrap();
+
+        response.expect("rewritten Responses request must be sent successfully");
 
         assert!(
             captured.request_line.starts_with("POST "),
@@ -327,12 +360,15 @@ mod tests {
         let req = Request::builder()
             .uri(format!("{endpoint}/v1/models"))
             .header("x-test-header", "keep-me")
+            .header("content-length", body.len().to_string())
             .body(Bytes::from_static(body))
             .unwrap();
 
         let jh = std::thread::spawn(move || read_request(listener));
-        let _ = runtime().block_on(wrapper.send::<_, bytes::Bytes>(req));
+        let response = runtime().block_on(wrapper.send::<_, bytes::Bytes>(req));
         let captured = jh.join().unwrap();
+
+        response.expect("non-Responses request must be sent successfully");
 
         assert!(
             captured.request_line.contains(" /v1/models "),
@@ -375,6 +411,48 @@ mod tests {
             err.to_string().contains("not valid JSON"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn responses_request_ignores_path_prefix() {
+        let req = Request::builder()
+            .uri("https://example.openai.azure.com/v1/responses")
+            .body(Bytes::from_static(br#"{"model":"gpt-4o","input":[]}"#))
+            .unwrap();
+
+        let rewritten = AzureResponsesHttpClient::rewrite_request(
+            req,
+            "https://example.openai.azure.com",
+            "2025-05-15",
+        )
+        .expect("rewrite should succeed");
+
+        assert_eq!(
+            rewritten.uri().path(),
+            "/openai/deployments/gpt-4o/responses"
+        );
+        assert_eq!(rewritten.uri().query(), Some("api-version=2025-05-15"));
+    }
+
+    #[test]
+    fn responses_request_percent_encodes_deployment_and_api_version() {
+        let req = Request::builder()
+            .uri("https://example.openai.azure.com/responses")
+            .body(Bytes::from_static(br#"{"model":"gpt 4/o?","input":[]}"#))
+            .unwrap();
+
+        let rewritten = AzureResponsesHttpClient::rewrite_request(
+            req,
+            "https://example.openai.azure.com",
+            "2025-05/15",
+        )
+        .expect("rewrite should succeed");
+
+        assert_eq!(
+            rewritten.uri().path(),
+            "/openai/deployments/gpt%204%2Fo%3F/responses"
+        );
+        assert_eq!(rewritten.uri().query(), Some("api-version=2025-05%2F15"));
     }
 
     #[test]
