@@ -5,7 +5,6 @@ use std::sync::Arc;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
-use super::backend::ClientError;
 use super::retry;
 use super::task_kind::TaskKind;
 use super::tools::{self, ToolContext};
@@ -292,20 +291,10 @@ fn make_task_runner_at_depth(
             let retry_budget = max_retries.min(retry::STREAM_IDLE_BACKOFF.len());
             let result = retry::with_retry(
                 &retry::STREAM_IDLE_BACKOFF[..retry_budget],
-                |e: &ClientError| {
-                    matches!(
-                        e,
-                        ClientError::Timeout { .. } | ClientError::ApiServerError { .. }
-                    )
-                },
-                |attempt, e, wait| {
-                    let cause = match e {
-                        ClientError::Timeout { .. } => "stream idle timeout",
-                        ClientError::ApiServerError { .. } => "transient-error",
-                        _ => "error",
-                    };
+                |_| false,
+                |attempt, _e, wait| {
                     log::warn!(
-                        "{child_prefix}stream {cause}, retrying in {wait}s ({}/{})...",
+                        "{child_prefix}stream error, retrying in {wait}s ({}/{})...",
                         attempt + 1,
                         retry_budget
                     );
@@ -597,12 +586,11 @@ mod tests {
     /// When every attempt fails retryably, the Task still returns a string
     /// result (not an unwinding error) so the parent sees `Task error: …`.
     ///
-    /// The inner agent loop now retries 429s at the turn boundary (3 slots in
-    /// `TURN_RETRY_BACKOFF`), and the task runner's `with_retry` is a secondary
-    /// net (1 slot here via `max_retries=1`). With the mock repeating its last
-    /// 429 turn once the script is exhausted, each nested-loop invocation makes
-    /// 4 requests (initial + 3 turn-level retries), and `with_retry` re-invokes
-    /// the loop once more: 8 requests total.
+    /// The inner agent loop retries 429s at the turn boundary (3 slots in
+    /// `TURN_RETRY_BACKOFF`). After exhaustion the inner loop returns
+    /// `RetryExhausted`, which is *not* retryable by the outer `with_retry` — the
+    /// backend-level wrapper no longer second-guesses exhausted turn-level
+    /// retries. Total: 4 requests (initial + 3 turn-level retries).
     #[tokio::test(start_paused = true)]
     async fn make_task_runner_exhausts_retries_as_string() {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -637,12 +625,12 @@ mod tests {
             output.starts_with("Task error: "),
             "exhausted retries must remain in the tool result, got: {output}"
         );
-        // Inner loop: 3 turn-level retries (4 attempts) before giving up;
-        // with_retry then re-invokes the loop once (4 more attempts).
+        // Inner loop: 3 turn-level retries (4 attempts) before giving up.
+        // The exhausted error is RetryExhausted, so with_retry does not retry.
         assert_eq!(
             model.requests().len(),
-            8,
-            "turn-level retries plus the with_retry safety net must both fire"
+            4,
+            "turn-level retries exhaust without with_retry safety net"
         );
     }
 

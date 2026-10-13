@@ -88,6 +88,7 @@ impl Clone for RunParams {
 pub enum ClientError {
     Timeout { message: String },
     ApiServerError { message: String },
+    RetryExhausted { message: String },
     Runtime { message: String },
     Bail { reason: String },
 }
@@ -97,6 +98,7 @@ impl std::fmt::Display for ClientError {
         match self {
             ClientError::Timeout { message } => write!(f, "{message}"),
             ClientError::ApiServerError { message } => write!(f, "{message}"),
+            ClientError::RetryExhausted { message } => write!(f, "{message}"),
             ClientError::Runtime { message } => write!(f, "{message}"),
             ClientError::Bail { reason } => write!(f, "{reason}"),
         }

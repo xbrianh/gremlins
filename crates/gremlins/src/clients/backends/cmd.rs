@@ -547,9 +547,6 @@ impl Backend for CmdBackend {
                 }
                 Ok(r)
             }
-            Err(ClientError::Timeout { .. }) | Err(ClientError::ApiServerError { .. }) => {
-                self.resume().await
-            }
             Err(e) => Err(e),
         }
     }
@@ -580,20 +577,10 @@ impl Backend for CmdBackend {
 
         let result = with_retry(
             backoff,
-            |e: &ClientError| {
-                matches!(
-                    e,
-                    ClientError::Timeout { .. } | ClientError::ApiServerError { .. }
-                )
-            },
-            |attempt, e, wait| {
-                let cause = match e {
-                    ClientError::Timeout { .. } => "stream idle timeout",
-                    ClientError::ApiServerError { .. } => "api server error",
-                    _ => "error",
-                };
+            |_| false,
+            |attempt, _e, wait| {
                 log::warn!(
-                    "{prefix}{cause}, resuming in {wait}s ({}/{})...",
+                    "{prefix}error, resuming in {wait}s ({}/{})...",
                     attempt + 1,
                     max_retries
                 );

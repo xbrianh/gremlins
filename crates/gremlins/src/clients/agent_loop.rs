@@ -519,8 +519,11 @@ async fn run_agent_loop_core(
     let mut turns: usize = 0;
     let mut turn_num: usize = 0;
     let mut turn_retries: usize = 0;
+    let mut timeout_retries: usize = 0;
     let mut final_text = String::new();
     let mut timed_out = false;
+    let mut exhausted_turn_retries: bool = false;
+    let mut exhausted_timeout_retries: bool = false;
     let mut stream_error: Option<ProviderError> = None;
     let loop_start = Instant::now();
 
@@ -709,6 +712,10 @@ async fn run_agent_loop_core(
                     pending_run_one_turn = true;
                     continue;
                 }
+                let retryable = is_retryable(&e, opts);
+                if retryable {
+                    exhausted_turn_retries = true;
+                }
                 stream_error = Some(e);
                 break;
             }
@@ -724,6 +731,7 @@ async fn run_agent_loop_core(
         let mut turn_usage: Option<Usage> = None;
         let mut paused_mid_stream = false;
         let mut retry_turn = false;
+        let mut retry_timeout_turn = false;
 
         loop {
             let item = tokio::select! {
@@ -804,6 +812,32 @@ async fn run_agent_loop_core(
             };
             match item {
                 Err(_) => {
+                    if timeout_retries < TURN_RETRY_BACKOFF.len() {
+                        let wait = TURN_RETRY_BACKOFF[timeout_retries];
+                        timeout_retries += 1;
+                        log::warn!(
+                            "agent_loop: idle timeout on turn {turn_num} (attempt {timeout_retries}), backing off {wait}s"
+                        );
+                        send_log(
+                            log_tx,
+                            prefix,
+                            &format!("retry: idle timeout, backing off {wait}s"),
+                        );
+                        drop(response);
+                        retry_timeout_turn = true;
+                        if retry_backoff(cancel, wait).await {
+                            log::info!(
+                                "agent_loop: cancelled during timeout backoff (label={})",
+                                prefix
+                            );
+                            send_log(log_tx, prefix, "exit: cancelled during timeout backoff");
+                            return Err(ClientError::Runtime {
+                                message: "cancelled".into(),
+                            });
+                        }
+                        break;
+                    }
+                    exhausted_timeout_retries = true;
                     timed_out = true;
                     drop(response);
                     break;
@@ -840,6 +874,10 @@ async fn run_agent_loop_core(
                             });
                         }
                         break;
+                    }
+                    let retryable = is_retryable(&e, opts);
+                    if retryable {
+                        exhausted_turn_retries = true;
                     }
                     stream_error = Some(e);
                     break;
@@ -898,6 +936,12 @@ async fn run_agent_loop_core(
             // Preserve the pending one-turn state so the retry re-executes
             // this turn instead of re-entering interactive_loop in debug mode.
             pending_run_one_turn = true;
+            continue;
+        }
+
+        if retry_timeout_turn {
+            // Stream was interrupted by an idle timeout — re-execute this
+            // same turn with history intact.
             continue;
         }
 
@@ -975,6 +1019,7 @@ async fn run_agent_loop_core(
 
         turn_num += 1;
         turn_retries = 0;
+        timeout_retries = 0;
 
         // ---- completion decision ----
         // Solo Done is the only valid completion signal. Mixed Done + other
@@ -1424,6 +1469,11 @@ async fn run_agent_loop_core(
     if timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
         send_log(log_tx, prefix, "exit: stream idle timeout");
+        if exhausted_timeout_retries {
+            return Err(ClientError::RetryExhausted {
+                message: "exhausted turn-level timeout retries".into(),
+            });
+        }
         return Err(ClientError::Timeout {
             message: "stream idle timeout".into(),
         });
@@ -1431,6 +1481,14 @@ async fn run_agent_loop_core(
     if let Some(err) = stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
         send_log(log_tx, prefix, "exit: stream error");
+        if exhausted_turn_retries {
+            return Err(ClientError::RetryExhausted {
+                message: format!(
+                    "exhausted turn-level retries ({} attempts): {err}",
+                    TURN_RETRY_BACKOFF.len() + 1,
+                ),
+            });
+        }
         let classify = opts.classify_error.unwrap_or(default_classify);
         return Err(classify(err));
     }
@@ -1982,8 +2040,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn loop_idle_timeout_is_client_timeout() {
+    #[tokio::test(start_paused = true)]
+    async fn loop_idle_timeout_exhausts_turn_retries() {
         let ctx = test_ctx(None, None);
         let cancel = CancelToken::new();
         let model = rig_core::driver::Model::new(
@@ -1991,12 +2049,23 @@ mod tests {
             PendingTransport,
         )
         .erase();
-        let err = run_agent_loop(model, "hi", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap_err();
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone(),
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // The stream hangs forever, so each turn hits the idle timeout
+        // (0.05 s). After 3 turn-level timeout retries (2 + 5 + 10 s) the
+        // fourth attempt exhausts the budget and returns Runtime.
+        // Total wall-clock: 4 × 0.05 + 2 + 5 + 10 ≈ 17.2 s.
+        tokio::time::advance(Duration::from_secs(18)).await;
+        let err = handle.await.unwrap().unwrap_err();
         assert!(
-            matches!(err, ClientError::Timeout { .. }),
-            "expected ClientError::Timeout, got {err:?}"
+            matches!(err, ClientError::RetryExhausted { .. }),
+            "expected ClientError::RetryExhausted after exhausted timeout retries, got {err:?}"
         );
     }
 
@@ -2321,6 +2390,165 @@ mod tests {
         ));
 
         // Let the loop reach the retry backoff, then cancel mid-sleep.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        cancel.cancel();
+        tokio::time::advance(Duration::from_millis(500)).await;
+
+        let result = handle.await.unwrap();
+        match result {
+            Err(ClientError::Runtime { message }) => {
+                assert_eq!(message, "cancelled");
+            }
+            other => panic!("expected cancellation, got: {other:?}"),
+        }
+    }
+
+    /// When turn-level 429 retries are exhausted, the error must surface as
+    /// `Runtime` so the backend `with_retry` does not retry it again.
+    #[tokio::test(start_paused = true)]
+    async fn loop_429_exhausted_retries_returns_runtime() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-429-exhaust-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Every attempt returns 429 — the mock repeats the last turn.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::error("http://429: slow down"),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "boom",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // Advance past all turn-level backoffs: 2 + 5 + 10 = 17 s.
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(
+            matches!(err, ClientError::RetryExhausted { .. }),
+            "expected ClientError::RetryExhausted after exhausted turn retries, got {err:?}"
+        );
+    }
+
+    /// A timeout on turn N must back off and retry turn N in place — not
+    /// restart the loop from turn 0 — and `turn_num` must count only
+    /// completed turns.
+    #[tokio::test(start_paused = true)]
+    async fn loop_timeout_retries_same_turn_without_losing_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "content").unwrap();
+
+        // Turn 0: Read tool call (completes).
+        // Turn 1 attempt 1: hangs (idle timeout fires) — retried.
+        // Turn 1 attempt 2: Done (completes).
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({ "file_path": f.to_str().unwrap() }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            // This stream never produces an event — it hangs until the idle
+            // timeout fires.
+            vec![],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("recovered"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({ "summary": "done" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        // Short idle timeout so we don't need huge advances.
+        ctx.idle_timeout = 0.1;
+        ctx.params.idle_timeout = Some(0.1);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "read then finish",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // Advance to let turn 0 complete, then the timeout fires (0.1 s),
+        // then the turn-level backoff runs (2 s), then turn 1 retry
+        // completes.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let result = handle.await.unwrap().unwrap();
+
+        assert_eq!(result.text_result.as_deref(), Some("recovered"));
+
+        // Three requests: turn 0, turn 1 (timeout), turn 1 retry (Done).
+        assert_eq!(model.requests().len(), 3);
+
+        // turn_num counts completed turns only: turn 0 + turn 1 = 2.
+        let usage = result.token_usage.unwrap();
+        assert_eq!(
+            usage.turns, 2,
+            "turn_num must exclude the timed-out attempt"
+        );
+    }
+
+    /// A cancel token set during the timeout backoff must abandon the retry
+    /// immediately.
+    #[tokio::test(start_paused = true)]
+    async fn loop_timeout_backoff_observes_cancellation() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-timeout-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Empty stream — hangs until timeout.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 0.1;
+        ctx.params.idle_timeout = Some(0.1);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "boom",
+            ctx.clone(),
+            cancel.clone(),
+            loop_opts(None),
+            None,
+        ));
+
+        // Let the idle timeout fire (0.1 s), then cancel during backoff.
         tokio::time::advance(Duration::from_millis(500)).await;
         cancel.cancel();
         tokio::time::advance(Duration::from_millis(500)).await;

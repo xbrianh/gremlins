@@ -180,34 +180,16 @@ impl Backend for CopilotBackend {
         *self.state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
         let prompt = Mutex::new(params.prompt.clone());
-        let timeout_prompt = params.on_timeout_prompt.clone();
         let backoff = &STREAM_IDLE_BACKOFF[..params.max_retries];
 
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
 
         retry::with_retry(
             backoff,
-            |e: &ClientError| {
-                matches!(
-                    e,
-                    ClientError::Timeout { .. } | ClientError::ApiServerError { .. }
-                )
-            },
-            |attempt, e, wait| {
-                let next = match e {
-                    ClientError::Timeout { .. } => timeout_prompt
-                        .clone()
-                        .unwrap_or_else(|| prompt.lock().unwrap().clone()),
-                    _ => prompt.lock().unwrap().clone(),
-                };
-                *prompt.lock().unwrap() = next;
-                let cause = match e {
-                    ClientError::Timeout { .. } => "stream idle timeout",
-                    ClientError::ApiServerError { .. } => "transient-error",
-                    _ => "error",
-                };
+            |_| false,
+            |attempt, _e, wait| {
                 log::warn!(
-                    "{prefix}stream {cause}, retrying in {wait}s ({}/{})...",
+                    "{prefix}stream error, retrying in {wait}s ({}/{})...",
                     attempt + 1,
                     params.max_retries
                 );

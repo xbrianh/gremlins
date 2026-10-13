@@ -113,13 +113,8 @@ pub(crate) async fn run_openai_compat(
         |attempt, e, wait| {
             let next = retry_prompt(e, &prompt.lock().unwrap(), timeout_prompt.as_deref());
             *prompt.lock().unwrap() = next;
-            let cause = match e {
-                ClientError::Timeout { .. } => "stream idle timeout",
-                ClientError::ApiServerError { .. } => "transient-error",
-                _ => "error",
-            };
             log::warn!(
-                "{prefix}stream {cause}, retrying in {wait}s ({}/{})...",
+                "{prefix}stream error, retrying in {wait}s ({}/{})...",
                 attempt + 1,
                 params.max_retries
             );
@@ -375,18 +370,15 @@ pub(crate) fn build_extra_params(
     }
 }
 
-fn classify_retryable(e: &ClientError) -> bool {
-    matches!(
-        e,
-        ClientError::Timeout { .. } | ClientError::ApiServerError { .. }
-    )
+/// Turn-level retry inside the agent loop now handles transient stream errors
+/// (429/5xx) and idle timeouts. The backend wrapper is a pass-through — it
+/// only checks cancellation between the (single) attempt.
+fn classify_retryable(_e: &ClientError) -> bool {
+    false
 }
 
-fn retry_prompt(err: &ClientError, prompt: &str, on_timeout_prompt: Option<&str>) -> String {
-    match err {
-        ClientError::Timeout { .. } => on_timeout_prompt.unwrap_or(prompt).to_string(),
-        _ => prompt.to_string(),
-    }
+fn retry_prompt(_err: &ClientError, prompt: &str, _on_timeout_prompt: Option<&str>) -> String {
+    prompt.to_string()
 }
 
 // ── tests ────────────────────────────────────────────────────────────────
@@ -479,16 +471,17 @@ mod tests {
     }
 
     #[test]
-    fn retry_prompt_swaps_only_on_timeout() {
+    fn retry_prompt_is_pass_through() {
         let timeout = ClientError::Timeout {
             message: "idle".into(),
         };
         let api = ClientError::ApiServerError {
             message: "rate limit".into(),
         };
+        // Turn-level retry handles prompt swapping; backend retry_prompt is a no-op.
         assert_eq!(
             retry_prompt(&timeout, "orig", Some("timeout-prompt")),
-            "timeout-prompt"
+            "orig"
         );
         assert_eq!(retry_prompt(&api, "orig", Some("timeout-prompt")), "orig");
         assert_eq!(retry_prompt(&timeout, "orig", None), "orig");
