@@ -1871,6 +1871,20 @@ async fn handle_chat(
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from);
 
+    // The operator's environment, supplied by the TUI as a JSON object. When
+    // absent (non-TUI callers), fall back to the daemon's base process env
+    // snapshot so commands still run with a sane environment. The map lives
+    // only on the in-memory `Gremlin.env` — never persisted to state or logs.
+    let env: HashMap<String, String> = match request.get("env") {
+        Some(Value::Object(map)) => map
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect(),
+        // Fall back to the daemon's process environment (the same snapshot
+        // `RuntimeConfig::snapshot` captures as `base_process_env`).
+        _ => std::env::vars().collect(),
+    };
+
     // 1. Init config
     if let Err(e) = config::init_global() {
         let resp = error_response(&format!("config init: {e}"));
@@ -1966,6 +1980,7 @@ async fn handle_chat(
                 &default_client,
                 state_root,
                 &project_root,
+                &env,
             ) {
                 Ok(g) => g,
                 Err(e) => {
@@ -2003,6 +2018,10 @@ async fn handle_chat(
     gremlin.definition = Box::new(definition);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Mpsc(stream_tx));
     gremlin.cancel_token = Some(turn_cancel.clone());
+    // Refresh the environment on every turn: the chat gremlin is persistent
+    // and reused across turns, so a later turn's operator environment must
+    // replace the one captured at creation rather than freeze at first contact.
+    gremlin.env = env;
 
     // Point the run-map handle's cancel token at this turn so `stop` cancels
     // the in-flight stage rather than a stale persistent token.
@@ -2437,6 +2456,7 @@ fn create_chat_gremlin(
     default_client: &str,
     _state_root: &Path,
     project_root: &Path,
+    env: &HashMap<String, String>,
 ) -> Result<Gremlin, String> {
     use crate::clients::client::Client;
     use crate::definition::GremlinDefinition;
@@ -2528,7 +2548,7 @@ fn create_chat_gremlin(
         workdir: None,
         project_root,
         state,
-        env: HashMap::new(),
+        env: env.clone(),
         client,
         loop_iter: "1".to_string(),
         stage_inputs: HashMap::new(),
@@ -2950,6 +2970,7 @@ fn validate_launch_inputs(
 mod tests {
     use super::create_chat_gremlin;
     use crate::builders::{AgentBuilder, DefinitionBuilder};
+    use std::collections::HashMap;
 
     /// The chat system prompt must teach the agent about the TUI surface it
     /// is embedded in. This test is the drift check between the bundled
@@ -3035,8 +3056,14 @@ mod tests {
             .build()
             .unwrap();
 
-        let gremlin =
-            create_chat_gremlin(&definition, "cmd:echo", &state_root, &project_root).unwrap();
+        let gremlin = create_chat_gremlin(
+            &definition,
+            "cmd:echo",
+            &state_root,
+            &project_root,
+            &HashMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             gremlin.state.read_str("project_root"),
@@ -3051,6 +3078,36 @@ mod tests {
         assert!(
             gremlin.workdir.is_none(),
             "chat gremlins must not have a worktree"
+        );
+    }
+
+    /// The chat gremlin's `env` must be seeded from the resolved environment
+    /// map (the TUI's environment, or the daemon's base env when absent).
+    #[test]
+    fn create_chat_gremlin_seeds_environment() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("operator-project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = tmp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let stage = AgentBuilder::new("chat").prompt("hello").build().unwrap();
+        let definition = DefinitionBuilder::new("chat", "cmd:echo")
+            .stage(stage)
+            .build()
+            .unwrap();
+
+        let env = HashMap::from([
+            ("PATH".to_string(), "/custom/bin".to_string()),
+            ("HOME".to_string(), "/home/operator".to_string()),
+        ]);
+
+        let gremlin =
+            create_chat_gremlin(&definition, "cmd:echo", &state_root, &project_root, &env).unwrap();
+
+        assert_eq!(
+            gremlin.env, env,
+            "gremlin.env must be seeded from the resolved environment map"
         );
     }
 }
