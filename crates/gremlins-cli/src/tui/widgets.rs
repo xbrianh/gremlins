@@ -177,11 +177,10 @@ pub struct TranscriptWidget {
     last_width: u16,
     /// Whether the response region needs re-rendering into the FIFO.
     response_dirty: bool,
-    /// Byte offset into `response_accumulator` of text already rendered
-    /// into the FIFO. When overflow drains response lines, this offset
-    /// stays put so the next rebuild only renders the uncommitted suffix
-    /// — preventing drained lines from reappearing.
-    response_committed_offset: usize,
+    /// Number of rendered response lines already committed to terminal
+    /// scrollback. When the response region is rebuilt, these leading lines
+    /// are skipped so drained content is never emitted twice.
+    response_drained_lines: usize,
     /// Cached wrapped desired height `(width, height)` for the FIFO,
     /// invalidated whenever the FIFO, accumulator, or width changes.
     desired_cache: Cell<Option<(u16, u16)>>,
@@ -197,7 +196,7 @@ impl TranscriptWidget {
             separator_index: None,
             last_width: 40,
             response_dirty: false,
-            response_committed_offset: 0,
+            response_drained_lines: 0,
             desired_cache: Cell::new(None),
         }
     }
@@ -298,7 +297,7 @@ impl TranscriptWidget {
         self.response_start = None;
         self.response_accumulator.clear();
         self.response_dirty = false;
-        self.response_committed_offset = 0;
+        self.response_drained_lines = 0;
     }
 
     /// Append streaming response text.
@@ -308,6 +307,9 @@ impl TranscriptWidget {
             self.response_start = Some(self.scrollable.len());
         }
         self.response_accumulator.push_str(text);
+        // Keep the drained-line watermark: appended text re-renders the full
+        // accumulator, but the lines already committed to scrollback stay
+        // committed and must not be emitted again.
         self.response_dirty = true;
     }
 
@@ -320,7 +322,7 @@ impl TranscriptWidget {
         self.response_accumulator.clear();
         self.response_accumulator.push_str(text);
         self.response_dirty = true;
-        self.response_committed_offset = 0;
+        self.response_drained_lines = 0;
     }
 
     /// Whether the streaming response is empty.
@@ -370,7 +372,9 @@ impl TranscriptWidget {
             .truncate(self.response_accumulator.len() - overlap);
         self.response_accumulator.push_str(text);
         self.response_dirty = true;
-        self.response_committed_offset = 0;
+        // Reconcile rewrites the accumulated text, so the drained-line
+        // watermark no longer maps to the repaired accumulator.
+        self.response_drained_lines = 0;
     }
 
     /// Whether a current turn is active (pinned).
@@ -388,7 +392,7 @@ impl TranscriptWidget {
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
-        self.response_committed_offset = 0;
+        self.response_drained_lines = 0;
     }
 
     /// Discard the current turn: truncate the FIFO back to the turn start
@@ -413,7 +417,7 @@ impl TranscriptWidget {
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
-        self.response_committed_offset = 0;
+        self.response_drained_lines = 0;
     }
 
     /// Clear the scrollable FIFO.
@@ -425,7 +429,7 @@ impl TranscriptWidget {
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
-        self.response_committed_offset = 0;
+        self.response_drained_lines = 0;
     }
 
     /// Re-render the response region into the FIFO if dirty.
@@ -437,19 +441,17 @@ impl TranscriptWidget {
         self.response_dirty = false;
         let start = self.response_start.unwrap_or(self.scrollable.len());
         self.scrollable.truncate(start);
-        // Only render the suffix that hasn't been committed yet. After
-        // overflow drains response lines from the FIFO head,
-        // response_committed_offset stays put so drained text is never
-        // re-rendered.
-        let suffix = &self.response_accumulator[self.response_committed_offset..];
-        for line in markdown::render(
-            suffix,
+        // Re-render the full accumulator so appended chunks merge into the
+        // retained response instead of replacing it, but skip the leading
+        // lines already committed to scrollback by overflow.
+        let lines = markdown::render(
+            &self.response_accumulator,
             Style::default().fg(DEFAULT_THEME.text),
             self.last_width.saturating_sub(1),
-        ) {
+        );
+        for line in lines.into_iter().skip(self.response_drained_lines) {
             self.scrollable.push(line);
         }
-        self.response_committed_offset = self.response_accumulator.len();
     }
 
     /// Regenerate the turn separator at the current content width.
@@ -494,6 +496,11 @@ impl TranscriptWidget {
         }
 
         let drained = overflow_lines.len();
+        // Count the drained lines that belonged to the response region so a
+        // later rebuild skips them instead of emitting them to scrollback a
+        // second time.
+        let response_start_old = self.response_start.unwrap_or(self.scrollable.len());
+        self.response_drained_lines += drained.saturating_sub(response_start_old);
         self.scrollable.drain_head(drained);
         if let Some(t) = &mut self.turn_start {
             *t = t.saturating_sub(drained);
@@ -2034,6 +2041,76 @@ mod tests {
         assert!(
             text.contains(&"completed system note".to_string()),
             "completed content before the turn start must survive: {text:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_response_accumulates_across_frames() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+
+        // Stream the response word-by-word, finalizing after each chunk the
+        // way `compose` does every frame. Each chunk must append to the
+        // previously-rendered text, not replace it.
+        for word in ["hello", " ", "world", " ", "again"] {
+            transcript.push_response(word);
+            LiveAreaWidget::finalize(&mut transcript, 80);
+        }
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.iter().any(|l| l.contains("hello world again")),
+            "streamed words must accumulate into one response line: {text:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_response_does_not_reemit_drained_lines() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+
+        // A tall streamed response. List items render as distinct logical
+        // lines, so re-emission into overflow is observable.
+        transcript.push_response("- one\n- two\n- three\n- four");
+        LiveAreaWidget::finalize(&mut transcript, 80);
+        let first: Vec<String> = transcript
+            .take_overflow(1, 80)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(!first.is_empty());
+
+        // Stream another chunk. The rebuild must append to the retained tail
+        // and skip the lines already committed to scrollback.
+        transcript.push_response("\n- five");
+        LiveAreaWidget::finalize(&mut transcript, 80);
+        let second: Vec<String> = transcript
+            .take_overflow(1, 80)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+
+        for line in &first {
+            assert!(
+                !second.contains(line),
+                "line committed to scrollback was emitted again: {line:?}\nfirst={first:?}\nsecond={second:?}"
+            );
+        }
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.iter().any(|l| l.contains("five")),
+            "the newly streamed chunk must stay visible: {text:?}"
         );
     }
 
