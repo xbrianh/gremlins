@@ -1,28 +1,27 @@
 //! HTTP client wrapper that rewrites Azure OpenAI Responses requests.
 //!
 //! Rig's `AZURE` dialect still resolves the Responses wire at the account
-//! endpoint root (`{endpoint}/responses`) and keeps the deployment in the
-//! top-level `model` body field.  Azure's deployment routing needs the
-//! deployment in the URL instead:
+//! endpoint root (`{endpoint}/responses`). Azure OpenAI's v1 inference
+//! contract serves Responses one path segment deeper:
 //!
 //! ```text
-//! {endpoint}/openai/deployments/{model}/responses?api-version=…
+//! {endpoint}/openai/v1/responses?api-version=v1
 //! ```
 //!
+//! and requires the deployment name in the top-level `model` body field.
 //! This wrapper intercepts every outgoing request whose path ends in
-//! `/responses`, moves the top-level `model` out of the JSON body, and
-//! rewrites the URL to the Azure deployment form.  All other requests pass
-//! through unchanged, as do all headers and every other body field.
+//! `/responses`, validates the top-level `model`, and rewrites the URL to
+//! the account-level v1 form. The JSON body and all headers pass through
+//! unchanged, as do all other requests.
 //!
 //! This module is self-contained.  When rig's Responses wire supports Azure
-//! deployment-in-URL routing, delete this file and revert the call sites in
+//! v1 routing, delete this file and revert the call sites in
 //! `backends/azure_openai.rs`.
 
 use std::fmt::Write as _;
 use std::future::Future;
 
 use bytes::Bytes;
-use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use http::{Request, Response};
 use rig_core::http_client::{
     DynHttpClient, Error, HttpClientExt, LazyBody, MultipartForm, Result, StreamingResponse,
@@ -42,7 +41,7 @@ pub(crate) struct AzureResponsesHttpClient {
 
 impl AzureResponsesHttpClient {
     /// Wrap `inner` so Requests-route requests are rewritten to Azure's
-    /// deployment-in-URL form using `endpoint` and `api_version`.
+    /// account-level v1 form using `endpoint` and `api_version`.
     pub(crate) fn new(
         inner: DynHttpClient,
         endpoint: impl Into<String>,
@@ -55,7 +54,8 @@ impl AzureResponsesHttpClient {
         }
     }
 
-    /// Rewrite a `/responses` request body and URL.  Non-`/responses`
+    /// Rewrite a `/responses` request URL.  The body passes through
+    /// unchanged after its top-level `model` is validated.  Non-`/responses`
     /// requests are returned exactly as they arrived.
     #[allow(clippy::result_large_err)]
     fn rewrite_request(
@@ -68,44 +68,13 @@ impl AzureResponsesHttpClient {
         }
 
         let (mut parts, body) = req.into_parts();
-        let mut value: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
-            Error::instance(std::io::Error::other(format!(
-                "Azure OpenAI Responses request body is not valid JSON: {e}"
-            )))
-        })?;
 
-        let model = value
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                Error::instance(std::io::Error::other(
-                    "Azure OpenAI Responses request body is missing the top-level `model` field",
-                ))
-            })?
-            .to_string();
-
-        if let Some(object) = value.as_object_mut() {
-            object.remove("model");
-        }
-
-        let body = serde_json::to_vec(&value).map_err(|e| {
-            Error::instance(std::io::Error::other(format!(
-                "failed to serialize Azure OpenAI Responses request body: {e}"
-            )))
-        })?;
-
-        let deployment = model.trim_matches('/');
-        if deployment.is_empty() {
-            return Err(Error::instance(std::io::Error::other(
-                "Azure OpenAI Responses request body has an empty top-level `model` field",
-            )));
-        }
+        validate_model(&body)?;
 
         let uri: http::Uri = format!(
-            "{}/openai/deployments/{}/responses?api-version={}",
+            "{}/openai/v1/responses?api-version={}",
             endpoint.trim_end_matches('/'),
-            percent_encode_path_segment(deployment),
-            percent_encode_path_segment(api_version),
+            percent_encode_query_value(api_version),
         )
         .parse()
         .map_err(|e| {
@@ -114,19 +83,39 @@ impl AzureResponsesHttpClient {
             )))
         })?;
 
-        // The body was reserialized without `model`, so any framing headers
-        // supplied by the caller no longer match the bytes that will be sent.
-        parts.headers.remove(CONTENT_LENGTH);
-        parts.headers.remove(TRANSFER_ENCODING);
-
         parts.uri = uri;
-        Ok(Request::from_parts(parts, Bytes::from(body)))
+        Ok(Request::from_parts(parts, body))
     }
 }
 
-/// Percent-encode a URL path segment or query value, keeping only RFC 3986
-/// unreserved characters unescaped.
-fn percent_encode_path_segment(value: &str) -> String {
+/// Validate the one body field Azure's account-level Responses contract
+/// needs: the deployment name in `model`. The body itself is left intact.
+#[allow(clippy::result_large_err)]
+fn validate_model(body: &[u8]) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
+        Error::instance(std::io::Error::other(format!(
+            "Azure OpenAI Responses request body is not valid JSON: {e}"
+        )))
+    })?;
+
+    match value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    {
+        Some(model) if !model.is_empty() => Ok(()),
+        Some(_) => Err(Error::instance(std::io::Error::other(
+            "Azure OpenAI Responses request body has an empty top-level `model` field",
+        ))),
+        None => Err(Error::instance(std::io::Error::other(
+            "Azure OpenAI Responses request body is missing the top-level `model` field",
+        ))),
+    }
+}
+
+/// Percent-encode a URL query value, keeping only RFC 3986 unreserved
+/// characters unescaped.
+fn percent_encode_query_value(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for &byte in value.as_bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
@@ -275,14 +264,11 @@ mod tests {
     // ── body/URL rewriting against a local TCP listener ─────────────
 
     #[test]
-    fn send_rewrites_responses_url_and_body_on_wire() {
+    fn send_rewrites_responses_url_and_preserves_body_on_wire() {
         let (listener, port) = bind_ephemeral();
         let endpoint = format!("http://127.0.0.1:{port}");
-        let wrapper = AzureResponsesHttpClient::new(
-            test_dyn_http(),
-            endpoint.clone(),
-            "2025-05-15".to_string(),
-        );
+        let wrapper =
+            AzureResponsesHttpClient::new(test_dyn_http(), endpoint.clone(), "v1".to_string());
 
         let body = serde_json::json!({
             "model": "gpt-4o",
@@ -296,7 +282,6 @@ mod tests {
             .uri(format!("{endpoint}/responses"))
             .header("x-test-header", "keep-me")
             .header("content-type", "application/json")
-            .header("content-length", "9999")
             .body(serde_json::to_vec(&body).unwrap())
             .unwrap();
 
@@ -314,7 +299,7 @@ mod tests {
         assert!(
             captured
                 .request_line
-                .contains("/openai/deployments/gpt-4o/responses?api-version=2025-05-15"),
+                .contains("/openai/v1/responses?api-version=v1"),
             "rewritten URL missing from request line: {}",
             captured.request_line
         );
@@ -329,8 +314,8 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_slice(&captured.body).unwrap();
         assert!(
-            parsed.get("model").is_none(),
-            "top-level model must be removed: {parsed}"
+            parsed.get("model").and_then(serde_json::Value::as_str) == Some("gpt-4o"),
+            "top-level model must be preserved: {parsed}"
         );
         assert!(
             parsed.get("input").is_some(),
@@ -350,11 +335,8 @@ mod tests {
     fn send_passes_through_non_responses_requests() {
         let (listener, port) = bind_ephemeral();
         let endpoint = format!("http://127.0.0.1:{port}");
-        let wrapper = AzureResponsesHttpClient::new(
-            test_dyn_http(),
-            endpoint.clone(),
-            "2025-05-15".to_string(),
-        );
+        let wrapper =
+            AzureResponsesHttpClient::new(test_dyn_http(), endpoint.clone(), "v1".to_string());
 
         let body = br#"{"unchanged":true}"#;
         let req = Request::builder()
@@ -376,8 +358,8 @@ mod tests {
             captured.request_line
         );
         assert!(
-            !captured.request_line.contains("openai/deployments"),
-            "non-Responses request must not gain deployment routing: {}",
+            !captured.request_line.contains("/openai/v1/responses"),
+            "non-Responses request must not gain Responses routing: {}",
             captured.request_line
         );
         assert_eq!(captured.body, body);
@@ -403,7 +385,7 @@ mod tests {
         let err = AzureResponsesHttpClient::rewrite_request(
             req,
             "https://example.openai.azure.com",
-            "2025-05-15",
+            "v1",
         )
         .expect_err("invalid JSON must yield an error");
 
@@ -423,19 +405,16 @@ mod tests {
         let rewritten = AzureResponsesHttpClient::rewrite_request(
             req,
             "https://example.openai.azure.com",
-            "2025-05-15",
+            "v1",
         )
         .expect("rewrite should succeed");
 
-        assert_eq!(
-            rewritten.uri().path(),
-            "/openai/deployments/gpt-4o/responses"
-        );
-        assert_eq!(rewritten.uri().query(), Some("api-version=2025-05-15"));
+        assert_eq!(rewritten.uri().path(), "/openai/v1/responses");
+        assert_eq!(rewritten.uri().query(), Some("api-version=v1"));
     }
 
     #[test]
-    fn responses_request_percent_encodes_deployment_and_api_version() {
+    fn responses_request_percent_encodes_api_version() {
         let req = Request::builder()
             .uri("https://example.openai.azure.com/responses")
             .body(Bytes::from_static(br#"{"model":"gpt 4/o?","input":[]}"#))
@@ -448,10 +427,7 @@ mod tests {
         )
         .expect("rewrite should succeed");
 
-        assert_eq!(
-            rewritten.uri().path(),
-            "/openai/deployments/gpt%204%2Fo%3F/responses"
-        );
+        assert_eq!(rewritten.uri().path(), "/openai/v1/responses");
         assert_eq!(rewritten.uri().query(), Some("api-version=2025-05%2F15"));
     }
 
@@ -465,7 +441,7 @@ mod tests {
         let err = AzureResponsesHttpClient::rewrite_request(
             req,
             "https://example.openai.azure.com",
-            "2025-05-15",
+            "v1",
         )
         .expect_err("missing model must yield an error");
 
@@ -477,11 +453,31 @@ mod tests {
     }
 
     #[test]
+    fn responses_request_with_empty_model_yields_error() {
+        let req = Request::builder()
+            .uri("https://example.openai.azure.com/responses")
+            .body(Bytes::from_static(br#"{"model":"  ","input":[]}"#))
+            .unwrap();
+
+        let err = AzureResponsesHttpClient::rewrite_request(
+            req,
+            "https://example.openai.azure.com",
+            "v1",
+        )
+        .expect_err("empty model must yield an error");
+
+        assert!(
+            err.to_string().contains("empty top-level `model` field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn azure_responses_http_client_is_cloneable() {
         let wrapper = AzureResponsesHttpClient::new(
             test_dyn_http(),
             "https://example.openai.azure.com",
-            "2025-05-15",
+            "v1",
         );
         let _clone = wrapper.clone();
     }

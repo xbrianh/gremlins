@@ -24,7 +24,7 @@ use rig_reqwest::ReqwestClient;
 // ── AzureOpenAiClientState ───────────────────────────────────────────────
 
 /// Azure OpenAI's Responses-capable default API version.
-const DEFAULT_API_VERSION: &str = "2025-05-15";
+const DEFAULT_API_VERSION: &str = "v1";
 
 /// Either a statically-built client (for ApiKey / Token auth) or the
 /// ingredients to build one dynamically per attempt (for identity-based auth).
@@ -221,7 +221,7 @@ impl AzureOpenAiBackend {
     /// is async).  Configuration errors (bad env vars) surface at first use.
     ///
     /// `GREMLINS_AZURE_OPENAI_ENDPOINT` (or `providers.yaml` `azure-openai.endpoint`) is required.
-    /// `GREMLINS_AZURE_OPENAI_API_VERSION` (or `providers.yaml` `azure-openai.api-version`) defaults to `"2025-05-15"`.
+    /// `GREMLINS_AZURE_OPENAI_API_VERSION` (or `providers.yaml` `azure-openai.api-version`) defaults to `"v1"`.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
@@ -658,7 +658,7 @@ mod tests {
             "azure-openai",
             DEFAULT_API_VERSION,
         );
-        assert_eq!(version, "2025-05-15", "api-version should default to 2025-05-15");
+        assert_eq!(version, "v1", "api-version should default to v1");
     }
 
     #[test]
