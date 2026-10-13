@@ -5,8 +5,6 @@ use std::sync::Arc;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
-use super::backend::ClientError;
-use super::retry;
 use super::task_kind::TaskKind;
 use super::tools::{self, ToolContext};
 
@@ -174,7 +172,6 @@ pub(crate) fn make_task_runner(
     parent_model_name: String,
     idle_timeout: f64,
     max_turns: usize,
-    max_retries: usize,
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
@@ -190,7 +187,6 @@ pub(crate) fn make_task_runner(
         parent_model_name,
         idle_timeout,
         max_turns,
-        max_retries,
         0,
         String::new(),
         completion_nudge_budget,
@@ -211,7 +207,6 @@ fn make_task_runner_at_depth(
     _parent_model_name: String,
     idle_timeout: f64,
     max_turns: usize,
-    max_retries: usize,
     depth: u32,
     id_chain: String,
     completion_nudge_budget: usize,
@@ -269,7 +264,6 @@ fn make_task_runner_at_depth(
                 model_name.clone(),
                 idle_timeout,
                 max_turns,
-                max_retries,
                 depth + 1,
                 new_chain,
                 completion_nudge_budget,
@@ -284,49 +278,20 @@ fn make_task_runner_at_depth(
                 &work_root, &scratch,
             ));
 
-            // The parent backends validate `max_retries` before starting a run,
-            // so this is normally already bounded. Clamp defensively anyway:
-            // task runners are stored closures and shouldn't be able to panic
-            // from a mis-sliced backoff schedule if a caller ever constructs one
-            // independently.
-            let retry_budget = max_retries.min(retry::STREAM_IDLE_BACKOFF.len());
-            let result = retry::with_retry(
-                &retry::STREAM_IDLE_BACKOFF[..retry_budget],
-                |e: &ClientError| {
-                    matches!(
-                        e,
-                        ClientError::Timeout { .. } | ClientError::ApiServerError { .. }
-                    )
-                },
-                |attempt, e, wait| {
-                    let cause = match e {
-                        ClientError::Timeout { .. } => "stream idle timeout",
-                        ClientError::ApiServerError { .. } => "transient-error",
-                        _ => "error",
-                    };
-                    log::warn!(
-                        "{child_prefix}stream {cause}, retrying in {wait}s ({}/{})...",
-                        attempt + 1,
-                        retry_budget
-                    );
-                },
-                || {
-                    crate::clients::agent_loop::run_agent_loop_nested(
-                        selected_model.clone(),
-                        &task,
-                        system_prompt.clone(),
-                        &child_ctx,
-                        &cancel,
-                        tool_filter.as_deref(),
-                        &child_prefix,
-                        idle_timeout,
-                        max_turns,
-                        completion_nudge_budget,
-                        log_tx.clone(),
-                        max_tokens,
-                        skip_temperature,
-                    )
-                },
+            let result = crate::clients::agent_loop::run_agent_loop_nested(
+                selected_model.clone(),
+                &task,
+                system_prompt.clone(),
+                &child_ctx,
+                &cancel,
+                tool_filter.as_deref(),
+                &child_prefix,
+                idle_timeout,
+                max_turns,
+                completion_nudge_budget,
+                log_tx.clone(),
+                max_tokens,
+                skip_temperature,
             )
             .await;
 
@@ -494,7 +459,6 @@ mod tests {
             "model".into(),
             5.0,
             10,
-            1,
             0,
             None,
             None,
@@ -535,7 +499,6 @@ mod tests {
             "model".into(),
             0.2,
             10,
-            0,
             MAX_DEPTH,
             String::new(),
             0,
@@ -577,7 +540,6 @@ mod tests {
             "model".into(),
             5.0,
             10,
-            1,
             0,
             None,
             None,
@@ -596,6 +558,12 @@ mod tests {
 
     /// When every attempt fails retryably, the Task still returns a string
     /// result (not an unwinding error) so the parent sees `Task error: …`.
+    ///
+    /// The inner agent loop retries 429s at the turn boundary (3 slots in
+    /// `TURN_RETRY_BACKOFF`). After exhaustion the inner loop returns
+    /// `RetryExhausted`, which is *not* retryable by the outer `with_retry` — the
+    /// backend-level wrapper no longer second-guesses exhausted turn-level
+    /// retries. Total: 4 requests (initial + 3 turn-level retries).
     #[tokio::test(start_paused = true)]
     async fn make_task_runner_exhausts_retries_as_string() {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -616,7 +584,6 @@ mod tests {
             "model".into(),
             5.0,
             10,
-            1,
             0,
             None,
             None,
@@ -630,10 +597,12 @@ mod tests {
             output.starts_with("Task error: "),
             "exhausted retries must remain in the tool result, got: {output}"
         );
+        // Inner loop: 3 turn-level retries (4 attempts) before giving up.
+        // The exhausted error is RetryExhausted, so with_retry does not retry.
         assert_eq!(
             model.requests().len(),
-            2,
-            "exhausted retries must perform one retry after the initial attempt"
+            4,
+            "turn-level retries exhaust without with_retry safety net"
         );
     }
 
@@ -674,7 +643,6 @@ mod tests {
             "model".into(),
             0.2,
             10,
-            0,
             0,
             None,
             None,
@@ -774,7 +742,6 @@ mod tests {
                 "model".into(),
                 5.0,
                 10,
-                1,
                 0,
                 Some(log_tx),
                 None,

@@ -19,6 +19,7 @@ use super::interactive::{
 };
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
+use super::retry::{TIMEOUT_RETRY_BACKOFF, TURN_RETRY_BACKOFF};
 use super::tools::{self, ToolContext};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
@@ -44,13 +45,33 @@ pub(crate) fn default_classify(err: ProviderError) -> ClientError {
     }
     // No HTTP status — mid-stream SSE error (e.g. X.AI response.failed).
     // Retry it; log at WARNING so we can spot provider patterns later.
-    log::warn!("retrying provider error (no HTTP status): {}", err);
+    log::info!("retrying provider error (no HTTP status): {}", err);
     ClientError::ApiServerError {
         message: err.to_string(),
     }
 }
 
 pub(crate) const DEFAULT_TEMPERATURE: f64 = 0.4;
+
+/// Classify a provider error and report whether it is retryable at the turn
+/// boundary (429 / 5xx / no-HTTP-status mid-stream drops). Reuses the same
+/// `default_classify` (or the caller-supplied classifier) used for the
+/// terminal error path, so the retry decision stays consistent with what the
+/// backend would otherwise surface.
+fn is_retryable(err: &ProviderError, opts: &LoopOpts<'_>) -> bool {
+    let classify = opts.classify_error.unwrap_or(default_classify);
+    matches!(classify(err.clone()), ClientError::ApiServerError { .. })
+}
+
+/// Sleep for the turn-level backoff, aborting early when the cancel token is
+/// set. Returns `true` if cancellation was observed (the caller must abandon
+/// the retry and unwind), `false` if the full backoff elapsed.
+async fn retry_backoff(cancel: &CancelToken, wait: f64) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs_f64(wait)) => false,
+        _ = cancel.cancelled() => true,
+    }
+}
 
 #[derive(Debug)]
 pub struct CancelToken {
@@ -213,7 +234,6 @@ pub(crate) async fn run_agent_loop(
         model_name.clone(),
         idle_timeout,
         max_turns,
-        ctx.params.max_retries,
         ctx.completion_nudge_budget,
         ctx.params.log_tx.clone(),
         opts.max_tokens,
@@ -497,8 +517,12 @@ async fn run_agent_loop_core(
     let mut next_prompt = Message::user(prompt.to_string());
     let mut turns: usize = 0;
     let mut turn_num: usize = 0;
+    let mut turn_retries: usize = 0;
+    let mut timeout_retries: usize = 0;
     let mut final_text = String::new();
     let mut timed_out = false;
+    let mut exhausted_turn_retries: bool = false;
+    let mut exhausted_timeout_retries: bool = false;
     let mut stream_error: Option<ProviderError> = None;
     let loop_start = Instant::now();
 
@@ -658,6 +682,41 @@ async fn run_agent_loop_core(
         let mut response = match model.stream(builder) {
             Ok(s) => s,
             Err(e) => {
+                // Retryable (429/5xx) error before streaming began — back off
+                // and re-execute this same turn with history intact.
+                if turn_retries < TURN_RETRY_BACKOFF.len() && is_retryable(&e, opts) {
+                    let wait = TURN_RETRY_BACKOFF[turn_retries];
+                    turn_retries += 1;
+                    log::info!(
+                        "agent_loop: retryable stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
+                    );
+                    send_log(
+                        log_tx,
+                        prefix,
+                        &format!("retry: transient error, backing off {wait}s"),
+                    );
+                    if retry_backoff(cancel, wait).await {
+                        log::info!(
+                            "agent_loop: cancelled during retry backoff (label={})",
+                            prefix
+                        );
+                        send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                        return Err(ClientError::Runtime {
+                            message: "cancelled".into(),
+                        });
+                    }
+                    // Preserve the pending one-turn state only when
+                    // already interactive — otherwise an unconditional
+                    // set would force RunOneTurn after normal resumption.
+                    if interactive_active {
+                        pending_run_one_turn = true;
+                    }
+                    continue;
+                }
+                let retryable = is_retryable(&e, opts);
+                if retryable {
+                    exhausted_turn_retries = true;
+                }
                 stream_error = Some(e);
                 break;
             }
@@ -672,6 +731,8 @@ async fn run_agent_loop_core(
         let mut ended = false;
         let mut turn_usage: Option<Usage> = None;
         let mut paused_mid_stream = false;
+        let mut retry_turn = false;
+        let mut retry_timeout_turn = false;
 
         loop {
             let item = tokio::select! {
@@ -752,6 +813,32 @@ async fn run_agent_loop_core(
             };
             match item {
                 Err(_) => {
+                    if timeout_retries < TIMEOUT_RETRY_BACKOFF.len() {
+                        let wait = TIMEOUT_RETRY_BACKOFF[timeout_retries];
+                        timeout_retries += 1;
+                        log::info!(
+                            "agent_loop: idle timeout on turn {turn_num} (attempt {timeout_retries}), backing off {wait}s"
+                        );
+                        send_log(
+                            log_tx,
+                            prefix,
+                            &format!("retry: idle timeout, backing off {wait}s"),
+                        );
+                        drop(response);
+                        retry_timeout_turn = true;
+                        if retry_backoff(cancel, wait).await {
+                            log::info!(
+                                "agent_loop: cancelled during timeout backoff (label={})",
+                                prefix
+                            );
+                            send_log(log_tx, prefix, "exit: cancelled during timeout backoff");
+                            return Err(ClientError::Runtime {
+                                message: "cancelled".into(),
+                            });
+                        }
+                        break;
+                    }
+                    exhausted_timeout_retries = true;
                     timed_out = true;
                     drop(response);
                     break;
@@ -762,6 +849,37 @@ async fn run_agent_loop_core(
                     break;
                 }
                 Ok(Some(Err(e))) => {
+                    // Retryable (429/5xx) error delivered mid-stream — back off
+                    // and re-execute this same turn with history intact.
+                    if turn_retries < TURN_RETRY_BACKOFF.len() && is_retryable(&e, opts) {
+                        let wait = TURN_RETRY_BACKOFF[turn_retries];
+                        turn_retries += 1;
+                        log::info!(
+                            "agent_loop: retryable mid-stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
+                        );
+                        send_log(
+                            log_tx,
+                            prefix,
+                            &format!("retry: transient error, backing off {wait}s"),
+                        );
+                        drop(response);
+                        retry_turn = true;
+                        if retry_backoff(cancel, wait).await {
+                            log::info!(
+                                "agent_loop: cancelled during retry backoff (label={})",
+                                prefix
+                            );
+                            send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                            return Err(ClientError::Runtime {
+                                message: "cancelled".into(),
+                            });
+                        }
+                        break;
+                    }
+                    let retryable = is_retryable(&e, opts);
+                    if retryable {
+                        exhausted_turn_retries = true;
+                    }
                     stream_error = Some(e);
                     break;
                 }
@@ -809,6 +927,33 @@ async fn run_agent_loop_core(
             // Stream was interrupted by pause — skip post-stream processing.
             // The turn loop will re-enter at the top and either continue
             // (if Resumed) or execute one turn (if RunOneTurn).
+            continue;
+        }
+
+        if retry_turn {
+            // Stream was interrupted by a retryable error — re-execute this
+            // same turn. History and next_prompt are untouched (the builder
+            // cloned both), so the retry picks up exactly where it left off.
+            // Preserve the pending one-turn state only when already
+            // interactive — otherwise an unconditional set would force
+            // RunOneTurn after normal resumption.
+            if interactive_active {
+                pending_run_one_turn = true;
+            }
+
+            // Send StreamReset so consumers discard partial text /
+            // reasoning from the failed attempt.
+            if let Some(ref se) = stream_events {
+                if se.wants_events() {
+                    se.send(InteractiveEvent::StreamReset);
+                }
+            }
+            continue;
+        }
+
+        if retry_timeout_turn {
+            // Stream was interrupted by an idle timeout — re-execute this
+            // same turn with history intact.
             continue;
         }
 
@@ -885,6 +1030,8 @@ async fn run_agent_loop_core(
         }
 
         turn_num += 1;
+        turn_retries = 0;
+        timeout_retries = 0;
 
         // ---- completion decision ----
         // Solo Done is the only valid completion signal. Mixed Done + other
@@ -1334,6 +1481,16 @@ async fn run_agent_loop_core(
     if timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
         send_log(log_tx, prefix, "exit: stream idle timeout");
+        if exhausted_timeout_retries {
+            log::error!(
+                "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
+                prefix
+            );
+            send_log(log_tx, prefix, "exit: exhausted turn-level timeout retries");
+            return Err(ClientError::RetryExhausted {
+                message: "exhausted turn-level timeout retries".into(),
+            });
+        }
         return Err(ClientError::Timeout {
             message: "stream idle timeout".into(),
         });
@@ -1341,6 +1498,20 @@ async fn run_agent_loop_core(
     if let Some(err) = stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
         send_log(log_tx, prefix, "exit: stream error");
+        if exhausted_turn_retries {
+            log::error!(
+                "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
+                TURN_RETRY_BACKOFF.len() + 1,
+                prefix
+            );
+            send_log(log_tx, prefix, "exit: exhausted turn-level retries");
+            return Err(ClientError::RetryExhausted {
+                message: format!(
+                    "exhausted turn-level retries ({} attempts): {err}",
+                    TURN_RETRY_BACKOFF.len() + 1,
+                ),
+            });
+        }
         let classify = opts.classify_error.unwrap_or(default_classify);
         return Err(classify(err));
     }
@@ -1892,8 +2063,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn loop_idle_timeout_is_client_timeout() {
+    #[tokio::test(start_paused = true)]
+    async fn loop_idle_timeout_exhausts_turn_retries() {
         let ctx = test_ctx(None, None);
         let cancel = CancelToken::new();
         let model = rig_core::driver::Model::new(
@@ -1901,12 +2072,23 @@ mod tests {
             PendingTransport,
         )
         .erase();
-        let err = run_agent_loop(model, "hi", ctx.clone(), cancel, loop_opts(None), None)
-            .await
-            .unwrap_err();
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone(),
+            "hi",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // The stream hangs forever, so each turn hits the idle timeout
+        // (0.05 s). After 3 turn-level timeout retries (2 + 5 + 10 s) the
+        // fourth attempt exhausts the budget and returns Runtime.
+        // Total wall-clock: 4 × 0.05 + 2 + 5 + 10 ≈ 17.2 s.
+        tokio::time::advance(Duration::from_secs(18)).await;
+        let err = handle.await.unwrap().unwrap_err();
         assert!(
-            matches!(err, ClientError::Timeout { .. }),
-            "expected ClientError::Timeout, got {err:?}"
+            matches!(err, ClientError::RetryExhausted { .. }),
+            "expected ClientError::RetryExhausted after exhausted timeout retries, got {err:?}"
         );
     }
 
@@ -1968,6 +2150,439 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e["message"]["content"][0]["type"] == "tool_result"));
+    }
+
+    /// A 429 on turn N must back off and retry turn N in place — not restart
+    /// the loop from turn 0 — and `turn_num` must count only completed turns.
+    #[tokio::test(start_paused = true)]
+    async fn loop_429_retries_same_turn_without_losing_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-429-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "content").unwrap();
+
+        // Turn 0: Read tool call (completes).
+        // Turn 1 attempt 1: text + tool call, then a 429 mid-stream error
+        // (retried — the partial text and tool call must be discarded).
+        // Turn 1 attempt 2: Done (completes).
+        let side_effect = dir.join("side.txt");
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({ "file_path": f.to_str().unwrap() }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("partial"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "w1",
+                    "Write",
+                    serde_json::json!({ "file_path": side_effect.to_str().unwrap(), "content": "x" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::error("http://429: slow down"),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("recovered"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({ "summary": "done" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "read then finish",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // Skip past the turn-level backoff (2s for the first retry).
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let result = handle.await.unwrap().unwrap();
+
+        assert_eq!(result.text_result.as_deref(), Some("recovered"));
+
+        // The aborted turn's partial text and tool call must be discarded:
+        // no duplicated text and no tool side effect from the 429 turn.
+        assert!(
+            !side_effect.exists(),
+            "aborted turn's Write must not have executed"
+        );
+
+        // Three requests: turn 0, turn 1 (429), turn 1 retry (Done).
+        assert_eq!(model.requests().len(), 3);
+
+        // The retried turn must carry the prior turn's history — the Read
+        // tool result from turn 0 must still be present in the final request.
+        let reqs = model.requests();
+        let final_req = reqs.last().unwrap();
+        let history = format!("{:?}", final_req.chat_history);
+        assert!(
+            history.contains("x.txt"),
+            "retried turn must retain turn 0 history, got: {history}"
+        );
+
+        // turn_num counts completed turns only: turn 0 + turn 1 = 2, not 3.
+        let usage = result.token_usage.unwrap();
+        assert_eq!(usage.turns, 2, "turn_num must exclude the retried attempt");
+    }
+
+    /// A wire that fails `encode` once — a request error with no HTTP status,
+    /// which `default_classify` treats as retryable — then delegates to
+    /// [`MockScript`]. Exercises the `model.stream(builder)` `Err(e)` branch,
+    /// which the mid-stream 429 tests never reach.
+    #[derive(Clone)]
+    struct FailingOnceWire {
+        inner: rig_core::test_utils::MockScript,
+        failed: Arc<AtomicBool>,
+    }
+
+    impl rig_core::wire::Wire for FailingOnceWire {
+        type Op = Completion;
+        type Payload = CompletionRequest;
+        type Frame = rig_core::test_utils::MockFrame;
+        type Decoder<'id> = rig_core::test_utils::MockDecoder<'id>;
+
+        fn describe(&self) -> rig_core::wire::Descriptor<'_> {
+            self.inner.describe()
+        }
+
+        fn encode(
+            &self,
+            request: rig_core::wire::Request<Self>,
+            mode: rig_core::wire::Mode,
+        ) -> Result<Self::Payload, rig_core::error::EncodeError> {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                return Err(rig_core::error::EncodeError::request(
+                    "transient encode failure",
+                ));
+            }
+            self.inner.encode(request, mode)
+        }
+
+        fn decoder<'id>(&self) -> Self::Decoder<'id> {
+            self.inner.decoder()
+        }
+    }
+
+    /// A transport that records each request and answers with a single `Done`
+    /// turn, so the retried attempt can be observed to succeed.
+    #[derive(Clone)]
+    struct RecordingDoneTransport {
+        requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+    }
+
+    impl rig_core::driver::Transport<FailingOnceWire> for RecordingDoneTransport {
+        fn send(
+            &self,
+            request: CompletionRequest,
+            _exchange: rig_core::driver::Exchange,
+        ) -> rig_core::driver::Opening<rig_core::test_utils::MockFrame> {
+            self.requests.lock().unwrap().push(request);
+            rig_core::driver::Opening::ready(rig_core::driver::Opened::new(futures::stream::iter(
+                [
+                    Ok(rig_core::test_utils::MockFrame::Event(
+                        rig_core::test_utils::MockStreamEvent::tool_call(
+                            "done1",
+                            "Done",
+                            serde_json::json!({"summary": "done"}),
+                        ),
+                    )),
+                    Ok(rig_core::test_utils::MockFrame::Event(
+                        rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+                    )),
+                ],
+            )))
+        }
+    }
+
+    /// An immediate `model.stream(builder)` failure — a request error with no
+    /// HTTP status, which `default_classify` treats as retryable — must back
+    /// off and re-execute the same turn, then succeed. This exercises the
+    /// `Err(e)` branch of the stream-open match, distinct from mid-stream
+    /// errors.
+    #[tokio::test(start_paused = true)]
+    async fn loop_immediate_stream_error_retries_same_turn() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-immediate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let model = rig_core::driver::Model::new(
+            FailingOnceWire {
+                inner: rig_core::test_utils::MockScript::default(),
+                failed: Arc::new(AtomicBool::new(false)),
+            },
+            RecordingDoneTransport {
+                requests: requests.clone(),
+            },
+        )
+        .erase();
+
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone(),
+            "finish",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // Skip past the first turn-level backoff (2s).
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let result = handle.await.unwrap().unwrap();
+
+        assert_eq!(result.text_result.as_deref(), Some("done"));
+
+        // The failed encode never reaches the transport; only the retried
+        // attempt does, and it must carry the original prompt.
+        let recorded = requests.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "only the retried attempt reaches the transport"
+        );
+        let history = format!("{:?}", recorded[0].chat_history);
+        assert!(
+            history.contains("finish"),
+            "retried request must carry the original prompt, got: {history}"
+        );
+
+        // turn_num counts completed turns only: the failed attempt is excluded.
+        let usage = result.token_usage.unwrap();
+        assert_eq!(usage.turns, 1, "turn_num must exclude the retried attempt");
+    }
+
+    /// A cancel token set during the turn-level backoff must abandon the
+    /// retry immediately rather than sleeping out the full backoff window.
+    #[tokio::test(start_paused = true)]
+    async fn loop_429_backoff_observes_cancellation() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-429-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::error("http://429: slow down"),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "boom",
+            ctx.clone(),
+            cancel.clone(),
+            loop_opts(None),
+            None,
+        ));
+
+        // Let the loop reach the retry backoff, then cancel mid-sleep.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        cancel.cancel();
+        tokio::time::advance(Duration::from_millis(500)).await;
+
+        let result = handle.await.unwrap();
+        match result {
+            Err(ClientError::Runtime { message }) => {
+                assert_eq!(message, "cancelled");
+            }
+            other => panic!("expected cancellation, got: {other:?}"),
+        }
+    }
+
+    /// When turn-level 429 retries are exhausted, the error must surface as
+    /// `Runtime` so the backend `with_retry` does not retry it again.
+    #[tokio::test(start_paused = true)]
+    async fn loop_429_exhausted_retries_returns_runtime() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-429-exhaust-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Every attempt returns 429 — the mock repeats the last turn.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::error("http://429: slow down"),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "boom",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // Advance past all turn-level backoffs: 2 + 5 + 10 = 17 s.
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(
+            matches!(err, ClientError::RetryExhausted { .. }),
+            "expected ClientError::RetryExhausted after exhausted turn retries, got {err:?}"
+        );
+    }
+
+    /// A timeout on turn N must back off and retry turn N in place — not
+    /// restart the loop from turn 0 — and `turn_num` must count only
+    /// completed turns.
+    #[tokio::test(start_paused = true)]
+    async fn loop_timeout_retries_same_turn_without_losing_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "content").unwrap();
+
+        // Turn 0: Read tool call (completes).
+        // Turn 1 attempt 1: hangs (idle timeout fires) — retried.
+        // Turn 1 attempt 2: Done (completes).
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({ "file_path": f.to_str().unwrap() }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            // This stream never produces an event — it hangs until the idle
+            // timeout fires.
+            vec![],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("recovered"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({ "summary": "done" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        // Short idle timeout so we don't need huge advances.
+        ctx.idle_timeout = 0.1;
+        ctx.params.idle_timeout = Some(0.1);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "read then finish",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        ));
+        // Advance to let turn 0 complete, then the timeout fires (0.1 s),
+        // then the turn-level backoff runs (2 s), then turn 1 retry
+        // completes.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let result = handle.await.unwrap().unwrap();
+
+        assert_eq!(result.text_result.as_deref(), Some("recovered"));
+
+        // Three requests: turn 0, turn 1 (timeout), turn 1 retry (Done).
+        assert_eq!(model.requests().len(), 3);
+
+        // turn_num counts completed turns only: turn 0 + turn 1 = 2.
+        let usage = result.token_usage.unwrap();
+        assert_eq!(
+            usage.turns, 2,
+            "turn_num must exclude the timed-out attempt"
+        );
+    }
+
+    /// A cancel token set during the timeout backoff must abandon the retry
+    /// immediately.
+    #[tokio::test(start_paused = true)]
+    async fn loop_timeout_backoff_observes_cancellation() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-timeout-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Empty stream — hangs until timeout.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 0.1;
+        ctx.params.idle_timeout = Some(0.1);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "boom",
+            ctx.clone(),
+            cancel.clone(),
+            loop_opts(None),
+            None,
+        ));
+
+        // Let the idle timeout fire (0.1 s), then cancel during backoff.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        cancel.cancel();
+        tokio::time::advance(Duration::from_millis(500)).await;
+
+        let result = handle.await.unwrap();
+        match result {
+            Err(ClientError::Runtime { message }) => {
+                assert_eq!(message, "cancelled");
+            }
+            other => panic!("expected cancellation, got: {other:?}"),
+        }
     }
 
     /// The `Done` summary must survive alongside streamed text: when the
