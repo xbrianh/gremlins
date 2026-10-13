@@ -396,7 +396,8 @@ fn toolchain_hints_section(inputs: &ContextInputs<'_>) -> Vec<ChatSection> {
     let rows: Vec<String> = TOOLCHAIN_MANIFESTS
         .iter()
         .zip(found)
-        .filter(|&((_filename, _label), present)| present).map(|((filename, label), _present)| format!("{filename}  {label}"))
+        .filter(|&((_filename, _label), present)| present)
+        .map(|((filename, label), _present)| format!("{filename}  {label}"))
         .collect();
 
     if rows.is_empty() {
