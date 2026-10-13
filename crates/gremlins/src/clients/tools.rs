@@ -13,6 +13,7 @@ use super::task_kind::TaskKind;
 
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
+const WEBSEARCH_TIMEOUT_SECS: u64 = 30;
 /// Cap on Task calls spawned from a single model message. Without this, one
 /// response could fan out unbounded child loops and overflow the context.
 pub(crate) const TASK_MAX_PER_TURN: usize = 8;
@@ -1163,6 +1164,8 @@ fn check_tool(name: &str, ctx: &ToolContext, args: &serde_json::Value) -> Option
             args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
             ctx.cwd.as_deref(),
         ),
+        // Network I/O has no filesystem path to sandbox.
+        "WebSearch" => None,
         _ => None,
     }
 }
@@ -1392,6 +1395,14 @@ impl ProcessGroupGuard {
     fn disarm(&mut self) {
         self.pgid = None;
     }
+
+    fn kill(&mut self) {
+        if let Some(pgid) = self.pgid {
+            unsafe {
+                libc::killpg(pgid as i32, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1479,6 +1490,213 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
                 format!("[exit {}]\n{text}", output.status.code().unwrap_or(1))
             }
         }
+    }
+}
+
+pub(crate) async fn websearch_invoke(ctx: &ToolContext, args_json: &str) -> String {
+    let cap = crate::config::max_tool_output_bytes();
+    websearch_invoke_with_cap(ctx, args_json, cap).await
+}
+
+async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64) -> String {
+    let args = match parse_args(args_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let url = match req_str(&args, "url") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let timeout_secs = args
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(WEBSEARCH_TIMEOUT_SECS)
+        .clamp(1, 3600);
+
+    // The truncated result must fit inside `cap`. Reserve room for the marker
+    // up front, so the outer `invoke` cap sees `len <= cap` and keeps the
+    // capped page body instead of replacing it with the generic limit error.
+    let marker = if cap > 0 {
+        let marker = format!("[truncated at {cap} bytes]\n");
+        if marker.len() as u64 <= cap {
+            marker
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    let data_limit = if cap > 0 {
+        cap.checked_sub(marker.len() as u64).map(|n| n as usize)
+    } else {
+        None
+    };
+
+    // Cap the download size so a huge response cannot exhaust memory before
+    // `invoke` applies `max_tool_output_bytes`. `--max-filesize` makes curl
+    // abort the transfer once the cap is exceeded; we also stop reading at the
+    // cap and kill the process group as a belt-and-suspenders measure.
+    let max_filesize = if cap > 0 { cap } else { 64 * 1024 * 1024 };
+    let mut cmd = Command::new("curl");
+    // `-q` disables `.curlrc` so a local config cannot rewrite the request.
+    // `-sS` silences the progress meter but still surfaces errors on stderr.
+    // `--proto`/`--proto-redir` restrict both the initial transfer and any
+    // `-L` redirects to HTTP(S), blocking `file://` and other schemes.
+    cmd.arg("-qsSL")
+        .arg("--proto")
+        .arg("=http,https")
+        .arg("--proto-redir")
+        .arg("=http,https")
+        .arg("--max-filesize")
+        .arg(max_filesize.to_string())
+        .arg("--max-time")
+        .arg(timeout_secs.to_string())
+        .arg("--")
+        .arg(url);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
+    if let Some(cwd) = &ctx.cwd {
+        cmd.current_dir(cwd);
+    }
+    if let Some(base) = &ctx.base_env {
+        let mut env = base.clone();
+        if let Some(extra) = &ctx.extra_env {
+            env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        cmd.env_clear().envs(env);
+    } else if let Some(extra) = &ctx.extra_env {
+        let mut env: HashMap<String, String> = std::env::vars().collect();
+        env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+        cmd.env_clear().envs(env);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return format!("Error: {e}"),
+    };
+    // `curl` is a group leader; its pgid matches its pid on POSIX. Capture
+    // the pid *before* taking stdout/stderr because `tokio::process::Child::
+    // id()` returns `None` once the handles have been reaped.
+    #[cfg(unix)]
+    let child_pid = child.id();
+    #[cfg(unix)]
+    let mut process_group_guard = ProcessGroupGuard::new(child_pid);
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut out_buf = [0u8; 8192];
+    let mut err_buf = [0u8; 8192];
+    let read_all = async {
+        use tokio::io::AsyncReadExt;
+        let mut capped = false;
+        let mut stdout_done = stdout.is_none();
+        let mut stderr_done = stderr.is_none();
+        let out_limit = data_limit;
+        let err_limit = data_limit;
+        loop {
+            if capped || (stdout_done && stderr_done) {
+                break;
+            }
+            tokio::select! {
+                r = async {
+                    stdout.as_mut().unwrap().read(&mut out_buf).await
+                }, if !stdout_done => {
+                    match r {
+                        Ok(0) | Err(_) => stdout_done = true,
+                        Ok(n) => {
+                            let remaining = out_limit.map_or(n, |limit| limit.saturating_sub(out.len()));
+                            if remaining == 0 {
+                                capped = true;
+                                break;
+                            }
+                            let take = n.min(remaining);
+                            out.extend_from_slice(&out_buf[..take]);
+                            if take < n {
+                                capped = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                r = async {
+                    stderr.as_mut().unwrap().read(&mut err_buf).await
+                }, if !stderr_done => {
+                    match r {
+                        Ok(0) | Err(_) => stderr_done = true,
+                        Ok(n) => {
+                            // curl keeps emitting diagnostics after it trips
+                            // `--max-filesize` ("Exceeded the maximum allowed"),
+                            // so stderr may fill first and the combined output
+                            // can legitimately be empty when stdout never got
+                            // a chance to deliver body bytes. Prefer body bytes
+                            // when they exist; otherwise fall back to stderr.
+                            let body_room = out_limit.map_or(n, |limit| limit.saturating_sub(out.len()));
+                            let err_room = err_limit.map_or(n, |limit| limit.saturating_sub(err.len()));
+                            if body_room > 0 {
+                                let take = n.min(err_room);
+                                err.extend_from_slice(&err_buf[..take]);
+                            } else if err_room == 0 {
+                                stderr_done = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        capped
+    };
+    let capped = match tokio::time::timeout(Duration::from_secs(timeout_secs), read_all).await {
+        Err(_) => {
+            // `process_group_guard` fires as this function returns.
+            return "[timeout]".into();
+        }
+        Ok(capped) => capped,
+    };
+    if capped {
+        // Stop the transfer now that we have enough bytes.
+        #[cfg(unix)]
+        process_group_guard.kill();
+        let _ = child.kill().await;
+    }
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            #[cfg(unix)]
+            process_group_guard.disarm();
+            return format!("Error: {e}");
+        }
+    };
+    #[cfg(unix)]
+    process_group_guard.disarm();
+    let mut combined = out;
+    combined.extend_from_slice(&err);
+    if let Some(limit) = data_limit {
+        combined.truncate(limit);
+    }
+    let text = String::from_utf8_lossy(&combined).trim().to_string();
+    if capped {
+        format!("{marker}{text}")
+    } else if status.success() {
+        text
+    } else {
+        let code = status.code().unwrap_or_else(|| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(signal) = status.signal() {
+                    return 128 + signal;
+                }
+            }
+            #[allow(unreachable_code)]
+            1
+        });
+        format!("[exit {code}]\n{text}")
     }
 }
 
@@ -1762,17 +1980,26 @@ fn glob_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
 }
 
 /// Used by `validate_tool_args` to produce rich error messages when
-/// the model sends malformed tool-call arguments.
-fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str)>> {
+/// the model sends malformed tool-call arguments. The boolean marks whether
+/// the parameter is required; optional parameters are type-checked only when
+/// present.
+fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool)>> {
     match name {
-        "Read" => Some(vec![("file_path", "string")]),
-        "Edit" => Some(vec![("file_path", "string"), ("edits", "array")]),
-        "Bash" => Some(vec![("command", "string")]),
-        "Write" => Some(vec![("file_path", "string"), ("content", "string")]),
-        "Grep" => Some(vec![("pattern", "string")]),
-        "Glob" => Some(vec![("pattern", "string")]),
-        "Task" => Some(vec![("kind", "string"), ("prompt", "string")]),
-        "Done" => Some(vec![("summary", "string")]),
+        "Read" => Some(vec![("file_path", "string", true)]),
+        "Edit" => Some(vec![
+            ("file_path", "string", true),
+            ("edits", "array", true),
+        ]),
+        "Bash" => Some(vec![("command", "string", true)]),
+        "Write" => Some(vec![
+            ("file_path", "string", true),
+            ("content", "string", true),
+        ]),
+        "Grep" => Some(vec![("pattern", "string", true)]),
+        "Glob" => Some(vec![("pattern", "string", true)]),
+        "Task" => Some(vec![("kind", "string", true), ("prompt", "string", true)]),
+        "Done" => Some(vec![("summary", "string", true)]),
+        "WebSearch" => Some(vec![("url", "string", true), ("timeout", "integer", false)]),
         _ => None,
     }
 }
@@ -1782,11 +2009,19 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str)>> {
 /// or `None` if valid.
 fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
     let schema = tool_param_schema(name)?;
-    for (field, expected_type) in &schema {
+    for (field, expected_type, required) in &schema {
         match args.get(field) {
-            None => {
-                let expected: Vec<String> =
-                    schema.iter().map(|(f, t)| format!("{f}: {t}")).collect();
+            None if *required => {
+                let expected: Vec<String> = schema
+                    .iter()
+                    .map(|(f, t, required)| {
+                        if *required {
+                            format!("{f}: {t}")
+                        } else {
+                            format!("{f}: {t} (optional)")
+                        }
+                    })
+                    .collect();
                 let found: Vec<String> = args
                     .as_object()
                     .map(|o| o.keys().map(|k| format!("{k}: …")).collect())
@@ -1819,6 +2054,7 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
                 }
                 return Some(msg);
             }
+            None => continue,
             Some(val) => {
                 let ok = match *expected_type {
                     "string" => val.is_string(),
@@ -1934,6 +2170,7 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
         "Write" => write_invoke(ctx, args_json).await,
         "Grep" => grep_invoke(ctx, args_json).await,
         "Glob" => glob_invoke(ctx, args_json).await,
+        "WebSearch" => websearch_invoke(ctx, args_json).await,
         "Task" => {
             if let Some(f) = &ctx.task_fn {
                 let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -1988,7 +2225,10 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
     // Task and Done are excluded: Task manages its own context, Done is tiny.
     // Edit and Write always return tiny results.
     let cap = crate::config::max_tool_output_bytes();
-    if cap > 0 && matches!(name, "Read" | "Bash" | "Grep" | "Glob") && res.len() as u64 > cap {
+    if cap > 0
+        && matches!(name, "Read" | "Bash" | "Grep" | "Glob" | "WebSearch")
+        && res.len() as u64 > cap
+    {
         return format!(
             "Tool output exceeded the limit ({} bytes, cap is {}). Try a narrower approach:\n\
 - Bash: pipe through `head`, filter with `grep`, or target a specific file.\n\
@@ -2145,6 +2385,25 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
                 "additionalProperties": false
             }),
         },
+        ToolDefinition {
+            name: "WebSearch".into(),
+            description: "Fetch a web page and extract its text via `curl -sL`. Returns the body text capped at a byte limit. Use this to look up documentation, check package versions, or read external references. Default timeout is 30 seconds.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch (e.g. https://example.com/page)"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (optional, default 30)"
+                    }
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        },
     ];
     // Task is always available, even when a tool filter is set.
     all.push(ToolDefinition {
@@ -2199,6 +2458,7 @@ message to finish. The summary parameter briefly describes what you accomplished
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::EnvGuard;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2588,14 +2848,105 @@ mod tests {
         assert!(!out.contains("[truncated"));
     }
 
+    fn spawn_http_server(
+        body: String,
+        include_content_length: bool,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let headers = if include_content_length {
+                format!("Content-Length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
+            let response = format!("HTTP/1.1 200 OK\r\n{headers}Connection: close\r\n\r\n{body}");
+            let _ = stream.write_all(response.as_bytes());
+        });
+        (url, handle)
+    }
+
+    fn unused_local_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn websearch_fetches_url() {
+        let _env = EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        let (url, server) = spawn_http_server("hello from local server\n".into(), true);
+        let args = serde_json::json!({ "url": url }).to_string();
+        let out = websearch_invoke(&c, &args).await;
+        server.join().unwrap();
+        assert_eq!(out, "hello from local server");
+    }
+
+    #[tokio::test]
+    async fn websearch_omitted_timeout_uses_default() {
+        let _env = EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        let (url, server) = spawn_http_server("ok\n".into(), true);
+        // `timeout` is optional; an args object with only `url` must dispatch.
+        let args = serde_json::json!({ "url": url }).to_string();
+        let out = websearch_invoke(&c, &args).await;
+        server.join().unwrap();
+        assert_eq!(out, "ok");
+        assert!(!out.contains("[timeout]"));
+    }
+
+    #[tokio::test]
+    async fn websearch_preserves_curl_diagnostics() {
+        let _env = EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        // Bind and immediately release a port so the connection is refused.
+        let url = format!("http://127.0.0.1:{}/", unused_local_port());
+        let args = serde_json::json!({ "url": url, "timeout": 5 }).to_string();
+        let out = websearch_invoke(&c, &args).await;
+        assert!(out.starts_with("[exit"), "got: {out:?}");
+        assert!(out.contains("curl:"), "got: {out:?}");
+        assert!(out.contains("Failed to connect"), "got: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn websearch_oversized_response_kept_within_cap() {
+        let _env = EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        let body = "0123456789".repeat(30);
+        // Omit Content-Length so curl streams the response and our read-side
+        // cap (rather than curl's `--max-filesize` check) truncates it.
+        let (url, server) = spawn_http_server(body, false);
+        let cap = 64;
+        let args = serde_json::json!({ "url": url, "timeout": 5 }).to_string();
+        let out = websearch_invoke_with_cap(&c, &args, cap).await;
+        server.join().unwrap();
+        assert!(out.starts_with("[truncated at 64 bytes]\n"), "got: {out:?}");
+        assert!(out.contains("0123456789"), "got: {out:?}");
+        assert!(out.len() as u64 <= cap, "got len {}: {out:?}", out.len());
+        assert!(!out.contains("Tool output exceeded"), "got: {out:?}");
+    }
+
     #[test]
     fn tool_definitions_filter() {
         let all = tool_definitions(None);
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 9);
+        let all_names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
+        assert!(all_names.contains(&"WebSearch"), "got: {all_names:?}");
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         // Task and Done are always available regardless of the filter.
         assert_eq!(names, ["Read", "Bash", "Done", "Task"]);
+        assert!(!names.contains(&"WebSearch"), "got: {names:?}");
     }
 
     #[test]
@@ -2613,6 +2964,26 @@ mod tests {
         assert!(err.contains("missing 'edits'"));
         assert!(err.contains("Edit"));
         assert!(err.contains("file_path: string"));
+    }
+
+    #[test]
+    fn validate_tool_args_optional_field_absent_passes() {
+        assert!(validate_tool_args(
+            "WebSearch",
+            &serde_json::json!({"url": "https://example.com"})
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn validate_tool_args_optional_field_wrong_type() {
+        let err = validate_tool_args(
+            "WebSearch",
+            &serde_json::json!({"url": "https://example.com", "timeout": "30"}),
+        )
+        .unwrap();
+        assert!(err.contains("'timeout'"));
+        assert!(err.contains("must be integer"));
     }
 
     #[test]
