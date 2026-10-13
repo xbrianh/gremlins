@@ -529,7 +529,10 @@ mod tests {
             None
         });
         let selector = TaskModelSelector::new(
-            HashMap::from([(TaskKind::Scout, "openai:mini".into())]),
+            HashMap::from([
+                (TaskKind::Scout, "openai:mini".into()),
+                (TaskKind::Fork, "openai:fork".into()),
+            ]),
             factory,
         )
         .expect("a configured task-clients map yields a selector");

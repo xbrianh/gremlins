@@ -1353,9 +1353,8 @@ async fn run_agent_loop_core(
         // single response cannot spawn an unbounded number of child loops.
         // Wrapped in a tokio::select! with maybe_pause so the operator can
         // interrupt a long-running tool batch.
-        let mut tool_ctx = tool_ctx.clone();
-        tool_ctx.parent_history = fork_parent_history;
-        let ctx = tool_ctx.clone();
+        let mut ctx = tool_ctx.clone();
+        ctx.parent_history = fork_parent_history;
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             async move {
@@ -3828,6 +3827,115 @@ mod tests {
     }
 
     // ── max_tokens propagation tests ─────────────────────────────────
+
+    /// A parent agent-loop turn with prior assistant/tool-result history that
+    /// emits `Task(kind="Fork")` must hand the child the snapshot of that
+    /// history (including the current user prompt), followed by the Fork
+    /// prompt, in exact order. This exercises the agent-loop snapshot path and
+    /// the `tools::invoke` handoff rather than calling the task runner directly.
+    #[tokio::test]
+    async fn fork_child_receives_parent_history_then_fork_prompt() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note.txt");
+        std::fs::write(&note, "hello from parent").unwrap();
+
+        let read_call = MockStreamEvent::tool_call(
+            "r1",
+            "Read",
+            serde_json::json!({ "file_path": note.to_str().unwrap() }),
+        );
+        let fork_call = MockStreamEvent::tool_call(
+            "f1",
+            "Task",
+            serde_json::json!({"kind": "Fork", "prompt": "finish as fork"}),
+        );
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
+        };
+
+        // One model drives every loop: parent Read turn, parent Fork turn,
+        // forked child turn, then parent wrap-up turn.
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                read_call,
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                fork_call,
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("fork reply"),
+                done_call("d2", "fork reply"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("parent done"),
+                done_call("d1", "parent done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+
+        run_agent_loop(
+            model.clone().erase(),
+            "parent go",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        fn user_text_of(m: &Message) -> Option<&str> {
+            match m {
+                Message::User { content } => content.iter().find_map(|c| match c {
+                    UserContent::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                }),
+                _ => None,
+            }
+        }
+
+        let requests = model.requests();
+        let fork_req = requests
+            .iter()
+            .find(|req| {
+                matches!(
+                    req.chat_history.first(),
+                    Some(Message::System { content })
+                        if content.contains("This is a forked child agent")
+                )
+            })
+            .expect("the forked child must issue its own request");
+
+        let history = &fork_req.chat_history;
+        assert_eq!(history.len(), 6, "unexpected fork history: {history:#?}");
+
+        // Fork system prompt leads the child history.
+        assert!(matches!(
+            &history[0],
+            Message::System { content }
+                if content.contains("<tools>") && content.contains("Do not call")
+        ));
+
+        // Inherited parent conversation, in exact order.
+        assert_eq!(user_text_of(&history[1]), Some("parent go"));
+        assert!(matches!(&history[2], Message::Assistant { .. }));
+        assert!(matches!(&history[3], Message::User { content }
+                if content.iter().any(|c| matches!(c, UserContent::ToolResult(_)))));
+        assert!(
+            user_text_of(&history[4]).is_some_and(|t| t.starts_with("Actions taken this turn:"))
+        );
+
+        // The Fork prompt is the final user message in the child request.
+        assert_eq!(user_text_of(&history[5]), Some("finish as fork"));
+    }
 
     /// When `LoopOpts.max_tokens` is `Some(8192)`, every turn's
     /// `CompletionRequest` must carry `max_tokens: Some(8192)`.
