@@ -1376,7 +1376,7 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
 
 /// Kills the command's process group when the tool future is dropped or the
 /// timeout elapses. `tokio::process::Child::kill_on_drop` only reaches the
-/// direct `sh` process; a process group guard is what stops descendants
+/// direct `bash` process; a process group guard is what stops descendants
 /// spawned by the shell (`sleep 3600 & wait`).
 #[cfg(unix)]
 struct ProcessGroupGuard {
@@ -1419,7 +1419,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         .and_then(|v| v.as_u64())
         .unwrap_or(BASH_TIMEOUT_SECS)
         .clamp(1, 3600);
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(command);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -1427,8 +1427,8 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Start `sh` in its own process group. `kill_on_drop` only kills
-        // the direct `sh` child; making it a group leader lets the timeout
+        // Start `bash` in its own process group. `kill_on_drop` only kills
+        // the direct `bash` child; making it a group leader lets the timeout
         // path (and the dropped-tool-future path, via `kill_on_drop` plus
         // the timeout killpg below) stop every descendant too.
         cmd.as_std_mut().process_group(0);
@@ -1453,7 +1453,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     };
     // Own the process group for the tool call. When the surrounding
     // `join_all` future is dropped on Esc, this guard is dropped too and
-    // kills the whole group — not just the direct `sh` child.
+    // kills the whole group — not just the direct `bash` child.
     #[cfg(unix)]
     let mut process_group_guard = ProcessGroupGuard::new(child.id());
     match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
@@ -2063,13 +2063,13 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Bash".into(),
-            description: "Execute a shell command via `sh -c`. Returns combined stdout and stderr. Exit codes are reported as `[exit N]`; commands exceeding the timeout return `[timeout]`. Runs in the gremlin's working directory with no stdin. Path arguments are checked against the sandbox before execution — escapes return an error without running the command. Default timeout is 120 seconds.".into(),
+            description: "Execute a shell command via `bash -c`. Returns combined stdout and stderr. Exit codes are reported as `[exit N]`; commands exceeding the timeout return `[timeout]`. Runs in the gremlin's working directory with no stdin. Path arguments are checked against the sandbox before execution — escapes return an error without running the command. Default timeout is 120 seconds.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to execute (run via sh -c)"
+                        "description": "Shell command to execute (run via bash -c)"
                     },
                     "timeout": {
                         "type": "integer",
@@ -2295,6 +2295,10 @@ mod tests {
         assert_eq!(bash_invoke(&c, &env_args).await, "abc");
         let fail = serde_json::json!({"command": "exit 7"}).to_string();
         assert!(bash_invoke(&c, &fail).await.starts_with("[exit 7]"));
+        // Process substitution is bash-only; `sh` would fail here, proving
+        // the interpreter is `bash` rather than a POSIX shell.
+        let bash_only = serde_json::json!({"command": "diff <(echo a) <(echo a)"}).to_string();
+        assert_eq!(bash_invoke(&c, &bash_only).await.trim(), "");
     }
 
     #[tokio::test]
