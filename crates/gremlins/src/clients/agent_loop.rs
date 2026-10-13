@@ -96,7 +96,12 @@ impl CancelToken {
 
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::Relaxed);
-        self.notify.notify_one();
+        // Cancellation is broadcast: an active chat turn has both
+        // `run_chat_turn` and the tool-phase select arm waiting on this
+        // token. `notify_waiters()` wakes every waiter so the outer
+        // `finish()` path is never left asleep while the inner waiter
+        // unwinds the turn.
+        self.notify.notify_waiters();
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -2021,17 +2026,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_token_wakes_waiters() {
+    async fn cancel_token_wakes_all_waiters() {
         let token = CancelToken::new();
-        let t = token.clone();
-        let handle = tokio::spawn(async move {
-            t.cancelled().await;
-        });
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let t = token.clone();
+                tokio::spawn(async move {
+                    t.cancelled().await;
+                })
+            })
+            .collect();
         token.cancel();
-        tokio::time::timeout(Duration::from_secs(1), handle)
-            .await
-            .unwrap()
-            .unwrap();
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(1), handle)
+                .await
+                .unwrap()
+                .unwrap();
+        }
         assert!(token.is_cancelled());
     }
 
