@@ -135,6 +135,8 @@ pub(crate) struct Providers {
     api_keys: HashMap<String, String>,
     base_urls: HashMap<String, String>,
     tokens: HashMap<String, String>,
+    endpoints: HashMap<String, String>,
+    api_versions: HashMap<String, String>,
     azure_auth_methods: HashMap<String, String>,
     azure_auth_scopes: HashMap<String, String>,
 }
@@ -156,6 +158,10 @@ struct ProviderEntry {
     base_url: Option<StrictString>,
     #[serde(default)]
     token: Option<StrictString>,
+    #[serde(default)]
+    endpoint: Option<StrictString>,
+    #[serde(rename = "api-version", default)]
+    api_version: Option<StrictString>,
     #[serde(default)]
     azure: Option<AzureEntry>,
 }
@@ -200,6 +206,22 @@ impl Providers {
             .filter(|s| !s.trim().is_empty())
     }
 
+    /// Get the endpoint for a provider name.
+    pub(crate) fn endpoint(&self, provider: &str) -> Option<&str> {
+        self.endpoints
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Get the api-version for a provider name.
+    pub(crate) fn api_version(&self, provider: &str) -> Option<&str> {
+        self.api_versions
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
     /// Get the Azure auth method from the nested `azure.auth` for a provider.
     pub(crate) fn azure_auth_method(&self, provider: &str) -> Option<&str> {
         self.azure_auth_methods
@@ -217,35 +239,62 @@ impl Providers {
     }
 }
 
+/// Normalize a [`StrictString`] config value: trim surrounding whitespace
+/// and drop values that become empty.
+fn normalize(value: Option<StrictString>) -> Option<String> {
+    value
+        .map(|s| s.0)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Read an env var, trimming surrounding whitespace and ignoring empty values.
+fn env_value(env_var_name: &str) -> Option<String> {
+    std::env::var(env_var_name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
     let content = std::fs::read_to_string(path)?;
     let providers_file: ProvidersFile = serde_yaml::from_str(&content)?;
     let mut api_keys = HashMap::new();
     let mut base_urls = HashMap::new();
     let mut tokens = HashMap::new();
+    let mut endpoints = HashMap::new();
+    let mut api_versions = HashMap::new();
     let mut azure_auth_methods = HashMap::new();
     let mut azure_auth_scopes = HashMap::new();
     for (k, v) in providers_file.0 {
-        if let Some(api_key) = v.api_key.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+        if let Some(api_key) = normalize(v.api_key) {
             api_keys.insert(k.clone(), api_key);
         }
-        if let Some(base_url) = v.base_url.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+        if let Some(base_url) = normalize(v.base_url) {
             base_urls.insert(k.clone(), base_url);
         }
-        if let Some(token) = v.token.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+        if let Some(token) = normalize(v.token) {
             tokens.insert(k.clone(), token);
         }
+        if let Some(endpoint) = normalize(v.endpoint) {
+            endpoints.insert(k.clone(), endpoint);
+        }
+        if let Some(api_version) = normalize(v.api_version) {
+            api_versions.insert(k.clone(), api_version);
+        }
         if let Some(azure) = v.azure {
-            if let Some(auth) = azure.auth.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            if let Some(auth) = normalize(azure.auth) {
                 azure_auth_methods.insert(k.clone(), auth);
             }
-            if let Some(scope) = azure.scope.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            if let Some(scope) = normalize(azure.scope) {
                 azure_auth_scopes.insert(k.clone(), scope);
             }
         }
         if !api_keys.contains_key(&k)
             && !base_urls.contains_key(&k)
             && !tokens.contains_key(&k)
+            && !endpoints.contains_key(&k)
+            && !api_versions.contains_key(&k)
             && !azure_auth_methods.contains_key(&k)
             && !azure_auth_scopes.contains_key(&k)
         {
@@ -256,6 +305,8 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
         api_keys,
         base_urls,
         tokens,
+        endpoints,
+        api_versions,
         azure_auth_methods,
         azure_auth_scopes,
     })
@@ -272,37 +323,54 @@ pub(crate) enum ProvidersError {
 /// Resolve an API key for `provider`. Checks the named env var first,
 /// then falls back to `providers.yaml`. Returns None if neither is set.
 pub(crate) fn api_key(env_var_name: &str, provider_name: &str) -> Option<String> {
-    if let Ok(key) = std::env::var(env_var_name) {
-        if !key.trim().is_empty() {
-            return Some(key);
-        }
+    if let Some(key) = env_value(env_var_name) {
+        return Some(key);
     }
-    Providers::load().get(provider_name).map(|s| s.to_string())
+    Providers::load()
+        .get(provider_name)
+        .map(|s| s.trim().to_string())
 }
 
 /// Resolve base_url for a provider. Checks env var first, then providers.yaml, then default.
 pub(crate) fn base_url(env_var_name: &str, provider_name: &str, default: &str) -> String {
-    if let Ok(val) = std::env::var(env_var_name) {
-        if !val.trim().is_empty() {
-            return val;
-        }
+    if let Some(val) = env_value(env_var_name) {
+        return val;
     }
     Providers::load()
         .base_url(provider_name)
-        .map(|s| s.to_string())
+        .map(|s| s.trim().to_string())
         .unwrap_or_else(|| default.to_string())
 }
 
 /// Resolve auth token for a provider. Checks env var first, then providers.yaml.
 pub(crate) fn auth_token(env_var_name: &str, provider_name: &str) -> Option<String> {
-    if let Ok(val) = std::env::var(env_var_name) {
-        if !val.trim().is_empty() {
-            return Some(val);
-        }
+    if let Some(val) = env_value(env_var_name) {
+        return Some(val);
     }
     Providers::load()
         .token(provider_name)
-        .map(|s| s.to_string())
+        .map(|s| s.trim().to_string())
+}
+
+/// Resolve endpoint for a provider. Checks env var first, then providers.yaml.
+pub(crate) fn endpoint(env_var_name: &str, provider_name: &str) -> Option<String> {
+    if let Some(val) = env_value(env_var_name) {
+        return Some(val);
+    }
+    Providers::load()
+        .endpoint(provider_name)
+        .map(|s| s.trim().to_string())
+}
+
+/// Resolve api-version for a provider. Checks env var first, then providers.yaml, then default.
+pub(crate) fn api_version(env_var_name: &str, provider_name: &str, default: &str) -> String {
+    if let Some(val) = env_value(env_var_name) {
+        return val;
+    }
+    Providers::load()
+        .api_version(provider_name)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// Resolve the Azure auth method for a provider from the nested `azure:` key.
@@ -316,11 +384,8 @@ pub(crate) fn azure_auth_method(
     api_key_env_var_name: &str,
 ) -> Result<ProviderAuth, String> {
     // 1. env var
-    if let Ok(env_val) = std::env::var(env_var_name) {
-        let v = env_val.trim();
-        if !v.is_empty() {
-            return parse_provider_auth(v);
-        }
+    if let Some(env_val) = env_value(env_var_name) {
+        return parse_provider_auth(&env_val);
     }
 
     // 2. providers.yaml provider.azure.auth
@@ -347,14 +412,12 @@ pub(crate) fn azure_auth_method(
 ///
 /// Precedence: env var → providers.yaml `provider.azure.scope` → default.
 pub(crate) fn azure_auth_scope(env_var_name: &str, provider_name: &str, default: &str) -> String {
-    if let Ok(val) = std::env::var(env_var_name) {
-        if !val.trim().is_empty() {
-            return val;
-        }
+    if let Some(val) = env_value(env_var_name) {
+        return val;
     }
     Providers::load()
         .azure_auth_scope(provider_name)
-        .map(|s| s.to_string())
+        .map(|s| s.trim().to_string())
         .unwrap_or_else(|| default.to_string())
 }
 
@@ -752,6 +815,33 @@ mod tests {
     }
 
     #[test]
+    fn test_azure_auth_method_fallback_to_token_trims_env_whitespace() {
+        let mut env = EnvGuard::lock();
+        env.set("TEST_TOKEN", "  fallback-token  ");
+        let result = azure_auth_method(
+            "TEST_AZURE_AUTH_NONEXISTENT",
+            "anthropic",
+            "TEST_TOKEN",
+            "TEST_API_KEY_NONEXISTENT",
+        )
+        .unwrap();
+        assert!(matches!(result, ProviderAuth::Token(t) if t == "fallback-token"));
+    }
+
+    #[test]
+    fn test_azure_auth_method_fallback_to_token_trims_yaml_whitespace() {
+        let _sandbox = Sandbox::with_providers(r#"{"anthropic": {"token": "  fallback-token  "}}"#);
+        let result = azure_auth_method(
+            "TEST_AZURE_AUTH_NONEXISTENT",
+            "anthropic",
+            "TEST_TOKEN_NONEXISTENT",
+            "TEST_API_KEY_NONEXISTENT",
+        )
+        .unwrap();
+        assert!(matches!(result, ProviderAuth::Token(t) if t == "fallback-token"));
+    }
+
+    #[test]
     fn test_azure_auth_method_fallback_to_api_key() {
         let mut env = EnvGuard::lock();
         env.set("TEST_API_KEY", "fallback-key");
@@ -760,6 +850,33 @@ mod tests {
             "anthropic",
             "TEST_TOKEN_NONEXISTENT",
             "TEST_API_KEY",
+        )
+        .unwrap();
+        assert!(matches!(result, ProviderAuth::ApiKey(k) if k == "fallback-key"));
+    }
+
+    #[test]
+    fn test_azure_auth_method_fallback_to_api_key_trims_env_whitespace() {
+        let mut env = EnvGuard::lock();
+        env.set("TEST_API_KEY", "  fallback-key  ");
+        let result = azure_auth_method(
+            "TEST_AZURE_AUTH_NONEXISTENT",
+            "anthropic",
+            "TEST_TOKEN_NONEXISTENT",
+            "TEST_API_KEY",
+        )
+        .unwrap();
+        assert!(matches!(result, ProviderAuth::ApiKey(k) if k == "fallback-key"));
+    }
+
+    #[test]
+    fn test_azure_auth_method_fallback_to_api_key_trims_yaml_whitespace() {
+        let _sandbox = Sandbox::with_providers(r#"{"anthropic": {"api-key": "  fallback-key  "}}"#);
+        let result = azure_auth_method(
+            "TEST_AZURE_AUTH_NONEXISTENT",
+            "anthropic",
+            "TEST_TOKEN_NONEXISTENT",
+            "TEST_API_KEY_NONEXISTENT",
         )
         .unwrap();
         assert!(matches!(result, ProviderAuth::ApiKey(k) if k == "fallback-key"));

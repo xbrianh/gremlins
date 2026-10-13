@@ -60,24 +60,6 @@ impl From<PathsSection> for PathOverrides {
 // Config
 // ---------------------------------------------------------------------------
 
-/// Settings for the Azure OpenAI backend, read from settings.yaml.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AzureOpenAiSettings {
-    #[serde(default)]
-    pub auth: Option<StrictString>,
-    #[serde(rename = "auth-scope", default)]
-    pub auth_scope: Option<StrictString>,
-    #[serde(default)]
-    pub endpoint: Option<StrictString>,
-    #[serde(rename = "api-version", default)]
-    pub api_version: Option<StrictString>,
-    #[serde(default)]
-    pub token: Option<StrictString>,
-    #[serde(rename = "api-key", default)]
-    pub api_key: Option<StrictString>,
-}
-
 /// A named client profile from `settings.yaml`.
 ///
 /// A profile is flat: one concrete `client:` spec and an optional
@@ -97,7 +79,6 @@ pub struct Config {
     default_task_clients: Option<IndexMap<String, String>>,
     client_profiles: IndexMap<String, ClientProfile>,
     path_overrides: PathOverrides,
-    azure_openai: Option<AzureOpenAiSettings>,
     max_tool_output_bytes: u64,
 }
 
@@ -175,8 +156,6 @@ struct ConfigFile {
     #[serde(rename = "client-profiles")]
     client_profiles: Option<IndexMap<String, ProfileFile>>,
     paths: Option<PathsSection>,
-    #[serde(rename = "azure-openai", default)]
-    azure_openai: Option<AzureOpenAiSettings>,
     #[serde(rename = "max-tool-output-bytes", default)]
     max_tool_output_bytes: Option<u64>,
 }
@@ -309,7 +288,6 @@ impl Config {
             default_task_clients: task_clients,
             client_profiles,
             path_overrides,
-            azure_openai: cfg_file.azure_openai,
             max_tool_output_bytes,
         })
     }
@@ -338,10 +316,6 @@ impl Config {
 
     pub fn path_overrides(&self) -> &PathOverrides {
         &self.path_overrides
-    }
-
-    pub(crate) fn azure_openai(&self) -> Option<&AzureOpenAiSettings> {
-        self.azure_openai.as_ref()
     }
 
     pub fn max_tool_output_bytes(&self) -> u64 {
@@ -961,11 +935,12 @@ not-a-key: 1"#,
     }
 
     #[test]
-    fn test_config_denies_unknown_key_under_azure_openai() {
+    fn test_config_denies_azure_openai_top_level_key() {
+        // `azure-openai` moved to providers.yaml; it is now an unknown
+        // top-level key in settings.yaml and must be rejected.
         let _sandbox = Sandbox::with_config(Some(
             r#"azure-openai:
-  endpoint: https://example.com
-  not-a-key: 1"#,
+  endpoint: https://example.com"#,
         ));
         assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
     }
