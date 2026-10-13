@@ -256,12 +256,12 @@ impl TranscriptWidget {
         match self.turn_start {
             Some(t) => {
                 let mut inserted = 0usize;
-                for styled in block {
-                    self.scrollable.insert(t + inserted, styled);
+                if t > 0 {
+                    self.scrollable.insert(t, Line::from(""));
                     inserted += 1;
                 }
-                if t > 0 {
-                    self.scrollable.insert(t + inserted, Line::from(""));
+                for styled in block {
+                    self.scrollable.insert(t + inserted, styled);
                     inserted += 1;
                 }
                 self.turn_start = Some(t + inserted);
@@ -1909,15 +1909,48 @@ mod tests {
     }
 
     #[test]
+    fn transcript_block_inserted_before_pinned_turn_with_prior_content() {
+        // Prior content means `submit_prompt` pushes a separator rule, so the
+        // turn is pinned at index > 0 and the `t > 0` blank-separator branch
+        // runs. The block lines stay contiguous above the pinned turn, with
+        // exactly one blank separator between the block and the prompt.
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_transcript_line("prior".to_string());
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+        transcript.push_transcript_block(vec!["block one".to_string(), "block two".to_string()]);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text,
+            vec![
+                "prior",
+                "────────────────────────────────────────",
+                "",
+                "block one",
+                "block two",
+                "▍» hi"
+            ]
+        );
+    }
+
+    #[test]
     fn transcript_block_single_line_matches_single_line_insertion() {
         // A one-line block inserted during a turn must produce the same FIFO
-        // layout as `push_styled_line`.
+        // layout as `push_styled_line`, including when prior content pins the
+        // turn at index > 0 (exercising the blank-separator branch).
         let mut block = TranscriptWidget::new();
+        block.push_transcript_line("prior".to_string());
         block.submit_prompt("hi".to_string());
         block.push_response("resp");
         block.push_transcript_block(vec!["system note".to_string()]);
 
         let mut single = TranscriptWidget::new();
+        single.push_transcript_line("prior".to_string());
         single.submit_prompt("hi".to_string());
         single.push_response("resp");
         single.push_transcript_line("system note".to_string());
