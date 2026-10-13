@@ -30,6 +30,12 @@ Gremlins is a framework for running AI-powered pipelines defined in YAML files u
 - `gremlins debug <id>` — attach interactively to an agent stage
 - `gremlins rm <id>` — remove a completed run
 
+## Your working directory
+
+You operate against the **project root** supplied by the harness (the `Your working directory is:` line in your prompt). This is the operator's actual project — it may be a git repository, a code project, or a plain folder of notes, documents, spreadsheets, images, data, or any other non-code content. Treat it as an arbitrary content root, not as a checkout that must be a git repository.
+
+Before taking any git action (push, branch, PR, commit, diff), rely on the **injected repository context** in your prompt — the current branch, remotes, status, recent commits, and top-level listing. When that context is absent, the directory is not a git repository (or git is unavailable); answer without git and do not assume a repository exists.
+
 ## Your tools
 
 You have access to standard tools: Read, Write, Edit, Grep, Glob, Bash, Task. Use them to help the operator explore the codebase, edit files, run commands, and manage gremlin pipelines.

@@ -221,6 +221,104 @@ pub(crate) fn build_workspace_preamble(cwd: &str) -> String {
     parts.join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// Chat repository context
+// ---------------------------------------------------------------------------
+
+/// Run a git command with `cwd` and return its trimmed stdout, or `None` on
+/// any failure (missing binary, not a repo, detached/broken state, permission
+/// problem). Never panics, never surfaces raw git errors.
+fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// Whether `cwd` is inside a git work tree. A missing `git` binary is treated
+/// exactly like a non-git directory: `false`, so every git section is skipped.
+fn is_git_repo(cwd: &str) -> bool {
+    git_output(cwd, &["rev-parse", "--is-inside-work-tree"]).as_deref() == Some("true")
+}
+
+/// A bounded, read-only snapshot of the repository context for a chat turn.
+///
+/// Git sections are gated behind a single `rev-parse --is-inside-work-tree`
+/// check and are omitted (never an error) when the directory is not a git
+/// repository, `git` is missing, or any individual command fails. The
+/// top-level directory/file listing is produced independently of git and
+/// includes every visible entry — non-code files are listed by name, never
+/// read into the prompt.
+pub(crate) fn build_chat_context(cwd: &str) -> String {
+    let mut sections: Vec<String> = Vec::new();
+
+    if is_git_repo(cwd) {
+        if let Some(branch) = git_output(cwd, &["branch", "--show-current"]) {
+            sections.push(format!("Current branch: {branch}"));
+        }
+
+        if let Some(remotes) = git_output(cwd, &["remote", "-v"]) {
+            sections.push(format!("Remotes:\n{remotes}"));
+        }
+
+        if let Some(status) = git_output(cwd, &["status", "--short"]) {
+            sections.push(format!("Git status (short):\n{status}"));
+        }
+
+        if let Some(log) = git_output(cwd, &["log", "--oneline", "-n", "5"]) {
+            sections.push(format!("Recent commits:\n{log}"));
+        }
+
+        // Diff stat against upstream/base when available.
+        if let Some(stat) = git_output(cwd, &["diff", "--stat", "@{upstream}"]) {
+            if !stat.trim().is_empty() {
+                sections.push(format!("Diff stat vs upstream:\n{stat}"));
+            }
+        }
+    }
+
+    if let Some(listing) = top_level_listing(cwd) {
+        sections.push(format!("Top-level directory listing:\n{listing}"));
+    }
+
+    sections.join("\n\n")
+}
+
+/// A bounded listing of the top-level entries in `cwd`, each tagged by file
+/// type (directory / file / symlink). Every visible entry is included; no
+/// source-code or known-language filtering is applied.
+fn top_level_listing(cwd: &str) -> Option<String> {
+    let entries = std::fs::read_dir(cwd).ok()?;
+    let mut rows: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let ft = entry.file_type().ok();
+        let tag = if ft.as_ref().is_some_and(|t| t.is_dir()) {
+            "dir"
+        } else if ft.as_ref().is_some_and(|t| t.is_symlink()) {
+            "symlink"
+        } else {
+            "file"
+        };
+        rows.push(format!("{tag}  {name}"));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    rows.sort();
+    Some(rows.join("\n"))
+}
+
 impl AgentPrepared {
     /// The harness system prompt — the full output of agent_system_prompt().
     pub fn system_prompt(&self) -> String {
@@ -781,5 +879,75 @@ mod tests {
         std::fs::write(&prepared.output_paths["out"], "content").unwrap();
         commit_agent(&prepared, &store).await.unwrap();
         assert!(store.is_registered("artifact://out.md").await);
+    }
+
+    // ---- build_chat_context tests ----
+
+    /// Run `git` in `dir`, ignoring failures (e.g. git unavailable).
+    fn git(dir: &std::path::Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn chat_context_in_git_repo_includes_git_sections_and_listing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        if !git(&repo, &["init", "-q"]) {
+            eprintln!("git unavailable; skipping chat_context_in_git_repo");
+            return;
+        }
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("README.md"), "# hi\n").unwrap();
+        std::fs::write(repo.join("notes.txt"), "notes\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+
+        let cwd = repo.to_string_lossy().into_owned();
+        let ctx = build_chat_context(&cwd);
+
+        assert!(ctx.contains("Current branch:"), "ctx: {ctx}");
+        assert!(ctx.contains("Recent commits:"), "ctx: {ctx}");
+        assert!(ctx.contains("Top-level directory listing:"), "ctx: {ctx}");
+        // Non-code files are listed by name, not filtered out.
+        assert!(ctx.contains("notes.txt"), "ctx: {ctx}");
+        assert!(ctx.contains("README.md"), "ctx: {ctx}");
+    }
+
+    #[test]
+    fn chat_context_outside_git_repo_omits_git_sections() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("plain");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), "a").unwrap();
+        std::fs::write(dir.join("b.csv"), "b").unwrap();
+        std::fs::write(dir.join("image.png"), b"\x89PNG").unwrap();
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+
+        let cwd = dir.to_string_lossy().into_owned();
+        let ctx = build_chat_context(&cwd);
+
+        assert!(!ctx.contains("Current branch:"), "ctx: {ctx}");
+        assert!(!ctx.contains("Recent commits:"), "ctx: {ctx}");
+        assert!(!ctx.contains("Git status"), "ctx: {ctx}");
+        assert!(!ctx.contains("Remotes:"), "ctx: {ctx}");
+        // The listing is still produced, with non-code files included.
+        assert!(ctx.contains("Top-level directory listing:"), "ctx: {ctx}");
+        assert!(ctx.contains("a.md"), "ctx: {ctx}");
+        assert!(ctx.contains("b.csv"), "ctx: {ctx}");
+        assert!(ctx.contains("image.png"), "ctx: {ctx}");
+        assert!(ctx.contains("subdir"), "ctx: {ctx}");
+    }
+
+    #[test]
+    fn chat_context_nonexistent_dir_is_empty() {
+        let ctx = build_chat_context("/nonexistent/gremlins/chat/root");
+        assert!(ctx.is_empty(), "ctx should be empty, got: {ctx}");
     }
 }

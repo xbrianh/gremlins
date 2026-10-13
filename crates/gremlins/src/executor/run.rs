@@ -22,7 +22,7 @@ use crate::clients::client::Client;
 use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::{ExecutorStage, GremlinDefinition};
-use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
+use crate::executor::agent_runner::{build_chat_context, commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
 use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell, ExecError};
 use crate::executor::gremlin::Gremlin;
@@ -400,7 +400,11 @@ async fn run_agent(
     };
 
     let params = RunParams {
-        prompt: prepared.user_prompt(),
+        prompt: if gremlin.state.read_str("kind") == "chat" {
+            chat_user_prompt(&prepared)
+        } else {
+            prepared.user_prompt()
+        },
         label: prepared.name.clone(),
         model: prepared
             .model
@@ -1091,6 +1095,21 @@ pub(crate) fn messages_from_conversation(
 ) -> Result<Vec<rig_core::completion::Message>, String> {
     serde_json::from_str::<Vec<rig_core::completion::Message>>(json)
         .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
+}
+
+/// Compose the user prompt for a chat turn: the workspace preamble, the
+/// repository-context snapshot, and the operator's message. The context block
+/// is chat-only; pipeline stages keep the existing `AgentPrepared::user_prompt`
+/// behavior untouched.
+fn chat_user_prompt(prepared: &crate::executor::agent_runner::AgentPrepared) -> String {
+    let preamble = crate::executor::agent_runner::build_workspace_preamble(&prepared.cwd);
+    let context = build_chat_context(&prepared.cwd);
+    let mut parts = vec![preamble];
+    if !context.is_empty() {
+        parts.push(context);
+    }
+    parts.push(prepared.prompt.clone());
+    parts.join("\n\n")
 }
 
 /// Clamp `text` to at most `max` bytes, cutting on a char boundary.

@@ -1862,6 +1862,14 @@ async fn handle_chat(
         .get("turn")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // The operator's project root, supplied by the TUI. When absent (non-TUI
+    // callers), fall back to the daemon's resolved project root.
+    let project_root = request
+        .get("project_root")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(config::project_root);
 
     // 1. Init config
     if let Err(e) = config::init_global() {
@@ -1951,7 +1959,12 @@ async fn handle_chat(
             id
         }
         None => {
-            let gremlin = match create_chat_gremlin(&definition, &default_client, state_root) {
+            let gremlin = match create_chat_gremlin(
+                &definition,
+                &default_client,
+                state_root,
+                &project_root,
+            ) {
                 Ok(g) => g,
                 Err(e) => {
                     let resp = error_response(&e);
@@ -2421,16 +2434,16 @@ fn create_chat_gremlin(
     definition: &crate::definition::StaticDefinition,
     default_client: &str,
     _state_root: &Path,
+    project_root: &Path,
 ) -> Result<Gremlin, String> {
     use crate::clients::client::Client;
-    use crate::config;
     use crate::definition::GremlinDefinition;
     use crate::executor::gremlin::{validate_gremlin_id, Gremlin, RuntimeConfig, ScratchDir};
     use crate::executor::state::{self, BlobMode, StateData};
     use serde_json::{Map, Value};
     use std::collections::HashMap;
 
-    let project_root = config::project_root();
+    let project_root = project_root.to_path_buf();
 
     // Generate ID — use an atomic counter so concurrent chat sessions
     // never collide. Chat gremlins are ephemeral so they never appear

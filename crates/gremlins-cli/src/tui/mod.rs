@@ -34,6 +34,27 @@ fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
     }
 }
 
+/// Build the `chat` request payload sent to the daemon. Carries the operator's
+/// project root so the chat gremlin anchors against the actual project rather
+/// than the daemon's own working directory.
+fn build_chat_request(
+    text: &str,
+    turn: &str,
+    chat_id: Option<&str>,
+    project_root: &str,
+) -> serde_json::Value {
+    let mut request = serde_json::json!({
+        "op": "chat",
+        "text": text,
+        "turn": turn,
+        "project_root": project_root,
+    });
+    if let Some(id) = chat_id {
+        request["id"] = serde_json::Value::String(id.to_string());
+    }
+    request
+}
+
 /// Submit plain-text chat input to the daemon.
 ///
 /// This is the shared tail of the Enter and `Ctrl+G`-editor paths. Caller
@@ -67,15 +88,15 @@ fn send_chat_input(
     let chat_id = app.chat_id.clone();
     let client_for_chat = Arc::clone(client);
     let chat_tx = client_for_chat.chat_sender();
+    // The operator's project root, resolved the same way the info bar does.
+    let project_root = gremlins::config::project_root();
     tokio::spawn(async move {
-        let mut request = serde_json::json!({
-            "op": "chat",
-            "text": input,
-            "turn": turn_id,
-        });
-        if let Some(id) = chat_id {
-            request["id"] = serde_json::Value::String(id);
-        }
+        let request = build_chat_request(
+            &input,
+            &turn_id,
+            chat_id.as_deref(),
+            &project_root.to_string_lossy(),
+        );
         match client_for_chat.send_request(request).await {
             Ok(resp) => {
                 // A chat ack is `{"type":"ok",...}`; an error response is
@@ -1639,4 +1660,26 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_chat_request;
+
+    #[test]
+    fn chat_request_carries_project_root() {
+        let req = build_chat_request("push this branch", "3", None, "/home/user/proj");
+        assert_eq!(req["op"], "chat");
+        assert_eq!(req["text"], "push this branch");
+        assert_eq!(req["turn"], "3");
+        assert_eq!(req["project_root"], "/home/user/proj");
+        assert!(req.get("id").is_none());
+    }
+
+    #[test]
+    fn chat_request_includes_id_when_present() {
+        let req = build_chat_request("hi", "2", Some("chat-0001"), "/p");
+        assert_eq!(req["id"], "chat-0001");
+        assert_eq!(req["project_root"], "/p");
+    }
 }
