@@ -1616,9 +1616,9 @@ pub(crate) fn format_tool_call(tc: &ToolCall) -> String {
             .and_then(|v| v.as_str())
             .map(|s| format!("pattern={s:?}")),
         "WebSearch" => args
-            .get("query")
+            .get("url")
             .and_then(|v| v.as_str())
-            .map(|s| format!("query={s:?}")),
+            .map(|s| format!("url={s:?}")),
         "WebFetch" => args
             .get("url")
             .and_then(|v| v.as_str())
