@@ -11,7 +11,9 @@ use std::process::Command;
 use std::sync::Arc;
 
 use crossterm::{
-    cursor, execute,
+    cursor,
+    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use tokio::sync::{mpsc, Notify};
@@ -94,6 +96,12 @@ impl Drop for TerminalRestoreGuard {
     fn drop(&mut self) {
         let _ = enable_raw_mode();
         let _ = execute!(io::stdout(), cursor::Hide);
+        // Re-enable the enhanced keyboard protocol so Shift+Enter keeps
+        // arriving as a distinct key event after the editor hands back.
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::all())
+        );
         let _ = io::stdout().flush();
     }
 }
@@ -179,6 +187,9 @@ pub async fn open_editor<'a>(
 /// every return path.
 fn run_editor_process(input: &str) -> io::Result<Option<String>> {
     // Cooked mode + visible cursor are what an interactive editor expects.
+    // Drop the enhanced keyboard protocol first so the editor reads plain
+    // escape sequences rather than the CSI-u encoding the TUI relies on.
+    execute!(io::stdout(), PopKeyboardEnhancementFlags)?;
     disable_raw_mode()?;
     execute!(io::stdout(), cursor::Show)?;
     io::stdout().flush()?;

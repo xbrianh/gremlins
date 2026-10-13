@@ -502,6 +502,25 @@ mod tests {
     }
 
     #[test]
+    fn insert_newline_at_cursor_keeps_char_boundary() {
+        let mut app = App::new();
+        app.input = "ab".to_string();
+        app.input_cursor = 1;
+
+        app.insert_char('\n');
+        assert_eq!(app.input, "a\nb");
+        assert_eq!(app.input_cursor, 2);
+        assert!(app.input.is_char_boundary(app.input_cursor));
+
+        // Inserting at the very end appends a trailing newline.
+        app.input_cursor = app.input.len();
+        app.insert_char('\n');
+        assert_eq!(app.input, "a\nb\n");
+        assert_eq!(app.input_cursor, app.input.len());
+        assert!(app.input.is_char_boundary(app.input_cursor));
+    }
+
+    #[test]
     fn backspace_deletes_char_before_cursor() {
         let mut app = App::new();
         app.input = "aé😀b".to_string();

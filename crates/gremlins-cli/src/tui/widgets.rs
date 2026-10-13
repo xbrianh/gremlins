@@ -553,18 +553,35 @@ fn render_prompt(prompt: &str, rule_width: u16) -> Vec<Line<'static>> {
     let margin_style = Style::default()
         .fg(DEFAULT_THEME.prompt_margin)
         .bg(DEFAULT_THEME.prompt_bg);
-    let lines = markdown::render(prompt, text_style, rule_width);
-    let mut out = Vec::with_capacity(lines.len());
-    for (i, line) in lines.into_iter().enumerate() {
-        let mut spans = Vec::with_capacity(line.spans.len() + 2);
-        spans.push(Span::styled(if i == 0 { "▍" } else { " " }, margin_style));
-        if i == 0 {
-            spans.push(Span::styled("» ", marker_style));
-        } else {
-            spans.push(Span::styled("  ", marker_style));
+    // Render each physical line independently so a user-entered `\n` is
+    // preserved as a hard break. The markdown renderer would otherwise
+    // collapse a bare newline into a `SoftBreak` (a space), silently
+    // flattening multi-line prompts. Inline markdown still applies per line.
+    let mut out = Vec::new();
+    let mut first = true;
+    for raw_line in prompt.split('\n') {
+        let lines = markdown::render(raw_line, text_style, rule_width);
+        if lines.is_empty() {
+            // Preserve blank lines as empty continuation lines.
+            out.push(Line::from(vec![
+                Span::styled(" ", margin_style),
+                Span::styled("  ", marker_style),
+            ]));
+            first = false;
+            continue;
         }
-        spans.extend(line.spans);
-        out.push(Line::from(spans));
+        for line in lines {
+            let mut spans = Vec::with_capacity(line.spans.len() + 2);
+            spans.push(Span::styled(if first { "▍" } else { " " }, margin_style));
+            if first {
+                spans.push(Span::styled("» ", marker_style));
+            } else {
+                spans.push(Span::styled("  ", marker_style));
+            }
+            spans.extend(line.spans);
+            out.push(Line::from(spans));
+            first = false;
+        }
     }
     out
 }
@@ -1041,45 +1058,59 @@ impl InputBarWidget {
     /// The wrapped rows of the input text (prompt + text + optional preview)
     /// at `width`, uncapped.
     pub fn wrapped_rows(&self, width: u16, input: &str, preview: Option<&str>) -> u16 {
-        let text = Self::preview_line(Self::full_line(input, width), preview, width);
-        (wrapped_height(&[text], width).max(1).min(u16::MAX as usize)) as u16
+        let lines = Self::preview_lines(Self::full_lines(input), preview);
+        (wrapped_height(&lines, width).max(1).min(u16::MAX as usize)) as u16
     }
 
-    /// Build the full styled line: prompt + input text, or just the prompt
-    /// when the input is empty.
-    fn full_line(input: &str, _width: u16) -> Line<'static> {
+    /// Build the styled logical lines: the prompt chevron on the first line,
+    /// with each `'\n'` in the input producing a hard line break and
+    /// continuation lines indented two cells to align past the chevron.
+    fn full_lines(input: &str) -> Vec<Line<'static>> {
         if input.is_empty() {
-            return Line::from(vec![Span::styled(
+            return vec![Line::from(vec![Span::styled(
                 format!("{} ", glyph::CHEVRON),
                 Style::default().fg(DEFAULT_THEME.accent_primary),
-            )]);
+            )])];
         }
-        Line::from(vec![
-            Span::styled(
-                format!("{} ", glyph::CHEVRON),
-                Style::default().fg(DEFAULT_THEME.accent_primary),
-            ),
-            Span::raw(input.to_string()),
-        ])
+        input
+            .split('\n')
+            .enumerate()
+            .map(|(i, part)| {
+                if i == 0 {
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{} ", glyph::CHEVRON),
+                            Style::default().fg(DEFAULT_THEME.accent_primary),
+                        ),
+                        Span::raw(part.to_string()),
+                    ])
+                } else {
+                    Line::from(vec![Span::raw("  "), Span::raw(part.to_string())])
+                }
+            })
+            .collect()
     }
 
-    /// Extend the real input line with a dimmed inline preview suffix.
+    /// Extend the final logical line with a dimmed inline preview suffix.
     ///
     /// The preview is paint-only: it never changes the buffer, cursor, or
     /// wrapping measurements beyond what the full candidate path would
-    /// occupy.
-    fn preview_line(base: Line<'static>, preview: Option<&str>, _width: u16) -> Line<'static> {
+    /// occupy. It stays on the last logical line and is never split or
+    /// duplicated across lines.
+    fn preview_lines(mut lines: Vec<Line<'static>>, preview: Option<&str>) -> Vec<Line<'static>> {
         let Some(preview) = preview.filter(|p| !p.is_empty()) else {
-            return base;
+            return lines;
         };
-        let mut spans = base.spans;
-        spans.push(Span::styled(
+        let last = lines
+            .last_mut()
+            .expect("full_lines always yields at least one line");
+        last.spans.push(Span::styled(
             preview.to_string(),
             Style::default()
                 .fg(DEFAULT_THEME.subtle)
                 .add_modifier(Modifier::DIM),
         ));
-        Line::from(spans)
+        lines
     }
 
     /// Compute the cursor's (row, column) within the wrapped view.
@@ -1109,17 +1140,15 @@ impl InputBarWidget {
             .chars()
             .next()
             .expect("cursor < input.len()");
-        let len = ch.len_utf8();
-
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Self::prompt_span());
-        if cursor > 0 {
-            spans.push(Span::raw(input[..cursor].to_string()));
+        // A cursor parked on a `'\n'` has no visible cell of its own: it sits
+        // at the end of the logical line that the newline terminates.
+        if ch == '\n' {
+            return Self::end_of_text_position(&input[..cursor], width);
         }
-        spans.push(Span::styled(ch.to_string(), Self::marker_style()));
-        spans.push(Span::raw(input[cursor + len..].to_string()));
 
-        if let Some(pos) = Self::locate_marker(Line::from(spans), width) {
+        let lines = Self::lines_with_marker(input, cursor);
+
+        if let Some(pos) = Self::locate_marker(&lines, width) {
             return pos;
         }
 
@@ -1128,18 +1157,51 @@ impl InputBarWidget {
         Self::end_of_text_position(&input[..cursor], width)
     }
 
+    /// Build the logical lines of `input`, styling the grapheme at byte offset
+    /// `marker_at` with the marker style. The offset must lie strictly inside
+    /// a logical line (never on a `'\n'` or past the end).
+    fn lines_with_marker(input: &str, marker_at: usize) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let mut offset = 0usize;
+        for (i, part) in input.split('\n').enumerate() {
+            let line_start = offset;
+            let line_end = offset + part.len();
+            let mut spans = Vec::new();
+            if i == 0 {
+                spans.push(Self::prompt_span());
+            } else {
+                spans.push(Span::raw("  "));
+            }
+            if marker_at >= line_start && marker_at < line_end {
+                let local = marker_at - line_start;
+                let ch = part[local..].chars().next().expect("marker within line");
+                let len = ch.len_utf8();
+                if local > 0 {
+                    spans.push(Span::raw(part[..local].to_string()));
+                }
+                spans.push(Span::styled(ch.to_string(), Self::marker_style()));
+                spans.push(Span::raw(part[local + len..].to_string()));
+            } else {
+                spans.push(Span::raw(part.to_string()));
+            }
+            lines.push(Line::from(spans));
+            offset = line_end + 1;
+        }
+        lines
+    }
+
     /// Cursor position at the very end of `input` (just past the last char).
     fn end_of_text_position(input: &str, width: u16) -> (u16, u16) {
-        let full_rows = wrapped_height(&[Self::full_line(input, width)], width).max(1) as u16;
+        let mut lines = Self::full_lines(input);
+        let full_rows = wrapped_height(&lines, width).max(1) as u16;
 
-        let spans: Vec<Span<'static>> = vec![
-            Self::prompt_span(),
-            Span::raw(input.to_string()),
-            Span::styled("\u{E000}", Self::marker_style()),
-        ];
+        lines
+            .last_mut()
+            .expect("full_lines always yields at least one line")
+            .spans
+            .push(Span::styled("\u{E000}", Self::marker_style()));
 
-        let marker =
-            Self::locate_marker(Line::from(spans), width).unwrap_or((full_rows - 1, width - 1));
+        let marker = Self::locate_marker(&lines, width).unwrap_or((full_rows - 1, width - 1));
 
         // Park at the end of the last row if the sentinel wrapped past the
         // wrapped content (the cursor would otherwise address a row that does
@@ -1164,13 +1226,13 @@ impl InputBarWidget {
         Style::default().fg(DEFAULT_THEME.prompt_marker)
     }
 
-    /// Render `line` at `width` and return the (row, col) of the marker-style
+    /// Render `lines` at `width` and return the (row, col) of the marker-style
     /// cell, if present.
-    fn locate_marker(line: Line<'static>, width: u16) -> Option<(u16, u16)> {
-        let rows = wrapped_height(std::slice::from_ref(&line), width).max(1) as u16;
+    fn locate_marker(lines: &[Line<'static>], width: u16) -> Option<(u16, u16)> {
+        let rows = wrapped_height(lines, width).max(1) as u16;
         let area = Rect::new(0, 0, width, rows);
         let mut buf = Buffer::empty(area);
-        Paragraph::new(line)
+        Paragraph::new(lines.to_vec())
             .wrap(Wrap { trim: false })
             .render(area, &mut buf);
 
@@ -1244,16 +1306,12 @@ impl LiveAreaWidget for InputBarWidget {
             return;
         }
 
-        // Build the full styled line, adding the paint-only preview suffix
-        // immediately after the real input. Measurement now includes the
-        // preview so the extended line is allocated enough rows; cursor
-        // position is still computed from `ctx.input` alone.
-        let preview_line = Self::preview_line(
-            Self::full_line(ctx.input, width),
-            ctx.completion_preview,
-            width,
-        );
-        let paragraph = Paragraph::new(preview_line).wrap(Wrap { trim: false });
+        // Build the styled logical lines, adding the paint-only preview suffix
+        // immediately after the real input on the final line. Measurement now
+        // includes the preview so the extended line is allocated enough rows;
+        // cursor position is still computed from `ctx.input` alone.
+        let lines = Self::preview_lines(Self::full_lines(ctx.input), ctx.completion_preview);
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
 
         // Render into a full-width buffer at the paragraph's natural height,
         // then copy the visible window into `area`.
@@ -1777,6 +1835,24 @@ mod tests {
         let lines = transcript.scrollable.visible_lines();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].to_string(), "▍» bold prompt");
+    }
+
+    #[test]
+    fn submit_prompt_preserves_hard_line_breaks() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("one\ntwo".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["▍» one", "   two"]);
+    }
+
+    #[test]
+    fn submit_prompt_preserves_blank_lines() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("one\n\ntwo".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["▍» one", "   ", "   two"]);
     }
 
     #[test]
@@ -2443,5 +2519,92 @@ mod tests {
         bar.render(area, &mut buf, &ctx);
         assert_eq!(buf[(4, 0)].style().bg, Some(DEFAULT_THEME.cursor));
         assert_ne!(buf[(0, 0)].style().bg, Some(DEFAULT_THEME.cursor));
+    }
+
+    // ── multi-line input bar ────────────────────────────────────
+
+    #[test]
+    fn full_lines_splits_on_newline_with_chevron_on_first_line_only() {
+        let lines = InputBarWidget::full_lines("one\ntwo\nthree");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].to_string(), "» one");
+        assert_eq!(lines[1].to_string(), "  two");
+        assert_eq!(lines[2].to_string(), "  three");
+    }
+
+    #[test]
+    fn full_lines_empty_input_yields_chevron_only() {
+        let lines = InputBarWidget::full_lines("");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].to_string(), "» ");
+    }
+
+    #[test]
+    fn full_lines_trailing_newline_produces_empty_continuation() {
+        let lines = InputBarWidget::full_lines("a\n");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].to_string(), "» a");
+        assert_eq!(lines[1].to_string(), "  ");
+    }
+
+    #[test]
+    fn wrapped_rows_counts_hard_breaks() {
+        let bar = InputBarWidget::new();
+        // Two logical lines at a wide width → 2 rows.
+        assert_eq!(bar.wrapped_rows(80, "one\ntwo", None), 2);
+        // Three logical lines → 3 rows.
+        assert_eq!(bar.wrapped_rows(80, "one\ntwo\nthree", None), 3);
+    }
+
+    #[test]
+    fn cursor_position_on_second_logical_line() {
+        // "ab\ncd" at width 10: line 0 = "» ab" (4 cells), line 1 = "  cd"
+        // (4 cells). Cursor at end of input (byte 5) → end of line 1.
+        assert_eq!(InputBarWidget::cursor_position(5, "ab\ncd", 10), (1, 4));
+        // Cursor before 'c' (byte 3) → line 1, col 2 (after the 2-cell indent).
+        assert_eq!(InputBarWidget::cursor_position(3, "ab\ncd", 10), (1, 2));
+    }
+
+    #[test]
+    fn cursor_position_on_newline_parks_at_end_of_prior_line() {
+        // Cursor on the '\n' (byte 2 in "ab\ncd") sits at the end of line 0.
+        assert_eq!(InputBarWidget::cursor_position(2, "ab\ncd", 10), (0, 4));
+    }
+
+    #[test]
+    fn cursor_position_word_wraps_within_a_logical_line() {
+        // "hello world\nnext" at width 7. Line 0 wraps: "» hello" / "world".
+        // Line 1 = "  next". Cursor at end of input lands after "next".
+        let input = "hello world\nnext";
+        let end = input.len();
+        // "  next" is 6 cells, so end of line 1 is col 6, on row 2.
+        assert_eq!(InputBarWidget::cursor_position(end, input, 7), (2, 6));
+    }
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_to_later_logical_line() {
+        let mut bar = InputBarWidget::new();
+        // 10 logical lines at width 80 → 10 rows. Cursor at end (row 9) must
+        // scroll within a 5-row window: v_scroll = 9 - 4 = 5.
+        let input = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj";
+        bar.ensure_cursor_visible(input.len(), input, 80, 5);
+        assert_eq!(bar.v_scroll, 5);
+    }
+
+    #[test]
+    fn render_multi_line_chevron_only_on_first_row() {
+        let mut bar = InputBarWidget::new();
+        let area = Rect::new(0, 0, 10, 3);
+        let mut buf = Buffer::empty(area);
+        let ctx = input_ctx("one\ntwo", 7);
+        bar.render(area, &mut buf, &ctx);
+
+        // Row 0 starts with the chevron glyph; row 1 starts with two spaces.
+        let row0: String = (0..area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        let row1: String = (0..area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(row0.starts_with('»'), "row0 = {row0:?}");
+        assert!(row1.starts_with("  "), "row1 = {row1:?}");
+        assert!(row0.contains("one"), "row0 = {row0:?}");
+        assert!(row1.contains("two"), "row1 = {row1:?}");
     }
 }

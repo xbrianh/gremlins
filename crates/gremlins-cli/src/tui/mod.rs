@@ -878,6 +878,24 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::Enter => {
+                            // Shift+Enter inserts a newline into the main input
+                            // bar instead of submitting. The debug overlay prompt
+                            // is single-line, so Shift+Enter there is a no-op.
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                                if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                    continue;
+                                }
+                                app.insert_char('\n');
+                                app.clear_completion();
+                                app.history_cursor = None;
+                                live_area.ensure_input_cursor_visible(
+                                    app.input_cursor,
+                                    &app.input,
+                                    app.width,
+                                );
+                                continue;
+                            }
+
                             // Debug overlay owns a prompt: submit into its
                             // scrollback instead of the main input bar.
                             if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {

@@ -1,11 +1,14 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 
-.PHONY: test check fmt fmt-check clippy build release autoformat test-overlay-tools
+.PHONY: test test-cli check fmt fmt-check clippy build release autoformat test-overlay-tools
 
 # --- Test ---
 
 test:
 	cargo test -q -p gremlins --lib
+
+test-cli:
+	cargo test -q -p gremlins-cli
 
 # --- Check ---
 
