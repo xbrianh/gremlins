@@ -2135,15 +2135,17 @@ mod tests {
         let pidfile = dir.path().join("pid");
 
         // A Bash tool call that records its PID and signals when it starts,
-        // then hangs until the child process is killed by the dropped
-        // join_all future (bash_invoke sets kill_on_drop(true)).
+        // then hangs until killed by the dropped join_all future.
+        // Uses a pure-bash infinite loop (while true; do :; done) so no
+        // child process is spawned — avoiding GNU Make jobserver pipe leaks
+        // that would keep `make -j` waiting forever.
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
             rig_core::test_utils::MockStreamEvent::tool_call(
                 "c1",
                 "Bash",
                 serde_json::json!({
                     "command": format!(
-                        "echo $$ > {}; touch {}; sleep 3600",
+                        "echo $$ > {}; touch {}; while true; do :; done",
                         pidfile.display(),
                         marker.display()
                     ),
@@ -2194,8 +2196,8 @@ mod tests {
             other => panic!("expected Runtime cancelled, got: {other:?}"),
         }
 
-        // The dropped join_all future must have killed the Bash child, not
-        // left an hour-long `sleep` orphaned. Poll until the pid is gone.
+        // The dropped join_all future must have killed the Bash child.
+        // Poll until the pid is gone.
         let reaped = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if !process_alive(pid) {
