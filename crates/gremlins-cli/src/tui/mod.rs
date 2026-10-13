@@ -5,6 +5,7 @@ pub mod client;
 pub mod commands;
 pub mod editor;
 pub mod markdown;
+pub mod motif;
 pub mod screen;
 pub mod theme;
 pub mod widgets;
@@ -571,8 +572,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     }
 
     // ── Startup banner ────────────────────────────────────────────
-    let banner = "gremlins tui — type /help for commands, Ctrl+C to exit";
-    live_area.push_transcript_line(banner.to_string());
+    for line in motif::spire_banner() {
+        live_area.push_styled_line(line);
+    }
+    live_area.push_styled_line(motif::tagline());
 
     // ── Event loop ────────────────────────────────────────────────
     loop {
@@ -867,6 +870,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         live_area.clear_transcript();
                                         // Clear the live reasoning/tool widgets.
                                         live_area.clear_live_widgets();
+                                        live_area.push_styled_line(motif::marble_line());
                                         // Cancel any in-flight turn on the daemon
                                         // (do not abort `chat_task` mid-write).
                                         if app.active_request {

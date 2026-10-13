@@ -45,26 +45,38 @@ pub struct Theme {
     pub danger: Color,
     /// Input cursor block background.
     pub cursor: Color,
+    /// Near-white for rules and titles.
+    pub chrome: Color,
+    /// Deep band background.
+    pub midnight: Color,
+    /// Text on colored bands.
+    pub ivory: Color,
+    /// Startup spire gold gradient step.
+    pub sunburst: Color,
 }
 
 /// The default (dark) theme.
 pub const DEFAULT_THEME: Theme = Theme {
-    text: Color::White,
-    subtle: Color::DarkGray,
-    code_bg: Color::Rgb(30, 30, 30),
-    code_fg: Color::Rgb(200, 200, 200),
-    code_border: Color::DarkGray,
-    heading_primary: Color::Yellow,
-    heading_secondary: Color::Cyan,
-    link: Color::Cyan,
-    prompt_marker: Color::Magenta,
-    prompt_bg: Color::Rgb(40, 40, 40),
-    blockquote_bar: Color::DarkGray,
-    list_bullet: Color::DarkGray,
-    separator: Color::DarkGray,
-    accent_primary: Color::Cyan,
-    accent_secondary: Color::Yellow,
-    success: Color::Green,
-    danger: Color::Red,
-    cursor: Color::White,
+    text: Color::Rgb(224, 224, 228),
+    subtle: Color::Rgb(122, 122, 130),
+    code_bg: Color::Rgb(20, 22, 28),
+    code_fg: Color::Rgb(210, 210, 215),
+    code_border: Color::Rgb(181, 137, 0),
+    heading_primary: Color::Rgb(212, 175, 55),
+    heading_secondary: Color::Rgb(210, 210, 220),
+    link: Color::Rgb(95, 175, 230),
+    prompt_marker: Color::Rgb(196, 30, 58),
+    prompt_bg: Color::Rgb(24, 22, 20),
+    blockquote_bar: Color::Rgb(212, 175, 55),
+    list_bullet: Color::Rgb(181, 137, 0),
+    separator: Color::Rgb(122, 122, 130),
+    accent_primary: Color::Rgb(212, 175, 55),
+    accent_secondary: Color::Rgb(181, 137, 0),
+    success: Color::Rgb(0, 155, 130),
+    danger: Color::Rgb(196, 30, 58),
+    cursor: Color::Rgb(212, 175, 55),
+    chrome: Color::Rgb(224, 224, 228),
+    midnight: Color::Rgb(12, 14, 20),
+    ivory: Color::Rgb(245, 240, 225),
+    sunburst: Color::Rgb(232, 196, 88),
 };

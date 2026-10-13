@@ -610,6 +610,11 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().push_transcript_line(line);
     }
 
+    /// Append a pre-styled line to the transcript (e.g. the startup spire).
+    pub fn push_styled_line(&mut self, line: ratatui::text::Line<'static>) {
+        self.transcript_mut().push_styled_line(line);
+    }
+
     // ── Overlay mutation ─────────────────────────────────────────
 
     /// Push a log line into the watch-single widget, if present.
@@ -1018,7 +1023,7 @@ mod tests {
             "the oldest response line must not be visible: {visible}"
         );
         assert!(
-            live_area.scrollback().iter().any(|l| l.contains("> hi")),
+            live_area.scrollback().iter().any(|l| l.contains("» hi")),
             "the prompt must overflow into scrollback: {:?}",
             live_area.scrollback()
         );
@@ -1066,6 +1071,10 @@ mod tests {
 
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
+        // A non-empty input keeps the empty-state hint out of the input bar
+        // so this test exercises transcript tail anchoring in isolation.
+        app.input = "x".to_string();
+        app.input_cursor = 1;
 
         // Two long raw lines, each longer than the 10-col width so each wraps
         // to multiple rows. The transcript gets fewer rows than the combined
@@ -1120,7 +1129,7 @@ mod tests {
             "Response text should be visible.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("> hi"),
+            visible.contains("» hi"),
             "Prompt should be visible.\nBuffer:\n{visible}"
         );
     }
@@ -1161,7 +1170,7 @@ mod tests {
             "Response should be visible after Done.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("> hi"),
+            visible.contains("» hi"),
             "Prompt should be visible.\nBuffer:\n{visible}"
         );
     }
@@ -1187,11 +1196,11 @@ mod tests {
         // The two fixed bars must still be rendered even when the content
         // area has zero height.
         assert!(
-            visible.contains("gremlins tui"),
+            visible.contains("GREMLINS"),
             "Info bar should be visible.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains(">"),
+            visible.contains("»"),
             "Input bar prompt should be visible.\nBuffer:\n{visible}"
         );
     }
@@ -1306,11 +1315,11 @@ mod tests {
         );
         // The fixed bars remain visible.
         assert!(
-            visible.contains("gremlins tui"),
+            visible.contains("GREMLINS"),
             "Info bar should remain visible.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains(">"),
+            visible.contains("»"),
             "Input bar should remain visible.\nBuffer:\n{visible}"
         );
 
@@ -1416,7 +1425,7 @@ mod tests {
 
         let visible = dump_buffer(live.backend().buffer());
         assert!(
-            visible.contains("gremlins tui"),
+            visible.contains("GREMLINS"),
             "Info bar should render even with an overlay on a 2-row viewport.\nBuffer:\n{visible}"
         );
     }
@@ -1636,14 +1645,14 @@ mod tests {
         let visible = dump_buffer(live_area.backend().buffer());
         // The transcript content sits directly above the input/info bars with
         // no rows consumed by the empty reasoning/tool widgets.
-        assert!(visible.contains("> hi"));
+        assert!(visible.contains("» hi"));
         assert!(visible.contains("answer"));
         // The answer is contiguous with the prompt (no reasoning/tool rows
         // interleaved), and no reasoning/tool content is rendered.
         let lines: Vec<&str> = visible.lines().collect();
         let prompt_idx = lines
             .iter()
-            .position(|l| l.contains("> hi"))
+            .position(|l| l.contains("» hi"))
             .expect("prompt row present");
         assert!(
             lines[prompt_idx + 1].contains("answer"),

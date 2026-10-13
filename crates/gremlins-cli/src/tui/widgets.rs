@@ -28,6 +28,7 @@ use ratatui::{
 use crate::tui::app::{ActiveRun, Overlay};
 use crate::tui::buffer::{line_wrapped_height, wrapped_height, LineBuffer};
 use crate::tui::markdown;
+use crate::tui::motif::{self, glyph};
 use crate::tui::theme::DEFAULT_THEME;
 /// Shared read-only state handed to each widget's [`LiveAreaWidget::render`]
 /// and [`LiveAreaWidget::min_height`].
@@ -168,6 +169,12 @@ pub struct TranscriptWidget {
     turn_start: Option<usize>,
     /// FIFO index where the response region starts.
     response_start: Option<usize>,
+    /// FIFO index of the turn separator rule (regenerated at `finalize`
+    /// width so the glint rule spans the full content width).
+    separator_index: Option<usize>,
+    /// Last-known content width (from `finalize`), used to size rules when
+    /// the response region is rebuilt outside a finalize pass.
+    last_width: u16,
     /// Whether the response region needs re-rendering into the FIFO.
     response_dirty: bool,
     /// Cached wrapped desired height `(width, height)` for the FIFO,
@@ -182,6 +189,8 @@ impl TranscriptWidget {
             response_accumulator: String::new(),
             turn_start: None,
             response_start: None,
+            separator_index: None,
+            last_width: 40,
             response_dirty: false,
             desired_cache: Cell::new(None),
         }
@@ -233,19 +242,24 @@ impl TranscriptWidget {
     /// markdown-rendered prompt, then pin the turn start.
     pub fn submit_prompt(&mut self, prompt: String) {
         self.invalidate_desired_cache();
+        let mut sep_index = None;
         if !self.scrollable.is_empty() {
+            // Placeholder width; regenerated at `finalize` with the real
+            // content width.
             self.scrollable.push(Line::from(Span::styled(
                 "─".repeat(40),
                 Style::default().fg(DEFAULT_THEME.separator),
             )));
+            sep_index = Some(self.scrollable.len() - 1);
         }
         // Pin the turn at the first prompt line, so the leading separator
         // (which belongs to the *previous* turn) may still overflow.
         let start = self.scrollable.len();
-        for line in render_prompt(&prompt) {
+        for line in render_prompt(&prompt, self.last_width.saturating_sub(1)) {
             self.scrollable.push(line);
         }
         self.turn_start = Some(start);
+        self.separator_index = sep_index;
         self.response_start = None;
         self.response_accumulator.clear();
         self.response_dirty = false;
@@ -333,6 +347,7 @@ impl TranscriptWidget {
         self.invalidate_desired_cache();
         self.turn_start = None;
         self.response_start = None;
+        self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
     }
@@ -356,6 +371,7 @@ impl TranscriptWidget {
         }
         self.turn_start = None;
         self.response_start = None;
+        self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
     }
@@ -366,6 +382,7 @@ impl TranscriptWidget {
         self.scrollable.clear();
         self.turn_start = None;
         self.response_start = None;
+        self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
     }
@@ -382,8 +399,21 @@ impl TranscriptWidget {
         for line in markdown::render(
             &self.response_accumulator,
             Style::default().fg(DEFAULT_THEME.text),
+            self.last_width.saturating_sub(1),
         ) {
             self.scrollable.push(line);
+        }
+    }
+
+    /// Regenerate the turn separator at the current content width.
+    fn rebuild_separator(&mut self, width: u16) {
+        let Some(idx) = self.separator_index else {
+            return;
+        };
+        let rule = motif::glint_rule(width.saturating_sub(1));
+        if idx < self.scrollable.len() {
+            self.scrollable.remove(idx);
+            self.scrollable.insert(idx, rule);
         }
     }
 
@@ -424,6 +454,15 @@ impl TranscriptWidget {
         if let Some(r) = &mut self.response_start {
             *r = r.saturating_sub(drained);
         }
+        if let Some(s) = &mut self.separator_index {
+            if *s < drained {
+                // The separator was drained; drop the index so a later
+                // `finalize` cannot overwrite a real transcript line.
+                self.separator_index = None;
+            } else {
+                *s -= drained;
+            }
+        }
         overflow_lines
     }
 }
@@ -434,16 +473,20 @@ impl Default for TranscriptWidget {
     }
 }
 
-/// Whether a line is the turn separator rule (a single span of all `─`).
+/// Whether a line is the turn separator rule (a single span of rule glyphs).
 fn is_separator_rule(line: &Line<'static>) -> bool {
     line.spans.len() == 1
         && !line.spans[0].content.is_empty()
-        && line.spans[0].content.chars().all(|c| c == '─')
+        && line.spans[0]
+            .content
+            .chars()
+            .all(|c| c == '─' || c == '═' || c == '◆')
 }
 
-/// Render a prompt as markdown with a `> ` marker on the first line and
-/// continuation lines indented.
-fn render_prompt(prompt: &str) -> Vec<Line<'static>> {
+/// Render a prompt as markdown with a two-tone `» ` chevron on the first
+/// line and continuation lines indented. `rule_width` is the content width
+/// used to size any thematic breaks or fenced-code borders in the prompt.
+fn render_prompt(prompt: &str, rule_width: u16) -> Vec<Line<'static>> {
     let marker_style = Style::default()
         .fg(DEFAULT_THEME.prompt_marker)
         .bg(DEFAULT_THEME.prompt_bg)
@@ -452,12 +495,12 @@ fn render_prompt(prompt: &str) -> Vec<Line<'static>> {
         .fg(DEFAULT_THEME.text)
         .bg(DEFAULT_THEME.prompt_bg)
         .add_modifier(Modifier::BOLD);
-    let lines = markdown::render(prompt, text_style);
+    let lines = markdown::render(prompt, text_style, rule_width);
     let mut out = Vec::with_capacity(lines.len());
     for (i, line) in lines.into_iter().enumerate() {
         let mut spans = Vec::with_capacity(line.spans.len() + 1);
         if i == 0 {
-            spans.push(Span::styled("> ", marker_style));
+            spans.push(Span::styled("» ", marker_style));
         } else {
             spans.push(Span::styled("  ", marker_style));
         }
@@ -465,6 +508,45 @@ fn render_prompt(prompt: &str) -> Vec<Line<'static>> {
         out.push(Line::from(spans));
     }
     out
+}
+
+/// A single reasoning line: brass telemetry diamond + nickel italic text.
+/// `hollow` alternates the diamond glyph so streaming motion comes free from
+/// the stream itself (no frame timer).
+fn reasoning_line(text: &str, hollow: bool) -> Line<'static> {
+    let g = if hollow {
+        glyph::TELEMETRY_HOLLOW
+    } else {
+        glyph::TELEMETRY
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{g} "),
+            Style::default().fg(DEFAULT_THEME.code_border),
+        ),
+        Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(DEFAULT_THEME.subtle)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ])
+}
+
+/// A single tool-event line: chrome diamond + nickel italic name.
+fn tool_line(name: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{} ", glyph::DIAMOND),
+            Style::default().fg(DEFAULT_THEME.chrome),
+        ),
+        Span::styled(
+            name.to_string(),
+            Style::default()
+                .fg(DEFAULT_THEME.subtle)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ])
 }
 
 /// Find a prefix of `buffer` that does not fit within `available_rows`.
@@ -539,6 +621,9 @@ fn trim_to_tail(buffer: &mut LineBuffer, available_rows: u16, width: u16) {
 pub struct ReasoningWidget {
     lines: LineBuffer,
     partial: String,
+    /// Number of completed lines pushed, used to alternate the telemetry
+    /// diamond glyph for free streaming motion.
+    line_count: usize,
 }
 
 impl ReasoningWidget {
@@ -546,23 +631,21 @@ impl ReasoningWidget {
         Self {
             lines: LineBuffer::new(),
             partial: String::new(),
+            line_count: 0,
         }
     }
 
     /// Append reasoning text (may be a partial chunk). Completed lines are
     /// pushed into the buffer; the trailing partial is kept as a live line.
+    /// Each line is prefixed with a brass telemetry diamond.
     pub fn push_reasoning_text(&mut self, text: &str) {
         self.partial.push_str(text);
         while let Some(newline_pos) = self.partial.find('\n') {
             let line: String = self.partial[..newline_pos].into();
             self.partial = self.partial[newline_pos + 1..].into();
-            self.lines.push(
-                Line::from(line).style(
-                    Style::default()
-                        .fg(DEFAULT_THEME.subtle)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            );
+            let hollow = self.line_count % 2 == 1;
+            self.lines.push(reasoning_line(&line, hollow));
+            self.line_count += 1;
         }
     }
 
@@ -571,13 +654,9 @@ impl ReasoningWidget {
     pub fn flush_reasoning(&mut self) {
         if !self.partial.is_empty() {
             let line = std::mem::take(&mut self.partial);
-            self.lines.push(
-                Line::from(line).style(
-                    Style::default()
-                        .fg(DEFAULT_THEME.subtle)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            );
+            let hollow = self.line_count % 2 == 1;
+            self.lines.push(reasoning_line(&line, hollow));
+            self.line_count += 1;
         }
     }
 
@@ -585,6 +664,7 @@ impl ReasoningWidget {
     pub fn clear(&mut self) {
         self.lines.clear();
         self.partial.clear();
+        self.line_count = 0;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -602,13 +682,8 @@ impl ReasoningWidget {
     fn rendered_lines(&self) -> Vec<Line<'static>> {
         let mut out = self.lines.visible_lines().to_vec();
         if !self.partial.is_empty() {
-            out.push(
-                Line::from(self.partial.clone()).style(
-                    Style::default()
-                        .fg(DEFAULT_THEME.subtle)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            );
+            let hollow = self.line_count % 2 == 1;
+            out.push(reasoning_line(&self.partial, hollow));
         }
         out
     }
@@ -695,13 +770,7 @@ impl ToolEventsWidget {
 
     /// Append a tool-name line.
     pub fn push_tool(&mut self, name: &str) {
-        self.lines.push(
-            Line::from(name.to_string()).style(
-                Style::default()
-                    .fg(DEFAULT_THEME.subtle)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        );
+        self.lines.push(tool_line(name));
     }
 
     /// Reset the live region for a new turn.
@@ -804,7 +873,9 @@ impl LiveAreaWidget for TranscriptWidget {
         self.desired_height(width)
     }
 
-    fn finalize(&mut self, _width: u16) {
+    fn finalize(&mut self, width: u16) {
+        self.last_width = width;
+        self.rebuild_separator(width);
         self.rebuild_response();
     }
 
@@ -911,14 +982,37 @@ impl InputBarWidget {
     /// The wrapped rows of the input text (prompt + text) at `width`,
     /// uncapped.
     pub fn wrapped_rows(&self, width: u16, input: &str) -> u16 {
-        let text = Self::full_line(input);
+        let text = Self::full_line(input, width);
         (wrapped_height(&[text], width).max(1).min(u16::MAX as usize)) as u16
     }
 
-    /// Build the full styled line: prompt + input text.
-    fn full_line(input: &str) -> Line<'static> {
+    /// Build the full styled line: prompt + input text (or a faint hint when
+    /// the input is empty). The hint is truncated to `width` cells so an empty
+    /// bar never wraps onto a second row on a narrow terminal.
+    fn full_line(input: &str, width: u16) -> Line<'static> {
+        if input.is_empty() {
+            let hint = "say it like you mean it — /help for the brass";
+            // Reserve two cells for the `» ` chevron prefix.
+            let budget = width.saturating_sub(2) as usize;
+            let hint: String = hint.chars().take(budget).collect();
+            return Line::from(vec![
+                Span::styled(
+                    format!("{} ", glyph::CHEVRON),
+                    Style::default().fg(DEFAULT_THEME.accent_primary),
+                ),
+                Span::styled(
+                    hint,
+                    Style::default()
+                        .fg(DEFAULT_THEME.subtle)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]);
+        }
         Line::from(vec![
-            Span::styled("> ", Style::default().fg(DEFAULT_THEME.accent_primary)),
+            Span::styled(
+                format!("{} ", glyph::CHEVRON),
+                Style::default().fg(DEFAULT_THEME.accent_primary),
+            ),
             Span::raw(input.to_string()),
         ])
     }
@@ -971,7 +1065,7 @@ impl InputBarWidget {
 
     /// Cursor position at the very end of `input` (just past the last char).
     fn end_of_text_position(input: &str, width: u16) -> (u16, u16) {
-        let full_rows = wrapped_height(&[Self::full_line(input)], width).max(1) as u16;
+        let full_rows = wrapped_height(&[Self::full_line(input, width)], width).max(1) as u16;
 
         let spans: Vec<Span<'static>> = vec![
             Self::prompt_span(),
@@ -994,7 +1088,10 @@ impl InputBarWidget {
 
     /// The prompt span shared by the input bar's real rendering.
     fn prompt_span() -> Span<'static> {
-        Span::styled("> ", Style::default().fg(DEFAULT_THEME.accent_primary))
+        Span::styled(
+            format!("{} ", glyph::CHEVRON),
+            Style::default().fg(DEFAULT_THEME.accent_primary),
+        )
     }
 
     /// A style that cannot occur in the input (raw/default) or the prompt.
@@ -1083,11 +1180,12 @@ impl LiveAreaWidget for InputBarWidget {
 
         // Build the wrapped paragraph, then slice out the visible vertical
         // window so the cursor stays in view.
-        let paragraph = Paragraph::new(Self::full_line(ctx.input)).wrap(Wrap { trim: false });
+        let paragraph =
+            Paragraph::new(Self::full_line(ctx.input, width)).wrap(Wrap { trim: false });
 
         // Render into a full-width buffer at the paragraph's natural height,
         // then copy the visible window into `area`.
-        let full_rows = wrapped_height(&[Self::full_line(ctx.input)], width).max(1) as u16;
+        let full_rows = wrapped_height(&[Self::full_line(ctx.input, width)], width).max(1) as u16;
         let full_area = Rect::new(0, 0, width, full_rows);
         let mut full_buf = Buffer::empty(full_area);
         paragraph.render(full_area, &mut full_buf);
@@ -1136,43 +1234,67 @@ impl LiveAreaWidget for InfoBarWidget {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
+        // Clear the region first so a shorter frame cannot leave stale cells
+        // (mirrors the transcript's clear loop; the info bar paints a
+        // background band).
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let band = Style::default().bg(DEFAULT_THEME.midnight);
+        let gold = band
+            .fg(DEFAULT_THEME.heading_primary)
+            .add_modifier(Modifier::BOLD);
+        let red = band.fg(DEFAULT_THEME.danger);
+        let nickel = band.fg(DEFAULT_THEME.subtle);
+        let chrome = band.fg(DEFAULT_THEME.chrome);
+        let ivory = band.fg(DEFAULT_THEME.ivory);
+        let malachite = band.fg(DEFAULT_THEME.success);
+        let brass = band.fg(DEFAULT_THEME.code_border);
+
+        let running = ctx
+            .active_runs
+            .values()
+            .filter(|r| r.status == "running")
+            .count();
+        let count_style = if running > 0 { malachite } else { brass };
+
         let mut spans = vec![
-            Span::styled(
-                "gremlins tui",
-                Style::default().fg(DEFAULT_THEME.accent_primary),
-            ),
-            Span::raw(" · "),
-            Span::styled(
-                format!("{} gremlins", ctx.gremlin_count),
-                Style::default().fg(DEFAULT_THEME.accent_secondary),
-            ),
-            Span::raw(" · "),
-            Span::styled(
-                format!("project: {}", ctx.project_name),
-                Style::default().fg(DEFAULT_THEME.prompt_marker),
-            ),
+            Span::styled("◆ ", red),
+            Span::styled("GREMLINS", gold),
+            Span::styled(" ◆", red),
+            Span::styled("  ", band),
+            Span::styled(format!("{} running", ctx.gremlin_count), count_style),
+            Span::styled("  ", band),
+            Span::styled("project:", nickel),
+            Span::styled(" ", band),
+            Span::styled(ctx.project_name.to_string(), chrome),
         ];
 
         if let Some(id) = ctx.following_log {
-            spans.push(Span::raw(" · "));
+            spans.push(Span::styled("  ", band));
             spans.push(Span::styled(
                 format!("following: {id}"),
-                Style::default().fg(DEFAULT_THEME.danger),
+                Style::default()
+                    .fg(DEFAULT_THEME.ivory)
+                    .bg(DEFAULT_THEME.danger)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
-        spans.push(Span::raw("  |  "));
-        spans.push(Span::styled(
-            "Ctrl+G",
-            Style::default().fg(DEFAULT_THEME.success),
-        ));
-        spans.push(Span::raw(" editor  "));
-        spans.push(Span::styled(
-            "/help",
-            Style::default().fg(DEFAULT_THEME.success),
-        ));
+        spans.push(Span::styled("  ", band));
+        spans.push(Span::styled(glyph::COLUMN, gold));
+        spans.push(Span::styled("  ", band));
+        spans.push(Span::styled("Ctrl+G", malachite));
+        spans.push(Span::styled(" editor  ", ivory));
+        spans.push(Span::styled("/help", malachite));
 
-        let paragraph = Paragraph::new(Line::from(spans));
+        let paragraph = Paragraph::new(Line::from(spans)).style(band);
         paragraph.render(area, buf);
     }
 }
@@ -1233,27 +1355,30 @@ impl LiveAreaWidget for WatchTableWidget {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         let header_style = Style::default()
-            .fg(DEFAULT_THEME.accent_primary)
+            .fg(DEFAULT_THEME.heading_primary)
             .add_modifier(Modifier::BOLD);
         lines.push(Line::from(Span::styled(
             "  ID        STATUS    STAGE       DEFINITION",
             header_style,
         )));
+        // Brass streamline rule under the header.
+        lines.push(motif::streamline_rule_brass(area.width));
 
         let mut runs: Vec<(&String, &ActiveRun)> = ctx.active_runs.iter().collect();
         runs.sort_by(|a, b| a.0.cmp(b.0));
 
         for (id, run) in runs {
-            let status_style = match run.status.as_str() {
-                "running" => Style::default().fg(DEFAULT_THEME.success),
-                "failed" => Style::default().fg(DEFAULT_THEME.danger),
-                "stopped" => Style::default().fg(DEFAULT_THEME.accent_secondary),
-                _ => Style::default().fg(DEFAULT_THEME.subtle),
+            let (glyph, status_style) = match run.status.as_str() {
+                "running" => (glyph::RUNNING, Style::default().fg(DEFAULT_THEME.success)),
+                "failed" => (glyph::FAILED, Style::default().fg(DEFAULT_THEME.danger)),
+                "stopped" => (glyph::STOPPED, Style::default().fg(DEFAULT_THEME.subtle)),
+                _ => (glyph::DONE, Style::default().fg(DEFAULT_THEME.chrome)),
             };
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(id.clone(), Style::default().fg(DEFAULT_THEME.text)),
                 Span::raw("  "),
+                Span::styled(format!("{glyph} "), status_style),
                 Span::styled(run.status.clone(), status_style),
                 Span::raw("  "),
                 Span::styled(run.stage.clone(), Style::default().fg(DEFAULT_THEME.subtle)),
@@ -1327,15 +1452,21 @@ impl LiveAreaWidget for WatchSingleWidget {
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
         let header = Line::from(vec![
             Span::styled(
-                "following: ",
+                "◆ following: ",
                 Style::default()
-                    .fg(DEFAULT_THEME.accent_primary)
+                    .fg(DEFAULT_THEME.heading_primary)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 self.id.clone(),
                 Style::default()
                     .fg(DEFAULT_THEME.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ◆",
+                Style::default()
+                    .fg(DEFAULT_THEME.heading_primary)
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
@@ -1458,15 +1589,21 @@ impl LiveAreaWidget for DebugWidget {
 
         let header = Line::from(vec![
             Span::styled(
-                "debug: ",
+                "◆ debug: ",
                 Style::default()
-                    .fg(DEFAULT_THEME.accent_primary)
+                    .fg(DEFAULT_THEME.heading_primary)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 self.id.clone(),
                 Style::default()
                     .fg(DEFAULT_THEME.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ◆",
+                Style::default()
+                    .fg(DEFAULT_THEME.heading_primary)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
@@ -1491,7 +1628,10 @@ impl LiveAreaWidget for DebugWidget {
         // Debug prompt line.
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("debug> ", Style::default().fg(DEFAULT_THEME.accent_primary)),
+            Span::styled(
+                "debug» ",
+                Style::default().fg(DEFAULT_THEME.heading_primary),
+            ),
             Span::styled(self.input.clone(), Style::default().fg(DEFAULT_THEME.text)),
         ]));
 
@@ -1559,7 +1699,7 @@ mod tests {
         assert!(transcript.has_current_turn());
         let lines = transcript.scrollable.visible_lines();
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].to_string(), "> bold prompt");
+        assert_eq!(lines[0].to_string(), "» bold prompt");
     }
 
     #[test]
@@ -1610,7 +1750,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(transcript_text, vec!["> hi", "answer"]);
+        assert_eq!(transcript_text, vec!["» hi", "answer"]);
         assert!(!transcript_text.contains(&"thinking".to_string()));
         assert!(!transcript_text.contains(&"Done".to_string()));
 
@@ -1619,7 +1759,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(reasoning_text, vec!["thinking"]);
+        assert_eq!(reasoning_text, vec!["◈ thinking"]);
 
         let tool_text: Vec<String> = tools
             .lines
@@ -1627,7 +1767,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(tool_text, vec!["Done"]);
+        assert_eq!(tool_text, vec!["◆ Done"]);
     }
 
     #[test]
@@ -1640,7 +1780,7 @@ mod tests {
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         // "system note" appears above the pinned turn.
         assert_eq!(text[0], "system note");
-        assert!(text.contains(&"> hi".to_string()));
+        assert!(text.contains(&"» hi".to_string()));
     }
 
     #[test]
@@ -1666,7 +1806,11 @@ mod tests {
             .collect();
         assert_eq!(
             overflow_text,
-            vec!["prior".to_string(), "─".repeat(40), "> hi".to_string()]
+            vec![
+                "prior".to_string(),
+                motif::glint_rule(79).to_string(),
+                "» hi".to_string()
+            ]
         );
         assert_eq!(text, vec!["resp"]);
     }
@@ -1696,8 +1840,8 @@ mod tests {
             overflow_text,
             vec![
                 "abcdefghijklmnopqrstuvwxyz".to_string(),
-                "─".repeat(40),
-                "> hi".to_string()
+                motif::glint_rule(9).to_string(),
+                "» hi".to_string()
             ]
         );
         assert_eq!(text, vec!["resp"]);
@@ -1733,7 +1877,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(!text.contains(&"> current".to_string()));
+        assert!(!text.contains(&"» current".to_string()));
         assert!(
             text.contains(&"completed system note".to_string()),
             "completed content before the turn start must survive: {text:?}"
@@ -1784,7 +1928,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(text.contains(&"thinking".to_string()), "{text:?}");
+        assert!(text.contains(&"◈ thinking".to_string()), "{text:?}");
     }
 
     #[test]
@@ -1819,7 +1963,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(tool_text.contains(&"grep".to_string()), "{tool_text:?}");
+        assert!(tool_text.contains(&"◆ grep".to_string()), "{tool_text:?}");
     }
 
     #[test]
@@ -1853,7 +1997,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(text, vec!["tool-4", "tool-5"]);
+        assert_eq!(text, vec!["◆ tool-4", "◆ tool-5"]);
     }
 
     #[test]
@@ -1891,27 +2035,28 @@ mod tests {
 
     #[test]
     fn live_tail_widgets_floor_is_wrapped_rows_capped_at_5() {
-        // A single long line that wraps to 3 rows at width 10 must report a
-        // floor of 3, not 1 (raw line count) or 5 (the cap).
+        // A single long line with a `◈ `/`◆ ` prefix: the prefix occupies
+        // row 1 and the long word wraps onto the following rows, so a
+        // 26-char word reports a floor of 4 (prefix row + 3 word rows).
         let mut reasoning = ReasoningWidget::new();
         reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz");
-        assert_eq!(reasoning.desired_rows(10), 3);
-        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 3);
+        assert_eq!(reasoning.desired_rows(10), 4);
+        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 4);
 
         let mut tools = ToolEventsWidget::new();
         tools.push_tool("abcdefghijklmnopqrstuvwxyz");
-        assert_eq!(tools.desired_rows(10), 3);
-        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 3);
+        assert_eq!(tools.desired_rows(10), 4);
+        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 4);
 
         // A long line wrapping past 5 rows caps the floor at 5.
         let mut reasoning = ReasoningWidget::new();
         reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
-        assert_eq!(reasoning.desired_rows(10), 6);
+        assert_eq!(reasoning.desired_rows(10), 7);
         assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 5);
 
         let mut tools = ToolEventsWidget::new();
         tools.push_tool("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
-        assert_eq!(tools.desired_rows(10), 6);
+        assert_eq!(tools.desired_rows(10), 7);
         assert_eq!(tools.min_height(10, &input_ctx("", 0)), 5);
     }
 

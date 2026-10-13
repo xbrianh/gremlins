@@ -19,6 +19,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use crate::tui::motif::{self, glyph};
 use crate::tui::theme::DEFAULT_THEME;
 
 /// Extension options enabled for markdown parsing: tables, strikethrough,
@@ -28,9 +29,14 @@ const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_TASKLISTS);
 
 /// Render `markdown` into styled lines using `base` as the default style.
-pub fn render(markdown: &str, base: Style) -> Vec<Line<'static>> {
+///
+/// `rule_width` is the display width available for full-width rules (the
+/// thematic break and code-block borders). Callers pass the transcript's
+/// content width (usually `width - 1` for the one-cell margin).
+pub fn render(markdown: &str, base: Style, rule_width: u16) -> Vec<Line<'static>> {
     let mut renderer = Renderer {
         base,
+        rule_width,
         lines: Vec::new(),
         current: Vec::new(),
         style_stack: vec![base],
@@ -38,6 +44,7 @@ pub fn render(markdown: &str, base: Style) -> Vec<Line<'static>> {
         table: None,
         code_block: None,
         quote_depth: 0,
+        heading_level: None,
         last_block: None,
     };
     renderer.run(markdown);
@@ -47,6 +54,8 @@ pub fn render(markdown: &str, base: Style) -> Vec<Line<'static>> {
 
 struct Renderer {
     base: Style,
+    /// Display width for full-width rules (thematic break, code borders).
+    rule_width: u16,
     lines: Vec<Line<'static>>,
     /// Spans accumulated for the current logical line.
     current: Vec<Span<'static>>,
@@ -59,8 +68,10 @@ struct Renderer {
     /// Active code-block buffering state (language + raw text), if inside
     /// a code block.
     code_block: Option<CodeBlock>,
-    /// Depth of nested blockquotes (drives the `│ ` line prefix).
+    /// Depth of nested blockquotes (drives the `║ ` line prefix).
     quote_depth: usize,
+    /// The level of the heading currently being accumulated, if any.
+    heading_level: Option<HeadingLevel>,
     /// The kind of the most recently completed block (drives blank-line
     /// spacing between blocks).
     last_block: Option<BlockKind>,
@@ -144,6 +155,7 @@ impl Renderer {
             }
             Tag::Heading { level, .. } => {
                 self.blank_line_before_block(BlockKind::Heading);
+                self.heading_level = Some(level);
                 self.push_style(self.heading_style(level));
             }
             Tag::BlockQuote(_) => {
@@ -189,7 +201,7 @@ impl Renderer {
                 // Blockquote markers, then list nesting indentation.
                 for _ in 0..self.quote_depth {
                     self.current.push(Span::styled(
-                        "│ ",
+                        format!("{} ", glyph::QUOTE_BAR),
                         self.base.fg(DEFAULT_THEME.blockquote_bar),
                     ));
                 }
@@ -207,8 +219,10 @@ impl Renderer {
                     ));
                 } else {
                     item.bullet_width = 2;
-                    self.current
-                        .push(Span::styled("• ", self.base.fg(DEFAULT_THEME.list_bullet)));
+                    self.current.push(Span::styled(
+                        format!("{} ", glyph::BULLET),
+                        self.base.fg(DEFAULT_THEME.list_bullet),
+                    ));
                 }
             }
             Tag::Table(alignments) => {
@@ -254,7 +268,9 @@ impl Renderer {
             }
             TagEnd::Heading(_) => {
                 self.pop_style();
+                self.flank_heading();
                 self.flush_line();
+                self.heading_level = None;
                 self.last_block = Some(BlockKind::Heading);
             }
             TagEnd::BlockQuote(_) => {
@@ -353,10 +369,7 @@ impl Renderer {
     fn rule(&mut self) {
         self.blank_line_before_block(BlockKind::Other);
         self.flush_line();
-        self.lines.push(Line::from(Span::styled(
-            "─".repeat(40),
-            self.base.fg(DEFAULT_THEME.separator),
-        )));
+        self.lines.push(motif::streamline_rule(self.rule_width));
         self.last_block = Some(BlockKind::Other);
     }
 
@@ -367,12 +380,21 @@ impl Renderer {
             if !item.task {
                 item.task = true;
                 self.current.pop();
-                item.bullet_width = 4;
+                item.bullet_width = 2;
             }
         }
-        let mark = if checked { "[x] " } else { "[ ] " };
+        let mark = if checked {
+            glyph::TASK_DONE
+        } else {
+            glyph::TASK_OPEN
+        };
+        let color = if checked {
+            DEFAULT_THEME.success
+        } else {
+            DEFAULT_THEME.list_bullet
+        };
         self.current
-            .push(Span::styled(mark, self.base.fg(DEFAULT_THEME.list_bullet)));
+            .push(Span::styled(format!("{mark} "), self.base.fg(color)));
     }
 
     fn heading_style(&self, level: HeadingLevel) -> Style {
@@ -386,6 +408,33 @@ impl Renderer {
             HeadingLevel::H6 => style = style.fg(DEFAULT_THEME.heading_secondary),
         }
         style
+    }
+
+    /// Flank H1/H2 headings with `◆ TITLE ◆` / `─── TITLE ───`; H3-H6 stay
+    /// quiet (chrome bold, no flank) so nesting reads as a hierarchy.
+    fn flank_heading(&mut self) {
+        let Some(level) = self.heading_level else {
+            return;
+        };
+        let (flank, fill) = match level {
+            HeadingLevel::H1 => (glyph::DIAMOND, ""),
+            HeadingLevel::H2 => ("───", ""),
+            _ => return,
+        };
+        let style = self.heading_style(level);
+        let mut spans = Vec::new();
+        spans.push(Span::styled(flank.to_string(), style));
+        if !fill.is_empty() {
+            spans.push(Span::styled(fill.to_string(), style));
+        }
+        spans.push(Span::styled(" ", style));
+        spans.extend(std::mem::take(&mut self.current));
+        spans.push(Span::styled(" ", style));
+        if !fill.is_empty() {
+            spans.push(Span::styled(fill.to_string(), style));
+        }
+        spans.push(Span::styled(flank.to_string(), style));
+        self.current = spans;
     }
 
     fn top_style(&self) -> Style {
@@ -437,7 +486,7 @@ impl Renderer {
         }
         for _ in 0..self.quote_depth {
             self.current.push(Span::styled(
-                "│ ",
+                format!("{} ", glyph::QUOTE_BAR),
                 self.base.fg(DEFAULT_THEME.blockquote_bar),
             ));
         }
@@ -481,11 +530,9 @@ impl Renderer {
         self.blank_line_before_block(BlockKind::CodeBlock);
 
         if is_fenced {
-            // Top border.
-            self.lines.push(Line::from(Span::styled(
-                "─".repeat(40),
-                self.base.fg(DEFAULT_THEME.code_border),
-            )));
+            // Top border: brass groove with corner caps.
+            self.lines
+                .push(motif::groove_rule(self.rule_width, ("◤", "◥")));
         }
 
         let indent = if is_fenced { " " } else { "" };
@@ -503,11 +550,9 @@ impl Renderer {
         }
 
         if is_fenced {
-            // Bottom border.
-            self.lines.push(Line::from(Span::styled(
-                "─".repeat(40),
-                self.base.fg(DEFAULT_THEME.code_border),
-            )));
+            // Bottom border: brass groove with corner caps.
+            self.lines
+                .push(motif::groove_rule(self.rule_width, ("◣", "◢")));
         }
 
         self.last_block = Some(BlockKind::CodeBlock);
@@ -647,7 +692,7 @@ fn syntect_theme() -> &'static syntect::highlighting::Theme {
 /// Render markdown with a default (unstyled) base style.
 #[cfg(test)]
 fn render_default(markdown: &str) -> Vec<Line<'static>> {
-    render(markdown, Style::default())
+    render(markdown, Style::default(), 40)
 }
 
 #[cfg(test)]
@@ -656,6 +701,16 @@ mod tests {
 
     fn text_of(lines: &[Line<'static>]) -> Vec<String> {
         lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    /// Top groove border at `width` (for code-block test expectations).
+    fn groove_top(width: u16) -> String {
+        motif::groove_rule(width, ("◤", "◥")).to_string()
+    }
+
+    /// Bottom groove border at `width`.
+    fn groove_bottom(width: u16) -> String {
+        motif::groove_rule(width, ("◣", "◢")).to_string()
     }
 
     #[test]
@@ -667,7 +722,7 @@ mod tests {
     #[test]
     fn renders_headings() {
         let lines = render_default("# Title\n\n## Sub");
-        assert_eq!(text_of(&lines), vec!["Title", "", "Sub"]);
+        assert_eq!(text_of(&lines), vec!["◆ Title ◆", "", "─── Sub ───"]);
         assert!(lines[0].spans[0]
             .style
             .add_modifier
@@ -687,7 +742,11 @@ mod tests {
         let text = text_of(&lines);
         assert_eq!(
             text,
-            vec!["─".repeat(40), " let x = 1;".to_string(), "─".repeat(40)]
+            vec![
+                "◤▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔◥".to_string(),
+                " let x = 1;".to_string(),
+                "◣▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔◢".to_string()
+            ]
         );
         assert!(lines[1].spans[0].style.bg.is_some());
     }
@@ -695,7 +754,7 @@ mod tests {
     #[test]
     fn renders_list() {
         let lines = render_default("- one\n- two\n- three");
-        assert_eq!(text_of(&lines), vec!["• one", "• two", "• three"]);
+        assert_eq!(text_of(&lines), vec!["» one", "» two", "» three"]);
     }
 
     #[test]
@@ -707,13 +766,13 @@ mod tests {
     #[test]
     fn renders_task_list() {
         let lines = render_default("- [ ] todo\n- [x] done");
-        assert_eq!(text_of(&lines), vec!["[ ] todo", "[x] done"]);
+        assert_eq!(text_of(&lines), vec!["▢ todo", "▣ done"]);
     }
 
     #[test]
     fn renders_blockquote() {
         let lines = render_default("> quoted");
-        assert_eq!(text_of(&lines), vec!["│ quoted"]);
+        assert_eq!(text_of(&lines), vec!["║ quoted"]);
     }
 
     #[test]
@@ -730,7 +789,7 @@ mod tests {
         let lines = render_default("before\n\n---\n\nafter");
         let text = text_of(&lines);
         assert_eq!(text.len(), 3);
-        assert!(text[1].chars().all(|c| c == '─'));
+        assert!(text[1].chars().all(|c| c == '─' || c == '═'));
     }
 
     #[test]
@@ -740,11 +799,11 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "─".repeat(40),
+                "◤▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔◥".to_string(),
                 " a".to_string(),
                 " ".to_string(),
                 " b".to_string(),
-                "─".repeat(40)
+                "◣▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔◢".to_string()
             ]
         );
     }
@@ -752,14 +811,14 @@ mod tests {
     #[test]
     fn blockquote_prefix_applies_to_continuation_lines() {
         let lines = render_default("> one\n> two");
-        assert_eq!(text_of(&lines), vec!["│ one", "│ two"]);
+        assert_eq!(text_of(&lines), vec!["║ one", "║ two"]);
     }
 
     #[test]
     fn blockquote_prefix_applies_to_multiple_paragraphs() {
         let lines = render_default("> para one\n>\n> para two");
         let text = text_of(&lines);
-        assert_eq!(text, vec!["│ para one", "", "│ para two"]);
+        assert_eq!(text, vec!["║ para one", "", "║ para two"]);
     }
 
     #[test]
@@ -767,8 +826,8 @@ mod tests {
         let lines = render_default("- a\n  - b");
         let text = text_of(&lines);
         assert_eq!(text.len(), 2);
-        assert_eq!(text[0], "• a");
-        assert_eq!(text[1], "  • b");
+        assert_eq!(text[0], "» a");
+        assert_eq!(text[1], "  » b");
     }
 
     #[test]
@@ -790,7 +849,7 @@ mod tests {
     #[test]
     fn heading_gets_blank_line_before_unless_first() {
         let lines = render_default("para\n\n# Heading");
-        assert_eq!(text_of(&lines), vec!["para", "", "Heading"]);
+        assert_eq!(text_of(&lines), vec!["para", "", "◆ Heading ◆"]);
     }
 
     #[test]
@@ -801,9 +860,9 @@ mod tests {
             vec![
                 "para".to_string(),
                 "".to_string(),
-                "─".repeat(40),
+                groove_top(40),
                 " code".to_string(),
-                "─".repeat(40)
+                groove_bottom(40)
             ]
         );
     }
@@ -814,7 +873,7 @@ mod tests {
         let text = text_of(&lines);
         assert_eq!(
             text,
-            vec!["─".repeat(40), " let x = 1;".to_string(), "─".repeat(40)]
+            vec![groove_top(40), " let x = 1;".to_string(), groove_bottom(40)]
         );
         assert!(lines[1].spans[0].style.bg.is_some());
     }
@@ -825,7 +884,11 @@ mod tests {
         let text = text_of(&lines);
         assert_eq!(
             text,
-            vec!["─".repeat(40), " fn main() {}".to_string(), "─".repeat(40)]
+            vec![
+                groove_top(40),
+                " fn main() {}".to_string(),
+                groove_bottom(40)
+            ]
         );
         // The code line is highlighted into multiple token spans, each with
         // the code background.
