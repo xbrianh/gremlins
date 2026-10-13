@@ -397,14 +397,22 @@ async fn handle_connection(
     event_handle.abort();
 
     // Cancel the in-flight turn (if any) without removing `current`.
-    // Chat gremlins outlive any single socket connection — the gremlin
-    // remains in the global map for reconnection. The turn's `finish`
-    // re-inserts it, and the `done` Notify stays live so a reconnecting
-    // client can wait for re-insertion instead of getting `unknown
-    // chat gremlin`. Cleanup only happens on explicit `stop`.
-    let state = chat_state.lock().await;
-    if let Some(cur) = &state.current {
-        cur.cancel.cancel();
+    // The turn's `finish` re-inserts the gremlin into `CHAT_GREMLINS`,
+    // so it must be cancelled before we shut down the gremlins below;
+    // otherwise a gremlin could be resurrected after teardown.
+    //
+    // Shut down every chat gremlin owned by this connection. Drain the
+    // ids into a local list under the same lock so the connection-state
+    // guard is dropped before the async cleanup calls below.
+    let ids: Vec<String> = {
+        let mut state = chat_state.lock().await;
+        if let Some(cur) = &state.current {
+            cur.cancel.cancel();
+        }
+        state.ids.drain().collect()
+    };
+    for id in &ids {
+        cleanup_chat_gremlin(id).await;
     }
 
     // After cleanup the run map may have drained; let shutdown observe it
@@ -2313,7 +2321,6 @@ async fn handle_cancel_chat(
 /// Shut down a chat gremlin using the same cleanup sequence as a `stop`
 /// op: remove the run-map entry, write terminal state, reap the client,
 /// drop the persistent gremlin, and emit `RunStopped`.
-#[allow(dead_code)]
 async fn cleanup_chat_gremlin(id: &str) {
     if validate_gremlin_id(id).is_err() {
         return;
