@@ -170,7 +170,15 @@ impl Renderer {
                         // Keep only the first whitespace-delimited token, so
                         // annotations like `rust,ignore` or `js {1}` still
                         // resolve to their language syntax.
-                        let language = info.split_whitespace().next().map(str::to_string);
+                        // Strip comma-delimited annotations (e.g.
+                        // `rust,ignore` → `rust`) so the first token
+                        // always resolves to a real syntax.
+                        let language = info
+                            .split_whitespace()
+                            .next()
+                            .map(|s| s.split(',').next().unwrap_or(s))
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
                         (true, language)
                     }
                     CodeBlockKind::Indented => (false, None),
@@ -895,5 +903,25 @@ mod tests {
             .spans
             .iter()
             .all(|s| s.style.bg == Some(DEFAULT_THEME.code_bg)));
+    }
+
+    #[test]
+    fn comma_annotated_language_strips_to_base_syntax() {
+        // `rust,ignore` should resolve to `rust`, not fall back to mono.
+        let lines = render_default("```rust,ignore\nfn main() {}\n```");
+        let text = text_of(&lines);
+        assert_eq!(
+            text,
+            vec![
+                groove_top(40),
+                " fn main() {}".to_string(),
+                groove_bottom(40)
+            ]
+        );
+        let code_line = &lines[1];
+        assert!(
+            code_line.spans.len() > 1,
+            "comma-annotated rust fence should be highlighted: {code_line:?}"
+        );
     }
 }

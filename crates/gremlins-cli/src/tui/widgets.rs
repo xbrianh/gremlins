@@ -177,6 +177,11 @@ pub struct TranscriptWidget {
     last_width: u16,
     /// Whether the response region needs re-rendering into the FIFO.
     response_dirty: bool,
+    /// Byte offset into `response_accumulator` of text already rendered
+    /// into the FIFO. When overflow drains response lines, this offset
+    /// stays put so the next rebuild only renders the uncommitted suffix
+    /// — preventing drained lines from reappearing.
+    response_committed_offset: usize,
     /// Cached wrapped desired height `(width, height)` for the FIFO,
     /// invalidated whenever the FIFO, accumulator, or width changes.
     desired_cache: Cell<Option<(u16, u16)>>,
@@ -192,6 +197,7 @@ impl TranscriptWidget {
             separator_index: None,
             last_width: 40,
             response_dirty: false,
+            response_committed_offset: 0,
             desired_cache: Cell::new(None),
         }
     }
@@ -255,7 +261,10 @@ impl TranscriptWidget {
         // Pin the turn at the first prompt line, so the leading separator
         // (which belongs to the *previous* turn) may still overflow.
         let start = self.scrollable.len();
-        for line in render_prompt(&prompt, self.last_width.saturating_sub(1)) {
+        // The prompt prefix (▍ + » ) adds 3 cells; subtract those plus
+        // the transcript's 1-cell outer margin so thematic breaks and
+        // fenced-code borders never exceed the inner content width.
+        for line in render_prompt(&prompt, self.last_width.saturating_sub(4)) {
             self.scrollable.push(line);
         }
         self.turn_start = Some(start);
@@ -263,6 +272,7 @@ impl TranscriptWidget {
         self.response_start = None;
         self.response_accumulator.clear();
         self.response_dirty = false;
+        self.response_committed_offset = 0;
     }
 
     /// Append streaming response text.
@@ -284,6 +294,7 @@ impl TranscriptWidget {
         self.response_accumulator.clear();
         self.response_accumulator.push_str(text);
         self.response_dirty = true;
+        self.response_committed_offset = 0;
     }
 
     /// Whether the streaming response is empty.
@@ -333,6 +344,7 @@ impl TranscriptWidget {
             .truncate(self.response_accumulator.len() - overlap);
         self.response_accumulator.push_str(text);
         self.response_dirty = true;
+        self.response_committed_offset = 0;
     }
 
     /// Whether a current turn is active (pinned).
@@ -350,6 +362,7 @@ impl TranscriptWidget {
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
+        self.response_committed_offset = 0;
     }
 
     /// Discard the current turn: truncate the FIFO back to the turn start
@@ -374,6 +387,7 @@ impl TranscriptWidget {
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
+        self.response_committed_offset = 0;
     }
 
     /// Clear the scrollable FIFO.
@@ -385,6 +399,7 @@ impl TranscriptWidget {
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
+        self.response_committed_offset = 0;
     }
 
     /// Re-render the response region into the FIFO if dirty.
@@ -396,13 +411,19 @@ impl TranscriptWidget {
         self.response_dirty = false;
         let start = self.response_start.unwrap_or(self.scrollable.len());
         self.scrollable.truncate(start);
+        // Only render the suffix that hasn't been committed yet. After
+        // overflow drains response lines from the FIFO head,
+        // response_committed_offset stays put so drained text is never
+        // re-rendered.
+        let suffix = &self.response_accumulator[self.response_committed_offset..];
         for line in markdown::render(
-            &self.response_accumulator,
+            suffix,
             Style::default().fg(DEFAULT_THEME.text),
             self.last_width.saturating_sub(1),
         ) {
             self.scrollable.push(line);
         }
+        self.response_committed_offset = self.response_accumulator.len();
     }
 
     /// Regenerate the turn separator at the current content width.
