@@ -1038,10 +1038,10 @@ impl InputBarWidget {
         Self { v_scroll: 0 }
     }
 
-    /// The wrapped rows of the input text (prompt + text) at `width`,
-    /// uncapped.
-    pub fn wrapped_rows(&self, width: u16, input: &str) -> u16 {
-        let text = Self::full_line(input, width);
+    /// The wrapped rows of the input text (prompt + text + optional preview)
+    /// at `width`, uncapped.
+    pub fn wrapped_rows(&self, width: u16, input: &str, preview: Option<&str>) -> u16 {
+        let text = Self::preview_line(Self::full_line(input, width), preview, width);
         (wrapped_height(&[text], width).max(1).min(u16::MAX as usize)) as u16
     }
 
@@ -1226,11 +1226,12 @@ impl LiveAreaWidget for InputBarWidget {
     fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         // Minimum: the wrapped content, capped at 5 rows. The bar is not
         // shrunk below its visible text unless the viewport cannot fit it.
-        self.wrapped_rows(width, ctx.input).min(5)
+        self.wrapped_rows(width, ctx.input, ctx.completion_preview)
+            .min(5)
     }
 
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
-        self.wrapped_rows(width, ctx.input)
+        self.wrapped_rows(width, ctx.input, ctx.completion_preview)
     }
 
     fn max_height(&self, _ctx: &RenderContext) -> u16 {
@@ -1244,16 +1245,21 @@ impl LiveAreaWidget for InputBarWidget {
         }
 
         // Build the full styled line, adding the paint-only preview suffix
-        // immediately after the real input. Measurement and cursor position
-        // still use only `ctx.input`.
-        let full_line = Self::full_line(ctx.input, width);
-        let paragraph =
-            Paragraph::new(Self::preview_line(full_line, ctx.completion_preview, width))
-                .wrap(Wrap { trim: false });
+        // immediately after the real input. Measurement now includes the
+        // preview so the extended line is allocated enough rows; cursor
+        // position is still computed from `ctx.input` alone.
+        let preview_line = Self::preview_line(
+            Self::full_line(ctx.input, width),
+            ctx.completion_preview,
+            width,
+        );
+        let paragraph = Paragraph::new(preview_line).wrap(Wrap { trim: false });
 
         // Render into a full-width buffer at the paragraph's natural height,
         // then copy the visible window into `area`.
-        let full_rows = wrapped_height(&[Self::full_line(ctx.input, width)], width).max(1) as u16;
+        let full_rows = self
+            .wrapped_rows(width, ctx.input, ctx.completion_preview)
+            .max(1);
         let full_area = Rect::new(0, 0, width, full_rows);
         let mut full_buf = Buffer::empty(full_area);
         paragraph.render(full_area, &mut full_buf);

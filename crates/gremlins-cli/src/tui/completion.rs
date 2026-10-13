@@ -44,6 +44,18 @@ impl CompletionState {
             self.index = (self.index + self.candidates.len() - 1) % self.candidates.len();
         }
     }
+
+    /// Whether `input` currently contains the full [`current`](Self::current)
+    /// candidate at [`span`](Self::span).
+    ///
+    /// This is `false` only for the initial common-prefix state, where the
+    /// input holds the shared prefix while `index` previews the first
+    /// candidate that will be committed on the next cycle key.
+    pub fn contains_current(&self, input: &str) -> bool {
+        input
+            .get(self.span.clone())
+            .is_some_and(|inserted| inserted == self.current())
+    }
 }
 
 /// Extract the path word being completed.
@@ -159,7 +171,13 @@ fn entry_path_word(dir: &Path, name: &str, is_dir: bool) -> String {
 /// candidate list.
 pub fn complete(input: &str, cursor: usize) -> Option<CompletionState> {
     let word = path_word(input, cursor)?;
-    let expanded = expand_home(word).unwrap_or_else(|| PathBuf::from(word));
+    // A tilde-prefixed word must expand successfully; otherwise a local
+    // directory literally named `~` (or `~user`) could produce candidates.
+    let expanded = if word.starts_with('~') {
+        expand_home(word)?
+    } else {
+        PathBuf::from(word)
+    };
     // A bare `~` expands to the home directory but has no trailing `/`;
     // treat it like a trailing-slash directory so we list inside home.
     let (dir, partial) = if word == "~" {
@@ -278,9 +296,9 @@ mod tests {
 
     #[test]
     fn common_prefix_never_splits_a_char() {
-        // 'é' (U+00E9) and 'e' share no common prefix at the char level, but
-        // their UTF-8 encodings share the first byte (0x65).
-        let c = vec!["éclair".to_string(), "eclair".to_string()];
+        // 'é' (U+00E9) and 'ê' (U+00EA) share no common prefix at the char
+        // level, but their UTF-8 encodings share the first byte (0xC3).
+        let c = vec!["éclair".to_string(), "êclair".to_string()];
         assert_eq!(common_prefix(&c), "");
     }
 

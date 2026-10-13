@@ -809,14 +809,25 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
 
                             if let Some(state) = app.completion.as_ref() {
-                                // Commit the currently previewed candidate first,
-                                // then advance so the ghost suffix always matches
-                                // what the next Tab will insert.
                                 let span = state.span.clone();
-                                let candidate = state.current().to_string();
-                                app.replace_input_span(span.clone(), candidate.clone());
-                                app.completion_advance();
-                                app.update_completion_span(span.start..span.start + candidate.len());
+                                // The initial Tab only inserted the common
+                                // prefix, so it must not cycle yet. On
+                                // subsequent presses, advance to the next
+                                // candidate before committing so the input
+                                // always matches the state's current index.
+                                if state.contains_current(&app.input) {
+                                    app.completion_advance();
+                                }
+                                let next = app
+                                    .completion
+                                    .as_ref()
+                                    .expect("completion is active")
+                                    .current()
+                                    .to_string();
+                                app.replace_input_span(span.clone(), next.clone());
+                                app.update_completion_span(
+                                    span.start..span.start + next.len(),
+                                );
                             } else {
                                 let cursor = app.input_cursor.min(app.input.len());
                                 let Some(mut state) = completion::complete(&app.input, cursor) else {
@@ -848,9 +859,17 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             };
                             let span = state.span.clone();
-                            let candidate = state.current().to_string();
-                            app.replace_input_span(span.clone(), candidate.clone());
+                            // Rewind first, then commit the previous candidate
+                            // so the input always matches the state's current
+                            // index.
                             app.completion_rewind();
+                            let candidate = app
+                                .completion
+                                .as_ref()
+                                .expect("completion is active")
+                                .current()
+                                .to_string();
+                            app.replace_input_span(span.clone(), candidate.clone());
                             app.update_completion_span(span.start..span.start + candidate.len());
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
