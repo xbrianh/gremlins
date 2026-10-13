@@ -2132,15 +2132,21 @@ mod tests {
     async fn loop_mid_tool_cancel_returns_runtime_without_waiting_for_tool() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("started");
+        let pidfile = dir.path().join("pid");
 
-        // A Bash tool call that signals when it starts, then hangs until the
-        // child process is killed by the dropped join_all future.
+        // A Bash tool call that records its PID and signals when it starts,
+        // then hangs until the child process is killed by the dropped
+        // join_all future (bash_invoke sets kill_on_drop(true)).
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
             rig_core::test_utils::MockStreamEvent::tool_call(
                 "c1",
                 "Bash",
                 serde_json::json!({
-                    "command": format!("touch {}; sleep 3600", marker.display()),
+                    "command": format!(
+                        "echo $$ > {}; touch {}; sleep 3600",
+                        pidfile.display(),
+                        marker.display()
+                    ),
                     "timeout": 3600
                 }),
             ),
@@ -2169,6 +2175,12 @@ mod tests {
         .await
         .expect("Bash tool should start");
 
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .expect("pidfile should exist")
+            .trim()
+            .parse()
+            .expect("pidfile should hold a valid pid");
+
         cancel.cancel();
 
         // Cancellation must unblock the loop promptly instead of waiting for
@@ -2181,6 +2193,41 @@ mod tests {
             Err(ClientError::Runtime { message }) => assert_eq!(message, "cancelled"),
             other => panic!("expected Runtime cancelled, got: {other:?}"),
         }
+
+        // The dropped join_all future must have killed the Bash child, not
+        // left an hour-long `sleep` orphaned. Poll until the pid is gone.
+        let reaped = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !process_alive(pid) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if reaped.is_err() {
+            // Best-effort cleanup so a failed assertion does not orphan the
+            // child on the test host.
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+        }
+        assert!(
+            !process_alive(pid),
+            "Bash child pid {pid} should have been killed by the dropped tool future"
+        );
+    }
+
+    /// Returns true if a process with the given pid exists on this host.
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     #[tokio::test]
