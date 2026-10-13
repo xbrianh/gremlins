@@ -1419,7 +1419,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         .and_then(|v| v.as_u64())
         .unwrap_or(BASH_TIMEOUT_SECS)
         .clamp(1, 3600);
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(command);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -1427,8 +1427,8 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Start `sh` in its own process group. `kill_on_drop` only kills
-        // the direct `sh` child; making it a group leader lets the timeout
+        // Start `bash` in its own process group. `kill_on_drop` only kills
+        // the direct `bash` child; making it a group leader lets the timeout
         // path (and the dropped-tool-future path, via `kill_on_drop` plus
         // the timeout killpg below) stop every descendant too.
         cmd.as_std_mut().process_group(0);
@@ -2063,13 +2063,13 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Bash".into(),
-            description: "Execute a shell command via `sh -c`. Returns combined stdout and stderr. Exit codes are reported as `[exit N]`; commands exceeding the timeout return `[timeout]`. Runs in the gremlin's working directory with no stdin. Path arguments are checked against the sandbox before execution — escapes return an error without running the command. Default timeout is 120 seconds.".into(),
+            description: "Execute a shell command via `bash -c`. Returns combined stdout and stderr. Exit codes are reported as `[exit N]`; commands exceeding the timeout return `[timeout]`. Runs in the gremlin's working directory with no stdin. Path arguments are checked against the sandbox before execution — escapes return an error without running the command. Default timeout is 120 seconds.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to execute (run via sh -c)"
+                        "description": "Shell command to execute (run via bash -c)"
                     },
                     "timeout": {
                         "type": "integer",
