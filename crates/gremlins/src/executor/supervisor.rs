@@ -400,16 +400,15 @@ async fn handle_connection(
     // The turn's `finish` re-inserts the gremlin into `CHAT_GREMLINS`,
     // so it must be cancelled before we shut down the gremlins below;
     // otherwise a gremlin could be resurrected after teardown.
-    let state = chat_state.lock().await;
-    if let Some(cur) = &state.current {
-        cur.cancel.cancel();
-    }
-
+    //
     // Shut down every chat gremlin owned by this connection. Drain the
-    // ids into a local list first so the connection-state lock is not
-    // held across the async cleanup calls.
+    // ids into a local list under the same lock so the connection-state
+    // guard is dropped before the async cleanup calls below.
     let ids: Vec<String> = {
         let mut state = chat_state.lock().await;
+        if let Some(cur) = &state.current {
+            cur.cancel.cancel();
+        }
         state.ids.drain().collect()
     };
     for id in &ids {
