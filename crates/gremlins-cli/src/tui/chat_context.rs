@@ -91,9 +91,6 @@ const PROVIDERS: &[SectionProvider] = &[
 /// with empty stdout returns `Some("")` so callers can distinguish "clean"
 /// from "failed".
 ///
-/// Callers that accept a specific non-zero exit code (e.g. `git diff --stat`
-/// exiting 1 when a diff exists) should use [`run_output_allow_exit`].
-///
 /// Stdout is drained on a background thread while the child is waited on, so
 /// a command that fills the OS pipe buffer cannot deadlock against the wait
 /// loop. The captured output is capped at [`MAX_SECTION_BYTES`] during the
@@ -162,91 +159,12 @@ fn run_output(program: &std::path::Path, cwd: &str, args: &[&str]) -> Option<Str
     }
 }
 
-/// Like [`run_output`], but treats a specific exit code as success in
-/// addition to exit 0. Used by `git diff --stat`, which exits 1 when a diff
-/// exists (and 0 when the tree is clean).
-fn run_output_allow_exit(
-    program: &std::path::Path,
-    cwd: &str,
-    args: &[&str],
-    allowed: i32,
-) -> Option<String> {
-    use std::io::Read;
-    use std::process::Stdio;
-
-    let mut child = std::process::Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    let mut stdout = child.stdout.take()?;
-    let drain = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            match stdout.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    buf.extend_from_slice(&chunk[..n]);
-                    if buf.len() >= MAX_SECTION_BYTES {
-                        break;
-                    }
-                }
-            }
-        }
-        buf
-    });
-
-    let deadline = std::time::Instant::now() + SUBPROCESS_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    break None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(_) => break None,
-        }
-    };
-
-    match status {
-        Some(status) if status.success() || status.code() == Some(allowed) => {
-            let buf = drain.join().unwrap_or_default();
-            Some(String::from_utf8_lossy(&buf).trim().to_string())
-        }
-        _ => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = drain.join();
-            None
-        }
-    }
-}
-
 /// Run a git command with `cwd`. The `--no-pager` prefix is a git-specific
 /// caller concern, so it is supplied here rather than by the generic helper.
 fn git_command(inputs: &ContextInputs<'_>, args: &[&str]) -> Option<String> {
     let mut full = vec!["--no-pager"];
     full.extend_from_slice(args);
     run_output(inputs.git_exe, inputs.cwd, &full)
-}
-
-/// Run a git command that may legitimately exit 1 while still producing
-/// useful stdout (currently only `diff --stat`).
-fn git_command_allow_exit(
-    inputs: &ContextInputs<'_>,
-    args: &[&str],
-    allowed: i32,
-) -> Option<String> {
-    let mut full = vec!["--no-pager"];
-    full.extend_from_slice(args);
-    run_output_allow_exit(inputs.git_exe, inputs.cwd, &full, allowed)
 }
 
 /// Whether `cwd` is inside a git work tree. A missing `git` binary is treated
@@ -386,8 +304,11 @@ fn toolchain_hints_section(inputs: &ContextInputs<'_>) -> Vec<ChatSection> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        // Only a regular file counts as a manifest: a directory (or dangling
+        // symlink) named `Cargo.toml` is not an installed toolchain.
+        let is_regular = entry.file_type().is_ok_and(|t| t.is_file());
         for (i, (filename, _)) in TOOLCHAIN_MANIFESTS.iter().enumerate() {
-            if name == *filename {
+            if is_regular && name == *filename {
                 found[i] = true;
             }
         }
@@ -462,9 +383,10 @@ fn git_sections(inputs: &ContextInputs<'_>) -> Vec<ChatSection> {
 /// stat, or `None` when no base ref exists.
 fn diff_stat(inputs: &ContextInputs<'_>) -> Option<String> {
     for base in ["@{upstream}", "origin/HEAD", "main", "master"] {
-        // `git diff --stat` exits 1 when a diff exists, so exit 1 is a
-        // success here (0 = clean tree).
-        if let Some(stat) = git_command_allow_exit(inputs, &["diff", "--stat", base], 1) {
+        // `git diff --stat` exits 0 whether or not a diff exists (it only
+        // reports differences in the exit code when `--exit-code`/`--quiet`
+        // is given), so the normal success path is correct here.
+        if let Some(stat) = git_command(inputs, &["diff", "--stat", base]) {
             if !stat.is_empty() {
                 return Some(stat);
             }
@@ -675,12 +597,15 @@ mod tests {
         // The provider reads `SHELL` (or `COMSPEC` on Windows) directly, so
         // assert the assembled context reflects the process environment
         // without mutating it. On CI `SHELL` is normally set; when it is, the
-        // shell line must be present and sanitized.
-        let expected = if cfg!(windows) {
+        // shell line must be present and sanitized. The accepted value is
+        // derived from `sanitize_shell` (not "any non-empty value"), because
+        // production omits values containing newlines or control characters.
+        let raw = if cfg!(windows) {
             std::env::var("COMSPEC").ok()
         } else {
             std::env::var("SHELL").ok()
         };
+        let expected = raw.as_deref().and_then(sanitize_shell);
 
         let tmp = tempfile::TempDir::new().unwrap();
         let ctx = build_chat_context(tmp.path().to_str().unwrap());
@@ -688,10 +613,10 @@ mod tests {
         assert!(ctx.contains("OS: "), "ctx: {ctx}");
         assert!(ctx.contains("Architecture: "), "ctx: {ctx}");
         match expected {
-            Some(shell) if !shell.is_empty() => {
-                assert!(ctx.contains("Shell: "), "ctx: {ctx}");
+            Some(shell) => {
+                assert!(ctx.contains(&format!("Shell: {shell}")), "ctx: {ctx}");
             }
-            _ => {
+            None => {
                 assert!(!ctx.contains("Shell: "), "ctx: {ctx}");
             }
         }
