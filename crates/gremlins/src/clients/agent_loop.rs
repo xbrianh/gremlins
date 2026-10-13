@@ -4230,6 +4230,84 @@ mod tests {
         }
     }
 
+    /// Regression: the agent loop must never inject a `temperature` field on
+    /// its own. No `LoopOpts` knob exists for it, so every request — parent
+    /// loop and nested Task alike — must leave `temperature` unset.
+    #[tokio::test]
+    async fn temperature_is_never_set() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let task_call = |id: &str| {
+            MockStreamEvent::tool_call(
+                id,
+                "Task",
+                serde_json::json!({"kind": "Scout", "prompt": "look"}),
+            )
+        };
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
+        };
+
+        let parent = MockCompletionModel::from_stream_turns([
+            vec![
+                task_call("t1"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                done_call("d1", "outer done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let child = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("scout result"),
+            done_call("d2", "scout result"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+
+        let child_handle = child.clone();
+        let factory: super::super::task::TaskModelFactory =
+            Arc::new(move |_spec: &str| Some(child_handle.clone().erase()));
+
+        let selector = super::super::task::TaskModelSelector::new(
+            HashMap::from([(
+                super::super::task_kind::TaskKind::Scout,
+                "openai:mini".to_string(),
+            )]),
+            factory,
+        )
+        .expect("configured");
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.params.task_clients = Some(selector);
+
+        run_agent_loop(
+            parent.clone().erase(),
+            "go",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        for req in parent.requests() {
+            assert_eq!(
+                req.temperature, None,
+                "parent turn must not set temperature"
+            );
+        }
+        for req in child.requests() {
+            assert_eq!(
+                req.temperature, None,
+                "nested task turn must not set temperature"
+            );
+        }
+    }
+
     // ── PauseToken tests ───────────────────────────────────────────────
 
     /// Regression: `pause()` between flag load and `notified().await` must
