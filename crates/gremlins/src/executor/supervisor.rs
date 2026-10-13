@@ -2380,7 +2380,7 @@ async fn register_chat_gremlin(mut gremlin: Gremlin) {
     let (state_tx, _state_rx) = watch::channel(RunState {
         id: id.clone(),
         status: "running".to_string(),
-        stage: "starting".to_string(),
+        stage: "chat".to_string(),
         started_at: state::now_stamp(),
     });
 
@@ -2402,7 +2402,7 @@ async fn register_chat_gremlin(mut gremlin: Gremlin) {
     emit_event(DaemonEvent::RunStarted {
         id: id.clone(),
         definition: "chat".to_string(),
-        stage: "starting".to_string(),
+        stage: "chat".to_string(),
     });
 
     chat_gremlins().lock().await.insert(id, gremlin);
@@ -2455,7 +2455,7 @@ fn create_chat_gremlin(
         "client".to_string(),
         Value::String(default_client.to_string()),
     );
-    initial.insert("stage".to_string(), Value::String("starting".to_string()));
+    initial.insert("stage".to_string(), Value::String("chat".to_string()));
     initial.insert("pid".to_string(), Value::from(std::process::id() as i64));
     initial.insert("attempt".to_string(), Value::String(String::new()));
     initial.insert("exit_code".to_string(), Value::Null);
