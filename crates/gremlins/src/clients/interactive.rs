@@ -132,6 +132,12 @@ pub enum InteractiveEvent {
         /// How the session ended: "resumed", "bailed", or "disconnect".
         reason: String,
     },
+    /// The current turn's streamed deltas (text / reasoning) must be
+    /// discarded because a mid-stream retry is restarting the turn.
+    /// Consumers should clear any accumulated partial output for this
+    /// turn so they don't concatenate fragments from the failed attempt
+    /// with the retried attempt.
+    StreamReset,
 }
 
 /// Sender for stream events emitted by the agent loop.

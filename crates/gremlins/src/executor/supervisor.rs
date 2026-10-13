@@ -1787,6 +1787,13 @@ async fn handle_debug(
                             break;
                         }
                     }
+                    Ok(InteractiveEvent::StreamReset) => {
+                        let payload = serde_json::json!({"type": "stream_reset"});
+                        if writer.write_json_line(&payload).await.is_err() {
+                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
+                            break;
+                        }
+                    }
                     Ok(InteractiveEvent::ToolResult { name, output }) => {
                         let payload = serde_json::json!({"type": "tool_result", "name": name, "output": output});
                         if writer.write_json_line(&payload).await.is_err() {
@@ -2155,6 +2162,12 @@ async fn run_chat_turn(
                     }
                     Some(InteractiveEvent::ReasoningChunk { text }) => {
                         let payload = chat_payload(&turn, serde_json::json!({"type": "reasoning_chunk", "text": text}));
+                        if writer.write_json_line(&payload).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(InteractiveEvent::StreamReset) => {
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "stream_reset"}));
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }

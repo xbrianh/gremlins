@@ -19,7 +19,7 @@ use super::interactive::{
 };
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
-use super::retry::TURN_RETRY_BACKOFF;
+use super::retry::{TIMEOUT_RETRY_BACKOFF, TURN_RETRY_BACKOFF};
 use super::tools::{self, ToolContext};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
@@ -705,10 +705,12 @@ async fn run_agent_loop_core(
                             message: "cancelled".into(),
                         });
                     }
-                    // Preserve the pending one-turn state so the retry
-                    // re-executes this turn instead of re-entering
-                    // interactive_loop when in debug mode.
-                    pending_run_one_turn = true;
+                    // Preserve the pending one-turn state only when
+                    // already interactive — otherwise an unconditional
+                    // set would force RunOneTurn after normal resumption.
+                    if interactive_active {
+                        pending_run_one_turn = true;
+                    }
                     continue;
                 }
                 let retryable = is_retryable(&e, opts);
@@ -811,8 +813,8 @@ async fn run_agent_loop_core(
             };
             match item {
                 Err(_) => {
-                    if timeout_retries < TURN_RETRY_BACKOFF.len() {
-                        let wait = TURN_RETRY_BACKOFF[timeout_retries];
+                    if timeout_retries < TIMEOUT_RETRY_BACKOFF.len() {
+                        let wait = TIMEOUT_RETRY_BACKOFF[timeout_retries];
                         timeout_retries += 1;
                         log::info!(
                             "agent_loop: idle timeout on turn {turn_num} (attempt {timeout_retries}), backing off {wait}s"
@@ -932,9 +934,20 @@ async fn run_agent_loop_core(
             // Stream was interrupted by a retryable error — re-execute this
             // same turn. History and next_prompt are untouched (the builder
             // cloned both), so the retry picks up exactly where it left off.
-            // Preserve the pending one-turn state so the retry re-executes
-            // this turn instead of re-entering interactive_loop in debug mode.
-            pending_run_one_turn = true;
+            // Preserve the pending one-turn state only when already
+            // interactive — otherwise an unconditional set would force
+            // RunOneTurn after normal resumption.
+            if interactive_active {
+                pending_run_one_turn = true;
+            }
+
+            // Send StreamReset so consumers discard partial text /
+            // reasoning from the failed attempt.
+            if let Some(ref se) = stream_events {
+                if se.wants_events() {
+                    se.send(InteractiveEvent::StreamReset);
+                }
+            }
             continue;
         }
 
