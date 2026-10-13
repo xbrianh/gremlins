@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use rig_core::completion::Message;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
@@ -214,105 +215,126 @@ fn make_task_runner_at_depth(
     max_tokens: Option<u64>,
     skip_temperature: bool,
 ) -> tools::TaskFn {
-    Arc::new(move |kind: TaskKind, task: String| {
-        let model = model.clone();
-        let task_model_selector = task_model_selector.clone();
-        let tool_filter = tool_filter.clone();
-        let cancel = cancel.clone();
-        let mut child_ctx = ctx.clone();
-        let prefix = prefix.clone();
-        let id_chain = id_chain.clone();
+    Arc::new(
+        move |kind: TaskKind, task: String, parent_history: Option<Vec<Message>>| {
+            let model = model.clone();
+            let task_model_selector = task_model_selector.clone();
+            let tool_filter = tool_filter.clone();
+            let cancel = cancel.clone();
+            let mut child_ctx = ctx.clone();
+            let prefix = prefix.clone();
+            let id_chain = id_chain.clone();
 
-        let task_cwd = ctx.cwd.clone();
-        let log_tx = log_tx.clone();
+            let task_cwd = ctx.cwd.clone();
+            let log_tx = log_tx.clone();
 
-        Box::pin(async move {
-            if depth >= MAX_DEPTH {
-                return format!("Error: task max depth ({MAX_DEPTH}) exceeded");
-            }
-
-            // A selector, when configured, may swap in a different model based
-            // on this task's own `kind`; otherwise the parent's stands.
-            let (selected_model, _selected_spec) = match &task_model_selector {
-                Some(selector) => selector.model_for(kind, &model),
-                None => (model.clone(), None),
-            };
-            // Use the model's own id() when available; fall back to the
-            // parent model name so that log lines always identify the
-            // actual model sent to the API.
-            let model_name = selected_model.id().unwrap_or("?").to_string();
-
-            let new_chain = child_chain(&id_chain);
-            // Build the child prefix: [model_name] goes after the stage
-            // bracket and before the task-chain segment, e.g.
-            //   [stage][gpt-4o][task.a3f1]
-            let child_prefix =
-                task_prefix(&format!("{}[{model_name}]", prefix.trim_end()), &new_chain);
-
-            // Inject a child runner one level deeper so a nested task can
-            // recurse again, bounded by MAX_DEPTH along this call chain.
-            // Pass the original `prefix` (not `child_prefix`) so prefixes don't
-            // stack across nesting levels — each level appends its own id
-            // segment to the chain instead.
-            child_ctx.task_fn = Some(make_task_runner_at_depth(
-                selected_model.clone(),
-                task_model_selector.clone(),
-                tool_filter.clone(),
-                cancel.clone(),
-                child_ctx.clone(),
-                prefix.clone(),
-                model_name.clone(),
-                idle_timeout,
-                max_turns,
-                depth + 1,
-                new_chain,
-                completion_nudge_budget,
-                log_tx.clone(),
-                max_tokens,
-                skip_temperature,
-            ));
-
-            let work_root = tools::worktree_root(task_cwd.as_deref());
-            let scratch = tools::scratch_root().unwrap_or_else(|| work_root.clone());
-            let system_prompt = Some(crate::clients::config::task_system_prompt(
-                &work_root, &scratch,
-            ));
-
-            let result = crate::clients::agent_loop::run_agent_loop_nested(
-                selected_model.clone(),
-                &task,
-                system_prompt.clone(),
-                &child_ctx,
-                &cancel,
-                tool_filter.as_deref(),
-                &child_prefix,
-                idle_timeout,
-                max_turns,
-                completion_nudge_budget,
-                log_tx.clone(),
-                max_tokens,
-                skip_temperature,
-            )
-            .await;
-
-            match result {
-                Ok(completed) => {
-                    let out = completed.text_result.unwrap_or_default();
-                    log::info!(
-                        "task complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?} has_done_header={has_done} has_md_header={has_md}",
-                        p_len = task.len(),
-                        p_preview = tools::preview_str(&task, 120),
-                        o_len = out.len(),
-                        o_preview = tools::preview_str(&out, 300),
-                        has_done = out.starts_with("Done."),
-                        has_md = out.starts_with("# "),
-                    );
-                    out
+            Box::pin(async move {
+                if depth >= MAX_DEPTH {
+                    return format!("Error: task max depth ({MAX_DEPTH}) exceeded");
                 }
-                Err(e) => format!("Task error: {e}"),
-            }
-        })
-    })
+
+                // A selector, when configured, may swap in a different model based
+                // on this task's own `kind`; otherwise the parent's stands.
+                // Fork always inherits the parent model directly and never consults
+                // the task-clients lookup.
+                let (selected_model, _selected_spec) = if kind == TaskKind::Fork {
+                    (model.clone(), None)
+                } else {
+                    match &task_model_selector {
+                        Some(selector) => selector.model_for(kind, &model),
+                        None => (model.clone(), None),
+                    }
+                };
+                // Use the model's own id() when available; fall back to the
+                // parent model name so that log lines always identify the
+                // actual model sent to the API.
+                let model_name = selected_model.id().unwrap_or("?").to_string();
+
+                let new_chain = child_chain(&id_chain);
+                // Build the child prefix: [model_name] goes after the stage
+                // bracket and before the task-chain segment, e.g.
+                //   [stage][gpt-4o][task.a3f1]
+                let child_prefix =
+                    task_prefix(&format!("{}[{model_name}]", prefix.trim_end()), &new_chain);
+
+                // Inject a child runner one level deeper so a nested task can
+                // recurse again, bounded by MAX_DEPTH along this call chain.
+                // Pass the original `prefix` (not `child_prefix`) so prefixes don't
+                // stack across nesting levels — each level appends its own id
+                // segment to the chain instead.
+                child_ctx.task_fn = Some(make_task_runner_at_depth(
+                    selected_model.clone(),
+                    task_model_selector.clone(),
+                    tool_filter.clone(),
+                    cancel.clone(),
+                    child_ctx.clone(),
+                    prefix.clone(),
+                    model_name.clone(),
+                    idle_timeout,
+                    max_turns,
+                    depth + 1,
+                    new_chain,
+                    completion_nudge_budget,
+                    log_tx.clone(),
+                    max_tokens,
+                    skip_temperature,
+                ));
+
+                let work_root = tools::worktree_root(task_cwd.as_deref());
+                let scratch = tools::scratch_root().unwrap_or_else(|| work_root.clone());
+                let system_prompt = if kind == TaskKind::Fork {
+                    Some(crate::clients::config::fork_system_prompt(
+                        &work_root, &scratch,
+                    ))
+                } else {
+                    Some(crate::clients::config::task_system_prompt(
+                        &work_root, &scratch,
+                    ))
+                };
+
+                let prepopulated_messages = if kind == TaskKind::Fork {
+                    parent_history
+                } else {
+                    None
+                };
+
+                let result = crate::clients::agent_loop::run_agent_loop_nested(
+                    selected_model.clone(),
+                    &task,
+                    system_prompt.clone(),
+                    &child_ctx,
+                    &cancel,
+                    tool_filter.as_deref(),
+                    &child_prefix,
+                    idle_timeout,
+                    max_turns,
+                    completion_nudge_budget,
+                    log_tx.clone(),
+                    max_tokens,
+                    skip_temperature,
+                    prepopulated_messages,
+                )
+                .await;
+
+                match result {
+                    Ok(completed) => {
+                        let out = completed.text_result.unwrap_or_default();
+                        log::info!(
+                            "task complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?} has_done_header={has_done} has_md_header={has_md}",
+                            p_len = task.len(),
+                            p_preview = tools::preview_str(&task, 120),
+                            o_len = out.len(),
+                            o_preview = tools::preview_str(&out, 300),
+                            has_done = out.starts_with("Done."),
+                            has_md = out.starts_with("# "),
+                        );
+                        out
+                    }
+                    Err(e) => format!("Task error: {e}"),
+                }
+            })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -435,6 +457,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            parent_history: None,
         }
     }
 
@@ -466,7 +489,7 @@ mod tests {
         );
 
         // First invocation: depth 0 < 3, should succeed.
-        let output = runner(TaskKind::Scout, "first call".into()).await;
+        let output = runner(TaskKind::Scout, "first call".into(), None).await;
         assert!(
             !output.contains("max depth"),
             "depth 0 should not hit guard, got: {output}"
@@ -482,6 +505,78 @@ mod tests {
                 other => panic!("task must inject a system prompt, got: {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn fork_inherits_parent_history_and_parent_model() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let ctx = depth_test_ctx();
+        let child = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("fork reply"),
+            MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "fork reply"}),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+
+        let factory_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let factory_flag = factory_called.clone();
+        let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
+            factory_flag.store(true, Ordering::SeqCst);
+            None
+        });
+        let selector = TaskModelSelector::new(
+            HashMap::from([
+                (TaskKind::Scout, "openai:mini".into()),
+                (TaskKind::Fork, "openai:fork".into()),
+            ]),
+            factory,
+        )
+        .expect("a configured task-clients map yields a selector");
+
+        let cancel = super::super::agent_loop::CancelToken::new();
+        let runner = make_task_runner(
+            child.clone().erase(),
+            Some(selector),
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            "model".into(),
+            5.0,
+            10,
+            0,
+            None,
+            None,
+            false,
+        );
+
+        let parent_history = vec![Message::user("earlier parent turn".to_string())];
+        let output = runner(TaskKind::Fork, "child task".into(), Some(parent_history)).await;
+
+        assert_eq!(output, "fork reply");
+        // Fork must bypass task-clients entirely, even when another kind is
+        // configured with an override.
+        assert!(
+            !factory_called.load(Ordering::SeqCst),
+            "Fork must never consult the task-clients factory"
+        );
+
+        // The child's first request must carry the inherited parent turn
+        // followed by the fork prompt as the next user message.
+        let requests = child.requests();
+        let child_history = format!("{:?}", requests[0].chat_history);
+        assert!(
+            child_history.contains("earlier parent turn"),
+            "fork child must be seeded with parent history, got: {child_history}"
+        );
+        assert!(
+            child_history.contains("child task"),
+            "fork prompt must follow inherited history, got: {child_history}"
+        );
     }
 
     #[tokio::test]
@@ -507,7 +602,7 @@ mod tests {
             false,
         );
 
-        let blocked = runner(TaskKind::Scout, "too deep".into()).await;
+        let blocked = runner(TaskKind::Scout, "too deep".into(), None).await;
         assert!(
             blocked.contains("max depth (3) exceeded"),
             "call at MAX_DEPTH should be rejected, got: {blocked}"
@@ -546,7 +641,7 @@ mod tests {
             false,
         );
 
-        let handle = tokio::spawn(runner(TaskKind::Scout, "transient".into()));
+        let handle = tokio::spawn(runner(TaskKind::Scout, "transient".into(), None));
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let output = handle.await.unwrap();
         assert!(
@@ -590,7 +685,7 @@ mod tests {
             false,
         );
 
-        let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into()));
+        let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into(), None));
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let output = handle.await.unwrap();
         assert!(
@@ -652,7 +747,7 @@ mod tests {
         // Ten concurrent siblings at depth 0 — none should be rejected as
         // "max depth" even though they overlap in time.
         let handles: Vec<_> = (0..10)
-            .map(|i| tokio::spawn(runner.clone()(TaskKind::Scout, format!("call {i}"))))
+            .map(|i| tokio::spawn(runner.clone()(TaskKind::Scout, format!("call {i}"), None)))
             .collect();
         for h in handles {
             let out = h.await.unwrap();
@@ -762,7 +857,7 @@ mod tests {
         #[test]
         fn task_prefix_wraps_a_single_segment_at_depth_one() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("only")]);
-            block_on(runner(TaskKind::Scout, "task".into()));
+            block_on(runner(TaskKind::Scout, "task".into(), None));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
@@ -783,7 +878,7 @@ mod tests {
         fn nested_task_prefix_appends_to_the_parent_chain() {
             let (runner, mut log_rx) =
                 runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
-            block_on(runner(TaskKind::Scout, "task".into()));
+            block_on(runner(TaskKind::Scout, "task".into(), None));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
@@ -805,8 +900,8 @@ mod tests {
         fn sibling_invocations_get_distinct_segments() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
             block_on(async {
-                runner(TaskKind::Scout, "one".into()).await;
-                runner(TaskKind::Scout, "two".into()).await;
+                runner(TaskKind::Scout, "one".into(), None).await;
+                runner(TaskKind::Scout, "two".into(), None).await;
             });
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));

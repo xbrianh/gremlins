@@ -41,7 +41,11 @@ pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
 type TaskFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
 
 /// Callback that `invoke` calls for Task tool invocations.
-pub(crate) type TaskFn = Arc<dyn Fn(TaskKind, String) -> TaskFuture + Send + Sync>;
+pub(crate) type TaskFn = Arc<
+    dyn Fn(TaskKind, String, Option<Vec<rig_core::completion::Message>>) -> TaskFuture
+        + Send
+        + Sync,
+>;
 
 /// How tool-path sandboxing is applied for a stage's agent loop.
 ///
@@ -76,6 +80,9 @@ pub(crate) struct ToolContext {
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) task_fn: Option<TaskFn>,
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
+    /// Point-in-time snapshot of the parent conversation, available to Task
+    /// tool calls (used only by `Fork`). `None` when unavailable.
+    pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
 }
 
 pub(crate) fn project_root() -> PathBuf {
@@ -1888,7 +1895,12 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
                             .join(", ")
                     );
                 };
-                let out = f(kind, prompt.to_string()).await;
+                let history = if kind == TaskKind::Fork {
+                    ctx.parent_history.clone()
+                } else {
+                    None
+                };
+                let out = f(kind, prompt.to_string(), history).await;
                 // Label the result so concurrent Task outputs can be told apart.
                 let final_output = format!("# {kind}\n\n{out}");
                 log::info!(
@@ -2098,7 +2110,7 @@ message to finish. The summary parameter briefly describes what you accomplished
     });
     all.push(ToolDefinition {
         name: "Task".into(),
-        description: format!("Delegate a self-contained task to a worker with a clean conversation context. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message. Returns the worker's final text output."),
+        description: format!("Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message. Returns the worker's final text output."),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -2112,7 +2124,7 @@ message to finish. The summary parameter briefly describes what you accomplished
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Full task briefing for the worker. The worker starts with a clean conversation context and sees nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field."
+                    "description": "Full task briefing for the worker. Non-Fork kinds start with a clean conversation context and see nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field. The Fork kind inherits the parent conversation history before this prompt."
                 }
             },
             "required": ["kind", "prompt"],
@@ -2159,6 +2171,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            parent_history: None,
         }
     }
 
@@ -2270,6 +2283,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            parent_history: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
         let output = bash_invoke(&c, &args).await;
@@ -2296,6 +2310,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            parent_history: None,
         };
         let expected = std::env::current_dir().unwrap();
         let args = serde_json::json!({"command": "pwd"}).to_string();
@@ -3107,6 +3122,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into()]),
             task_fn: None,
             audit_lock: None,
+            parent_history: None,
         };
         let write_args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"})
@@ -3513,6 +3529,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            parent_history: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -3524,7 +3541,7 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |kind, prompt| {
+        let task_fn: TaskFn = Arc::new(move |kind, prompt, _history| {
             *called2.lock().unwrap() = true;
             Box::pin(async move { format!("task result: {kind} / {prompt}") })
         });
@@ -3537,6 +3554,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
+            parent_history: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -3547,8 +3565,9 @@ mod tests {
     #[tokio::test]
     async fn task_empty_prompt_returns_error() {
         let dir = tmp();
-        let task_fn: TaskFn =
-            Arc::new(|_kind, _prompt| Box::pin(async move { "should not be called".to_string() }));
+        let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
+            Box::pin(async move { "should not be called".to_string() })
+        });
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
@@ -3558,6 +3577,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
+            parent_history: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -3574,7 +3594,7 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |_kind, _prompt| {
+        let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history| {
             *called2.lock().unwrap() = true;
             Box::pin(async move { "should not be called".to_string() })
         });
@@ -3587,6 +3607,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
+            parent_history: None,
         };
         let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -3600,7 +3621,8 @@ mod tests {
     #[tokio::test]
     async fn task_result_is_headered_with_kind() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_k, _p| Box::pin(async move { "body".to_string() }));
+        let task_fn: TaskFn =
+            Arc::new(|_k, _p, _history| Box::pin(async move { "body".to_string() }));
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
@@ -3610,6 +3632,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
+            parent_history: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         assert_eq!(invoke("Task", &c, &args).await, "# Scout\n\nbody");
@@ -3951,7 +3974,7 @@ mod tests {
     async fn invoke_does_not_cap_task() {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_k, _p| Box::pin(async move { "x".repeat(500) }));
+        let task_fn: TaskFn = Arc::new(|_k, _p, _history| Box::pin(async move { "x".repeat(500) }));
         let c = ToolContext {
             cwd: Some(dir.clone()),
             extra_env: None,
@@ -3961,6 +3984,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
+            parent_history: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
@@ -3987,6 +4011,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            parent_history: None,
         }
     }
 

@@ -383,10 +383,15 @@ fn yaml_string_map_ordered(
         let vs = v.as_str().ok_or_else(|| {
             SchemaError::Generic("'task-clients' values must be strings".to_string())
         })?;
+        if TaskKind::parse(ks) == Some(TaskKind::Fork) {
+            return Err(SchemaError::Generic(
+                "Fork cannot be configured — it always inherits the parent model".to_string(),
+            ));
+        }
         if TaskKind::parse(ks).is_none() {
             return Err(SchemaError::Generic(format!(
                 "unknown task-clients key {ks:?}: expected one of {}",
-                TaskKind::ALL
+                TaskKind::CONFIGURABLE
                     .iter()
                     .map(|k| k.as_str())
                     .collect::<Vec<_>>()
@@ -901,10 +906,15 @@ fn yaml_default_task_clients(
             let value = v.as_str().ok_or_else(|| {
                 SchemaError::Generic("'default_task_clients' values must be strings".to_string())
             })?;
+            if TaskKind::parse(key) == Some(TaskKind::Fork) {
+                return Err(SchemaError::Generic(
+                    "Fork cannot be configured — it always inherits the parent model".to_string(),
+                ));
+            }
             if TaskKind::parse(key).is_none() {
                 return Err(SchemaError::Generic(format!(
                     "unknown default_task_clients key {key:?}: expected one of {}",
-                    TaskKind::ALL
+                    TaskKind::CONFIGURABLE
                         .iter()
                         .map(|k| k.as_str())
                         .collect::<Vec<_>>()

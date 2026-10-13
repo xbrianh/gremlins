@@ -398,14 +398,26 @@ pub fn parse_task_clients_map(
         return Ok(HashMap::new());
     };
 
-    validate_task_clients_keys(obj.keys())?;
-
     let mut by_kind = HashMap::new();
     for (key, val_str) in obj {
-        // Keys are guaranteed valid by the check above; `parse` cannot fail.
-        if let Some(kind) = TaskKind::parse(key) {
-            by_kind.insert(kind, val_str.clone());
+        // Unknown keys are rejected at runtime, matching load-time validation.
+        let Some(kind) = TaskKind::parse(key) else {
+            return Err(ConfigError::TaskClients(format!(
+                "unknown task-clients key {key:?}: expected one of {}",
+                TaskKind::CONFIGURABLE
+                    .iter()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        // Fork is never configurable: it always inherits the parent model.
+        // Load-time validation rejects it, but skip here as defense-in-depth
+        // in case a merged runtime map bypasses load-time checks.
+        if kind == TaskKind::Fork {
+            continue;
         }
+        by_kind.insert(kind, val_str.clone());
     }
     Ok(by_kind)
 }
@@ -416,10 +428,15 @@ fn validate_task_clients_keys<'a>(
     keys: impl Iterator<Item = &'a String>,
 ) -> Result<(), ConfigError> {
     for key in keys {
+        if TaskKind::parse(key) == Some(TaskKind::Fork) {
+            return Err(ConfigError::TaskClients(
+                "Fork cannot be configured — it always inherits the parent model".to_string(),
+            ));
+        }
         if TaskKind::parse(key).is_none() {
             return Err(ConfigError::TaskClients(format!(
                 "unknown task-clients key {key:?}: expected one of {}",
-                TaskKind::ALL
+                TaskKind::CONFIGURABLE
                     .iter()
                     .map(|k| k.as_str())
                     .collect::<Vec<_>>()
@@ -1099,8 +1116,33 @@ not-a-key: 1"#,
         .into();
         assert!(parse_task_clients_map(Some(&map)).is_err());
 
+        // Fork is skipped by the parser, matching load-time validation.
+        let map: IndexMap<String, String> = [
+            ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
+            ("Fork".to_string(), "openai:gpt-5".to_string()),
+        ]
+        .into();
+        let by_kind = parse_task_clients_map(Some(&map)).unwrap();
+        assert_eq!(by_kind.len(), 1);
+        assert!(!by_kind.contains_key(&TaskKind::Fork));
+
         // Absent key yields an empty map.
         assert!(parse_task_clients_map(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_task_clients_skips_fork_defensively() {
+        // Defense-in-depth: a merged runtime map could theoretically bypass
+        // load-time validation, so the parser must skip Fork rather than
+        // building an override for it.
+        let map: IndexMap<String, String> = [
+            ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
+            ("Fork".to_string(), "openai:gpt-5".to_string()),
+        ]
+        .into();
+        let by_kind = parse_task_clients_map(Some(&map)).unwrap();
+        assert_eq!(by_kind.len(), 1);
+        assert!(!by_kind.contains_key(&TaskKind::Fork));
     }
 
     #[test]
@@ -1119,6 +1161,17 @@ not-a-key: 1"#,
 
         let empty: IndexMap<String, String> = IndexMap::new();
         assert!(validate_task_clients_keys(empty.keys()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_task_clients_rejects_fork() {
+        let fork: IndexMap<String, String> =
+            [("Fork".to_string(), "openai:mini".to_string())].into();
+        let err = validate_task_clients_keys(fork.keys()).unwrap_err();
+        assert!(
+            err.to_string().contains("Fork cannot be configured"),
+            "got: {err}"
+        );
     }
 
     #[test]
