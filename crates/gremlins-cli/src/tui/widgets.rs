@@ -489,16 +489,19 @@ fn is_separator_rule(line: &Line<'static>) -> bool {
 fn render_prompt(prompt: &str, rule_width: u16) -> Vec<Line<'static>> {
     let marker_style = Style::default()
         .fg(DEFAULT_THEME.prompt_marker)
-        .bg(DEFAULT_THEME.prompt_bg)
-        .add_modifier(Modifier::BOLD);
+        .bg(DEFAULT_THEME.prompt_bg);
     let text_style = Style::default()
-        .fg(DEFAULT_THEME.text)
+        .fg(DEFAULT_THEME.prompt_text)
         .bg(DEFAULT_THEME.prompt_bg)
         .add_modifier(Modifier::BOLD);
+    let margin_style = Style::default()
+        .fg(DEFAULT_THEME.prompt_margin)
+        .bg(DEFAULT_THEME.prompt_bg);
     let lines = markdown::render(prompt, text_style, rule_width);
     let mut out = Vec::with_capacity(lines.len());
     for (i, line) in lines.into_iter().enumerate() {
-        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        let mut spans = Vec::with_capacity(line.spans.len() + 2);
+        spans.push(Span::styled(if i == 0 { "▍" } else { " " }, margin_style));
         if i == 0 {
             spans.push(Span::styled("» ", marker_style));
         } else {
@@ -1190,7 +1193,8 @@ impl LiveAreaWidget for InputBarWidget {
         let mut full_buf = Buffer::empty(full_area);
         paragraph.render(full_area, &mut full_buf);
 
-        // Copy the visible vertical window.
+        // Copy the visible vertical window. Unwritten cells stay `Reset` so
+        // the input bar keeps the surrounding screen background.
         for y in 0..area.height {
             let src_y = self.v_scroll + y;
             if src_y >= full_rows {
@@ -1699,7 +1703,7 @@ mod tests {
         assert!(transcript.has_current_turn());
         let lines = transcript.scrollable.visible_lines();
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].to_string(), "» bold prompt");
+        assert_eq!(lines[0].to_string(), "▍» bold prompt");
     }
 
     #[test]
@@ -1750,7 +1754,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(transcript_text, vec!["» hi", "answer"]);
+        assert_eq!(transcript_text, vec!["▍» hi", "answer"]);
         assert!(!transcript_text.contains(&"thinking".to_string()));
         assert!(!transcript_text.contains(&"Done".to_string()));
 
@@ -1780,7 +1784,7 @@ mod tests {
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         // "system note" appears above the pinned turn.
         assert_eq!(text[0], "system note");
-        assert!(text.contains(&"» hi".to_string()));
+        assert!(text.contains(&"▍» hi".to_string()));
     }
 
     #[test]
@@ -1809,7 +1813,7 @@ mod tests {
             vec![
                 "prior".to_string(),
                 motif::glint_rule(79).to_string(),
-                "» hi".to_string()
+                "▍» hi".to_string()
             ]
         );
         assert_eq!(text, vec!["resp"]);
@@ -1841,7 +1845,7 @@ mod tests {
             vec![
                 "abcdefghijklmnopqrstuvwxyz".to_string(),
                 motif::glint_rule(9).to_string(),
-                "» hi".to_string()
+                "▍» hi".to_string()
             ]
         );
         assert_eq!(text, vec!["resp"]);
@@ -1877,7 +1881,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(!text.contains(&"» current".to_string()));
+        assert!(!text.contains(&"▍» current".to_string()));
         assert!(
             text.contains(&"completed system note".to_string()),
             "completed content before the turn start must survive: {text:?}"

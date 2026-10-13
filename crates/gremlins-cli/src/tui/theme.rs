@@ -17,6 +17,8 @@ pub struct Theme {
     pub code_bg: Color,
     /// Monochrome code-block foreground.
     pub code_fg: Color,
+    /// Inline-code foreground (bright ivory).
+    pub code_inline_fg: Color,
     /// Code-block top/bottom rule line.
     pub code_border: Color,
     /// H1/H2 headings.
@@ -25,10 +27,12 @@ pub struct Theme {
     pub heading_secondary: Color,
     /// Links and images.
     pub link: Color,
-    /// Turn prompt `> ` marker (also the info-bar project accent).
+    /// Turn prompt `» ` marker (also the info-bar project accent).
     pub prompt_marker: Color,
     /// Subtle background tint for the prompt line.
     pub prompt_bg: Color,
+    /// Bold prompt text on the prompt line.
+    pub prompt_text: Color,
     /// Blockquote `│ ` prefix.
     pub blockquote_bar: Color,
     /// List bullets and task-list checkboxes.
@@ -45,6 +49,8 @@ pub struct Theme {
     pub danger: Color,
     /// Input cursor block background.
     pub cursor: Color,
+    /// Prompt-line margin bar (a fixed left-edge accent for prompt blocks).
+    pub prompt_margin: Color,
     /// Near-white for rules and titles.
     pub chrome: Color,
     /// Deep band background.
@@ -59,14 +65,16 @@ pub struct Theme {
 pub const DEFAULT_THEME: Theme = Theme {
     text: Color::Rgb(224, 224, 228),
     subtle: Color::Rgb(122, 122, 130),
-    code_bg: Color::Rgb(20, 22, 28),
-    code_fg: Color::Rgb(210, 210, 215),
+    code_bg: Color::Rgb(26, 22, 16),
+    code_fg: Color::Rgb(232, 214, 168),
+    code_inline_fg: Color::Rgb(245, 224, 170),
     code_border: Color::Rgb(181, 137, 0),
     heading_primary: Color::Rgb(212, 175, 55),
     heading_secondary: Color::Rgb(210, 210, 220),
     link: Color::Rgb(95, 175, 230),
     prompt_marker: Color::Rgb(196, 30, 58),
-    prompt_bg: Color::Rgb(24, 22, 20),
+    prompt_bg: Color::Rgb(32, 27, 20),
+    prompt_text: Color::Rgb(255, 255, 255),
     blockquote_bar: Color::Rgb(212, 175, 55),
     list_bullet: Color::Rgb(181, 137, 0),
     separator: Color::Rgb(122, 122, 130),
@@ -75,6 +83,7 @@ pub const DEFAULT_THEME: Theme = Theme {
     success: Color::Rgb(0, 155, 130),
     danger: Color::Rgb(196, 30, 58),
     cursor: Color::Rgb(212, 175, 55),
+    prompt_margin: Color::Rgb(212, 175, 55),
     chrome: Color::Rgb(224, 224, 228),
     midnight: Color::Rgb(12, 14, 20),
     ivory: Color::Rgb(245, 240, 225),

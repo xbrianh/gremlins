@@ -345,10 +345,7 @@ impl Renderer {
 
     fn code(&mut self, code: &str) {
         self.begin_line();
-        let style = self
-            .base
-            .bg(DEFAULT_THEME.code_bg)
-            .fg(DEFAULT_THEME.code_fg);
+        let style = self.base.fg(DEFAULT_THEME.code_inline_fg);
         self.current.push(Span::styled(code.to_string(), style));
     }
 

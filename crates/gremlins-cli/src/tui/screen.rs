@@ -1023,7 +1023,7 @@ mod tests {
             "the oldest response line must not be visible: {visible}"
         );
         assert!(
-            live_area.scrollback().iter().any(|l| l.contains("» hi")),
+            live_area.scrollback().iter().any(|l| l.contains("▍» hi")),
             "the prompt must overflow into scrollback: {:?}",
             live_area.scrollback()
         );
@@ -1129,7 +1129,7 @@ mod tests {
             "Response text should be visible.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("» hi"),
+            visible.contains("▍» hi"),
             "Prompt should be visible.\nBuffer:\n{visible}"
         );
     }
@@ -1170,7 +1170,7 @@ mod tests {
             "Response should be visible after Done.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("» hi"),
+            visible.contains("▍» hi"),
             "Prompt should be visible.\nBuffer:\n{visible}"
         );
     }
@@ -1645,14 +1645,14 @@ mod tests {
         let visible = dump_buffer(live_area.backend().buffer());
         // The transcript content sits directly above the input/info bars with
         // no rows consumed by the empty reasoning/tool widgets.
-        assert!(visible.contains("» hi"));
+        assert!(visible.contains("▍» hi"));
         assert!(visible.contains("answer"));
         // The answer is contiguous with the prompt (no reasoning/tool rows
         // interleaved), and no reasoning/tool content is rendered.
         let lines: Vec<&str> = visible.lines().collect();
         let prompt_idx = lines
             .iter()
-            .position(|l| l.contains("» hi"))
+            .position(|l| l.contains("▍» hi"))
             .expect("prompt row present");
         assert!(
             lines[prompt_idx + 1].contains("answer"),
