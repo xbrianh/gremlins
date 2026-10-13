@@ -292,9 +292,9 @@ fn make_task_runner_at_depth(
             let result = retry::with_retry(
                 &retry::STREAM_IDLE_BACKOFF[..retry_budget],
                 |_| false,
-                |attempt, _e, wait| {
-                    log::warn!(
-                        "{child_prefix}stream error, retrying in {wait}s ({}/{})...",
+                |attempt, e, wait| {
+                    log::info!(
+                        "{child_prefix}stream error, retrying in {wait}s ({}/{})...: {e}",
                         attempt + 1,
                         retry_budget
                     );

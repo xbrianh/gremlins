@@ -45,7 +45,7 @@ pub(crate) fn default_classify(err: ProviderError) -> ClientError {
     }
     // No HTTP status — mid-stream SSE error (e.g. X.AI response.failed).
     // Retry it; log at WARNING so we can spot provider patterns later.
-    log::warn!("retrying provider error (no HTTP status): {}", err);
+    log::info!("retrying provider error (no HTTP status): {}", err);
     ClientError::ApiServerError {
         message: err.to_string(),
     }
@@ -688,7 +688,7 @@ async fn run_agent_loop_core(
                 if turn_retries < TURN_RETRY_BACKOFF.len() && is_retryable(&e, opts) {
                     let wait = TURN_RETRY_BACKOFF[turn_retries];
                     turn_retries += 1;
-                    log::warn!(
+                    log::info!(
                         "agent_loop: retryable stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
                     );
                     send_log(
@@ -815,7 +815,7 @@ async fn run_agent_loop_core(
                     if timeout_retries < TURN_RETRY_BACKOFF.len() {
                         let wait = TURN_RETRY_BACKOFF[timeout_retries];
                         timeout_retries += 1;
-                        log::warn!(
+                        log::info!(
                             "agent_loop: idle timeout on turn {turn_num} (attempt {timeout_retries}), backing off {wait}s"
                         );
                         send_log(
@@ -853,7 +853,7 @@ async fn run_agent_loop_core(
                     if turn_retries < TURN_RETRY_BACKOFF.len() && is_retryable(&e, opts) {
                         let wait = TURN_RETRY_BACKOFF[turn_retries];
                         turn_retries += 1;
-                        log::warn!(
+                        log::info!(
                             "agent_loop: retryable mid-stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
                         );
                         send_log(

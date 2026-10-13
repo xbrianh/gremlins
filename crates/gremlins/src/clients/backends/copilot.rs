@@ -187,9 +187,9 @@ impl Backend for CopilotBackend {
         retry::with_retry(
             backoff,
             |_| false,
-            |attempt, _e, wait| {
-                log::warn!(
-                    "{prefix}stream error, retrying in {wait}s ({}/{})...",
+            |attempt, e, wait| {
+                log::info!(
+                    "{prefix}stream error, retrying in {wait}s ({}/{})...: {e}",
                     attempt + 1,
                     params.max_retries
                 );

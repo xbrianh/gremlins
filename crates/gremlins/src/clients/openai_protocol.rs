@@ -113,8 +113,8 @@ pub(crate) async fn run_openai_compat(
         |attempt, e, wait| {
             let next = retry_prompt(e, &prompt.lock().unwrap(), timeout_prompt.as_deref());
             *prompt.lock().unwrap() = next;
-            log::warn!(
-                "{prefix}stream error, retrying in {wait}s ({}/{})...",
+            log::info!(
+                "{prefix}stream error, retrying in {wait}s ({}/{})...: {e}",
                 attempt + 1,
                 params.max_retries
             );

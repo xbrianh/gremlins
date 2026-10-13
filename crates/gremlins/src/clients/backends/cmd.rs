@@ -578,9 +578,9 @@ impl Backend for CmdBackend {
         let result = with_retry(
             backoff,
             |_| false,
-            |attempt, _e, wait| {
-                log::warn!(
-                    "{prefix}error, resuming in {wait}s ({}/{})...",
+            |attempt, e, wait| {
+                log::info!(
+                    "{prefix}error, resuming in {wait}s ({}/{})...: {e}",
                     attempt + 1,
                     max_retries
                 );

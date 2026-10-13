@@ -388,9 +388,9 @@ impl Backend for AnthropicBackend {
         retry::with_retry(
             backoff,
             |_| false,
-            |attempt, _e, wait| {
-                log::warn!(
-                    "{}stream error, retrying in {wait}s ({}/{})...",
+            |attempt, e, wait| {
+                log::info!(
+                    "{}stream error, retrying in {wait}s ({}/{})...: {e}",
                     ctx.prefix,
                     attempt + 1,
                     params.max_retries
