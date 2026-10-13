@@ -136,6 +136,11 @@ pub fn streamline_rule_brass(width: u16) -> Line<'static> {
 /// exceed `width`, the caps are truncated (left cap first, then right) so
 /// the rule never overflows its area.
 pub fn groove_rule(width: u16, caps: (&str, &str)) -> Line<'static> {
+    groove_rule_with_fill(width, caps, "▔")
+}
+
+/// A brass groove rule with a custom fill glyph (e.g. `▁` for a lower bar).
+pub fn groove_rule_with_fill(width: u16, caps: (&str, &str), fill_glyph: &str) -> Line<'static> {
     let w = width as usize;
     if w == 0 {
         return Line::from("");
@@ -144,7 +149,7 @@ pub fn groove_rule(width: u16, caps: (&str, &str)) -> Line<'static> {
     let lw = left.chars().count();
     let rw = right.chars().count();
     let inner = if w >= lw + rw {
-        fill("▔", (w - lw - rw) as u16)
+        fill(fill_glyph, (w - lw - rw) as u16)
     } else {
         String::new()
     };
