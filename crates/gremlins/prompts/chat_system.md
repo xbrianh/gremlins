@@ -90,7 +90,7 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 | `/stop <id>` | `gremlins stop <id>` |
 | `/resume <id>` | `gremlins resume <id>` |
 | `/log <id>` | `gremlins log <id>` |
-| `/debug <id>` | none — TUI-only (interactive attach; ask the operator to use `/debug` in the TUI) |
+| `/debug <id>` | `gremlins debug <id>` |
 | `/watch` / `/watch <id>` | none — TUI-only |
 | `/model` | none — TUI-only |
 | `/chat` | none — TUI-only |

@@ -2977,11 +2977,37 @@ mod tests {
             );
         }
 
-        assert!(prompt.contains("`gremlins ls`"), "must map /ls to the CLI");
-        assert!(
-            prompt.contains("none — TUI-only"),
-            "must mark TUI-only commands as having no agent path"
-        );
+        // Every slash command must map to its agent-executable CLI equivalent
+        // (or be explicitly marked TUI-only). Assert each pair individually so
+        // a single misclassified row cannot slip through.
+        for (cmd, cli) in [
+            ("/ls", "`gremlins ls`"),
+            ("/launch <definition>", "`gremlins launch <definition>`"),
+            ("/info <id>", "`gremlins info <id>`"),
+            ("/stop <id>", "`gremlins stop <id>`"),
+            ("/resume <id>", "`gremlins resume <id>`"),
+            ("/log <id>", "`gremlins log <id>`"),
+            ("/debug <id>", "`gremlins debug <id>`"),
+        ] {
+            assert!(
+                prompt.contains(&format!("| `{cmd}` | {cli} |")),
+                "must map {cmd} to {cli}"
+            );
+        }
+
+        for row in [
+            "| `/watch` / `/watch <id>` | none — TUI-only |",
+            "| `/model` | none — TUI-only |",
+            "| `/chat` | none — TUI-only |",
+            "| `/clear` / `/new` | none — TUI-only |",
+            "| `/help` | none — TUI-only |",
+            "| `/quit` | none — TUI-only |",
+        ] {
+            assert!(
+                prompt.contains(row),
+                "must mark TUI-only command row as having no agent path: {row}"
+            );
+        }
         assert!(
             prompt.contains("`Ctrl+G`") && prompt.contains("external editor"),
             "must document the external editor keybinding"
