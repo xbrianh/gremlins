@@ -1547,7 +1547,11 @@ pub(crate) async fn websearch_invoke(ctx: &ToolContext, args_json: &str) -> Stri
             if output.status.success() {
                 text.trim().to_string()
             } else {
-                format!("[exit {}]\n{}", output.status.code().unwrap_or(1), text.trim())
+                format!(
+                    "[exit {}]\n{}",
+                    output.status.code().unwrap_or(1),
+                    text.trim()
+                )
             }
         }
     }
@@ -2061,7 +2065,10 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
     // Task and Done are excluded: Task manages its own context, Done is tiny.
     // Edit and Write always return tiny results.
     let cap = crate::config::max_tool_output_bytes();
-    if cap > 0 && matches!(name, "Read" | "Bash" | "Grep" | "Glob" | "WebSearch") && res.len() as u64 > cap {
+    if cap > 0
+        && matches!(name, "Read" | "Bash" | "Grep" | "Glob" | "WebSearch")
+        && res.len() as u64 > cap
+    {
         return format!(
             "Tool output exceeded the limit ({} bytes, cap is {}). Try a narrower approach:\n\
 - Bash: pipe through `head`, filter with `grep`, or target a specific file.\n\
