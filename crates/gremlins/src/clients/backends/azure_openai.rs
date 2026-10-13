@@ -16,7 +16,6 @@ use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
-use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 use crate::clients::token_provider::TokenProvider;
 use crate::clients::config::ProviderAuth;
 use rig_reqwest::ReqwestClient;
@@ -431,36 +430,12 @@ impl Backend for AzureOpenAiBackend {
     async fn run(
         &self,
         params: RunParams,
-        mut interactive: Option<InteractiveSession>,
+        interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError> {
-        validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
-
         let ctx = self.state.prepare_context(params.clone());
-        let prompt = Mutex::new(params.prompt.clone());
-        let backoff = &STREAM_IDLE_BACKOFF[..params.max_retries];
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
 
-        retry::with_retry(
-            backoff,
-            |_| false,
-            |attempt, e, wait| {
-                log::info!(
-                    "{}stream error, retrying in {wait}s ({}/{})...: {e}",
-                    ctx.prefix,
-                    attempt + 1,
-                    params.max_retries
-                );
-            },
-            || {
-                let p = prompt.lock().unwrap().clone();
-                let ctx = ctx.clone();
-                let cancel = cancel.clone();
-                // Move interactive on first attempt; subsequent retries get None.
-                let interactive = interactive.take();
-                async move { self.state.single_attempt(&p, ctx, cancel, interactive).await }
-            },
-        )
-        .await
+        self.state.single_attempt(&params.prompt, ctx, cancel, interactive).await
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {

@@ -13,7 +13,6 @@ use tokio::process::{Child, Command};
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::protocol::CompletedRun;
-use crate::clients::retry::{validate_max_retries, with_retry, STREAM_IDLE_BACKOFF};
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 use crate::clients::stream_json::{self, StreamState};
@@ -44,7 +43,6 @@ struct CmdContext {
     raw_path: Option<PathBuf>,
     capture_events: bool,
     on_timeout_prompt: Option<String>,
-    max_retries: usize,
     cwd: Option<PathBuf>,
     idle_timeout: f64,
     extra_env: Option<HashMap<String, String>>,
@@ -488,9 +486,6 @@ impl Backend for CmdBackend {
         params: RunParams,
         _interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError> {
-        validate_max_retries(params.max_retries)
-            .map_err(|m| ClientError::Runtime { message: m })?;
-
         // Concatenation of harness system prompt and definition user content —
         // this is the single string bound for the child process's stdin.
         let effective_prompt = match &params.system_prompt {
@@ -519,7 +514,6 @@ impl Backend for CmdBackend {
                     raw_path: params.raw_path.clone(),
                     capture_events: params.capture_events,
                     on_timeout_prompt: params.on_timeout_prompt.clone(),
-                    max_retries: params.max_retries,
                     cwd: params.cwd.clone(),
                     idle_timeout,
                     extra_env: params.extra_env.clone(),
@@ -552,7 +546,7 @@ impl Backend for CmdBackend {
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        let (prompt, on_timeout_prompt, max_retries, prefix, last_session_id, gremlin_id) = {
+        let (prompt, on_timeout_prompt, _prefix, last_session_id, gremlin_id) = {
             let gid = self.last_gremlin_id.lock().unwrap();
             let gid = gid.as_ref().ok_or_else(|| ClientError::Runtime {
                 message: "resume() called before run()".into(),
@@ -564,39 +558,20 @@ impl Backend for CmdBackend {
             (
                 ctx.prompt.clone(),
                 ctx.on_timeout_prompt.clone(),
-                ctx.max_retries,
                 ctx.prefix.clone(),
                 ctx.last_session_id.clone(),
                 ctx.gremlin_id.clone(),
             )
         };
 
-        let backoff = &STREAM_IDLE_BACKOFF[..max_retries.saturating_sub(1)];
-
         let active_prompt = prompt.clone();
 
-        let result = with_retry(
-            backoff,
-            |_| false,
-            |attempt, e, wait| {
-                log::info!(
-                    "{prefix}error, resuming in {wait}s ({}/{})...: {e}",
-                    attempt + 1,
-                    max_retries
-                );
-            },
-            || {
-                let p = if on_timeout_prompt.is_some() {
-                    on_timeout_prompt.clone().unwrap()
-                } else {
-                    active_prompt.clone()
-                };
-                let sid = last_session_id.clone();
-                let gid = gremlin_id.clone();
-                async move { self.attempt(&p, sid.as_deref(), &gid).await }
-            },
-        )
-        .await;
+        let p = if on_timeout_prompt.is_some() {
+            on_timeout_prompt.clone().unwrap()
+        } else {
+            active_prompt
+        };
+        let result = self.attempt(&p, last_session_id.as_deref(), &gremlin_id).await;
 
         match result {
             Ok(r) => {

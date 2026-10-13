@@ -11,7 +11,6 @@ use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, 
 use super::backend::{ClientError, RunParams};
 use super::interactive::InteractiveSession;
 use super::protocol::CompletedRun;
-use super::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 
 /// Shared state for OpenAI-protocol backends.
 ///
@@ -74,12 +73,10 @@ impl OpenAiRunState {
 pub(crate) async fn run_openai_compat(
     state: &OpenAiRunState,
     params: RunParams,
-    mut interactive: Option<InteractiveSession>,
+    interactive: Option<InteractiveSession>,
     classify_error: Option<ErrorClassifier>,
     _provider_name: &str, // kept for logging; unused after task-clients moved to Backend trait
 ) -> Result<CompletedRun, ClientError> {
-    validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
-
     let idle_timeout = params
         .idle_timeout
         .unwrap_or_else(crate::config::stream_idle_timeout);
@@ -100,76 +97,48 @@ pub(crate) async fn run_openai_compat(
     };
     *state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
-    let prompt = Mutex::new(params.prompt.clone());
-    let timeout_prompt = params.on_timeout_prompt.clone();
-    let backoff = &STREAM_IDLE_BACKOFF[..params.max_retries];
-
     // Use the supervisor's cancel token when available; otherwise create one.
     let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
 
-    retry::with_retry(
-        backoff,
-        classify_retryable,
-        |attempt, e, wait| {
-            let next = retry_prompt(e, &prompt.lock().unwrap(), timeout_prompt.as_deref());
-            *prompt.lock().unwrap() = next;
-            log::info!(
-                "{prefix}stream error, retrying in {wait}s ({}/{})...: {e}",
-                attempt + 1,
-                params.max_retries
-            );
-        },
-        || {
-            let p = prompt.lock().unwrap().clone();
-            let ctx = ctx.clone();
-            let cancel = cancel.clone();
-            // Move interactive on first attempt; subsequent retries get None.
-            let interactive = interactive.take();
-            async move {
-                // Before each retry attempt, check if we've been cancelled.
-                if cancel.is_cancelled() {
-                    return Err(ClientError::Runtime {
-                        message: "cancelled".into(),
-                    });
-                }
+    if cancel.is_cancelled() {
+        return Err(ClientError::Runtime {
+            message: "cancelled".into(),
+        });
+    }
 
-                let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
-                let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-                state
-                    .cancels
-                    .lock()
-                    .unwrap()
-                    .entry(gremlin_id.clone())
-                    .or_default()
-                    .insert(id, cancel.clone());
+    let gremlin_id = params.gremlin_id.clone().unwrap_or_default();
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    state
+        .cancels
+        .lock()
+        .unwrap()
+        .entry(gremlin_id.clone())
+        .or_default()
+        .insert(id, cancel.clone());
 
-                let model_name = state.effective_model(ctx.params.model.as_deref());
-                let result = run_with_agent_loop(
-                    &state.client,
-                    &model_name,
-                    &p,
-                    &ctx,
-                    cancel,
-                    state.extra_params(),
-                    state.tool_filter.as_deref(),
-                    classify_error,
-                    interactive,
-                )
-                .await;
-
-                if let Ok(mut guard) = state.cancels.lock() {
-                    if let Some(inner) = guard.get_mut(&gremlin_id) {
-                        inner.remove(&id);
-                        if inner.is_empty() {
-                            guard.remove(&gremlin_id);
-                        }
-                    }
-                }
-                result
-            }
-        },
+    let model_name = state.effective_model(params.model.as_deref());
+    let result = run_with_agent_loop(
+        &state.client,
+        &model_name,
+        &params.prompt,
+        &ctx,
+        cancel,
+        state.extra_params(),
+        state.tool_filter.as_deref(),
+        classify_error,
+        interactive,
     )
-    .await
+    .await;
+
+    if let Ok(mut guard) = state.cancels.lock() {
+        if let Some(inner) = guard.get_mut(&gremlin_id) {
+            inner.remove(&id);
+            if inner.is_empty() {
+                guard.remove(&gremlin_id);
+            }
+        }
+    }
+    result
 }
 
 /// Cancel every in-flight token for `gremlin_id`.
@@ -370,17 +339,6 @@ pub(crate) fn build_extra_params(
     }
 }
 
-/// Turn-level retry inside the agent loop now handles transient stream errors
-/// (429/5xx) and idle timeouts. The backend wrapper is a pass-through — it
-/// only checks cancellation between the (single) attempt.
-fn classify_retryable(_e: &ClientError) -> bool {
-    false
-}
-
-fn retry_prompt(_err: &ClientError, prompt: &str, _on_timeout_prompt: Option<&str>) -> String {
-    prompt.to_string()
-}
-
 // ── tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -468,23 +426,6 @@ mod tests {
         assert_eq!(p["thinking"], "deepseek");
         // xai auto-inserts parallel_tool_calls alongside reasoning + passthrough
         assert_eq!(p["parallel_tool_calls"], true);
-    }
-
-    #[test]
-    fn retry_prompt_is_pass_through() {
-        let timeout = ClientError::Timeout {
-            message: "idle".into(),
-        };
-        let api = ClientError::ApiServerError {
-            message: "rate limit".into(),
-        };
-        // Turn-level retry handles prompt swapping; backend retry_prompt is a no-op.
-        assert_eq!(
-            retry_prompt(&timeout, "orig", Some("timeout-prompt")),
-            "orig"
-        );
-        assert_eq!(retry_prompt(&api, "orig", Some("timeout-prompt")), "orig");
-        assert_eq!(retry_prompt(&timeout, "orig", None), "orig");
     }
 
     #[test]

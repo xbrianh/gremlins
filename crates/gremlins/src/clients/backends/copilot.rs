@@ -14,7 +14,6 @@ use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
 use crate::clients::protocol::CompletedRun;
-use crate::clients::retry::{self, validate_max_retries, STREAM_IDLE_BACKOFF};
 
 const PROVIDER_NAME: &str = "copilot";
 const DEFAULT_MODEL: &str = "gpt-4o";
@@ -155,10 +154,8 @@ impl Backend for CopilotBackend {
     async fn run(
         &self,
         params: RunParams,
-        mut interactive: Option<InteractiveSession>,
+        interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError> {
-        validate_max_retries(params.max_retries).map_err(|m| ClientError::Runtime { message: m })?;
-
         let idle_timeout = params
             .idle_timeout
             .unwrap_or_else(crate::config::stream_idle_timeout);
@@ -179,74 +176,50 @@ impl Backend for CopilotBackend {
         };
         *self.state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
-        let prompt = Mutex::new(params.prompt.clone());
-        let backoff = &STREAM_IDLE_BACKOFF[..params.max_retries];
-
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
 
-        retry::with_retry(
-            backoff,
-            |_| false,
-            |attempt, e, wait| {
-                log::info!(
-                    "{prefix}stream error, retrying in {wait}s ({}/{})...: {e}",
-                    attempt + 1,
-                    params.max_retries
-                );
+        if cancel.is_cancelled() {
+            return Err(ClientError::Runtime {
+                message: "cancelled".into(),
+            });
+        }
+
+        let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
+        let id = self.state.next_id.fetch_add(1, Ordering::Relaxed);
+        self.state
+            .cancels
+            .lock()
+            .unwrap()
+            .entry(gremlin_id.clone())
+            .or_default()
+            .insert(id, cancel.clone());
+
+        let model = self.state.make_model(ctx.params.model.as_deref());
+        let result = run_agent_loop(
+            model,
+            &params.prompt,
+            ctx,
+            cancel.clone(),
+            LoopOpts {
+                extra: None,
+                tool_filter: self.state.tool_filter.as_deref(),
+                classify_error: Some(default_classify as ErrorClassifier),
+                max_tokens: None,
+                skip_temperature: false,
             },
-            || {
-                let p = prompt.lock().unwrap().clone();
-                let ctx = ctx.clone();
-                let cancel = cancel.clone();
-                // Move interactive on first attempt; subsequent retries get None.
-                let interactive = interactive.take();
-                async move {
-                    if cancel.is_cancelled() {
-                        return Err(ClientError::Runtime {
-                            message: "cancelled".into(),
-                        });
-                    }
-
-                    let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
-                    let id = self.state.next_id.fetch_add(1, Ordering::Relaxed);
-                    self.state
-                        .cancels
-                        .lock()
-                        .unwrap()
-                        .entry(gremlin_id.clone())
-                        .or_default()
-                        .insert(id, cancel.clone());
-
-                    let model = self.state.make_model(ctx.params.model.as_deref());
-                    let result = run_agent_loop(
-                        model,
-                        &p,
-                        ctx,
-                        cancel,
-                        LoopOpts {
-                            extra: None,
-                            tool_filter: self.state.tool_filter.as_deref(),
-                            classify_error: Some(default_classify as ErrorClassifier),
-                            max_tokens: None,
-                            skip_temperature: false,
-                        },
-                        interactive,
-                    )
-                    .await;
-
-                    if let Ok(mut guard) = self.state.cancels.lock() {
-                        if let Some(inner) = guard.get_mut(&gremlin_id) {
-                            inner.remove(&id);
-                            if inner.is_empty() {
-                                guard.remove(&gremlin_id);
-                            }
-                        }
-                    }
-                    result
-                }
-            },
+            interactive,
         )
-        .await
+        .await;
+
+        if let Ok(mut guard) = self.state.cancels.lock() {
+            if let Some(inner) = guard.get_mut(&gremlin_id) {
+                inner.remove(&id);
+                if inner.is_empty() {
+                    guard.remove(&gremlin_id);
+                }
+            }
+        }
+        result
     }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError> {

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
-use super::retry;
 use super::task_kind::TaskKind;
 use super::tools::{self, ToolContext};
 
@@ -283,39 +282,20 @@ fn make_task_runner_at_depth(
                 &work_root, &scratch,
             ));
 
-            // The parent backends validate `max_retries` before starting a run,
-            // so this is normally already bounded. Clamp defensively anyway:
-            // task runners are stored closures and shouldn't be able to panic
-            // from a mis-sliced backoff schedule if a caller ever constructs one
-            // independently.
-            let retry_budget = max_retries.min(retry::STREAM_IDLE_BACKOFF.len());
-            let result = retry::with_retry(
-                &retry::STREAM_IDLE_BACKOFF[..retry_budget],
-                |_| false,
-                |attempt, e, wait| {
-                    log::info!(
-                        "{child_prefix}stream error, retrying in {wait}s ({}/{})...: {e}",
-                        attempt + 1,
-                        retry_budget
-                    );
-                },
-                || {
-                    crate::clients::agent_loop::run_agent_loop_nested(
-                        selected_model.clone(),
-                        &task,
-                        system_prompt.clone(),
-                        &child_ctx,
-                        &cancel,
-                        tool_filter.as_deref(),
-                        &child_prefix,
-                        idle_timeout,
-                        max_turns,
-                        completion_nudge_budget,
-                        log_tx.clone(),
-                        max_tokens,
-                        skip_temperature,
-                    )
-                },
+            let result = crate::clients::agent_loop::run_agent_loop_nested(
+                selected_model.clone(),
+                &task,
+                system_prompt.clone(),
+                &child_ctx,
+                &cancel,
+                tool_filter.as_deref(),
+                &child_prefix,
+                idle_timeout,
+                max_turns,
+                completion_nudge_budget,
+                log_tx.clone(),
+                max_tokens,
+                skip_temperature,
             )
             .await;
 
