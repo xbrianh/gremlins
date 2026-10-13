@@ -16,7 +16,7 @@ crates/
   gremlins/                  The main crate — executor, stages, clients, artifacts, CLI
     src/
       lib.rs              Crate root
-      config.rs              Configuration loading
+      config.rs              Configuration loading (owns `settings.yaml`; `clients/config.rs` owns `providers.yaml`)
       clients/              Client backends + agent loop — see src/clients/
       stages/                Stage types: agent, exec, loop, composite, parallel, sequence
       artifacts/            Artifact registry + URI model

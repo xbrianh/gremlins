@@ -60,7 +60,7 @@ specifier. Set `GREMLINS_AZURE_OPENAI_ENDPOINT` (required) and one of
 (API key). Optionally set `GREMLINS_AZURE_OPENAI_API_VERSION` (defaults to
 `2024-10-21`).
 
-Alternatively, configure Azure in `~/.config/gremlins/settings.yaml` under an
+Alternatively, configure Azure in `~/.config/gremlins/providers.yaml` under an
 `azure-openai` key:
 
 ```yaml
@@ -72,7 +72,7 @@ azure-openai:
 ```
 
 Environment variables take precedence over the corresponding
-`settings.yaml` values.
+`providers.yaml` values.
 
 ## Dev install
 

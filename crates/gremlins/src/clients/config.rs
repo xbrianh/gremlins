@@ -135,6 +135,8 @@ pub(crate) struct Providers {
     api_keys: HashMap<String, String>,
     base_urls: HashMap<String, String>,
     tokens: HashMap<String, String>,
+    endpoints: HashMap<String, String>,
+    api_versions: HashMap<String, String>,
     azure_auth_methods: HashMap<String, String>,
     azure_auth_scopes: HashMap<String, String>,
 }
@@ -156,6 +158,10 @@ struct ProviderEntry {
     base_url: Option<StrictString>,
     #[serde(default)]
     token: Option<StrictString>,
+    #[serde(default)]
+    endpoint: Option<StrictString>,
+    #[serde(rename = "api-version", default)]
+    api_version: Option<StrictString>,
     #[serde(default)]
     azure: Option<AzureEntry>,
 }
@@ -200,6 +206,22 @@ impl Providers {
             .filter(|s| !s.trim().is_empty())
     }
 
+    /// Get the endpoint for a provider name.
+    pub(crate) fn endpoint(&self, provider: &str) -> Option<&str> {
+        self.endpoints
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Get the api-version for a provider name.
+    pub(crate) fn api_version(&self, provider: &str) -> Option<&str> {
+        self.api_versions
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
     /// Get the Azure auth method from the nested `azure.auth` for a provider.
     pub(crate) fn azure_auth_method(&self, provider: &str) -> Option<&str> {
         self.azure_auth_methods
@@ -223,6 +245,8 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
     let mut api_keys = HashMap::new();
     let mut base_urls = HashMap::new();
     let mut tokens = HashMap::new();
+    let mut endpoints = HashMap::new();
+    let mut api_versions = HashMap::new();
     let mut azure_auth_methods = HashMap::new();
     let mut azure_auth_scopes = HashMap::new();
     for (k, v) in providers_file.0 {
@@ -235,6 +259,12 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
         if let Some(token) = v.token.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
             tokens.insert(k.clone(), token);
         }
+        if let Some(endpoint) = v.endpoint.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            endpoints.insert(k.clone(), endpoint);
+        }
+        if let Some(api_version) = v.api_version.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
+            api_versions.insert(k.clone(), api_version);
+        }
         if let Some(azure) = v.azure {
             if let Some(auth) = azure.auth.map(|s| s.0).filter(|s| !s.trim().is_empty()) {
                 azure_auth_methods.insert(k.clone(), auth);
@@ -246,6 +276,8 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
         if !api_keys.contains_key(&k)
             && !base_urls.contains_key(&k)
             && !tokens.contains_key(&k)
+            && !endpoints.contains_key(&k)
+            && !api_versions.contains_key(&k)
             && !azure_auth_methods.contains_key(&k)
             && !azure_auth_scopes.contains_key(&k)
         {
@@ -256,6 +288,8 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
         api_keys,
         base_urls,
         tokens,
+        endpoints,
+        api_versions,
         azure_auth_methods,
         azure_auth_scopes,
     })
@@ -303,6 +337,31 @@ pub(crate) fn auth_token(env_var_name: &str, provider_name: &str) -> Option<Stri
     Providers::load()
         .token(provider_name)
         .map(|s| s.to_string())
+}
+
+/// Resolve endpoint for a provider. Checks env var first, then providers.yaml.
+pub(crate) fn endpoint(env_var_name: &str, provider_name: &str) -> Option<String> {
+    if let Ok(val) = std::env::var(env_var_name) {
+        if !val.trim().is_empty() {
+            return Some(val);
+        }
+    }
+    Providers::load()
+        .endpoint(provider_name)
+        .map(|s| s.to_string())
+}
+
+/// Resolve api-version for a provider. Checks env var first, then providers.yaml, then default.
+pub(crate) fn api_version(env_var_name: &str, provider_name: &str, default: &str) -> String {
+    if let Ok(val) = std::env::var(env_var_name) {
+        if !val.trim().is_empty() {
+            return val;
+        }
+    }
+    Providers::load()
+        .api_version(provider_name)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// Resolve the Azure auth method for a provider from the nested `azure:` key.
