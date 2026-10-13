@@ -33,6 +33,9 @@ pub struct AgentPrepared {
     /// Whether the stage opted out of tool-path sandboxing via the hidden
     /// [`SANDBOX_ALLOW_ALL_KEY`] option.
     pub allow_all: bool,
+    /// A stage-supplied system prompt override. When present, this replaces
+    /// the harness default in [`AgentPrepared::system_prompt`].
+    pub system_prompt: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +166,15 @@ pub async fn prepare_agent(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+    // A stage-supplied system prompt override (the chat gremlin passes the
+    // bundled chat_system.md content here). Plain string, not a path, and
+    // delivered unchanged — no variable substitution.
+    let system_prompt = agent
+        .options
+        .get("system_prompt")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
     Ok(AgentPrepared {
         name: name.clone(),
         prompt,
@@ -173,6 +185,7 @@ pub async fn prepare_agent(
         cwd: String::new(),
         artifact_dir: String::new(),
         allow_all,
+        system_prompt,
     })
 }
 
@@ -222,8 +235,12 @@ pub(crate) fn build_workspace_preamble(cwd: &str) -> String {
 }
 
 impl AgentPrepared {
-    /// The harness system prompt — the full output of agent_system_prompt().
+    /// The harness system prompt — the full output of agent_system_prompt(),
+    /// unless the stage supplied a `system_prompt` override.
     pub fn system_prompt(&self) -> String {
+        if let Some(override_prompt) = &self.system_prompt {
+            return override_prompt.clone();
+        }
         let scratch = Path::new(&self.artifact_dir);
         let cwd = Path::new(&self.cwd);
         crate::clients::config::agent_system_prompt(cwd, scratch)
@@ -781,5 +798,50 @@ mod tests {
         std::fs::write(&prepared.output_paths["out"], "content").unwrap();
         commit_agent(&prepared, &store).await.unwrap();
         assert!(store.is_registered("artifact://out.md").await);
+    }
+
+    #[tokio::test]
+    async fn test_system_prompt_override_wins() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad);
+        let agent = Agent {
+            name: "test".to_string(),
+            prompts: vec!["hi".to_string()],
+            options: HashMap::from([(
+                "system_prompt".to_string(),
+                serde_json::Value::String("custom override prompt".to_string()),
+            )]),
+            interpolation_map: HashMap::new(),
+            outputs_map: HashMap::new(),
+        };
+        let fw = HashMap::new();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
+        assert_eq!(prepared.system_prompt(), "custom override prompt");
+    }
+
+    #[tokio::test]
+    async fn test_system_prompt_falls_back_to_harness_default() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad);
+        let agent = Agent {
+            name: "test".to_string(),
+            prompts: vec!["hi".to_string()],
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            outputs_map: HashMap::new(),
+        };
+        let fw = HashMap::new();
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
+        prepared.cwd = "/work".to_string();
+        prepared.artifact_dir = "/scratch".to_string();
+        let expected =
+            crate::clients::config::agent_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        assert_eq!(prepared.system_prompt(), expected);
     }
 }
