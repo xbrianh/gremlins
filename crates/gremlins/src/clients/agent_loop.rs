@@ -1470,6 +1470,11 @@ async fn run_agent_loop_core(
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
         send_log(log_tx, prefix, "exit: stream idle timeout");
         if exhausted_timeout_retries {
+            log::error!(
+                "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
+                prefix
+            );
+            send_log(log_tx, prefix, "exit: exhausted turn-level timeout retries");
             return Err(ClientError::RetryExhausted {
                 message: "exhausted turn-level timeout retries".into(),
             });
@@ -1482,6 +1487,12 @@ async fn run_agent_loop_core(
         log::info!("agent_loop: exit (stream error, label={})", prefix);
         send_log(log_tx, prefix, "exit: stream error");
         if exhausted_turn_retries {
+            log::error!(
+                "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
+                TURN_RETRY_BACKOFF.len() + 1,
+                prefix
+            );
+            send_log(log_tx, prefix, "exit: exhausted turn-level retries");
             return Err(ClientError::RetryExhausted {
                 message: format!(
                     "exhausted turn-level retries ({} attempts): {err}",
