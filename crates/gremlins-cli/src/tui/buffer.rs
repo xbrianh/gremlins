@@ -97,13 +97,14 @@ impl Default for LineBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::{Color, Style};
+    use crate::tui::theme::DEFAULT_THEME;
+    use ratatui::style::Style;
     use ratatui::text::Span;
 
     fn plain(s: &str) -> Line<'static> {
         Line::from(Span::styled(
             s.to_string(),
-            Style::default().fg(Color::White),
+            Style::default().fg(DEFAULT_THEME.text),
         ))
     }
 

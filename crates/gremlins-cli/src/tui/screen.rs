@@ -610,6 +610,11 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().push_transcript_line(line);
     }
 
+    /// Append a pre-styled line to the transcript (e.g. the startup spire).
+    pub fn push_styled_line(&mut self, line: ratatui::text::Line<'static>) {
+        self.transcript_mut().push_styled_line(line);
+    }
+
     // ── Overlay mutation ─────────────────────────────────────────
 
     /// Push a log line into the watch-single widget, if present.
@@ -756,6 +761,7 @@ impl<B: Backend> Drop for LiveArea<B> {
 mod tests {
     use super::*;
     use crate::tui::app::{ActiveRun, App, Overlay};
+    use crate::tui::theme::DEFAULT_THEME;
     use ratatui::{backend::TestBackend, buffer::Buffer, style::Style, text::Line as TuiLine};
 
     /// Helper: write a single text line at a given row.
@@ -806,7 +812,7 @@ mod tests {
     fn plain(s: &str) -> TuiLine<'static> {
         TuiLine::from(ratatui::text::Span::styled(
             s.to_string(),
-            Style::default().fg(ratatui::style::Color::White),
+            Style::default().fg(DEFAULT_THEME.text),
         ))
     }
 
@@ -975,6 +981,124 @@ mod tests {
     // ── compose() frame tests ────────────────────────────────────
 
     #[test]
+    fn compose_in_progress_tall_response_overflows_and_tail_visible() {
+        let cols: u16 = 40;
+        let rows: u16 = 8;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        // Completed content before the turn.
+        live_area.push_transcript_line("banner".to_string());
+        live_area.submit_prompt("hi".to_string());
+
+        // A response far taller than the viewport, still in-progress (no
+        // `finish_turn`).
+        let body: String = (0..40)
+            .map(|i| format!("response line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        live_area.replace_response(&body);
+
+        live_area.compose(&app).unwrap();
+
+        // In-progress overflow now commits to terminal scrollback.
+        assert!(
+            !live_area.scrollback().is_empty(),
+            "in-progress response taller than viewport must overflow"
+        );
+
+        // The tail (most recent content) is visible in the rendered frame;
+        // the oldest content has overflowed into scrollback. The response is
+        // a single wrapped line, so its head is above the visible window
+        // rather than in scrollback.
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("response line 39"),
+            "the most recent response line must be visible: {visible}"
+        );
+        assert!(
+            !visible.contains("response line 0"),
+            "the oldest response line must not be visible: {visible}"
+        );
+        assert!(
+            live_area.scrollback().iter().any(|l| l.contains("▍» hi")),
+            "the prompt must overflow into scrollback: {:?}",
+            live_area.scrollback()
+        );
+    }
+
+    #[test]
+    fn compose_short_viewport_shows_fresh_prompt_not_oldest_line() {
+        let cols: u16 = 40;
+        let rows: u16 = 6;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        // A completed turn that pushes content beyond the viewport.
+        for i in 0..12 {
+            live_area.push_transcript_line(format!("completed line {i}"));
+        }
+        // Fresh prompt: the tail the user just submitted.
+        live_area.submit_prompt("brand new prompt".to_string());
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        let combined = format!("{}\n\n{}", live_area.scrollback().join("\n"), visible);
+        assert!(
+            visible.contains("brand new prompt"),
+            "the freshly submitted prompt (tail) must be visible: {visible}"
+        );
+        assert!(
+            !visible.contains("completed line 0"),
+            "the oldest completed line (head) must not be visible: {visible}"
+        );
+        assert!(
+            combined.contains("completed line 0"),
+            "the oldest completed line belongs in scrollback, not dropped: {combined}"
+        );
+    }
+
+    #[test]
+    fn compose_tail_anchor_is_wrapping_aware() {
+        let cols: u16 = 10;
+        let rows: u16 = 6;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+        // A non-empty input keeps the empty-state hint out of the input bar
+        // so this test exercises transcript tail anchoring in isolation.
+        app.input = "x".to_string();
+        app.input_cursor = 1;
+
+        // Two long raw lines, each longer than the 10-col width so each wraps
+        // to multiple rows. The transcript gets fewer rows than the combined
+        // wrapped height, so tail anchoring must show the wrapped tail of the
+        // newest line rather than clipping at a raw line index.
+        live_area.push_transcript_line("abcdefghijklmnopqrstuvwxyz".to_string());
+        live_area.push_transcript_line("ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string());
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        // The wrapped tail of the newest line must be visible.
+        assert!(
+            visible.contains("WXYZ") || visible.contains("UVWXYZ"),
+            "the wrapped tail of the newest line must be visible: {visible}"
+        );
+        // The full oldest line must not be visible: its head overflowed.
+        assert!(
+            !visible.contains("abcdefghijklmnopqrstuvwxyz"),
+            "the oldest line's full text must not be visible: {visible}"
+        );
+    }
+
+    #[test]
     fn compose_chat_response_visible_after_done() {
         let cols: u16 = 80;
         let rows: u16 = 24;
@@ -1005,7 +1129,7 @@ mod tests {
             "Response text should be visible.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("> hi"),
+            visible.contains("▍» hi"),
             "Prompt should be visible.\nBuffer:\n{visible}"
         );
     }
@@ -1046,7 +1170,7 @@ mod tests {
             "Response should be visible after Done.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("> hi"),
+            visible.contains("▍» hi"),
             "Prompt should be visible.\nBuffer:\n{visible}"
         );
     }
@@ -1072,11 +1196,11 @@ mod tests {
         // The two fixed bars must still be rendered even when the content
         // area has zero height.
         assert!(
-            visible.contains("gremlins tui"),
+            visible.contains("GREMLINS"),
             "Info bar should be visible.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains(">"),
+            visible.contains("»"),
             "Input bar prompt should be visible.\nBuffer:\n{visible}"
         );
     }
@@ -1191,11 +1315,11 @@ mod tests {
         );
         // The fixed bars remain visible.
         assert!(
-            visible.contains("gremlins tui"),
+            visible.contains("GREMLINS"),
             "Info bar should remain visible.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains(">"),
+            visible.contains("»"),
             "Input bar should remain visible.\nBuffer:\n{visible}"
         );
 
@@ -1301,7 +1425,7 @@ mod tests {
 
         let visible = dump_buffer(live.backend().buffer());
         assert!(
-            visible.contains("gremlins tui"),
+            visible.contains("GREMLINS"),
             "Info bar should render even with an overlay on a 2-row viewport.\nBuffer:\n{visible}"
         );
     }
@@ -1418,9 +1542,11 @@ mod tests {
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
-        // The response must be present (it wins the contested space).
+        // The response must be present (it wins the contested space). The
+        // transcript is tail-anchored, so the newest response line is what
+        // stays visible.
         assert!(
-            visible.contains("response line 0"),
+            visible.contains("response line 19"),
             "response should be visible.\nBuffer:\n{visible}"
         );
         // Reasoning (priority 5) shrinks before the response (priority 10),
@@ -1433,15 +1559,26 @@ mod tests {
             !visible.contains("reasoning line 0"),
             "reasoning head should be trimmed.\nBuffer:\n{visible}"
         );
-        // Tools (lowest priority) collapse entirely once the viewport is
-        // exhausted.
+        // Tools (lowest priority) shrink the most: their head is trimmed,
+        // keeping only the tail.
         assert!(
-            !visible.contains("tool-9"),
-            "tools should collapse to zero rows.\nBuffer:\n{visible}"
+            !visible.contains("tool-0"),
+            "tools head should be trimmed.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("tool-9"),
+            "tools should keep their tail.\nBuffer:\n{visible}"
         );
         // Reasoning and tools are trimmed to their allocated rows; their
-        // content is never committed to scrollback.
-        assert!(live_area.scrollback().is_empty());
+        // content is never committed to scrollback. The transcript's tall
+        // in-progress response, however, now overflows into scrollback.
+        let scrollback = live_area.scrollback();
+        assert!(
+            scrollback
+                .iter()
+                .all(|l| !l.contains("reasoning") && !l.contains("tool-")),
+            "reasoning/tool content must not reach scrollback: {scrollback:?}"
+        );
     }
 
     #[test]
@@ -1508,14 +1645,14 @@ mod tests {
         let visible = dump_buffer(live_area.backend().buffer());
         // The transcript content sits directly above the input/info bars with
         // no rows consumed by the empty reasoning/tool widgets.
-        assert!(visible.contains("> hi"));
+        assert!(visible.contains("▍» hi"));
         assert!(visible.contains("answer"));
         // The answer is contiguous with the prompt (no reasoning/tool rows
         // interleaved), and no reasoning/tool content is rendered.
         let lines: Vec<&str> = visible.lines().collect();
         let prompt_idx = lines
             .iter()
-            .position(|l| l.contains("> hi"))
+            .position(|l| l.contains("▍» hi"))
             .expect("prompt row present");
         assert!(
             lines[prompt_idx + 1].contains("answer"),

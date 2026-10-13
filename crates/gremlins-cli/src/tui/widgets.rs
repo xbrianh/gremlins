@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Widget, Wrap},
 };
@@ -28,6 +28,8 @@ use ratatui::{
 use crate::tui::app::{ActiveRun, Overlay};
 use crate::tui::buffer::{line_wrapped_height, wrapped_height, LineBuffer};
 use crate::tui::markdown;
+use crate::tui::motif::{self, glyph};
+use crate::tui::theme::DEFAULT_THEME;
 /// Shared read-only state handed to each widget's [`LiveAreaWidget::render`]
 /// and [`LiveAreaWidget::min_height`].
 ///
@@ -155,9 +157,9 @@ macro_rules! as_any_methods {
 ///
 /// This is the only widget that can overflow. Its
 /// [`take_overflow`](TranscriptWidget::take_overflow) splits the FIFO head
-/// off into overflow lines when the combined content exceeds the region's
-/// height, respecting the pinned turn boundary so an in-progress turn never
-/// reaches terminal scrollback.
+/// off into overflow lines whenever the combined content exceeds the
+/// region's height. The transcript is a plain FIFO: it drains its head and
+/// renders its tail regardless of whether a turn is in progress.
 pub struct TranscriptWidget {
     /// The single styled FIFO — the only thing `render` reads.
     scrollable: LineBuffer,
@@ -167,9 +169,20 @@ pub struct TranscriptWidget {
     turn_start: Option<usize>,
     /// FIFO index where the response region starts.
     response_start: Option<usize>,
+    /// FIFO index of the turn separator rule (regenerated at `finalize`
+    /// width so the glint rule spans the full content width).
+    separator_index: Option<usize>,
+    /// Last-known content width (from `finalize`), used to size rules when
+    /// the response region is rebuilt outside a finalize pass.
+    last_width: u16,
     /// Whether the response region needs re-rendering into the FIFO.
     response_dirty: bool,
-    /// Cached wrapped desired height `(width, height)` for the pinned turn,
+    /// Byte offset into `response_accumulator` of text already rendered
+    /// into the FIFO. When overflow drains response lines, this offset
+    /// stays put so the next rebuild only renders the uncommitted suffix
+    /// — preventing drained lines from reappearing.
+    response_committed_offset: usize,
+    /// Cached wrapped desired height `(width, height)` for the FIFO,
     /// invalidated whenever the FIFO, accumulator, or width changes.
     desired_cache: Cell<Option<(u16, u16)>>,
 }
@@ -181,7 +194,10 @@ impl TranscriptWidget {
             response_accumulator: String::new(),
             turn_start: None,
             response_start: None,
+            separator_index: None,
+            last_width: 40,
             response_dirty: false,
+            response_committed_offset: 0,
             desired_cache: Cell::new(None),
         }
     }
@@ -196,7 +212,7 @@ impl TranscriptWidget {
     /// blank-line padding from the previous entry.
     pub fn push_transcript_line(&mut self, line: String) {
         self.invalidate_desired_cache();
-        let styled = Line::from(Span::styled(line, Style::default()));
+        let styled = Line::from(Span::styled(line, Style::default().fg(DEFAULT_THEME.text)));
         self.push_styled_line(styled);
     }
 
@@ -228,23 +244,35 @@ impl TranscriptWidget {
         }
     }
 
-    /// Start a new turn with the given prompt: push a separator and the
+    /// Start a new turn with the given prompt: push a separator rule and the
     /// markdown-rendered prompt, then pin the turn start.
     pub fn submit_prompt(&mut self, prompt: String) {
         self.invalidate_desired_cache();
+        let mut sep_index = None;
         if !self.scrollable.is_empty() {
-            self.scrollable.push(Line::from(""));
+            // Placeholder width; regenerated at `finalize` with the real
+            // content width.
+            self.scrollable.push(Line::from(Span::styled(
+                "─".repeat(40),
+                Style::default().fg(DEFAULT_THEME.separator),
+            )));
+            sep_index = Some(self.scrollable.len() - 1);
         }
         // Pin the turn at the first prompt line, so the leading separator
         // (which belongs to the *previous* turn) may still overflow.
         let start = self.scrollable.len();
-        for line in render_prompt(&prompt) {
+        // The prompt prefix (▍ + » ) adds 3 cells; subtract those plus
+        // the transcript's 1-cell outer margin so thematic breaks and
+        // fenced-code borders never exceed the inner content width.
+        for line in render_prompt(&prompt, self.last_width.saturating_sub(4)) {
             self.scrollable.push(line);
         }
         self.turn_start = Some(start);
+        self.separator_index = sep_index;
         self.response_start = None;
         self.response_accumulator.clear();
         self.response_dirty = false;
+        self.response_committed_offset = 0;
     }
 
     /// Append streaming response text.
@@ -266,6 +294,7 @@ impl TranscriptWidget {
         self.response_accumulator.clear();
         self.response_accumulator.push_str(text);
         self.response_dirty = true;
+        self.response_committed_offset = 0;
     }
 
     /// Whether the streaming response is empty.
@@ -315,6 +344,7 @@ impl TranscriptWidget {
             .truncate(self.response_accumulator.len() - overlap);
         self.response_accumulator.push_str(text);
         self.response_dirty = true;
+        self.response_committed_offset = 0;
     }
 
     /// Whether a current turn is active (pinned).
@@ -329,8 +359,10 @@ impl TranscriptWidget {
         self.invalidate_desired_cache();
         self.turn_start = None;
         self.response_start = None;
+        self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
+        self.response_committed_offset = 0;
     }
 
     /// Discard the current turn: truncate the FIFO back to the turn start
@@ -339,12 +371,12 @@ impl TranscriptWidget {
         self.invalidate_desired_cache();
         if let Some(t) = self.turn_start {
             self.scrollable.truncate(t);
-            // The separator before the turn (pushed by `submit_prompt`) is
-            // left behind by the truncation; drop it so Esc leaves no stray
-            // blank line.
+            // The separator rule before the turn (pushed by `submit_prompt`)
+            // is left behind by the truncation; drop it so Esc leaves no
+            // stray rule.
             if t > 0 && self.scrollable.len() == t {
                 if let Some(last) = self.scrollable.visible_lines().last() {
-                    if last.to_string().is_empty() {
+                    if is_separator_rule(last) {
                         self.scrollable.truncate(t - 1);
                     }
                 }
@@ -352,8 +384,10 @@ impl TranscriptWidget {
         }
         self.turn_start = None;
         self.response_start = None;
+        self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
+        self.response_committed_offset = 0;
     }
 
     /// Clear the scrollable FIFO.
@@ -362,8 +396,10 @@ impl TranscriptWidget {
         self.scrollable.clear();
         self.turn_start = None;
         self.response_start = None;
+        self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
+        self.response_committed_offset = 0;
     }
 
     /// Re-render the response region into the FIFO if dirty.
@@ -375,26 +411,39 @@ impl TranscriptWidget {
         self.response_dirty = false;
         let start = self.response_start.unwrap_or(self.scrollable.len());
         self.scrollable.truncate(start);
-        for line in markdown::render(&self.response_accumulator, Style::default()) {
+        // Only render the suffix that hasn't been committed yet. After
+        // overflow drains response lines from the FIFO head,
+        // response_committed_offset stays put so drained text is never
+        // re-rendered.
+        let suffix = &self.response_accumulator[self.response_committed_offset..];
+        for line in markdown::render(
+            suffix,
+            Style::default().fg(DEFAULT_THEME.text),
+            self.last_width.saturating_sub(1),
+        ) {
             self.scrollable.push(line);
+        }
+        self.response_committed_offset = self.response_accumulator.len();
+    }
+
+    /// Regenerate the turn separator at the current content width.
+    fn rebuild_separator(&mut self, width: u16) {
+        let Some(idx) = self.separator_index else {
+            return;
+        };
+        let rule = motif::glint_rule(width.saturating_sub(1));
+        if idx < self.scrollable.len() {
+            self.scrollable.remove(idx);
+            self.scrollable.insert(idx, rule);
         }
     }
 
-    /// Wrapped height of the pinned current turn (prompt plus response) at
-    /// the given width. This is the transcript's shrink floor: allocation
-    /// must never clip the in-progress turn that `take_overflow` refuses to
-    /// scroll away.
-    fn pinned_turn_height(&self, width: u16) -> u16 {
-        let start = self.turn_start.unwrap_or(self.scrollable.len());
-        let lines = self.scrollable.visible_lines();
-        let current: Vec<Line<'static>> = lines[start..].to_vec();
-        (wrapped_height(&current, width).min(u16::MAX as usize)) as u16
-    }
-
-    /// Wrapped height of the full FIFO (completed history plus the pinned
-    /// current turn) at the given width. Measurement happens on finalized
-    /// content, so no prediction of a dirty response region is needed.
+    /// Wrapped height of the full FIFO at the given width. Measurement
+    /// happens on finalized content, so no prediction of a dirty response
+    /// region is needed. The transcript paints with a one-cell left margin,
+    /// so measurement uses `width - 1`.
     fn desired_height(&self, width: u16) -> u16 {
+        let width = width.saturating_sub(1);
         if let Some((w, h)) = self.desired_cache.get() {
             if w == width {
                 return h;
@@ -406,13 +455,14 @@ impl TranscriptWidget {
     }
 
     /// Drain the head of the transcript FIFO that does not fit in
-    /// `available_rows`. Lines at or after the pinned turn are never
-    /// reported as overflow, keeping an in-progress turn on screen.
+    /// `available_rows`. The FIFO is drained unconditionally: an in-progress
+    /// turn overflows into terminal scrollback exactly like completed
+    /// history.
     pub fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
         self.invalidate_desired_cache();
-        let pinned = self.turn_start.unwrap_or(self.scrollable.len());
+        let width = width.saturating_sub(1);
         let (_overflow_rows, overflow_lines): (_, Vec<_>) =
-            split_overflow(&self.scrollable, available_rows, width, pinned);
+            split_overflow(&self.scrollable, available_rows, width);
         if overflow_lines.is_empty() {
             return Vec::new();
         }
@@ -425,6 +475,15 @@ impl TranscriptWidget {
         if let Some(r) = &mut self.response_start {
             *r = r.saturating_sub(drained);
         }
+        if let Some(s) = &mut self.separator_index {
+            if *s < drained {
+                // The separator was drained; drop the index so a later
+                // `finalize` cannot overwrite a real transcript line.
+                self.separator_index = None;
+            } else {
+                *s -= drained;
+            }
+        }
         overflow_lines
     }
 }
@@ -435,21 +494,37 @@ impl Default for TranscriptWidget {
     }
 }
 
-/// Render a prompt as markdown with a `> ` marker on the first line and
-/// continuation lines indented.
-fn render_prompt(prompt: &str) -> Vec<Line<'static>> {
+/// Whether a line is the turn separator rule (a single span of rule glyphs).
+fn is_separator_rule(line: &Line<'static>) -> bool {
+    line.spans.len() == 1
+        && !line.spans[0].content.is_empty()
+        && line.spans[0]
+            .content
+            .chars()
+            .all(|c| c == '─' || c == '═' || c == '◆')
+}
+
+/// Render a prompt as markdown with a two-tone `» ` chevron on the first
+/// line and continuation lines indented. `rule_width` is the content width
+/// used to size any thematic breaks or fenced-code borders in the prompt.
+fn render_prompt(prompt: &str, rule_width: u16) -> Vec<Line<'static>> {
     let marker_style = Style::default()
-        .fg(Color::Magenta)
-        .add_modifier(Modifier::BOLD);
+        .fg(DEFAULT_THEME.prompt_marker)
+        .bg(DEFAULT_THEME.prompt_bg);
     let text_style = Style::default()
-        .fg(Color::White)
+        .fg(DEFAULT_THEME.prompt_text)
+        .bg(DEFAULT_THEME.prompt_bg)
         .add_modifier(Modifier::BOLD);
-    let lines = markdown::render(prompt, text_style);
+    let margin_style = Style::default()
+        .fg(DEFAULT_THEME.prompt_margin)
+        .bg(DEFAULT_THEME.prompt_bg);
+    let lines = markdown::render(prompt, text_style, rule_width);
     let mut out = Vec::with_capacity(lines.len());
     for (i, line) in lines.into_iter().enumerate() {
-        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        let mut spans = Vec::with_capacity(line.spans.len() + 2);
+        spans.push(Span::styled(if i == 0 { "▍" } else { " " }, margin_style));
         if i == 0 {
-            spans.push(Span::styled("> ", marker_style));
+            spans.push(Span::styled("» ", marker_style));
         } else {
             spans.push(Span::styled("  ", marker_style));
         }
@@ -459,28 +534,77 @@ fn render_prompt(prompt: &str) -> Vec<Line<'static>> {
     out
 }
 
+/// A single reasoning line: brass telemetry diamond + nickel italic text.
+/// `hollow` alternates the diamond glyph so streaming motion comes free from
+/// the stream itself (no frame timer).
+fn reasoning_line(text: &str, hollow: bool) -> Line<'static> {
+    let g = if hollow {
+        glyph::TELEMETRY_HOLLOW
+    } else {
+        glyph::TELEMETRY
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{g} "),
+            Style::default().fg(DEFAULT_THEME.code_border),
+        ),
+        Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(DEFAULT_THEME.subtle)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ])
+}
+
+/// A single tool-event line: chrome diamond + nickel italic name.
+fn tool_line(name: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{} ", glyph::DIAMOND),
+            Style::default().fg(DEFAULT_THEME.chrome),
+        ),
+        Span::styled(
+            name.to_string(),
+            Style::default()
+                .fg(DEFAULT_THEME.subtle)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ])
+}
+
 /// Find a prefix of `buffer` that does not fit within `available_rows`.
 ///
-/// Lines at or after `pinned` are never included, so an in-progress turn is
-/// never committed to scrollback. Returns the number of overflowing wrapped
-/// rows and the actual head lines (in render order).
+/// The head is drained unconditionally; an in-progress turn is treated like
+/// any other FIFO content. Returns the number of overflowing wrapped rows
+/// and the actual head lines (in render order).
 fn split_overflow(
     buffer: &LineBuffer,
     available_rows: u16,
     width: u16,
-    pinned: usize,
 ) -> (usize, Vec<Line<'static>>) {
+    // Zero-area regions have no place to put overflow, and the transcript
+    // may be collapsed by a blocking overlay or a very short viewport. Keep
+    // the FIFO intact in those cases.
+    if width == 0 || available_rows == 0 {
+        return (0, Vec::new());
+    }
+
     let available = available_rows as usize;
     let total = buffer.wrapped_height(width);
     if total <= available {
         return (0, Vec::new());
     }
 
-    let limit = pinned.min(buffer.len());
+    let lines = buffer.visible_lines();
     let mut dropped = 0usize;
     let mut drop_count = 0usize;
-    while total - dropped > available && drop_count < limit {
-        dropped += line_wrapped_height(&buffer.visible_lines()[drop_count], width);
+    // Drain the head until the remaining content fits, but never drain the
+    // final line: a single line that wraps taller than the viewport must
+    // stay in the FIFO so the tail-anchored renderer can show its wrapped
+    // tail. Overflowing preceding lines is enough to make room.
+    while total - dropped > available && drop_count + 1 < lines.len() {
+        dropped += line_wrapped_height(&lines[drop_count], width);
         drop_count += 1;
     }
 
@@ -488,7 +612,7 @@ fn split_overflow(
         return (0, Vec::new());
     }
 
-    let overflow_lines = buffer.visible_lines()[..drop_count].to_vec();
+    let overflow_lines = lines[..drop_count].to_vec();
     (dropped, overflow_lines)
 }
 
@@ -521,6 +645,9 @@ fn trim_to_tail(buffer: &mut LineBuffer, available_rows: u16, width: u16) {
 pub struct ReasoningWidget {
     lines: LineBuffer,
     partial: String,
+    /// Number of completed lines pushed, used to alternate the telemetry
+    /// diamond glyph for free streaming motion.
+    line_count: usize,
 }
 
 impl ReasoningWidget {
@@ -528,23 +655,21 @@ impl ReasoningWidget {
         Self {
             lines: LineBuffer::new(),
             partial: String::new(),
+            line_count: 0,
         }
     }
 
     /// Append reasoning text (may be a partial chunk). Completed lines are
     /// pushed into the buffer; the trailing partial is kept as a live line.
+    /// Each line is prefixed with a brass telemetry diamond.
     pub fn push_reasoning_text(&mut self, text: &str) {
         self.partial.push_str(text);
         while let Some(newline_pos) = self.partial.find('\n') {
             let line: String = self.partial[..newline_pos].into();
             self.partial = self.partial[newline_pos + 1..].into();
-            self.lines.push(
-                Line::from(line).style(
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            );
+            let hollow = self.line_count % 2 == 1;
+            self.lines.push(reasoning_line(&line, hollow));
+            self.line_count += 1;
         }
     }
 
@@ -553,13 +678,9 @@ impl ReasoningWidget {
     pub fn flush_reasoning(&mut self) {
         if !self.partial.is_empty() {
             let line = std::mem::take(&mut self.partial);
-            self.lines.push(
-                Line::from(line).style(
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            );
+            let hollow = self.line_count % 2 == 1;
+            self.lines.push(reasoning_line(&line, hollow));
+            self.line_count += 1;
         }
     }
 
@@ -567,6 +688,7 @@ impl ReasoningWidget {
     pub fn clear(&mut self) {
         self.lines.clear();
         self.partial.clear();
+        self.line_count = 0;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -584,13 +706,8 @@ impl ReasoningWidget {
     fn rendered_lines(&self) -> Vec<Line<'static>> {
         let mut out = self.lines.visible_lines().to_vec();
         if !self.partial.is_empty() {
-            out.push(
-                Line::from(self.partial.clone()).style(
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            );
+            let hollow = self.line_count % 2 == 1;
+            out.push(reasoning_line(&self.partial, hollow));
         }
         out
     }
@@ -677,13 +794,7 @@ impl ToolEventsWidget {
 
     /// Append a tool-name line.
     pub fn push_tool(&mut self, name: &str) {
-        self.lines.push(
-            Line::from(name.to_string()).style(
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        );
+        self.lines.push(tool_line(name));
     }
 
     /// Reset the live region for a new turn.
@@ -758,15 +869,18 @@ impl LiveAreaWidget for TranscriptWidget {
         0
     }
 
-    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
-        // When a blocking overlay is active, collapse to zero so the overlay
-        // occupies the whole content region.
+    fn min_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
+        // The transcript is a plain FIFO with a one-row floor: it always
+        // reserves a single row so a streaming response stays visible even
+        // when reasoning/tool widgets contest the space, but the floor no
+        // longer depends on where a turn happens to start. Content that does
+        // not fit is drained to scrollback. A blocking overlay collapses it
+        // to zero by the same logic.
         if ctx.blocking_overlay() {
-            return 0;
+            0
+        } else {
+            1
         }
-        // Shrink floor: the pinned current turn must stay on screen. The
-        // transcript fills whatever remains above that floor.
-        self.pinned_turn_height(width)
     }
 
     fn flexible(&self, ctx: &RenderContext) -> bool {
@@ -783,7 +897,9 @@ impl LiveAreaWidget for TranscriptWidget {
         self.desired_height(width)
     }
 
-    fn finalize(&mut self, _width: u16) {
+    fn finalize(&mut self, width: u16) {
+        self.last_width = width;
+        self.rebuild_separator(width);
         self.rebuild_response();
     }
 
@@ -792,10 +908,82 @@ impl LiveAreaWidget for TranscriptWidget {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        let tail = self.scrollable.visible_lines().to_vec();
-        if !tail.is_empty() {
-            let paragraph = Paragraph::new(tail).wrap(Wrap { trim: false });
-            paragraph.render(area, buf);
+        // Clear the region first so a shorter frame cannot leave stale cells
+        // from a previous, taller transcript.
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        // One-cell left margin: paint into an inner rect.
+        let inner = Rect::new(
+            area.x + 1,
+            area.y,
+            area.width.saturating_sub(1),
+            area.height,
+        );
+        let width = inner.width;
+        if width == 0 {
+            return;
+        }
+
+        let lines = self.scrollable.visible_lines();
+        if lines.is_empty() {
+            return;
+        }
+
+        let full_rows = wrapped_height(lines, width);
+        if full_rows == 0 {
+            return;
+        }
+
+        // Tail-anchored, wrapping-aware paint. When the FIFO fits, paint it
+        // top-anchored directly. Otherwise skip the wrapped rows above the
+        // visible window and render only the tail slice, so the most recent
+        // content is always visible without materializing the whole history.
+        let skip = full_rows.saturating_sub(inner.height as usize);
+        if skip == 0 {
+            Paragraph::new(lines.to_vec())
+                .wrap(Wrap { trim: false })
+                .render(inner, buf);
+            return;
+        }
+
+        // Find the first line that contributes wrapped rows to the window.
+        let mut cum = 0usize;
+        let mut start = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            let h = line_wrapped_height(line, width);
+            if cum + h > skip {
+                start = i;
+                break;
+            }
+            cum += h;
+        }
+        // Wrapped rows of `lines[start]` that sit above the visible window.
+        let partial = skip - cum;
+
+        // Render the tail slice into a buffer tall enough to hold the window
+        // plus the partial head, then copy the last `area.height` rows.
+        let render_rows = (partial + inner.height as usize) as u16;
+        let render_area = Rect::new(0, 0, width, render_rows);
+        let mut render_buf = Buffer::empty(render_area);
+        Paragraph::new(lines[start..].to_vec())
+            .wrap(Wrap { trim: false })
+            .render(render_area, &mut render_buf);
+
+        for y in 0..inner.height {
+            let src_y = partial as u16 + y;
+            if src_y >= render_rows {
+                break;
+            }
+            for x in 0..width {
+                buf[(inner.x + x, inner.y + y)] = render_buf[(x, src_y)].clone();
+            }
         }
     }
 }
@@ -818,14 +1006,37 @@ impl InputBarWidget {
     /// The wrapped rows of the input text (prompt + text) at `width`,
     /// uncapped.
     pub fn wrapped_rows(&self, width: u16, input: &str) -> u16 {
-        let text = Self::full_line(input);
+        let text = Self::full_line(input, width);
         (wrapped_height(&[text], width).max(1).min(u16::MAX as usize)) as u16
     }
 
-    /// Build the full styled line: prompt + input text.
-    fn full_line(input: &str) -> Line<'static> {
+    /// Build the full styled line: prompt + input text (or a faint hint when
+    /// the input is empty). The hint is truncated to `width` cells so an empty
+    /// bar never wraps onto a second row on a narrow terminal.
+    fn full_line(input: &str, width: u16) -> Line<'static> {
+        if input.is_empty() {
+            let hint = "say it like you mean it — /help for the brass";
+            // Reserve two cells for the `» ` chevron prefix.
+            let budget = width.saturating_sub(2) as usize;
+            let hint: String = hint.chars().take(budget).collect();
+            return Line::from(vec![
+                Span::styled(
+                    format!("{} ", glyph::CHEVRON),
+                    Style::default().fg(DEFAULT_THEME.accent_primary),
+                ),
+                Span::styled(
+                    hint,
+                    Style::default()
+                        .fg(DEFAULT_THEME.subtle)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]);
+        }
         Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{} ", glyph::CHEVRON),
+                Style::default().fg(DEFAULT_THEME.accent_primary),
+            ),
             Span::raw(input.to_string()),
         ])
     }
@@ -878,7 +1089,7 @@ impl InputBarWidget {
 
     /// Cursor position at the very end of `input` (just past the last char).
     fn end_of_text_position(input: &str, width: u16) -> (u16, u16) {
-        let full_rows = wrapped_height(&[Self::full_line(input)], width).max(1) as u16;
+        let full_rows = wrapped_height(&[Self::full_line(input, width)], width).max(1) as u16;
 
         let spans: Vec<Span<'static>> = vec![
             Self::prompt_span(),
@@ -901,12 +1112,15 @@ impl InputBarWidget {
 
     /// The prompt span shared by the input bar's real rendering.
     fn prompt_span() -> Span<'static> {
-        Span::styled("> ", Style::default().fg(Color::Cyan))
+        Span::styled(
+            format!("{} ", glyph::CHEVRON),
+            Style::default().fg(DEFAULT_THEME.accent_primary),
+        )
     }
 
     /// A style that cannot occur in the input (raw/default) or the prompt.
     fn marker_style() -> Style {
-        Style::default().fg(Color::Magenta)
+        Style::default().fg(DEFAULT_THEME.prompt_marker)
     }
 
     /// Render `line` at `width` and return the (row, col) of the marker-style
@@ -922,10 +1136,11 @@ impl InputBarWidget {
         // Compare on the foreground color rather than full `Style` equality:
         // ratatui patches the cell style with `bg(Color::Reset)` and
         // `underline_color(Color::Reset)` defaults, so the rendered style never
-        // equals the marker style verbatim. Magenta is unique to the marker.
+        // equals the marker style verbatim. The prompt-marker color is unique
+        // to the marker within the input bar.
         for y in 0..rows {
             for x in 0..width {
-                if buf[(x, y)].style().fg == Some(Color::Magenta) {
+                if buf[(x, y)].style().fg == Some(DEFAULT_THEME.prompt_marker) {
                     return Some((y, x));
                 }
             }
@@ -989,16 +1204,18 @@ impl LiveAreaWidget for InputBarWidget {
 
         // Build the wrapped paragraph, then slice out the visible vertical
         // window so the cursor stays in view.
-        let paragraph = Paragraph::new(Self::full_line(ctx.input)).wrap(Wrap { trim: false });
+        let paragraph =
+            Paragraph::new(Self::full_line(ctx.input, width)).wrap(Wrap { trim: false });
 
         // Render into a full-width buffer at the paragraph's natural height,
         // then copy the visible window into `area`.
-        let full_rows = wrapped_height(&[Self::full_line(ctx.input)], width).max(1) as u16;
+        let full_rows = wrapped_height(&[Self::full_line(ctx.input, width)], width).max(1) as u16;
         let full_area = Rect::new(0, 0, width, full_rows);
         let mut full_buf = Buffer::empty(full_area);
         paragraph.render(full_area, &mut full_buf);
 
-        // Copy the visible vertical window.
+        // Copy the visible vertical window. Unwritten cells stay `Reset` so
+        // the input bar keeps the surrounding screen background.
         for y in 0..area.height {
             let src_y = self.v_scroll + y;
             if src_y >= full_rows {
@@ -1022,7 +1239,7 @@ impl LiveAreaWidget for InputBarWidget {
         if let Some(vis_row) = vis_row {
             if vis_row < area.height && col_in_row < width {
                 let cell = &mut buf[(area.x + col_in_row, area.y + vis_row)];
-                cell.set_style(Style::default().bg(Color::White));
+                cell.set_style(Style::default().bg(DEFAULT_THEME.cursor));
             }
         }
     }
@@ -1042,34 +1259,67 @@ impl LiveAreaWidget for InfoBarWidget {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
+        // Clear the region first so a shorter frame cannot leave stale cells
+        // (mirrors the transcript's clear loop; the info bar paints a
+        // background band).
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let band = Style::default().bg(DEFAULT_THEME.midnight);
+        let gold = band
+            .fg(DEFAULT_THEME.heading_primary)
+            .add_modifier(Modifier::BOLD);
+        let red = band.fg(DEFAULT_THEME.danger);
+        let nickel = band.fg(DEFAULT_THEME.subtle);
+        let chrome = band.fg(DEFAULT_THEME.chrome);
+        let ivory = band.fg(DEFAULT_THEME.ivory);
+        let malachite = band.fg(DEFAULT_THEME.success);
+        let brass = band.fg(DEFAULT_THEME.code_border);
+
+        let running = ctx
+            .active_runs
+            .values()
+            .filter(|r| r.status == "running")
+            .count();
+        let count_style = if running > 0 { malachite } else { brass };
+
         let mut spans = vec![
-            Span::styled("gremlins tui", Style::default().fg(Color::Cyan)),
-            Span::raw(" · "),
-            Span::styled(
-                format!("{} gremlins", ctx.gremlin_count),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(" · "),
-            Span::styled(
-                format!("project: {}", ctx.project_name),
-                Style::default().fg(Color::Magenta),
-            ),
+            Span::styled("◆ ", red),
+            Span::styled("GREMLINS", gold),
+            Span::styled(" ◆", red),
+            Span::styled("  ", band),
+            Span::styled(format!("{} running", ctx.gremlin_count), count_style),
+            Span::styled("  ", band),
+            Span::styled("project:", nickel),
+            Span::styled(" ", band),
+            Span::styled(ctx.project_name.to_string(), chrome),
         ];
 
         if let Some(id) = ctx.following_log {
-            spans.push(Span::raw(" · "));
+            spans.push(Span::styled("  ", band));
             spans.push(Span::styled(
                 format!("following: {id}"),
-                Style::default().fg(Color::Red),
+                Style::default()
+                    .fg(DEFAULT_THEME.ivory)
+                    .bg(DEFAULT_THEME.danger)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
-        spans.push(Span::raw("  |  "));
-        spans.push(Span::styled("Ctrl+G", Style::default().fg(Color::Green)));
-        spans.push(Span::raw(" editor  "));
-        spans.push(Span::styled("/help", Style::default().fg(Color::Green)));
+        spans.push(Span::styled("  ", band));
+        spans.push(Span::styled(glyph::COLUMN, gold));
+        spans.push(Span::styled("  ", band));
+        spans.push(Span::styled("Ctrl+G", malachite));
+        spans.push(Span::styled(" editor  ", ivory));
+        spans.push(Span::styled("/help", malachite));
 
-        let paragraph = Paragraph::new(Line::from(spans));
+        let paragraph = Paragraph::new(Line::from(spans)).style(band);
         paragraph.render(area, buf);
     }
 }
@@ -1130,32 +1380,38 @@ impl LiveAreaWidget for WatchTableWidget {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         let header_style = Style::default()
-            .fg(Color::Cyan)
+            .fg(DEFAULT_THEME.heading_primary)
             .add_modifier(Modifier::BOLD);
         lines.push(Line::from(Span::styled(
             "  ID        STATUS    STAGE       DEFINITION",
             header_style,
         )));
+        // Brass streamline rule under the header.
+        lines.push(motif::streamline_rule_brass(area.width));
 
         let mut runs: Vec<(&String, &ActiveRun)> = ctx.active_runs.iter().collect();
         runs.sort_by(|a, b| a.0.cmp(b.0));
 
         for (id, run) in runs {
-            let status_style = match run.status.as_str() {
-                "running" => Style::default().fg(Color::Green),
-                "failed" => Style::default().fg(Color::Red),
-                "stopped" => Style::default().fg(Color::Yellow),
-                _ => Style::default().fg(Color::DarkGray),
+            let (glyph, status_style) = match run.status.as_str() {
+                "running" => (glyph::RUNNING, Style::default().fg(DEFAULT_THEME.success)),
+                "failed" => (glyph::FAILED, Style::default().fg(DEFAULT_THEME.danger)),
+                "stopped" => (glyph::STOPPED, Style::default().fg(DEFAULT_THEME.subtle)),
+                _ => (glyph::DONE, Style::default().fg(DEFAULT_THEME.chrome)),
             };
             lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(id.clone(), Style::default().fg(Color::White)),
+                Span::styled(id.clone(), Style::default().fg(DEFAULT_THEME.text)),
                 Span::raw("  "),
+                Span::styled(format!("{glyph} "), status_style),
                 Span::styled(run.status.clone(), status_style),
                 Span::raw("  "),
-                Span::styled(run.stage.clone(), Style::default().fg(Color::DarkGray)),
+                Span::styled(run.stage.clone(), Style::default().fg(DEFAULT_THEME.subtle)),
                 Span::raw("  "),
-                Span::styled(run.definition.clone(), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    run.definition.clone(),
+                    Style::default().fg(DEFAULT_THEME.subtle),
+                ),
             ]));
         }
 
@@ -1168,7 +1424,7 @@ impl LiveAreaWidget for WatchTableWidget {
         lines.push(Line::from(Span::styled(
             format!("  {running} running · {total} total"),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(DEFAULT_THEME.accent_secondary)
                 .add_modifier(Modifier::BOLD),
         )));
 
@@ -1221,14 +1477,22 @@ impl LiveAreaWidget for WatchSingleWidget {
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
         let header = Line::from(vec![
             Span::styled(
-                "following: ",
+                "◆ following: ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(DEFAULT_THEME.heading_primary)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 self.id.clone(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(DEFAULT_THEME.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ◆",
+                Style::default()
+                    .fg(DEFAULT_THEME.heading_primary)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]);
 
@@ -1241,7 +1505,7 @@ impl LiveAreaWidget for WatchSingleWidget {
         for line in &self.log_lines[start..] {
             lines.push(Line::from(Span::styled(
                 line.clone(),
-                Style::default().fg(Color::White),
+                Style::default().fg(DEFAULT_THEME.text),
             )));
         }
 
@@ -1341,23 +1605,31 @@ impl LiveAreaWidget for DebugWidget {
             "ended"
         };
         let status_style = if self.connecting {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(DEFAULT_THEME.accent_secondary)
         } else if self.connected {
-            Style::default().fg(Color::Green)
+            Style::default().fg(DEFAULT_THEME.success)
         } else {
-            Style::default().fg(Color::Red)
+            Style::default().fg(DEFAULT_THEME.danger)
         };
 
         let header = Line::from(vec![
             Span::styled(
-                "debug: ",
+                "◆ debug: ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(DEFAULT_THEME.heading_primary)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 self.id.clone(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(DEFAULT_THEME.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ◆",
+                Style::default()
+                    .fg(DEFAULT_THEME.heading_primary)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             Span::styled(status, status_style),
@@ -1374,15 +1646,18 @@ impl LiveAreaWidget for DebugWidget {
         for line in &self.history[start..] {
             lines.push(Line::from(Span::styled(
                 line.clone(),
-                Style::default().fg(Color::White),
+                Style::default().fg(DEFAULT_THEME.text),
             )));
         }
 
         // Debug prompt line.
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("debug> ", Style::default().fg(Color::Cyan)),
-            Span::styled(self.input.clone(), Style::default().fg(Color::White)),
+            Span::styled(
+                "debug» ",
+                Style::default().fg(DEFAULT_THEME.heading_primary),
+            ),
+            Span::styled(self.input.clone(), Style::default().fg(DEFAULT_THEME.text)),
         ]));
 
         if !lines.is_empty() {
@@ -1449,7 +1724,7 @@ mod tests {
         assert!(transcript.has_current_turn());
         let lines = transcript.scrollable.visible_lines();
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].to_string(), "> bold prompt");
+        assert_eq!(lines[0].to_string(), "▍» bold prompt");
     }
 
     #[test]
@@ -1463,6 +1738,22 @@ mod tests {
         let lines = transcript.scrollable.visible_lines();
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         assert_eq!(text, vec!["prior"]);
+    }
+
+    #[test]
+    fn clear_current_turn_removes_rule_separator() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_transcript_line("prior".to_string());
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("response");
+        transcript.clear_current_turn();
+        assert!(!transcript.has_current_turn());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["prior"]);
+        assert!(!text
+            .iter()
+            .any(|l| l.chars().all(|c| c == '─') && !l.is_empty()));
     }
 
     #[test]
@@ -1484,7 +1775,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(transcript_text, vec!["> hi", "answer"]);
+        assert_eq!(transcript_text, vec!["▍» hi", "answer"]);
         assert!(!transcript_text.contains(&"thinking".to_string()));
         assert!(!transcript_text.contains(&"Done".to_string()));
 
@@ -1493,7 +1784,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(reasoning_text, vec!["thinking"]);
+        assert_eq!(reasoning_text, vec!["◈ thinking"]);
 
         let tool_text: Vec<String> = tools
             .lines
@@ -1501,7 +1792,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(tool_text, vec!["Done"]);
+        assert_eq!(tool_text, vec!["◆ Done"]);
     }
 
     #[test]
@@ -1514,41 +1805,43 @@ mod tests {
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         // "system note" appears above the pinned turn.
         assert_eq!(text[0], "system note");
-        assert!(text.contains(&"> hi".to_string()));
+        assert!(text.contains(&"▍» hi".to_string()));
     }
 
     #[test]
-    fn take_overflow_never_drains_pinned_turn() {
+    fn take_overflow_drains_in_progress_turn() {
         let mut transcript = TranscriptWidget::new();
-        // Completed turn that may overflow.
+        // Completed history.
         transcript.push_transcript_line("prior".to_string());
         // In-progress turn: pinned at the prompt line.
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("resp");
         LiveAreaWidget::finalize(&mut transcript, 80);
 
-        // Only 1 row available; the pinned prompt/response must stay put.
+        // Only 1 row available. The FIFO drains its head unconditionally,
+        // so the prompt is now scrollback and the tail "resp" stays on
+        // screen.
         let overflow = transcript.take_overflow(1, 80);
+        let overflow_text: Vec<String> = overflow.iter().map(|l| l.to_string()).collect();
         let text: Vec<String> = transcript
             .scrollable
             .visible_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(
-            text.contains(&"> hi".to_string()),
-            "pinned turn must never be drained: {text:?}"
+        assert_eq!(
+            overflow_text,
+            vec![
+                "prior".to_string(),
+                motif::glint_rule(79).to_string(),
+                "▍» hi".to_string()
+            ]
         );
-        assert!(
-            text.contains(&"resp".to_string()),
-            "pinned turn must never be drained: {text:?}"
-        );
-        // Only the pre-turn separator/prior line may overflow.
-        assert!(!overflow.is_empty());
+        assert_eq!(text, vec!["resp"]);
     }
 
     #[test]
-    fn take_overflow_respects_pinned_boundary_with_wrapping() {
+    fn take_overflow_drains_wrapped_head_lines_unconditionally() {
         let mut transcript = TranscriptWidget::new();
         // A long prior line that wraps to many rows.
         transcript.push_transcript_line("abcdefghijklmnopqrstuvwxyz".to_string());
@@ -1557,24 +1850,63 @@ mod tests {
         LiveAreaWidget::finalize(&mut transcript, 10);
 
         // Width 10: the prior line wraps to 3 rows. With 1 available row,
-        // overflow would want to drop the wrapped prior line, but the pinned
-        // turn boundary caps the drain at the prompt line.
+        // the wrapped-aware overflow drain rolls through the head (long
+        // prior, separator, prompt) until only one wrapped row remains: the
+        // response tail.
         let overflow = transcript.take_overflow(1, 10);
+        let overflow_text: Vec<String> = overflow.iter().map(|l| l.to_string()).collect();
         let text: Vec<String> = transcript
             .scrollable
             .visible_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(
-            text.contains(&"> hi".to_string()),
-            "pinned turn must never be drained: {text:?}"
+        assert_eq!(
+            overflow_text,
+            vec![
+                "abcdefghijklmnopqrstuvwxyz".to_string(),
+                motif::glint_rule(9).to_string(),
+                "▍» hi".to_string()
+            ]
         );
-        assert!(
-            text.contains(&"resp".to_string()),
-            "pinned turn must never be drained: {text:?}"
-        );
+        assert_eq!(text, vec!["resp"]);
+    }
+
+    #[test]
+    fn clear_current_turn_still_truncates_to_recorded_start_after_overflow() {
+        let mut transcript = TranscriptWidget::new();
+
+        // A completed turn remains in the FIFO before the current one.
+        transcript.submit_prompt("first".to_string());
+        transcript.push_response("first response");
+        transcript.finish_turn();
+
+        transcript.push_transcript_line("completed system note".to_string());
+
+        // The current turn starts after that completed content.
+        transcript.submit_prompt("current".to_string());
+        transcript.push_response("current response");
+        LiveAreaWidget::finalize(&mut transcript, 80);
+
+        // Drain the head far enough that the turn start index shifts but the
+        // pre-turn completed content stays in the FIFO.
+        let overflow = transcript.take_overflow(5, 80);
         assert!(!overflow.is_empty());
+
+        transcript.clear_current_turn();
+
+        assert!(!transcript.has_current_turn());
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(!text.contains(&"▍» current".to_string()));
+        assert!(
+            text.contains(&"completed system note".to_string()),
+            "completed content before the turn start must survive: {text:?}"
+        );
     }
 
     #[test]
@@ -1621,7 +1953,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(text.contains(&"thinking".to_string()), "{text:?}");
+        assert!(text.contains(&"◈ thinking".to_string()), "{text:?}");
     }
 
     #[test]
@@ -1656,7 +1988,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(tool_text.contains(&"grep".to_string()), "{tool_text:?}");
+        assert!(tool_text.contains(&"◆ grep".to_string()), "{tool_text:?}");
     }
 
     #[test]
@@ -1690,7 +2022,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(text, vec!["tool-4", "tool-5"]);
+        assert_eq!(text, vec!["◆ tool-4", "◆ tool-5"]);
     }
 
     #[test]
@@ -1728,27 +2060,28 @@ mod tests {
 
     #[test]
     fn live_tail_widgets_floor_is_wrapped_rows_capped_at_5() {
-        // A single long line that wraps to 3 rows at width 10 must report a
-        // floor of 3, not 1 (raw line count) or 5 (the cap).
+        // A single long line with a `◈ `/`◆ ` prefix: the prefix occupies
+        // row 1 and the long word wraps onto the following rows, so a
+        // 26-char word reports a floor of 4 (prefix row + 3 word rows).
         let mut reasoning = ReasoningWidget::new();
         reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz");
-        assert_eq!(reasoning.desired_rows(10), 3);
-        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 3);
+        assert_eq!(reasoning.desired_rows(10), 4);
+        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 4);
 
         let mut tools = ToolEventsWidget::new();
         tools.push_tool("abcdefghijklmnopqrstuvwxyz");
-        assert_eq!(tools.desired_rows(10), 3);
-        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 3);
+        assert_eq!(tools.desired_rows(10), 4);
+        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 4);
 
         // A long line wrapping past 5 rows caps the floor at 5.
         let mut reasoning = ReasoningWidget::new();
         reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
-        assert_eq!(reasoning.desired_rows(10), 6);
+        assert_eq!(reasoning.desired_rows(10), 7);
         assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 5);
 
         let mut tools = ToolEventsWidget::new();
         tools.push_tool("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
-        assert_eq!(tools.desired_rows(10), 6);
+        assert_eq!(tools.desired_rows(10), 7);
         assert_eq!(tools.min_height(10, &input_ctx("", 0)), 5);
     }
 
@@ -1870,7 +2203,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let ctx = input_ctx("abc", 3); // cursor at end, parked at (0,4)
         bar.render(area, &mut buf, &ctx);
-        assert_eq!(buf[(4, 0)].style().bg, Some(Color::White));
-        assert_ne!(buf[(0, 0)].style().bg, Some(Color::White));
+        assert_eq!(buf[(4, 0)].style().bg, Some(DEFAULT_THEME.cursor));
+        assert_ne!(buf[(0, 0)].style().bg, Some(DEFAULT_THEME.cursor));
     }
 }
