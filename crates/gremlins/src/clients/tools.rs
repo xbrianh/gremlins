@@ -1376,7 +1376,7 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
 
 /// Kills the command's process group when the tool future is dropped or the
 /// timeout elapses. `tokio::process::Child::kill_on_drop` only reaches the
-/// direct `sh` process; a process group guard is what stops descendants
+/// direct `bash` process; a process group guard is what stops descendants
 /// spawned by the shell (`sleep 3600 & wait`).
 #[cfg(unix)]
 struct ProcessGroupGuard {
@@ -1453,7 +1453,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     };
     // Own the process group for the tool call. When the surrounding
     // `join_all` future is dropped on Esc, this guard is dropped too and
-    // kills the whole group — not just the direct `sh` child.
+    // kills the whole group — not just the direct `bash` child.
     #[cfg(unix)]
     let mut process_group_guard = ProcessGroupGuard::new(child.id());
     match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
@@ -2295,6 +2295,10 @@ mod tests {
         assert_eq!(bash_invoke(&c, &env_args).await, "abc");
         let fail = serde_json::json!({"command": "exit 7"}).to_string();
         assert!(bash_invoke(&c, &fail).await.starts_with("[exit 7]"));
+        // Process substitution is bash-only; `sh` would fail here, proving
+        // the interpreter is `bash` rather than a POSIX shell.
+        let bash_only = serde_json::json!({"command": "diff <(echo a) <(echo a)"}).to_string();
+        assert_eq!(bash_invoke(&c, &bash_only).await.trim(), "");
     }
 
     #[tokio::test]
