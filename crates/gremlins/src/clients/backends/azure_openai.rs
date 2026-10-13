@@ -3,15 +3,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rig_core::providers::openai::{OpenAI, OpenAIConfig};
-use rig_core::providers::openai::wire::AZURE;
 use rig_core::driver::DynModel;
 use rig_core::http_client::DynHttpClient;
 use rig_core::operation::Completion;
+use rig_core::providers::openai::{OpenAI, OpenAIConfig, Route};
+use rig_core::providers::openai::wire::AZURE;
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
 };
+use crate::clients::azure_openai_responses_http::AzureResponsesHttpClient;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
@@ -21,6 +22,9 @@ use crate::clients::config::ProviderAuth;
 use rig_reqwest::ReqwestClient;
 
 // ── AzureOpenAiClientState ───────────────────────────────────────────────
+
+/// Azure OpenAI's Responses-capable default API version.
+const DEFAULT_API_VERSION: &str = "v1";
 
 /// Either a statically-built client (for ApiKey / Token auth) or the
 /// ingredients to build one dynamically per attempt (for identity-based auth).
@@ -152,9 +156,14 @@ impl AzureOpenAiRunState {
                             message: format!("Azure OpenAI token acquisition failed: {e}"),
                         })?;
                     let client = OpenAIConfig::with_alternate_key(&AZURE, token)
+                        .with_route(Route::Responses)
                         .with_api_version(api_version)
                         .with_base_url(endpoint)
-                        .connect(http_client.clone());
+                        .connect(AzureResponsesHttpClient::new(
+                            http_client.clone(),
+                            endpoint,
+                            api_version,
+                        ));
                     let model = client.completion(&model_name).erase();
                     run_agent_loop(
                         model,
@@ -212,7 +221,7 @@ impl AzureOpenAiBackend {
     /// is async).  Configuration errors (bad env vars) surface at first use.
     ///
     /// `GREMLINS_AZURE_OPENAI_ENDPOINT` (or `providers.yaml` `azure-openai.endpoint`) is required.
-    /// `GREMLINS_AZURE_OPENAI_API_VERSION` (or `providers.yaml` `azure-openai.api-version`) defaults to `"2024-10-21"`.
+    /// `GREMLINS_AZURE_OPENAI_API_VERSION` (or `providers.yaml` `azure-openai.api-version`) defaults to `"v1"`.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
@@ -229,7 +238,7 @@ impl AzureOpenAiBackend {
         let api_version = crate::clients::config::api_version(
             "GREMLINS_AZURE_OPENAI_API_VERSION",
             "azure-openai",
-            "2024-10-21",
+            DEFAULT_API_VERSION,
         );
 
         let auth_method = crate::clients::config::azure_auth_method(
@@ -261,16 +270,26 @@ impl AzureOpenAiBackend {
         let client_state = match auth_method {
             ProviderAuth::ApiKey(key) => {
                 let client = OpenAIConfig::with_key(&AZURE, key)
+                    .with_route(Route::Responses)
                     .with_api_version(&api_version)
                     .with_base_url(&endpoint)
-                    .connect(http_client.clone());
+                    .connect(AzureResponsesHttpClient::new(
+                        http_client.clone(),
+                        &endpoint,
+                        &api_version,
+                    ));
                 AzureOpenAiClientState::Static(Box::new(client))
             }
             ProviderAuth::Token(token) => {
                 let client = OpenAIConfig::with_alternate_key(&AZURE, token)
+                    .with_route(Route::Responses)
                     .with_api_version(&api_version)
                     .with_base_url(&endpoint)
-                    .connect(http_client.clone());
+                    .connect(AzureResponsesHttpClient::new(
+                        http_client.clone(),
+                        &endpoint,
+                        &api_version,
+                    ));
                 AzureOpenAiClientState::Static(Box::new(client))
             }
             ProviderAuth::ClientSecret => AzureOpenAiClientState::Dynamic {
@@ -383,15 +402,18 @@ impl Backend for AzureOpenAiBackend {
                     ref token_provider,
                     ref auth_scope,
                 } => {
-                    // Wrap the HTTP client so the api-key header is
-                    // populated lazily on the first request — make_model
-                    // is synchronous and cannot block on token acquisition.
                     let wrapped = crate::clients::lazy_auth_http::LazyApiKeyHttpClient::new(
                         http_client.clone(),
                         token_provider.clone(),
                         auth_scope.clone(),
                     );
+                    let wrapped = AzureResponsesHttpClient::new(
+                        DynHttpClient::new(wrapped),
+                        endpoint.clone(),
+                        api_version.clone(),
+                    );
                     let client = OpenAIConfig::with_alternate_key(&AZURE, "unused")
+                        .with_route(Route::Responses)
                         .with_api_version(api_version)
                         .with_base_url(endpoint)
                         .connect(wrapped);
@@ -621,7 +643,7 @@ mod tests {
         let version = crate::clients::config::api_version(
             "GREMLINS_AZURE_OPENAI_API_VERSION",
             "azure-openai",
-            "2024-10-21",
+            DEFAULT_API_VERSION,
         );
         assert_eq!(version, "2025-01-01", "api-version should come from providers.yaml");
     }
@@ -634,9 +656,9 @@ mod tests {
         let version = crate::clients::config::api_version(
             "GREMLINS_AZURE_OPENAI_API_VERSION",
             "azure-openai",
-            "2024-10-21",
+            DEFAULT_API_VERSION,
         );
-        assert_eq!(version, "2024-10-21", "api-version should default to 2024-10-21");
+        assert_eq!(version, "v1", "api-version should default to v1");
     }
 
     #[test]
@@ -649,7 +671,8 @@ mod tests {
         let state = AzureOpenAiRunState {
             client_state: AzureOpenAiClientState::Static(Box::new(
                 OpenAIConfig::with_key(&AZURE, "fake-key")
-            .with_api_version("2024-10-21")
+            .with_route(Route::Responses)
+            .with_api_version(DEFAULT_API_VERSION)
             .with_base_url("https://example.openai.azure.com")
             .client(),
             )),
@@ -674,7 +697,8 @@ mod tests {
         guard.set("GREMLINS_AZURE_OPENAI_API_KEY", "fake-key");
 
         let client = OpenAIConfig::with_key(&AZURE, "fake-key")
-            .with_api_version("2024-10-21")
+            .with_route(Route::Responses)
+            .with_api_version(DEFAULT_API_VERSION)
             .with_base_url("https://example.openai.azure.com")
             .client();
 
