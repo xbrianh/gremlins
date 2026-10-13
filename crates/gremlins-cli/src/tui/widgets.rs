@@ -308,6 +308,11 @@ impl TranscriptWidget {
             self.response_start = Some(self.scrollable.len());
         }
         self.response_accumulator.push_str(text);
+        // New streamed text invalidates the committed-offset watermark: the
+        // response region is re-rendered from the full accumulator, so the
+        // previously-rendered text must not be skipped. (The offset only
+        // advances when overflow drains response lines to scrollback.)
+        self.response_committed_offset = 0;
         self.response_dirty = true;
     }
 
@@ -2034,6 +2039,31 @@ mod tests {
         assert!(
             text.contains(&"completed system note".to_string()),
             "completed content before the turn start must survive: {text:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_response_accumulates_across_frames() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+
+        // Stream the response word-by-word, finalizing after each chunk the
+        // way `compose` does every frame. Each chunk must append to the
+        // previously-rendered text, not replace it.
+        for word in ["hello", " ", "world", " ", "again"] {
+            transcript.push_response(word);
+            LiveAreaWidget::finalize(&mut transcript, 80);
+        }
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.iter().any(|l| l.contains("hello world again")),
+            "streamed words must accumulate into one response line: {text:?}"
         );
     }
 
