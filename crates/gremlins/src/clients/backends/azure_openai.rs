@@ -132,7 +132,6 @@ impl AzureOpenAiRunState {
                         tool_filter: self.tool_filter.as_deref(),
                         classify_error: Some(default_classify as ErrorClassifier),
                         max_tokens: None,
-                        skip_temperature: false,
                     },
                     interactive,
                 )
@@ -175,7 +174,6 @@ impl AzureOpenAiRunState {
                             tool_filter: self.tool_filter.as_deref(),
                             classify_error: Some(default_classify as ErrorClassifier),
                             max_tokens: None,
-                            skip_temperature: false,
                         },
                         interactive,
                     )

@@ -133,7 +133,6 @@ impl AnthropicRunState {
                         tool_filter: self.tool_filter.as_deref(),
                         classify_error: Some(default_classify as ErrorClassifier),
                         max_tokens: Some(self.max_tokens),
-                        skip_temperature: true,
                     },
                     interactive,
                 )
@@ -173,7 +172,6 @@ impl AnthropicRunState {
                             tool_filter: self.tool_filter.as_deref(),
                             classify_error: Some(default_classify as ErrorClassifier),
                             max_tokens: Some(self.max_tokens),
-                            skip_temperature: true,
                         },
                         interactive,
                     )
