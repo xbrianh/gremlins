@@ -219,35 +219,14 @@ impl TranscriptWidget {
     /// Push a pre-styled line into the FIFO with the same insertion logic
     /// as `push_transcript_line`.
     pub fn push_styled_line(&mut self, styled: Line<'static>) {
-        self.invalidate_desired_cache();
-        match self.turn_start {
-            Some(t) => {
-                let mut inserted = 0usize;
-                self.scrollable.insert(t, styled);
-                inserted += 1;
-                if t > 0 {
-                    self.scrollable.insert(t, Line::from(""));
-                    inserted += 1;
-                }
-                self.turn_start = Some(t + inserted);
-                if let Some(r) = &mut self.response_start {
-                    *r += inserted;
-                }
-            }
-            None => {
-                if !self.scrollable.is_empty() {
-                    self.scrollable.push(Line::from(""));
-                    self.scrollable.push(Line::from(""));
-                }
-                self.scrollable.push(styled);
-            }
-        }
+        self.push_styled_block(vec![styled]);
     }
 
     /// Append a block of pre-styled lines with the same insertion logic as
     /// `push_styled_line`, but applying the blank-line padding exactly once
     /// before the first line of the block. Lines within the block are
-    /// appended contiguously (no blank lines between them).
+    /// appended contiguously (no blank lines between them), and the blank
+    /// separator inserted during an active turn is placed after the block.
     pub fn push_styled_block(&mut self, block: Vec<Line<'static>>) {
         self.invalidate_desired_cache();
         if block.is_empty() {
@@ -256,12 +235,12 @@ impl TranscriptWidget {
         match self.turn_start {
             Some(t) => {
                 let mut inserted = 0usize;
-                if t > 0 {
-                    self.scrollable.insert(t, Line::from(""));
-                    inserted += 1;
-                }
                 for styled in block {
                     self.scrollable.insert(t + inserted, styled);
+                    inserted += 1;
+                }
+                if t > 0 {
+                    self.scrollable.insert(t + inserted, Line::from(""));
                     inserted += 1;
                 }
                 self.turn_start = Some(t + inserted);
@@ -1930,9 +1909,9 @@ mod tests {
             vec![
                 "prior",
                 "────────────────────────────────────────",
-                "",
                 "block one",
                 "block two",
+                "",
                 "▍» hi"
             ]
         );
