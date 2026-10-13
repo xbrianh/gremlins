@@ -809,12 +809,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
 
                             if let Some(state) = app.completion.as_ref() {
+                                // Commit the currently previewed candidate first,
+                                // then advance so the ghost suffix always matches
+                                // what the next Tab will insert.
                                 let span = state.span.clone();
+                                let candidate = state.current().to_string();
+                                app.replace_input_span(span.clone(), candidate.clone());
                                 app.completion_advance();
-                                let Some(candidate) = app.completion.as_ref().map(|s| s.current().to_string()) else {
-                                    continue;
-                                };
-                                app.replace_input_span(span, candidate);
+                                app.update_completion_span(span.start..span.start + candidate.len());
                             } else {
                                 let cursor = app.input_cursor.min(app.input.len());
                                 let Some(mut state) = completion::complete(&app.input, cursor) else {
@@ -827,6 +829,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 } else {
                                     let prefix = completion::common_prefix(&state.candidates);
                                     state.index = 0;
+                                    state.span = span.start..span.start + prefix.len();
                                     app.set_completion(state);
                                     app.replace_input_span(span, prefix);
                                 }
@@ -845,11 +848,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             };
                             let span = state.span.clone();
+                            let candidate = state.current().to_string();
+                            app.replace_input_span(span.clone(), candidate.clone());
                             app.completion_rewind();
-                            let Some(candidate) = app.completion.as_ref().map(|s| s.current().to_string()) else {
-                                continue;
-                            };
-                            app.replace_input_span(span, candidate);
+                            app.update_completion_span(span.start..span.start + candidate.len());
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 &app.input,

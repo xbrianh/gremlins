@@ -59,7 +59,7 @@ pub fn path_word(input: &str, cursor: usize) -> Option<&str> {
     let before = &input[..cursor];
     let start = before
         .rfind(char::is_whitespace)
-        .map(|i| i + 1)
+        .map(|i| i + before[i..].chars().next().map_or(0, char::len_utf8))
         .unwrap_or(0);
     let word = &input[start..cursor];
     if word.is_empty() {
@@ -68,21 +68,24 @@ pub fn path_word(input: &str, cursor: usize) -> Option<&str> {
     Some(word)
 }
 
-/// Compute the longest common byte prefix of the candidate set.
+/// Compute the longest common prefix of the candidate set.
+///
+/// The prefix is computed on `char` boundaries so it never splits a
+/// multibyte UTF-8 character.
 pub fn common_prefix(candidates: &[String]) -> String {
     let Some(first) = candidates.first() else {
         return String::new();
     };
     let mut end = first.len();
     for candidate in &candidates[1..] {
-        end = end.min(candidate.len());
         let mut n = 0;
-        let a = first.as_bytes();
-        let b = candidate.as_bytes();
-        while n < end && a[n] == b[n] {
-            n += 1;
+        for (a, b) in first.chars().zip(candidate.chars()) {
+            if a != b {
+                break;
+            }
+            n += a.len_utf8();
         }
-        end = n;
+        end = end.min(n);
         if end == 0 {
             break;
         }
@@ -134,8 +137,14 @@ fn split_prefix(word: &str, expanded: PathBuf) -> (PathBuf, String) {
 
 /// Build the full path word for a directory entry.
 fn entry_path_word(dir: &Path, name: &str, is_dir: bool) -> String {
-    let joined = dir.join(name);
-    let mut out = joined.to_string_lossy().into_owned();
+    // A listing directory of `.` means a bare relative filename; emit the
+    // entry name directly rather than a `./`-prefixed path so the replaced
+    // token matches the form the user typed.
+    let mut out = if dir == Path::new(".") {
+        name.to_string()
+    } else {
+        dir.join(name).to_string_lossy().into_owned()
+    };
     if is_dir && !out.ends_with('/') {
         out.push('/');
     }
@@ -151,7 +160,13 @@ fn entry_path_word(dir: &Path, name: &str, is_dir: bool) -> String {
 pub fn complete(input: &str, cursor: usize) -> Option<CompletionState> {
     let word = path_word(input, cursor)?;
     let expanded = expand_home(word).unwrap_or_else(|| PathBuf::from(word));
-    let (dir, partial) = split_prefix(word, expanded);
+    // A bare `~` expands to the home directory but has no trailing `/`;
+    // treat it like a trailing-slash directory so we list inside home.
+    let (dir, partial) = if word == "~" {
+        (expanded, String::new())
+    } else {
+        split_prefix(word, expanded)
+    };
 
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -168,10 +183,11 @@ pub fn complete(input: &str, cursor: usize) -> Option<CompletionState> {
         if !name.starts_with(&partial) {
             continue;
         }
-        // We don't require `entry.file_type()` to append `/`; use the
-        // file-name component only. A trailing slash is added for known
-        // directories below.
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        // Follow symlinks so a link to a directory still gets a trailing
+        // `/` and can be entered on a later Tab.
+        let is_dir = std::fs::metadata(entry.path())
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
         candidates.push(entry_path_word(&dir, &name, is_dir));
     }
 
@@ -194,7 +210,7 @@ fn word_start(input: &str, cursor: usize) -> usize {
     let before = &input[..cursor];
     before
         .rfind(char::is_whitespace)
-        .map(|i| i + 1)
+        .map(|i| i + before[i..].chars().next().map_or(0, char::len_utf8))
         .unwrap_or(0)
 }
 
@@ -234,6 +250,15 @@ mod tests {
     }
 
     #[test]
+    fn path_word_handles_multibyte_whitespace() {
+        // U+00A0 (non-breaking space) is two bytes and `char::is_whitespace`.
+        let input = "read\u{00a0}file";
+        let cursor = input.len();
+        assert_eq!(path_word(input, cursor), Some("file"));
+        assert_eq!(word_start(input, cursor), "read\u{00a0}".len());
+    }
+
+    #[test]
     fn common_prefix_is_longest_byte_prefix() {
         let c = vec![
             "src/app.rs".to_string(),
@@ -249,6 +274,14 @@ mod tests {
     fn common_prefix_handles_multibyte() {
         let c = vec!["héllo world".to_string(), "héllo there".to_string()];
         assert_eq!(common_prefix(&c), "héllo ");
+    }
+
+    #[test]
+    fn common_prefix_never_splits_a_char() {
+        // 'é' (U+00E9) and 'e' share no common prefix at the char level, but
+        // their UTF-8 encodings share the first byte (0x65).
+        let c = vec!["éclair".to_string(), "eclair".to_string()];
+        assert_eq!(common_prefix(&c), "");
     }
 
     #[test]
@@ -305,6 +338,12 @@ mod tests {
     }
 
     #[test]
+    fn entry_path_word_omits_dot_prefix_for_cwd() {
+        assert_eq!(entry_path_word(Path::new("."), "main.rs", false), "main.rs");
+        assert_eq!(entry_path_word(Path::new("."), "sub", true), "sub/");
+    }
+
+    #[test]
     fn completion_in_temp_dir_returns_matches() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("apple.txt"), "x").unwrap();
@@ -337,6 +376,7 @@ mod tests {
 
     #[test]
     fn completion_failure_is_silent() {
-        assert!(complete("/definitely/not/here/pa", 24).is_none());
+        let input = "/definitely/not/here/pa";
+        assert!(complete(input, input.len()).is_none());
     }
 }

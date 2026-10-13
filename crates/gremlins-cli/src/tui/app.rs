@@ -284,14 +284,27 @@ impl App {
         self.completion = None;
     }
 
+    /// Update the active completion's replaced span to the given range.
+    /// Used after each candidate/prefix insert so the next Tab/BackTab
+    /// replaces exactly the text that was inserted.
+    pub fn update_completion_span(&mut self, span: std::ops::Range<usize>) {
+        if let Some(state) = &mut self.completion {
+            state.span = span;
+        }
+    }
+
     /// Derive the paint-only suffix for the currently selected completion
     /// candidate: the untyped remainder that appears dimmed after the real
     /// input. Returns `None` when completion is inactive or the current
-    /// candidate no longer extends the input.
+    /// candidate no longer extends the replaced path word.
     pub fn completion_preview_suffix(&self) -> Option<&str> {
         let state = self.completion.as_ref()?;
         let candidate = state.current();
-        let suffix = candidate.strip_prefix(&self.input)?;
+        // The candidate replaces the path word at `state.span`, which may be
+        // preceded by command/argument text. Compare against that slice (the
+        // currently inserted text) rather than the whole input buffer.
+        let inserted = self.input.get(state.span.start..state.span.end)?;
+        let suffix = candidate.strip_prefix(inserted)?;
         (!suffix.is_empty()).then_some(suffix)
     }
 
