@@ -55,6 +55,7 @@ fn build_chat_request(
     chat_id: Option<&str>,
     project_root: &str,
     context: &str,
+    env: &HashMap<String, String>,
 ) -> serde_json::Value {
     let user_text = if context.is_empty() {
         text.to_string()
@@ -66,6 +67,7 @@ fn build_chat_request(
         "text": user_text,
         "turn": turn,
         "project_root": project_root,
+        "env": env,
     });
     if let Some(id) = chat_id {
         request["id"] = serde_json::Value::String(id.to_string());
@@ -126,12 +128,18 @@ fn send_chat_input(
             Ok(Ok(ctx)) => ctx,
             Ok(Err(_)) | Err(_) => String::new(),
         };
+        // Forward the TUI process's environment so the chat gremlin's Bash
+        // tool runs commands under the operator's environment rather than an
+        // empty one. Collected here (on the chat submission path) so it
+        // reflects the operator's shell at submit time.
+        let env: HashMap<String, String> = std::env::vars().collect();
         let request = build_chat_request(
             &input,
             &turn_id,
             chat_id.as_deref(),
             &project_root.to_string_lossy(),
             &context,
+            &env,
         );
         match client_for_chat.send_request(request).await {
             Ok(resp) => {
@@ -1699,27 +1707,32 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::build_chat_request;
+    use std::collections::HashMap;
 
     #[test]
     fn chat_request_carries_project_root() {
-        let req = build_chat_request("push this branch", "3", None, "/home/user/proj", "");
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]);
+        let req = build_chat_request("push this branch", "3", None, "/home/user/proj", "", &env);
         assert_eq!(req["op"], "chat");
         assert_eq!(req["text"], "push this branch");
         assert_eq!(req["turn"], "3");
         assert_eq!(req["project_root"], "/home/user/proj");
+        assert_eq!(req["env"]["PATH"], "/usr/bin");
         assert!(req.get("id").is_none());
     }
 
     #[test]
     fn chat_request_includes_id_when_present() {
-        let req = build_chat_request("hi", "2", Some("chat-0001"), "/p", "");
+        let env = HashMap::new();
+        let req = build_chat_request("hi", "2", Some("chat-0001"), "/p", "", &env);
         assert_eq!(req["id"], "chat-0001");
         assert_eq!(req["project_root"], "/p");
     }
 
     #[test]
     fn chat_request_prepends_context() {
-        let req = build_chat_request("hello", "1", None, "/p", "Current branch: main");
+        let env = HashMap::new();
+        let req = build_chat_request("hello", "1", None, "/p", "Current branch: main", &env);
         assert_eq!(req["text"], "Current branch: main\n\nhello");
     }
 }
