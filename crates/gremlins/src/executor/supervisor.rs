@@ -1863,13 +1863,13 @@ async fn handle_chat(
         .and_then(|v| v.as_str())
         .map(String::from);
     // The operator's project root, supplied by the TUI. When absent (non-TUI
-    // callers), fall back to the daemon's resolved project root.
+    // callers), fall back to the daemon's resolved project root — resolved
+    // *after* `init_global()` so `paths.project-root` is visible.
     let project_root = request
         .get("project_root")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(config::project_root);
+        .map(std::path::PathBuf::from);
 
     // 1. Init config
     if let Err(e) = config::init_global() {
@@ -1877,6 +1877,8 @@ async fn handle_chat(
         let _ = writer.write_json_line(&resp).await;
         return;
     }
+
+    let project_root = project_root.unwrap_or_else(config::project_root);
 
     // 2. Get default client
     let default_client = match config::global_config() {

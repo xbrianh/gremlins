@@ -242,11 +242,17 @@ const MAX_LISTING_ENTRIES: usize = 200;
 /// problem, timeout). Never panics, never surfaces raw git errors. A
 /// successful command with empty stdout returns `Some("")` so callers can
 /// distinguish "clean" from "failed".
-fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
+///
+/// Stdout is drained on a background thread while the child is waited on, so
+/// a command that fills the OS pipe buffer cannot deadlock against the wait
+/// loop. The captured output is capped at [`MAX_SECTION_BYTES`] during the
+/// drain, so a pathological command cannot balloon memory before the later
+/// [`cap_section`] pass.
+fn git_output(git_exe: &std::path::Path, cwd: &str, args: &[&str]) -> Option<String> {
     use std::io::Read;
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new("git")
+    let mut child = std::process::Command::new(git_exe)
         .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -254,34 +260,58 @@ fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
         .spawn()
         .ok()?;
 
-    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
+    // Drain stdout concurrently so the child never blocks writing once the
+    // pipe buffer fills. The cap is enforced here (not just in `cap_section`)
+    // so a huge `git diff --stat` cannot grow the buffer without bound.
+    let mut stdout = child.stdout.take()?;
+    let drain = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() >= MAX_SECTION_BYTES {
+                        break;
+                    }
                 }
-                let mut out = String::new();
-                child.stdout.take()?.read_to_string(&mut out).ok()?;
-                return Some(out.trim().to_string());
             }
+        }
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
+                    break None;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            Err(_) => return None,
+            Err(_) => break None,
+        }
+    };
+
+    match status {
+        Some(status) if status.success() => {
+            let buf = drain.join().unwrap_or_default();
+            Some(String::from_utf8_lossy(&buf).trim().to_string())
+        }
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
         }
     }
 }
 
 /// Whether `cwd` is inside a git work tree. A missing `git` binary is treated
 /// exactly like a non-git directory: `false`, so every git section is skipped.
-fn is_git_repo(cwd: &str) -> bool {
-    git_output(cwd, &["rev-parse", "--is-inside-work-tree"]).as_deref() == Some("true")
+fn is_git_repo(git_exe: &std::path::Path, cwd: &str) -> bool {
+    git_output(git_exe, cwd, &["rev-parse", "--is-inside-work-tree"]).as_deref() == Some("true")
 }
 
 /// Truncate a multi-line section to `max_lines` lines and `max_bytes` bytes,
@@ -322,10 +352,16 @@ fn cap_section(text: &str, max_lines: usize, max_bytes: usize) -> String {
 /// and includes every visible entry — non-code files are listed by name,
 /// never read into the prompt.
 pub(crate) fn build_chat_context(cwd: &str) -> String {
+    build_chat_context_with_git(std::path::Path::new("git"), cwd)
+}
+
+/// [`build_chat_context`] with an injectable git executable, so tests can
+/// substitute a stub without mutating the process-global `PATH`.
+fn build_chat_context_with_git(git_exe: &std::path::Path, cwd: &str) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    if is_git_repo(cwd) {
-        if let Some(branch) = git_output(cwd, &["branch", "--show-current"]) {
+    if is_git_repo(git_exe, cwd) {
+        if let Some(branch) = git_output(git_exe, cwd, &["branch", "--show-current"]) {
             if !branch.is_empty() {
                 sections.push(format!("Current branch: {branch}"));
             }
@@ -333,7 +369,7 @@ pub(crate) fn build_chat_context(cwd: &str) -> String {
 
         // Remote names only: `git remote -v` URLs can embed PATs or other
         // userinfo, so we never copy URLs into the prompt.
-        if let Some(remotes) = git_output(cwd, &["remote"]) {
+        if let Some(remotes) = git_output(git_exe, cwd, &["remote"]) {
             if !remotes.is_empty() {
                 sections.push(format!(
                     "Remotes:\n{}",
@@ -347,6 +383,7 @@ pub(crate) fn build_chat_context(cwd: &str) -> String {
         // global option, before the subcommand) keeps the command read-only:
         // it never takes the index lock or rewrites the index.
         if let Some(status) = git_output(
+            git_exe,
             cwd,
             &["--no-optional-locks", "status", "--short", "--branch"],
         ) {
@@ -358,7 +395,7 @@ pub(crate) fn build_chat_context(cwd: &str) -> String {
             }
         }
 
-        if let Some(log) = git_output(cwd, &["log", "--oneline", "-n", "5"]) {
+        if let Some(log) = git_output(git_exe, cwd, &["log", "--oneline", "-n", "5"]) {
             if !log.is_empty() {
                 sections.push(format!(
                     "Recent commits:\n{}",
@@ -367,7 +404,7 @@ pub(crate) fn build_chat_context(cwd: &str) -> String {
             }
         }
 
-        if let Some(stat) = diff_stat(cwd) {
+        if let Some(stat) = diff_stat(git_exe, cwd) {
             sections.push(format!(
                 "Diff stat vs base:\n{}",
                 cap_section(&stat, MAX_SECTION_LINES, MAX_SECTION_BYTES)
@@ -389,9 +426,9 @@ pub(crate) fn build_chat_context(cwd: &str) -> String {
 /// "push this and open a PR" case has none yet), then falls back to
 /// `origin/HEAD`, `main`, and `master` in order. Returns the first non-empty
 /// stat, or `None` when no base ref exists.
-fn diff_stat(cwd: &str) -> Option<String> {
+fn diff_stat(git_exe: &std::path::Path, cwd: &str) -> Option<String> {
     for base in ["@{upstream}", "origin/HEAD", "main", "master"] {
-        if let Some(stat) = git_output(cwd, &["diff", "--stat", base]) {
+        if let Some(stat) = git_output(git_exe, cwd, &["diff", "--stat", base]) {
             if !stat.is_empty() {
                 return Some(stat);
             }
@@ -996,11 +1033,17 @@ mod tests {
     // ---- build_chat_context tests ----
 
     /// Run `git` in `dir`, returning an error on failure (e.g. git missing).
-    fn git(dir: &std::path::Path, args: &[&str]) -> std::io::Result<()> {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .status()?;
+    /// `git_exe` overrides the executable so tests can inject a stub without
+    /// mutating the process-global `PATH`.
+    fn git(
+        git_exe: Option<&std::path::Path>,
+        dir: &std::path::Path,
+        args: &[&str],
+    ) -> std::io::Result<()> {
+        let mut cmd =
+            std::process::Command::new(git_exe.unwrap_or_else(|| std::path::Path::new("git")));
+        cmd.args(args).current_dir(dir);
+        let status = cmd.status()?;
         assert!(status.success(), "git {args:?} failed in {dir:?}");
         Ok(())
     }
@@ -1011,14 +1054,15 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         // Fail (not skip) when git is unavailable: this test requires git.
-        git(&repo, &["init", "-q", "-b", "main"]).unwrap();
-        git(&repo, &["config", "user.email", "t@t"]).unwrap();
-        git(&repo, &["config", "user.name", "t"]).unwrap();
+        git(None, &repo, &["init", "-q", "-b", "main"]).unwrap();
+        git(None, &repo, &["config", "user.email", "t@t"]).unwrap();
+        git(None, &repo, &["config", "user.name", "t"]).unwrap();
         std::fs::write(repo.join("README.md"), "# hi\n").unwrap();
         std::fs::write(repo.join("notes.txt"), "notes\n").unwrap();
-        git(&repo, &["add", "-A"]).unwrap();
-        git(&repo, &["commit", "-qm", "init"]).unwrap();
+        git(None, &repo, &["add", "-A"]).unwrap();
+        git(None, &repo, &["commit", "-qm", "init"]).unwrap();
         git(
+            None,
             &repo,
             &[
                 "remote",
@@ -1081,8 +1125,10 @@ mod tests {
         assert!(ctx.is_empty(), "ctx should be empty, got: {ctx}");
     }
 
-    /// A failing `git` on PATH (or a missing one) must degrade exactly like a
+    /// A failing `git` (or a missing one) must degrade exactly like a
     /// non-git directory: every git section omitted, listing still produced.
+    /// The stub is injected via the git executable parameter rather than by
+    /// mutating the process-global `PATH`, which would race other tests.
     #[test]
     fn chat_context_stubbed_failing_git_omits_git_sections() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1091,9 +1137,7 @@ mod tests {
         std::fs::write(dir.join("note.md"), "n").unwrap();
 
         // A `git` stub that always fails.
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let stub = bin.join("git");
+        let stub = tmp.path().join("git-stub");
         std::fs::write(&stub, "#!/bin/sh\nexit 1\n").unwrap();
         #[cfg(unix)]
         {
@@ -1101,21 +1145,8 @@ mod tests {
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let old_path = std::env::var_os("PATH");
-        let new_path = format!(
-            "{}{}{}",
-            bin.display(),
-            std::path::MAIN_SEPARATOR,
-            old_path
-                .as_deref()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        );
-        std::env::set_var("PATH", &new_path);
-        let _guard = PathGuard(old_path);
-
         let cwd = dir.to_string_lossy().into_owned();
-        let ctx = build_chat_context(&cwd);
+        let ctx = build_chat_context_with_git(&stub, &cwd);
 
         assert!(!ctx.contains("Current branch:"), "ctx: {ctx}");
         assert!(!ctx.contains("Remotes:"), "ctx: {ctx}");
@@ -1124,17 +1155,5 @@ mod tests {
         assert!(!ctx.contains("Diff stat"), "ctx: {ctx}");
         assert!(ctx.contains("Top-level directory listing:"), "ctx: {ctx}");
         assert!(ctx.contains("note.md"), "ctx: {ctx}");
-    }
-
-    /// Restores `PATH` on drop so the stubbed-git test cannot leak its
-    /// process-global mutation into other tests.
-    struct PathGuard(Option<std::ffi::OsString>);
-    impl Drop for PathGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
     }
 }
