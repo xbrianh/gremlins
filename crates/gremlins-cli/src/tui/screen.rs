@@ -610,6 +610,12 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().push_transcript_line(line);
     }
 
+    /// Append a block of system messages to the transcript with default
+    /// style, applying blank-line padding once before the block.
+    pub fn push_transcript_block(&mut self, block: Vec<String>) {
+        self.transcript_mut().push_transcript_block(block);
+    }
+
     /// Append a pre-styled line to the transcript (e.g. the startup spire).
     pub fn push_styled_line(&mut self, line: ratatui::text::Line<'static>) {
         self.transcript_mut().push_styled_line(line);
