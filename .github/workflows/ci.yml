@@ -24,5 +24,7 @@ jobs:
         run: make check
       - name: Test (Rust)
         run: make test
+      - name: Test (CLI)
+        run: make test-cli
       - name: Test (Overlay Tools)
         run: make test-overlay-tools

@@ -553,18 +553,35 @@ fn render_prompt(prompt: &str, rule_width: u16) -> Vec<Line<'static>> {
     let margin_style = Style::default()
         .fg(DEFAULT_THEME.prompt_margin)
         .bg(DEFAULT_THEME.prompt_bg);
-    let lines = markdown::render(prompt, text_style, rule_width);
-    let mut out = Vec::with_capacity(lines.len());
-    for (i, line) in lines.into_iter().enumerate() {
-        let mut spans = Vec::with_capacity(line.spans.len() + 2);
-        spans.push(Span::styled(if i == 0 { "▍" } else { " " }, margin_style));
-        if i == 0 {
-            spans.push(Span::styled("» ", marker_style));
-        } else {
-            spans.push(Span::styled("  ", marker_style));
+    // Render each physical line independently so a user-entered `\n` is
+    // preserved as a hard break. The markdown renderer would otherwise
+    // collapse a bare newline into a `SoftBreak` (a space), silently
+    // flattening multi-line prompts. Inline markdown still applies per line.
+    let mut out = Vec::new();
+    let mut first = true;
+    for raw_line in prompt.split('\n') {
+        let lines = markdown::render(raw_line, text_style, rule_width);
+        if lines.is_empty() {
+            // Preserve blank lines as empty continuation lines.
+            out.push(Line::from(vec![
+                Span::styled(" ", margin_style),
+                Span::styled("  ", marker_style),
+            ]));
+            first = false;
+            continue;
         }
-        spans.extend(line.spans);
-        out.push(Line::from(spans));
+        for line in lines {
+            let mut spans = Vec::with_capacity(line.spans.len() + 2);
+            spans.push(Span::styled(if first { "▍" } else { " " }, margin_style));
+            if first {
+                spans.push(Span::styled("» ", marker_style));
+            } else {
+                spans.push(Span::styled("  ", marker_style));
+            }
+            spans.extend(line.spans);
+            out.push(Line::from(spans));
+            first = false;
+        }
     }
     out
 }
@@ -1818,6 +1835,24 @@ mod tests {
         let lines = transcript.scrollable.visible_lines();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].to_string(), "▍» bold prompt");
+    }
+
+    #[test]
+    fn submit_prompt_preserves_hard_line_breaks() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("one\ntwo".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["▍» one", "   two"]);
+    }
+
+    #[test]
+    fn submit_prompt_preserves_blank_lines() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("one\n\ntwo".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["▍» one", "   ", "   two"]);
     }
 
     #[test]
