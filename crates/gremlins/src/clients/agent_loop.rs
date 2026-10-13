@@ -96,7 +96,12 @@ impl CancelToken {
 
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::Relaxed);
-        self.notify.notify_one();
+        // Cancellation is broadcast: an active chat turn has both
+        // `run_chat_turn` and the tool-phase select arm waiting on this
+        // token. `notify_waiters()` wakes every waiter so the outer
+        // `finish()` path is never left asleep while the inner waiter
+        // unwinds the turn.
+        self.notify.notify_waiters();
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -1371,6 +1376,18 @@ async fn run_agent_loop_core(
 
         let results = tokio::select! {
             results = exec_fut => results,
+            _ = cancel.cancelled() => {
+                // Esc / cancel_chat during a tool batch: drop the join_all
+                // future (cancelling pending tool futures) and unwind the
+                // turn immediately. This is what lets run_chat_turn::finish
+                // re-insert the chat gremlin without waiting for every tool
+                // to complete.
+                log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
+                send_log(log_tx, prefix, "exit: cancelled mid-tool");
+                return Err(ClientError::Runtime {
+                    message: "cancelled".into(),
+                });
+            }
             _ = maybe_pause(&pause) => {
                 // Operator triggered debug mid-tool — drop the join_all future
                 // (cancels pending tool futures). Completed tool side effects
@@ -2009,17 +2026,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_token_wakes_waiters() {
+    async fn cancel_token_wakes_all_waiters() {
         let token = CancelToken::new();
-        let t = token.clone();
-        let handle = tokio::spawn(async move {
-            t.cancelled().await;
-        });
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let t = token.clone();
+                tokio::spawn(async move {
+                    t.cancelled().await;
+                })
+            })
+            .collect();
         token.cancel();
-        tokio::time::timeout(Duration::from_secs(1), handle)
-            .await
-            .unwrap()
-            .unwrap();
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(1), handle)
+                .await
+                .unwrap()
+                .unwrap();
+        }
         assert!(token.is_cancelled());
     }
 
@@ -2114,6 +2137,110 @@ mod tests {
             matches!(err, ClientError::RetryExhausted { .. }),
             "expected ClientError::RetryExhausted after exhausted timeout retries, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn loop_mid_tool_cancel_returns_runtime_without_waiting_for_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let pidfile = dir.path().join("pid");
+
+        // A Bash tool call that records its PID and signals when it starts,
+        // then hangs until killed by the dropped join_all future.
+        // Uses a pure-bash infinite loop (while true; do :; done) so no
+        // child process is spawned — avoiding GNU Make jobserver pipe leaks
+        // that would keep `make -j` waiting forever.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "c1",
+                "Bash",
+                serde_json::json!({
+                    "command": format!(
+                        "echo $$ > {}; touch {}; while true; do :; done",
+                        pidfile.display(),
+                        marker.display()
+                    ),
+                    "timeout": 3600
+                }),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "go",
+            ctx,
+            cancel.clone(),
+            loop_opts(None),
+            None,
+        ));
+
+        // Wait until the Bash child has started so the loop is in Phase 2.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Bash tool should start");
+
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .expect("pidfile should exist")
+            .trim()
+            .parse()
+            .expect("pidfile should hold a valid pid");
+
+        cancel.cancel();
+
+        // Cancellation must unblock the loop promptly instead of waiting for
+        // the (3600s) tool future to finish.
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("cancel must unblock the agent loop promptly")
+            .unwrap();
+        match result {
+            Err(ClientError::Runtime { message }) => assert_eq!(message, "cancelled"),
+            other => panic!("expected Runtime cancelled, got: {other:?}"),
+        }
+
+        // The dropped join_all future must have killed the Bash child.
+        // Poll until the pid is gone.
+        let reaped = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !process_alive(pid) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if reaped.is_err() {
+            // Best-effort cleanup so a failed assertion does not orphan the
+            // child on the test host.
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+        }
+        assert!(
+            !process_alive(pid),
+            "Bash child pid {pid} should have been killed by the dropped tool future"
+        );
+    }
+
+    /// Returns true if a process with the given pid exists on this host.
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     #[tokio::test]

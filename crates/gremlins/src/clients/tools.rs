@@ -1374,6 +1374,37 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
     "OK".into()
 }
 
+/// Kills the command's process group when the tool future is dropped or the
+/// timeout elapses. `tokio::process::Child::kill_on_drop` only reaches the
+/// direct `sh` process; a process group guard is what stops descendants
+/// spawned by the shell (`sleep 3600 & wait`).
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pgid: Option<u32>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn new(pgid: Option<u32>) -> Self {
+        Self { pgid }
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.pgid {
+            unsafe {
+                libc::killpg(pgid as i32, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
@@ -1393,6 +1424,15 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Start `sh` in its own process group. `kill_on_drop` only kills
+        // the direct `sh` child; making it a group leader lets the timeout
+        // path (and the dropped-tool-future path, via `kill_on_drop` plus
+        // the timeout killpg below) stop every descendant too.
+        cmd.as_std_mut().process_group(0);
+    }
     if let Some(cwd) = &ctx.cwd {
         cmd.current_dir(cwd);
     }
@@ -1411,10 +1451,26 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
+    // Own the process group for the tool call. When the surrounding
+    // `join_all` future is dropped on Esc, this guard is dropped too and
+    // kills the whole group — not just the direct `sh` child.
+    #[cfg(unix)]
+    let mut process_group_guard = ProcessGroupGuard::new(child.id());
     match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
-        Err(_) => "[timeout]".into(),
-        Ok(Err(e)) => format!("Error: {e}"),
+        Err(_) => {
+            // `process_group_guard` fires as this function returns; the
+            // direct child is also covered by `kill_on_drop` when the
+            // timed-out future was dropped.
+            "[timeout]".into()
+        }
+        Ok(Err(e)) => {
+            #[cfg(unix)]
+            process_group_guard.disarm();
+            format!("Error: {e}")
+        }
         Ok(Ok(output)) => {
+            #[cfg(unix)]
+            process_group_guard.disarm();
             let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
             text.push_str(&String::from_utf8_lossy(&output.stderr));
             if output.status.success() {
@@ -2147,6 +2203,18 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// Returns true if a process with the given pid exists on this host.
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     fn tmp() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!(
@@ -2246,6 +2314,50 @@ mod tests {
         let args = serde_json::json!({"command": "sleep 10", "timeout": 1}).to_string();
         let out = bash_invoke(&c, &args).await;
         assert_eq!(out, "[timeout]");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn bash_timeout_kills_descendant_process_group() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let child_pid = dir.join("child.pid");
+        let parent_pid = dir.join("parent.pid");
+        // `sh` records its own pid (group leader) and starts a descendant,
+        // then waits. On timeout both must be killed, proving the process
+        // group is terminated rather than just the direct `sh` child.
+        let command = format!(
+            "echo $$ > {parent}; sh -c 'echo $$ > {child}; sleep 10' & wait",
+            parent = parent_pid.display(),
+            child = child_pid.display(),
+        );
+        let args = serde_json::json!({ "command": command, "timeout": 1 }).to_string();
+        let out = bash_invoke(&c, &args).await;
+        assert_eq!(out, "[timeout]");
+
+        let read_pid = |path: &std::path::Path| -> u32 {
+            std::fs::read_to_string(path)
+                .expect("pid file should exist")
+                .trim()
+                .parse()
+                .expect("pid file should hold a valid pid")
+        };
+        let _parent = read_pid(&parent_pid);
+        let child = read_pid(&child_pid);
+
+        // Poll briefly: the timeout path must reap the group promptly. The
+        // group leader can linger as a zombie while the shell that spawned
+        // it waits, so only check the descendant is gone.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !process_alive(child) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant should be killed by the process-group timeout");
     }
 
     #[tokio::test]
