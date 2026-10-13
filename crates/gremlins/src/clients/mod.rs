@@ -1,5 +1,6 @@
 pub(crate) mod agent_loop;
 pub(crate) mod anthropic_bearer_http;
+pub(crate) mod azure_openai_responses_http;
 pub mod backend;
 pub mod backends;
 pub mod client;

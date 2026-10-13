@@ -1,0 +1,5 @@
+
+running 5 tests
+test clients::azure_openai_responses_http::tests::responses_request_without_model_yields_error ... ok
+test clients::azure_openai_responses_http::tests::responses_request_with_invalid_json_yields_error ... ok
+test clients::azure_openai_responses_http::tests::azure_responses_http_client_is_cloneable ... ok

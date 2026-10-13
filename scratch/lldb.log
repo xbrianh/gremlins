@@ -1,0 +1,5 @@
+(lldb) target create "./target/debug/deps/gremlins-62f0b12733bb1ea3"
+Current executable set to '/var/folders/2g/5r4bmp5519g7vtv8w_lm8gjw0000gn/T/gremlins/gh-92c0/target/debug/deps/gremlins-62f0b12733bb1ea3' (arm64).
+(lldb) settings set -- target.run-args  "azure_openai_responses_http" "--nocapture"
+(lldb) run
+error: process exited with status -1 (attach failed (Not allowed to attach to process.  Look in the console messages (Console.app), near the debugserver entries, when the attach failed.  The subsystem that denied the attach permission will likely have logged an informative message about why it was denied.))

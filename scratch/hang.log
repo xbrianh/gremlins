@@ -1,0 +1,7 @@
+
+running 5 tests
+test clients::azure_openai_responses_http::tests::responses_request_without_model_yields_error ... ok
+test clients::azure_openai_responses_http::tests::responses_request_with_invalid_json_yields_error ... ok
+test clients::azure_openai_responses_http::tests::azure_responses_http_client_is_cloneable ... ok
+test clients::azure_openai_responses_http::tests::send_passes_through_non_responses_requests has been running for over 60 seconds
+test clients::azure_openai_responses_http::tests::send_rewrites_responses_url_and_body_on_wire has been running for over 60 seconds
