@@ -1395,6 +1395,14 @@ impl ProcessGroupGuard {
     fn disarm(&mut self) {
         self.pgid = None;
     }
+
+    fn kill(&mut self) {
+        if let Some(pgid) = self.pgid {
+            unsafe {
+                libc::killpg(pgid as i32, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1499,10 +1507,27 @@ pub(crate) async fn websearch_invoke(ctx: &ToolContext, args_json: &str) -> Stri
         .and_then(|v| v.as_u64())
         .unwrap_or(WEBSEARCH_TIMEOUT_SECS)
         .clamp(1, 3600);
+    // Cap the download size so a huge response cannot exhaust memory before
+    // `invoke` applies `max_tool_output_bytes`. `--max-filesize` makes curl
+    // abort the transfer once the cap is exceeded; we also stop reading at the
+    // cap and kill the process group as a belt-and-suspenders measure.
+    let cap = crate::config::max_tool_output_bytes();
+    let max_filesize = if cap > 0 { cap } else { 64 * 1024 * 1024 };
     let mut cmd = Command::new("curl");
-    cmd.arg("-sL")
+    // `-q` disables `.curlrc` so a local config cannot rewrite the request.
+    // `-sS` silences the progress meter but still surfaces errors on stderr.
+    // `--proto`/`--proto-redir` restrict both the initial transfer and any
+    // `-L` redirects to HTTP(S), blocking `file://` and other schemes.
+    cmd.arg("-qsSL")
+        .arg("--proto")
+        .arg("=http,https")
+        .arg("--proto-redir")
+        .arg("=http,https")
+        .arg("--max-filesize")
+        .arg(max_filesize.to_string())
         .arg("--max-time")
         .arg(timeout_secs.to_string())
+        .arg("--")
         .arg(url);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -1526,34 +1551,88 @@ pub(crate) async fn websearch_invoke(ctx: &ToolContext, args_json: &str) -> Stri
         env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
         cmd.env_clear().envs(env);
     }
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
     #[cfg(unix)]
     let mut process_group_guard = ProcessGroupGuard::new(child.id());
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
-        Err(_) => "[timeout]".into(),
-        Ok(Err(e)) => {
-            #[cfg(unix)]
-            process_group_guard.disarm();
-            format!("Error: {e}")
-        }
-        Ok(Ok(output)) => {
-            #[cfg(unix)]
-            process_group_guard.disarm();
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            if output.status.success() {
-                text.trim().to_string()
-            } else {
-                format!(
-                    "[exit {}]\n{}",
-                    output.status.code().unwrap_or(1),
-                    text.trim()
-                )
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut out_buf = [0u8; 8192];
+    let mut err_buf = [0u8; 8192];
+    let read_all = async {
+        use tokio::io::AsyncReadExt;
+        let mut capped = false;
+        loop {
+            tokio::select! {
+                r = async {
+                    match stdout.as_mut() {
+                        Some(s) => s.read(&mut out_buf).await,
+                        None => Ok(0),
+                    }
+                } => {
+                    match r {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if out.len() + n > cap as usize && cap > 0 {
+                                out.extend_from_slice(&out_buf[..cap as usize - out.len()]);
+                                capped = true;
+                                break;
+                            }
+                            out.extend_from_slice(&out_buf[..n]);
+                        }
+                    }
+                }
+                r = async {
+                    match stderr.as_mut() {
+                        Some(s) => s.read(&mut err_buf).await,
+                        None => Ok(0),
+                    }
+                } => {
+                    match r {
+                        Ok(0) | Err(_) => {}
+                        Ok(n) => err.extend_from_slice(&err_buf[..n]),
+                    }
+                }
             }
         }
+        capped
+    };
+    let capped = match tokio::time::timeout(Duration::from_secs(timeout_secs), read_all).await {
+        Err(_) => {
+            // `process_group_guard` fires as this function returns.
+            return "[timeout]".into();
+        }
+        Ok(capped) => capped,
+    };
+    if capped {
+        // Stop the transfer now that we have enough bytes.
+        #[cfg(unix)]
+        process_group_guard.kill();
+        let _ = child.kill().await;
+    }
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            #[cfg(unix)]
+            process_group_guard.disarm();
+            return format!("Error: {e}");
+        }
+    };
+    #[cfg(unix)]
+    process_group_guard.disarm();
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    text.push_str(&String::from_utf8_lossy(&err));
+    let text = text.trim().to_string();
+    if capped {
+        format!("[truncated at {cap} bytes]\n{text}")
+    } else if status.success() {
+        text
+    } else {
+        format!("[exit {}]\n{text}", status.code().unwrap_or(1))
     }
 }
 
@@ -2691,10 +2770,13 @@ mod tests {
     fn tool_definitions_filter() {
         let all = tool_definitions(None);
         assert_eq!(all.len(), 9);
+        let all_names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
+        assert!(all_names.contains(&"WebSearch"), "got: {all_names:?}");
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         // Task and Done are always available regardless of the filter.
         assert_eq!(names, ["Read", "Bash", "Done", "Task"]);
+        assert!(!names.contains(&"WebSearch"), "got: {names:?}");
     }
 
     #[test]
