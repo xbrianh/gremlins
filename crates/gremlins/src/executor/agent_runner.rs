@@ -167,12 +167,13 @@ pub async fn prepare_agent(
             .unwrap_or(false);
 
     // A stage-supplied system prompt override (the chat gremlin passes the
-    // bundled chat_system.md content here). Plain string, not a path.
+    // bundled chat_system.md content here). Plain string, not a path, and
+    // delivered unchanged — no variable substitution.
     let system_prompt = agent
         .options
         .get("system_prompt")
         .and_then(|v| v.as_str())
-        .map(|raw| vars::substitute_vars(raw, &str_opts, &subst_vars, framework_subs));
+        .map(str::to_owned);
 
     Ok(AgentPrepared {
         name: name.clone(),
