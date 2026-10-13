@@ -30,7 +30,7 @@ use crate::executor::gremlin::Gremlin;
 use crate::executor::gremlin::{GremlinConfig, ScratchDir, WorkDir};
 use crate::executor::parallel::run_parallel;
 use crate::executor::state;
-use crate::executor::state::{Collision, StateStore};
+use crate::executor::state::{Checkout, Collision, StateStore};
 use crate::executor::supervisor::get_run_map;
 use crate::executor::vars;
 use crate::executor::RunError;
@@ -314,7 +314,10 @@ async fn run_agent(
         }
     }
 
-    let local_registry = gremlin
+    let Checkout {
+        store: local_registry,
+        artifact_dir,
+    } = gremlin
         .state
         .checkout_registry(&checkout_keys)
         .await
@@ -347,9 +350,9 @@ async fn run_agent(
     })?;
 
     prepared.cwd = gremlin.cwd().to_string_lossy().into_owned();
-    prepared.artifact_dir = local_registry.artifact_dir().to_string_lossy().into_owned();
+    prepared.artifact_dir = artifact_dir.to_string_lossy().into_owned();
 
-    std::fs::create_dir_all(local_registry.artifact_dir())?;
+    std::fs::create_dir_all(&artifact_dir)?;
 
     let stage_env = gremlin.env.clone();
 
@@ -416,7 +419,7 @@ async fn run_agent(
         on_timeout_prompt: None,
         max_retries: 3,
         cwd: Some(gremlin.cwd()),
-        artifact_dir: Some(local_registry.artifact_dir().to_path_buf()),
+        artifact_dir: Some(artifact_dir.clone()),
         idle_timeout: None,
         extra_env: Some(stage_env),
         expected_artifact_paths: prepared
@@ -661,7 +664,10 @@ async fn run_exec(
         }
     }
 
-    let local_registry = gremlin
+    let Checkout {
+        store: local_registry,
+        artifact_dir,
+    } = gremlin
         .state
         .checkout_registry(&checkout_keys)
         .await
@@ -692,7 +698,7 @@ async fn run_exec(
     })?;
 
     prepared.cwd = gremlin.cwd();
-    prepared.artifact_dir = local_registry.artifact_dir().to_path_buf();
+    prepared.artifact_dir = artifact_dir;
     prepared.state_dir = gremlin.state.state_dir().to_path_buf();
     prepared.env = gremlin.env.clone();
     prepared.base_env = gremlin.runtime_config.base_process_env.clone();
