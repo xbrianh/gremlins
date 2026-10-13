@@ -259,6 +259,9 @@ pub async fn run_supervisor(
     get_run_map();
     init_event_broadcast();
     init_connection_counter();
+    // Capture the base environment once at daemon startup. This is the
+    // snapshot chat requests without an explicit `env` field fall back to.
+    let _ = base_process_env();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
     loop {
@@ -1839,6 +1842,36 @@ fn chat_gremlins() -> &'static Arc<tokio::sync::Mutex<HashMap<String, Gremlin>>>
     CHAT_GREMLINS.get_or_init(|| Arc::new(tokio::sync::Mutex::new(HashMap::new())))
 }
 
+/// The daemon's process environment, captured once at supervisor startup.
+///
+/// Chat requests without an `env` field fall back to this stored snapshot
+/// rather than re-reading `std::env::vars()` on every turn, so a later
+/// process-environment mutation cannot silently change tool environments.
+static BASE_PROCESS_ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+fn base_process_env() -> &'static HashMap<String, String> {
+    BASE_PROCESS_ENV.get_or_init(|| std::env::vars().collect())
+}
+
+/// Resolve the chat gremlin's in-memory environment for a request.
+///
+/// A JSON object supplied by the TUI wins; otherwise the caller-supplied
+/// daemon baseline is used. Non-string values are ignored so a malformed
+/// object cannot panic the daemon. The resolved map lives only on
+/// `Gremlin.env` and is never persisted to state or logs.
+fn resolve_chat_env(
+    request: &Value,
+    base_env: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    match request.get("env") {
+        Some(Value::Object(map)) => map
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect(),
+        _ => base_env.clone(),
+    }
+}
+
 async fn handle_chat(
     request: &Value,
     state_root: &Path,
@@ -1875,15 +1908,7 @@ async fn handle_chat(
     // absent (non-TUI callers), fall back to the daemon's base process env
     // snapshot so commands still run with a sane environment. The map lives
     // only on the in-memory `Gremlin.env` — never persisted to state or logs.
-    let env: HashMap<String, String> = match request.get("env") {
-        Some(Value::Object(map)) => map
-            .iter()
-            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-            .collect(),
-        // Fall back to the daemon's process environment (the same snapshot
-        // `RuntimeConfig::snapshot` captures as `base_process_env`).
-        _ => std::env::vars().collect(),
-    };
+    let env = resolve_chat_env(request, base_process_env());
 
     // 1. Init config
     if let Err(e) = config::init_global() {
@@ -2968,9 +2993,192 @@ fn validate_launch_inputs(
 
 #[cfg(test)]
 mod tests {
-    use super::create_chat_gremlin;
+    use super::{create_chat_gremlin, resolve_chat_env};
     use crate::builders::{AgentBuilder, DefinitionBuilder};
+    use crate::executor::socket;
+    use crate::test_support::Sandbox;
+    use serde_json::Value;
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn read_until_type(
+        reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+        event_type: &str,
+    ) -> Value {
+        read_until_type_inner(reader, event_type)
+            .await
+            .unwrap_or_else(|e| panic!("waiting for {event_type}: {e}"))
+    }
+
+    async fn read_until_type_inner(
+        reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+        event_type: &str,
+    ) -> Result<Value, String> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let line = socket::read_json_line(reader)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let Some(line) = line else {
+                    return Err("chat event stream closed".to_string());
+                };
+                if line.get("type").and_then(|v| v.as_str()) == Some(event_type) {
+                    return Ok(line);
+                }
+            }
+        })
+        .await
+        .map_err(|_| "timed out".to_string())?
+    }
+
+    /// Wait until the chat gremlin has been re-inserted after its turn, then
+    /// return a snapshot of its in-memory environment.
+    async fn wait_for_chat_gremlin_env(id: &str) -> HashMap<String, String> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let env = {
+                    let gremlins = super::chat_gremlins().lock().await;
+                    gremlins.get(id).map(|g| g.env.clone())
+                };
+                if let Some(env) = env {
+                    return env;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
+    }
+
+    #[test]
+    fn resolve_chat_env_prefers_request_env() {
+        let request = serde_json::json!({
+            "env": {"GREMLINS_CHAT_ENV": "from-tui", "ignored": 42}
+        });
+        let base = HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]);
+
+        let resolved = resolve_chat_env(&request, &base);
+
+        assert_eq!(
+            resolved.get("GREMLINS_CHAT_ENV").map(String::as_str),
+            Some("from-tui")
+        );
+        assert!(!resolved.contains_key("ignored"));
+        assert!(!resolved.contains_key("PATH"));
+    }
+
+    #[test]
+    fn resolve_chat_env_falls_back_to_base_snapshot() {
+        let request = serde_json::json!({});
+        let base = HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]);
+
+        let resolved = resolve_chat_env(&request, &base);
+
+        assert_eq!(resolved, base);
+    }
+
+    #[tokio::test]
+    async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "cmd:echo"}"#));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        // `run_supervisor` captures this at daemon startup; establish the
+        // same snapshot here so the absent-field fallback can be asserted.
+        let base_env = super::base_process_env().clone();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let chat_state = Arc::new(tokio::sync::Mutex::new(
+            super::ConnectionChatState::default(),
+        ));
+
+        let chat = |turn: &str, env: Option<serde_json::Value>, id: Option<&str>| {
+            let mut req = serde_json::json!({
+                "op": "chat",
+                "text": "hello",
+                "turn": turn,
+                "project_root": project_root.to_string_lossy(),
+            });
+            if let Some(env) = env {
+                req["env"] = env;
+            }
+            if let Some(id) = id {
+                req["id"] = serde_json::Value::String(id.to_string());
+            }
+            req
+        };
+
+        // First contact: the request env seeds the newly created gremlin.
+        super::handle_chat(
+            &chat(
+                "1",
+                Some(serde_json::json!({"GREMLINS_CHAT_ENV_TEST": "first"})),
+                None,
+            ),
+            &state_root,
+            &writer,
+            &chat_state,
+        )
+        .await;
+        let ack = read_until_type(&mut reader, "ok").await;
+        let id = ack["id"].as_str().unwrap().to_string();
+        {
+            let env = wait_for_chat_gremlin_env(&id).await;
+            assert_eq!(
+                env.get("GREMLINS_CHAT_ENV_TEST").map(String::as_str),
+                Some("first")
+            );
+        }
+
+        // Reuse: a later turn's request env replaces the captured env.
+        super::handle_chat(
+            &chat(
+                "2",
+                Some(serde_json::json!({"GREMLINS_CHAT_ENV_TEST": "second"})),
+                Some(&id),
+            ),
+            &state_root,
+            &writer,
+            &chat_state,
+        )
+        .await;
+        read_until_type(&mut reader, "ok").await;
+        {
+            let env = wait_for_chat_gremlin_env(&id).await;
+            assert_eq!(
+                env.get("GREMLINS_CHAT_ENV_TEST").map(String::as_str),
+                Some("second")
+            );
+        }
+
+        // Absent env: fall back to the daemon's base process snapshot.
+        super::handle_chat(
+            &chat("3", None, Some(&id)),
+            &state_root,
+            &writer,
+            &chat_state,
+        )
+        .await;
+        read_until_type(&mut reader, "ok").await;
+        {
+            let env = wait_for_chat_gremlin_env(&id).await;
+            assert_eq!(
+                env, base_env,
+                "absent env must fall back to the daemon base process snapshot"
+            );
+        }
+
+        super::cleanup_chat_gremlin(&id).await;
+        chat_state.lock().await.ids.remove(&id);
+    }
 
     /// The chat system prompt must teach the agent about the TUI surface it
     /// is embedded in. This test is the drift check between the bundled
