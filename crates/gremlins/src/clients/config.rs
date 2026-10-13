@@ -59,6 +59,32 @@ Scratch root:  {scratch}\n\
     )
 }
 
+/// System prompt injected into a forked (Fork) agent invocation. The fork
+/// inherits the parent's full conversation history, so this preamble is
+/// minimal: it lists only the non-Task tools and tells the child not to fork
+/// again.
+pub(crate) fn fork_system_prompt(work_root: &Path, scratch_root: &Path) -> String {
+    format!(
+        "\
+<tools>\n\
+Read (read files), Write (create files), Edit (targeted \
+replacements), Grep (regex search), Glob (find files \
+by pattern), Bash (shell commands), Done\n\
+</tools>\n\
+This is a forked child agent with the parent's full context. Do not call \
+Task(kind=\"Fork\") again.\n\
+Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
+<directories>\n\
+Work root:     {work}\n\
+Scratch root:  {scratch}\n\
+(use scratch for test cruft and temporary files)\n\
+</directories>\
+",
+        work = work_root.display(),
+        scratch = scratch_root.display(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // ProviderAuth
 // ---------------------------------------------------------------------------
@@ -403,6 +429,25 @@ mod tests {
             prompt.contains("Call Done(summary) alongside your final message"),
             "task prompt must include Done instruction; got: {prompt}"
         );
+    }
+
+    #[test]
+    fn test_fork_system_prompt_lists_no_task_and_forbids_forking() {
+        let prompt = fork_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        assert!(
+            prompt.contains("Done"),
+            "fork prompt must include Done in tool roster; got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Task,"),
+            "fork prompt must not list Task; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Do not call Task(kind=\"Fork\") again"),
+            "fork prompt must forbid further forking; got: {prompt}"
+        );
+        assert!(prompt.contains("/work"));
+        assert!(prompt.contains("/scratch"));
     }
 
     // -----------------------------------------------------------------------

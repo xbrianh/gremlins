@@ -220,6 +220,7 @@ pub(crate) async fn run_agent_loop(
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
+        parent_history: None,
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter);
 
@@ -285,6 +286,7 @@ pub(crate) async fn run_agent_loop_nested(
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
     skip_temperature: bool,
+    prepopulated_messages: Option<Vec<Message>>,
 ) -> Result<CompletedRun, ClientError> {
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
@@ -319,7 +321,7 @@ pub(crate) async fn run_agent_loop_nested(
         &log_tx,
         None,
         None,
-        None,
+        prepopulated_messages,
     )
     .await;
     if let Some(ref tx) = log_tx {
@@ -1330,6 +1332,11 @@ async fn run_agent_loop_core(
         // single response cannot spawn an unbounded number of child loops.
         // Wrapped in a tokio::select! with maybe_pause so the operator can
         // interrupt a long-running tool batch.
+        let mut tool_ctx = tool_ctx.clone();
+        // Give every tool invocation in this batch a point-in-time clone of
+        // the parent conversation. Fork uses it to seed the child agent;
+        // other tools ignore it.
+        tool_ctx.parent_history = Some(history.clone());
         let ctx = tool_ctx.clone();
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
@@ -4058,6 +4065,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
+            parent_history: None,
         }
     }
 

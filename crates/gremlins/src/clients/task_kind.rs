@@ -1,6 +1,6 @@
 //! The fixed set of task kinds a `Task` tool invocation can name.
 //!
-//! `TaskKind` is the single source of truth for the eight allowed spellings.
+//! `TaskKind` is the single source of truth for the nine allowed spellings.
 //! Tool dispatch, `task-clients` config parsing, and task-client model
 //! selection all validate through this one enum — none of them keep an
 //! independent string list.
@@ -21,6 +21,7 @@ pub enum TaskKind {
     Review,
     Write,
     Refactor,
+    Fork,
 }
 
 impl TaskKind {
@@ -35,6 +36,7 @@ impl TaskKind {
             TaskKind::Review => "Review",
             TaskKind::Write => "Write",
             TaskKind::Refactor => "Refactor",
+            TaskKind::Fork => "Fork",
         }
     }
 
@@ -52,12 +54,13 @@ impl TaskKind {
             "Review" => Some(TaskKind::Review),
             "Write" => Some(TaskKind::Write),
             "Refactor" => Some(TaskKind::Refactor),
+            "Fork" => Some(TaskKind::Fork),
             _ => None,
         }
     }
 
-    /// The eight canonical spellings, in declaration order.
-    pub const ALL: [TaskKind; 8] = [
+    /// The nine canonical spellings, in declaration order.
+    pub const ALL: [TaskKind; 9] = [
         TaskKind::Scout,
         TaskKind::Implement,
         TaskKind::Research,
@@ -66,6 +69,7 @@ impl TaskKind {
         TaskKind::Review,
         TaskKind::Write,
         TaskKind::Refactor,
+        TaskKind::Fork,
     ];
 }
 
@@ -93,5 +97,11 @@ mod tests {
         assert_eq!(TaskKind::parse("Scout the codebase"), None);
         assert_eq!(TaskKind::parse(""), None);
         assert_eq!(TaskKind::parse("Bogus"), None);
+    }
+
+    #[test]
+    fn fork_spelling() {
+        assert_eq!(TaskKind::parse("Fork"), Some(TaskKind::Fork));
+        assert_eq!(TaskKind::Fork.as_str(), "Fork");
     }
 }
