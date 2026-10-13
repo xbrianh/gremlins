@@ -856,10 +856,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         }
                                     }
                                     CommandResult::Lines(lines) => {
-                                        live_area.push_transcript_line(format!("> {input}"));
-                                        for line in &lines {
-                                            live_area.push_transcript_line(line.clone());
-                                        }
+                                        let mut block = Vec::with_capacity(lines.len() + 1);
+                                        block.push(format!("> {input}"));
+                                        block.extend(lines.iter().cloned());
+                                        live_area.push_transcript_block(block);
                                     }
                                     CommandResult::RestartChat => {
                                         // Clear current turn.
@@ -1259,9 +1259,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Socket-op results ─────────────────────────────
             Some(lines) = result_rx.recv() => {
-                for line in lines {
-                    live_area.push_transcript_line(line);
-                }
+                live_area.push_transcript_block(lines);
             }
 
             // ── Chat events ────────────────────────────────

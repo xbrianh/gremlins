@@ -219,14 +219,28 @@ impl TranscriptWidget {
     /// Push a pre-styled line into the FIFO with the same insertion logic
     /// as `push_transcript_line`.
     pub fn push_styled_line(&mut self, styled: Line<'static>) {
+        self.push_styled_block(vec![styled]);
+    }
+
+    /// Append a block of pre-styled lines with the same insertion logic as
+    /// `push_styled_line`, but applying the blank-line padding exactly once
+    /// before the first line of the block. Lines within the block are
+    /// appended contiguously (no blank lines between them), and the blank
+    /// separator inserted during an active turn is placed after the block.
+    pub fn push_styled_block(&mut self, block: Vec<Line<'static>>) {
         self.invalidate_desired_cache();
+        if block.is_empty() {
+            return;
+        }
         match self.turn_start {
             Some(t) => {
                 let mut inserted = 0usize;
-                self.scrollable.insert(t, styled);
-                inserted += 1;
+                for styled in block {
+                    self.scrollable.insert(t + inserted, styled);
+                    inserted += 1;
+                }
                 if t > 0 {
-                    self.scrollable.insert(t, Line::from(""));
+                    self.scrollable.insert(t + inserted, Line::from(""));
                     inserted += 1;
                 }
                 self.turn_start = Some(t + inserted);
@@ -239,9 +253,21 @@ impl TranscriptWidget {
                     self.scrollable.push(Line::from(""));
                     self.scrollable.push(Line::from(""));
                 }
-                self.scrollable.push(styled);
+                for styled in block {
+                    self.scrollable.push(styled);
+                }
             }
         }
+    }
+
+    /// Append a block of system messages with the default body text style,
+    /// forwarding to [`push_styled_block`](Self::push_styled_block).
+    pub fn push_transcript_block(&mut self, block: Vec<String>) {
+        let styled = block
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(DEFAULT_THEME.text))))
+            .collect();
+        self.push_styled_block(styled);
     }
 
     /// Start a new turn with the given prompt: push a separator rule and the
@@ -1806,6 +1832,121 @@ mod tests {
         // "system note" appears above the pinned turn.
         assert_eq!(text[0], "system note");
         assert!(text.contains(&"▍» hi".to_string()));
+    }
+
+    #[test]
+    fn transcript_block_no_active_turn_is_contiguous() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_transcript_block(vec![
+            "line one".to_string(),
+            "line two".to_string(),
+            "line three".to_string(),
+        ]);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        // No blank lines between the block's lines.
+        assert_eq!(text, vec!["line one", "line two", "line three"]);
+    }
+
+    #[test]
+    fn transcript_block_no_active_turn_pads_once_before_block() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_transcript_line("prior".to_string());
+        transcript.push_transcript_block(vec!["line one".to_string(), "line two".to_string()]);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        // Two blank lines before the block (completed-history padding), then
+        // the block lines contiguously.
+        assert_eq!(text, vec!["prior", "", "", "line one", "line two"]);
+    }
+
+    #[test]
+    fn transcript_block_inserted_before_pinned_turn() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+        transcript.push_transcript_block(vec!["block one".to_string(), "block two".to_string()]);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        // The block lines appear above the pinned turn, contiguously. The
+        // turn starts at index 0 (no prior content), so no blank separator
+        // is inserted (mirroring `push_styled_line`). The response is still
+        // in the accumulator (not yet rebuilt into the FIFO).
+        assert_eq!(text, vec!["block one", "block two", "▍» hi"]);
+    }
+
+    #[test]
+    fn transcript_block_inserted_before_pinned_turn_with_prior_content() {
+        // Prior content means `submit_prompt` pushes a separator rule, so the
+        // turn is pinned at index > 0 and the `t > 0` blank-separator branch
+        // runs. The block lines stay contiguous above the pinned turn, with
+        // exactly one blank separator between the block and the prompt.
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_transcript_line("prior".to_string());
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+        transcript.push_transcript_block(vec!["block one".to_string(), "block two".to_string()]);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text,
+            vec![
+                "prior",
+                "────────────────────────────────────────",
+                "block one",
+                "block two",
+                "",
+                "▍» hi"
+            ]
+        );
+    }
+
+    #[test]
+    fn transcript_block_single_line_matches_single_line_insertion() {
+        // A one-line block inserted during a turn must produce the same FIFO
+        // layout as `push_styled_line`, including when prior content pins the
+        // turn at index > 0 (exercising the blank-separator branch).
+        let mut block = TranscriptWidget::new();
+        block.push_transcript_line("prior".to_string());
+        block.submit_prompt("hi".to_string());
+        block.push_response("resp");
+        block.push_transcript_block(vec!["system note".to_string()]);
+
+        let mut single = TranscriptWidget::new();
+        single.push_transcript_line("prior".to_string());
+        single.submit_prompt("hi".to_string());
+        single.push_response("resp");
+        single.push_transcript_line("system note".to_string());
+
+        let block_text: Vec<String> = block
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let single_text: Vec<String> = single
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(block_text, single_text);
     }
 
     #[test]
