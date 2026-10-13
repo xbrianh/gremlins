@@ -1036,27 +1036,14 @@ impl InputBarWidget {
         (wrapped_height(&[text], width).max(1).min(u16::MAX as usize)) as u16
     }
 
-    /// Build the full styled line: prompt + input text (or a faint hint when
-    /// the input is empty). The hint is truncated to `width` cells so an empty
-    /// bar never wraps onto a second row on a narrow terminal.
-    fn full_line(input: &str, width: u16) -> Line<'static> {
+    /// Build the full styled line: prompt + input text, or just the prompt
+    /// when the input is empty.
+    fn full_line(input: &str, _width: u16) -> Line<'static> {
         if input.is_empty() {
-            let hint = "say it like you mean it — /help for the brass";
-            // Reserve two cells for the `» ` chevron prefix.
-            let budget = width.saturating_sub(2) as usize;
-            let hint: String = hint.chars().take(budget).collect();
-            return Line::from(vec![
-                Span::styled(
-                    format!("{} ", glyph::CHEVRON),
-                    Style::default().fg(DEFAULT_THEME.accent_primary),
-                ),
-                Span::styled(
-                    hint,
-                    Style::default()
-                        .fg(DEFAULT_THEME.subtle)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ]);
+            return Line::from(vec![Span::styled(
+                format!("{} ", glyph::CHEVRON),
+                Style::default().fg(DEFAULT_THEME.accent_primary),
+            )]);
         }
         Line::from(vec![
             Span::styled(
