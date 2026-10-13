@@ -2963,7 +2963,7 @@ mod tests {
             "the chat prompt must contain the TUI self-knowledge section"
         );
         assert!(
-            prompt.contains("## Agent-side execution path"),
+            prompt.contains("### Agent-side execution path"),
             "the chat prompt must document the CLI execution path"
         );
 
