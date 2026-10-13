@@ -4,6 +4,7 @@ pub mod chat;
 mod chat_context;
 pub mod client;
 pub mod commands;
+pub mod completion;
 pub mod editor;
 pub mod markdown;
 pub mod motif;
@@ -716,6 +717,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             // position.
                                             app.input = text;
                                             app.reset_cursor_to_end();
+                                            app.clear_completion();
                                             app.history_cursor = None;
                                             live_area.ensure_input_cursor_visible(
                                                 app.input_cursor,
@@ -774,6 +776,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
                             app.input.clear();
                             app.input_cursor = 0;
+                            app.clear_completion();
                             live_area.reset_input_scroll();
                             // If a chat request is in-flight, cancel it on the
                             // daemon. Do not abort `chat_task` — it may be
@@ -798,6 +801,61 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 active_turn = None;
                             }
                         }
+                        KeyCode::Tab => {
+                            // Debug overlay owns a prompt; completion is for the
+                            // main input bar only.
+                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                continue;
+                            }
+
+                            if let Some(state) = app.completion.as_ref() {
+                                let span = state.span.clone();
+                                app.completion_advance();
+                                let Some(candidate) = app.completion.as_ref().map(|s| s.current().to_string()) else {
+                                    continue;
+                                };
+                                app.replace_input_span(span, candidate);
+                            } else {
+                                let cursor = app.input_cursor.min(app.input.len());
+                                let Some(mut state) = completion::complete(&app.input, cursor) else {
+                                    continue;
+                                };
+                                let span = state.span.clone();
+                                if state.candidates.len() == 1 {
+                                    let candidate = state.candidates[0].clone();
+                                    app.replace_input_span(span, candidate);
+                                } else {
+                                    let prefix = completion::common_prefix(&state.candidates);
+                                    state.index = 0;
+                                    app.set_completion(state);
+                                    app.replace_input_span(span, prefix);
+                                }
+                            }
+                            live_area.ensure_input_cursor_visible(
+                                app.input_cursor,
+                                &app.input,
+                                app.width,
+                            );
+                        }
+                        KeyCode::BackTab => {
+                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                                continue;
+                            }
+                            let Some(state) = app.completion.as_ref() else {
+                                continue;
+                            };
+                            let span = state.span.clone();
+                            app.completion_rewind();
+                            let Some(candidate) = app.completion.as_ref().map(|s| s.current().to_string()) else {
+                                continue;
+                            };
+                            app.replace_input_span(span, candidate);
+                            live_area.ensure_input_cursor_visible(
+                                app.input_cursor,
+                                &app.input,
+                                app.width,
+                            );
+                        }
                         KeyCode::Enter => {
                             // Debug overlay owns a prompt: submit into its
                             // scrollback instead of the main input bar.
@@ -816,6 +874,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
                             let input = std::mem::take(&mut app.input);
                             app.input_cursor = 0;
+                            app.clear_completion();
                             live_area.reset_input_scroll();
                             if input.is_empty() {
                                 continue;
@@ -972,6 +1031,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         }
                                         app.input.clear();
                                         app.input_cursor = 0;
+                                        app.clear_completion();
                                         live_area.reset_input_scroll();
                                         app.active_request = false;
                                         active_turn = None;
@@ -1047,6 +1107,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.cursor_left();
+                            app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 &app.input,
@@ -1058,6 +1119,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.cursor_right();
+                            app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 &app.input,
@@ -1069,6 +1131,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.cursor_home();
+                            app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 &app.input,
@@ -1080,6 +1143,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.cursor_end();
+                            app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 &app.input,
@@ -1091,6 +1155,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 prompt.pop();
                             } else {
                                 app.delete_before_cursor();
+                                app.clear_completion();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
                                     &app.input,
@@ -1103,6 +1168,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.delete_at_cursor();
+                            app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 &app.input,
@@ -1114,6 +1180,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 prompt.push(ch);
                             } else {
                                 app.insert_char(ch);
+                                app.clear_completion();
                                 // Typing a fresh character resets history navigation.
                                 app.history_cursor = None;
                                 live_area.ensure_input_cursor_visible(
@@ -1129,6 +1196,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 if let Some(entry) = app.history_up().map(|s| s.to_string()) {
                                     app.input = entry;
                                     app.reset_cursor_to_end();
+                                    app.clear_completion();
                                     live_area.ensure_input_cursor_visible(
                                         app.input_cursor,
                                         &app.input,
@@ -1143,6 +1211,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             && app.history_cursor.is_some() => {
                                 app.input = app.history_down().unwrap_or("").to_string();
                                 app.reset_cursor_to_end();
+                                app.clear_completion();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
                                     &app.input,

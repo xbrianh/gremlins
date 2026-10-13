@@ -276,6 +276,7 @@ impl<B: Backend> LiveArea<B> {
             overlay: app.overlay.as_ref(),
             active_runs: &app.active_runs,
             content_height: self.scrollable_rows(),
+            completion_preview: app.completion_preview_suffix(),
         };
 
         let width = self.cols;

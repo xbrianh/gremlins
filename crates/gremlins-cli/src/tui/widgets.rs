@@ -54,6 +54,8 @@ pub struct RenderContext<'a> {
     pub active_runs: &'a HashMap<String, ActiveRun>,
     /// Height of the content region (viewport minus the fixed bars).
     pub content_height: u16,
+    /// Inline completion preview suffix (paint-only, never submitted).
+    pub completion_preview: Option<&'a str>,
 }
 
 impl<'a> RenderContext<'a> {
@@ -1061,6 +1063,25 @@ impl InputBarWidget {
         ])
     }
 
+    /// Extend the real input line with a dimmed inline preview suffix.
+    ///
+    /// The preview is paint-only: it never changes the buffer, cursor, or
+    /// wrapping measurements beyond what the full candidate path would
+    /// occupy.
+    fn preview_line(base: Line<'static>, preview: Option<&str>, _width: u16) -> Line<'static> {
+        let Some(preview) = preview.filter(|p| !p.is_empty()) else {
+            return base;
+        };
+        let mut spans = base.spans;
+        spans.push(Span::styled(
+            preview.to_string(),
+            Style::default()
+                .fg(DEFAULT_THEME.subtle)
+                .add_modifier(Modifier::DIM),
+        ));
+        Line::from(spans)
+    }
+
     /// Compute the cursor's (row, column) within the wrapped view.
     ///
     /// The cursor cell is located by rendering the input through the same
@@ -1222,10 +1243,13 @@ impl LiveAreaWidget for InputBarWidget {
             return;
         }
 
-        // Build the wrapped paragraph, then slice out the visible vertical
-        // window so the cursor stays in view.
+        // Build the full styled line, adding the paint-only preview suffix
+        // immediately after the real input. Measurement and cursor position
+        // still use only `ctx.input`.
+        let full_line = Self::full_line(ctx.input, width);
         let paragraph =
-            Paragraph::new(Self::full_line(ctx.input, width)).wrap(Wrap { trim: false });
+            Paragraph::new(Self::preview_line(full_line, ctx.completion_preview, width))
+                .wrap(Wrap { trim: false });
 
         // Render into a full-width buffer at the paragraph's natural height,
         // then copy the visible window into `area`.
@@ -1337,6 +1361,8 @@ impl LiveAreaWidget for InfoBarWidget {
         spans.push(Span::styled("  ", band));
         spans.push(Span::styled("Ctrl+G", malachite));
         spans.push(Span::styled(" editor  ", ivory));
+        spans.push(Span::styled("Tab", malachite));
+        spans.push(Span::styled(" filepath  ", ivory));
         spans.push(Span::styled("/help", malachite));
 
         let paragraph = Paragraph::new(Line::from(spans)).style(band);
@@ -2303,6 +2329,7 @@ mod tests {
             overlay: None,
             active_runs: EMPTY.get_or_init(HashMap::new),
             content_height: 0,
+            completion_preview: None,
         }
     }
 

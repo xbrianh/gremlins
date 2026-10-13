@@ -209,6 +209,7 @@ fn help_text() -> Vec<String> {
         "  Ctrl+L           — redraw screen".to_string(),
         "  Esc              — clear input / cancel in-flight chat".to_string(),
         "  Ctrl+G           — open external editor".to_string(),
+        "  Tab              — complete filepaths (Shift+Tab cycles back)".to_string(),
         "".to_string(),
         "scrolling: use terminal scrollback / tmux copy mode".to_string(),
     ]
