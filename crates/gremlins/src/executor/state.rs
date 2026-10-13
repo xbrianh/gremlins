@@ -80,6 +80,21 @@ pub enum BlobMode {
 }
 
 // ---------------------------------------------------------------------------
+// Checkout
+// ---------------------------------------------------------------------------
+
+/// The result of localizing a registry subset via [`StateStore::checkout_registry`].
+///
+/// The `store` field is the scoped store that only allows access to the
+/// checked-out keys, and `artifact_dir` is where that scoped store writes its
+/// artifacts on disk.
+#[derive(Debug)]
+pub struct Checkout {
+    pub store: Box<dyn StateStore>,
+    pub artifact_dir: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
 // StateStore trait — the unified storage backend seam
 // ---------------------------------------------------------------------------
 
@@ -212,7 +227,7 @@ pub trait StateStore: Send + Sync + Debug {
     async fn checkout_registry(
         &self,
         keys: &[String],
-    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+    ) -> Result<Checkout, Box<dyn std::error::Error>> {
         let _ = keys;
         Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -766,7 +781,7 @@ impl FileSystemStateStore {
     pub async fn checkout_registry(
         &self,
         keys: &[String],
-    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+    ) -> Result<Checkout, Box<dyn std::error::Error>> {
         let temp_dir = tempfile::TempDir::new()?;
         let artifact_dir = temp_dir.path().join("artifacts");
         tokio::fs::create_dir_all(&artifact_dir).await?;
@@ -814,11 +829,14 @@ impl FileSystemStateStore {
             allowed.insert(key.clone());
         }
 
-        Ok(Box::new(ScopedFileSystemStateStore {
-            inner: new_store,
-            _temp: temp_dir,
-            allowed_keys: allowed,
-        }))
+        Ok(Checkout {
+            store: Box::new(ScopedFileSystemStateStore {
+                inner: new_store,
+                _temp: temp_dir,
+                allowed_keys: allowed,
+            }),
+            artifact_dir,
+        })
     }
 }
 
@@ -1190,7 +1208,7 @@ impl StateStore for FileSystemStateStore {
     async fn checkout_registry(
         &self,
         keys: &[String],
-    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+    ) -> Result<Checkout, Box<dyn std::error::Error>> {
         self.checkout_registry(keys).await
     }
 
@@ -1368,7 +1386,7 @@ impl StateStore for ScopedFileSystemStateStore {
     async fn checkout_registry(
         &self,
         keys: &[String],
-    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+    ) -> Result<Checkout, Box<dyn std::error::Error>> {
         self.inner.checkout_registry(keys).await
     }
 
@@ -1577,7 +1595,7 @@ impl StateData {
     pub async fn checkout_registry(
         &self,
         keys: &[String],
-    ) -> Result<Box<dyn StateStore>, Box<dyn std::error::Error>> {
+    ) -> Result<Checkout, Box<dyn std::error::Error>> {
         self.store.checkout_registry(keys).await
     }
 
@@ -2763,7 +2781,10 @@ mod tests {
         write_file(&store, "b", "content-b").await;
         write_file(&store, "c", "content-c").await;
 
-        let localized = store
+        let Checkout {
+            store: localized,
+            artifact_dir: _,
+        } = store
             .checkout_registry(&["artifact://a".to_string(), "artifact://c".to_string()])
             .await
             .unwrap();
@@ -2789,7 +2810,10 @@ mod tests {
         let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "a", "content-a").await;
 
-        let localized = store.checkout_registry(&[]).await.unwrap();
+        let Checkout {
+            store: localized,
+            artifact_dir: _,
+        } = store.checkout_registry(&[]).await.unwrap();
         assert!(localized.keys().await.is_empty());
     }
 
@@ -2800,14 +2824,17 @@ mod tests {
         let store = FileSystemStateStore::from_path(state_dir);
         write_file(&store, "secret", "classified").await;
 
-        let localized = store
+        let Checkout {
+            store: _localized,
+            artifact_dir,
+        } = store
             .checkout_registry(&["artifact://secret".to_string()])
             .await
             .unwrap();
 
         // The checkout lives in a different directory from the source.
-        assert_ne!(localized.artifact_dir(), store.artifact_dir());
-        assert!(!localized.artifact_dir().starts_with(store.artifact_dir()));
+        assert_ne!(artifact_dir, store.artifact_dir());
+        assert!(!artifact_dir.starts_with(store.artifact_dir()));
     }
 
     // --- artifact_dir tests ---
@@ -2925,7 +2952,7 @@ mod tests {
         let result = store.checkout_registry(&["key".to_string()]).await;
         match result {
             Err(e) => assert!(e.to_string().contains("not supported")),
-            Ok(_) => panic!("expected error"),
+            Ok(_checkout) => panic!("expected error"),
         }
     }
 }
