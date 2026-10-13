@@ -1862,6 +1862,14 @@ async fn handle_chat(
         .get("turn")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // The operator's project root, supplied by the TUI. When absent (non-TUI
+    // callers), fall back to the daemon's resolved project root — resolved
+    // *after* `init_global()` so `paths.project-root` is visible.
+    let project_root = request
+        .get("project_root")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
 
     // 1. Init config
     if let Err(e) = config::init_global() {
@@ -1869,6 +1877,8 @@ async fn handle_chat(
         let _ = writer.write_json_line(&resp).await;
         return;
     }
+
+    let project_root = project_root.unwrap_or_else(config::project_root);
 
     // 2. Get default client
     let default_client = match config::global_config() {
@@ -1951,7 +1961,12 @@ async fn handle_chat(
             id
         }
         None => {
-            let gremlin = match create_chat_gremlin(&definition, &default_client, state_root) {
+            let gremlin = match create_chat_gremlin(
+                &definition,
+                &default_client,
+                state_root,
+                &project_root,
+            ) {
                 Ok(g) => g,
                 Err(e) => {
                     let resp = error_response(&e);
@@ -2421,16 +2436,16 @@ fn create_chat_gremlin(
     definition: &crate::definition::StaticDefinition,
     default_client: &str,
     _state_root: &Path,
+    project_root: &Path,
 ) -> Result<Gremlin, String> {
     use crate::clients::client::Client;
-    use crate::config;
     use crate::definition::GremlinDefinition;
     use crate::executor::gremlin::{validate_gremlin_id, Gremlin, RuntimeConfig, ScratchDir};
     use crate::executor::state::{self, BlobMode, StateData};
     use serde_json::{Map, Value};
     use std::collections::HashMap;
 
-    let project_root = config::project_root();
+    let project_root = project_root.to_path_buf();
 
     // Generate ID — use an atomic counter so concurrent chat sessions
     // never collide. Chat gremlins are ephemeral so they never appear
@@ -2929,4 +2944,46 @@ fn validate_launch_inputs(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_chat_gremlin;
+    use crate::builders::{AgentBuilder, DefinitionBuilder};
+
+    /// The chat gremlin must anchor against the caller-supplied project root:
+    /// it is recorded in `state.json` and `gremlin.cwd()` resolves to it even
+    /// though the gremlin has no worktree.
+    #[test]
+    fn create_chat_gremlin_seeds_project_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("operator-project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = tmp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let stage = AgentBuilder::new("chat").prompt("hello").build().unwrap();
+        let definition = DefinitionBuilder::new("chat", "cmd:echo")
+            .stage(stage)
+            .build()
+            .unwrap();
+
+        let gremlin =
+            create_chat_gremlin(&definition, "cmd:echo", &state_root, &project_root).unwrap();
+
+        assert_eq!(
+            gremlin.state.read_str("project_root"),
+            project_root.to_string_lossy().into_owned(),
+            "state.json must record the operator's project root"
+        );
+        assert_eq!(
+            gremlin.cwd(),
+            project_root,
+            "gremlin.cwd() must resolve to the project root"
+        );
+        assert!(
+            gremlin.workdir.is_none(),
+            "chat gremlins must not have a worktree"
+        );
+    }
 }

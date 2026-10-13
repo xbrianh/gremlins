@@ -1,6 +1,7 @@
 pub mod app;
 pub mod buffer;
 pub mod chat;
+mod chat_context;
 pub mod client;
 pub mod commands;
 pub mod editor;
@@ -32,6 +33,44 @@ fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
     if let Some(handle) = handle.take() {
         handle.abort();
     }
+}
+
+/// Overall deadline for the whole repository-context snapshot. Each git
+/// subprocess is individually capped, but several run in sequence; this
+/// bounds the total so a hung `git` cannot stall request construction for
+/// tens of seconds.
+const CONTEXT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Build the `chat` request payload sent to the daemon. Carries the operator's
+/// project root so the chat gremlin anchors against the actual project rather
+/// than the daemon's own working directory.
+///
+/// `context` is the repository-context snapshot gathered off the UI thread by
+/// the caller (see [`send_chat_input`]); it is prepended to the operator's
+/// message here. The daemon passes the fully assembled prompt through without
+/// further wrapping.
+fn build_chat_request(
+    text: &str,
+    turn: &str,
+    chat_id: Option<&str>,
+    project_root: &str,
+    context: &str,
+) -> serde_json::Value {
+    let user_text = if context.is_empty() {
+        text.to_string()
+    } else {
+        format!("{context}\n\n{text}")
+    };
+    let mut request = serde_json::json!({
+        "op": "chat",
+        "text": user_text,
+        "turn": turn,
+        "project_root": project_root,
+    });
+    if let Some(id) = chat_id {
+        request["id"] = serde_json::Value::String(id.to_string());
+    }
+    request
 }
 
 /// Submit plain-text chat input to the daemon.
@@ -67,15 +106,33 @@ fn send_chat_input(
     let chat_id = app.chat_id.clone();
     let client_for_chat = Arc::clone(client);
     let chat_tx = client_for_chat.chat_sender();
+    // The operator's project root, resolved the same way the info bar does.
+    let project_root = gremlins::config::project_root();
     tokio::spawn(async move {
-        let mut request = serde_json::json!({
-            "op": "chat",
-            "text": input,
-            "turn": turn_id,
-        });
-        if let Some(id) = chat_id {
-            request["id"] = serde_json::Value::String(id);
-        }
+        // Gather the repository-context snapshot off the runtime's worker
+        // threads (git subprocesses are blocking) and under one overall
+        // deadline, so a hung `git` cannot stall the chat turn or starve the
+        // event loop. On timeout or failure the prompt is sent without a
+        // context block rather than being dropped.
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let context = match tokio::time::timeout(
+            CONTEXT_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                chat_context::build_chat_context(&project_root_str)
+            }),
+        )
+        .await
+        {
+            Ok(Ok(ctx)) => ctx,
+            Ok(Err(_)) | Err(_) => String::new(),
+        };
+        let request = build_chat_request(
+            &input,
+            &turn_id,
+            chat_id.as_deref(),
+            &project_root.to_string_lossy(),
+            &context,
+        );
         match client_for_chat.send_request(request).await {
             Ok(resp) => {
                 // A chat ack is `{"type":"ok",...}`; an error response is
@@ -1637,4 +1694,32 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_chat_request;
+
+    #[test]
+    fn chat_request_carries_project_root() {
+        let req = build_chat_request("push this branch", "3", None, "/home/user/proj", "");
+        assert_eq!(req["op"], "chat");
+        assert_eq!(req["text"], "push this branch");
+        assert_eq!(req["turn"], "3");
+        assert_eq!(req["project_root"], "/home/user/proj");
+        assert!(req.get("id").is_none());
+    }
+
+    #[test]
+    fn chat_request_includes_id_when_present() {
+        let req = build_chat_request("hi", "2", Some("chat-0001"), "/p", "");
+        assert_eq!(req["id"], "chat-0001");
+        assert_eq!(req["project_root"], "/p");
+    }
+
+    #[test]
+    fn chat_request_prepends_context() {
+        let req = build_chat_request("hello", "1", None, "/p", "Current branch: main");
+        assert_eq!(req["text"], "Current branch: main\n\nhello");
+    }
 }
