@@ -1371,6 +1371,18 @@ async fn run_agent_loop_core(
 
         let results = tokio::select! {
             results = exec_fut => results,
+            _ = cancel.cancelled() => {
+                // Esc / cancel_chat during a tool batch: drop the join_all
+                // future (cancelling pending tool futures) and unwind the
+                // turn immediately. This is what lets run_chat_turn::finish
+                // re-insert the chat gremlin without waiting for every tool
+                // to complete.
+                log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
+                send_log(log_tx, prefix, "exit: cancelled mid-tool");
+                return Err(ClientError::Runtime {
+                    message: "cancelled".into(),
+                });
+            }
             _ = maybe_pause(&pause) => {
                 // Operator triggered debug mid-tool — drop the join_all future
                 // (cancels pending tool futures). Completed tool side effects
@@ -2114,6 +2126,61 @@ mod tests {
             matches!(err, ClientError::RetryExhausted { .. }),
             "expected ClientError::RetryExhausted after exhausted timeout retries, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn loop_mid_tool_cancel_returns_runtime_without_waiting_for_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+
+        // A Bash tool call that signals when it starts, then hangs until the
+        // child process is killed by the dropped join_all future.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "c1",
+                "Bash",
+                serde_json::json!({
+                    "command": format!("touch {}; sleep 3600", marker.display()),
+                    "timeout": 3600
+                }),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "go",
+            ctx,
+            cancel.clone(),
+            loop_opts(None),
+            None,
+        ));
+
+        // Wait until the Bash child has started so the loop is in Phase 2.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Bash tool should start");
+
+        cancel.cancel();
+
+        // Cancellation must unblock the loop promptly instead of waiting for
+        // the (3600s) tool future to finish.
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("cancel must unblock the agent loop promptly")
+            .unwrap();
+        match result {
+            Err(ClientError::Runtime { message }) => assert_eq!(message, "cancelled"),
+            other => panic!("expected Runtime cancelled, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
