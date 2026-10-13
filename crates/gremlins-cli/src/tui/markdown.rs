@@ -555,9 +555,12 @@ impl Renderer {
         }
 
         if is_fenced {
-            // Bottom border: brass groove with corner caps.
-            self.lines
-                .push(motif::groove_rule(self.rule_width, ("◣", "◢")));
+            // Bottom border: brass groove with corner caps and a lower bar.
+            self.lines.push(motif::groove_rule_with_fill(
+                self.rule_width,
+                ("◣", "◢"),
+                "▁",
+            ));
         }
 
         self.last_block = Some(BlockKind::CodeBlock);
@@ -715,7 +718,7 @@ mod tests {
 
     /// Bottom groove border at `width`.
     fn groove_bottom(width: u16) -> String {
-        motif::groove_rule(width, ("◣", "◢")).to_string()
+        motif::groove_rule_with_fill(width, ("◣", "◢"), "▁").to_string()
     }
 
     #[test]
@@ -750,7 +753,7 @@ mod tests {
             vec![
                 "◤▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔◥".to_string(),
                 " let x = 1;".to_string(),
-                "◣▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔◢".to_string()
+                "◣▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁◢".to_string()
             ]
         );
         assert!(lines[1].spans[0].style.bg.is_some());
@@ -808,7 +811,7 @@ mod tests {
                 " a".to_string(),
                 " ".to_string(),
                 " b".to_string(),
-                "◣▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔◢".to_string()
+                "◣▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁◢".to_string()
             ]
         );
     }
