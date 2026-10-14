@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use rig_core::completion::message::{AssistantContent, CallId, ToolCall, ToolName};
+use rig_core::completion::message::{
+    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName,
+};
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
@@ -741,6 +743,7 @@ async fn run_agent_loop_core(
 
         let mut text = String::new();
         let mut reasoning = String::new();
+        let mut reasoning_items: Vec<Sealed<Reasoning>> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut ended = false;
         let mut turn_usage: Option<Usage> = None;
@@ -932,7 +935,13 @@ async fn run_agent_loop_core(
                             }
                         }
                     }
-                    apply_chunk(chunk, &mut text, &mut reasoning, &mut tool_calls);
+                    apply_chunk(
+                        chunk,
+                        &mut text,
+                        &mut reasoning,
+                        &mut reasoning_items,
+                        &mut tool_calls,
+                    );
                 }
             }
         }
@@ -1059,7 +1068,7 @@ async fn run_agent_loop_core(
                 // Mixed — produce a tool_result for every call so providers
                 // see a valid round of history.
                 history.push(next_prompt);
-                history.push(assistant_tool_message(&text, &tool_calls));
+                history.push(assistant_tool_message(&text, &reasoning_items, &tool_calls));
                 for tc in &tool_calls {
                     let body = if tc.function.name == "Done" {
                         "Error: Done must be called alone — do not combine Done with \
@@ -1095,8 +1104,11 @@ async fn run_agent_loop_core(
                                 artifact_reminder(&missing),
                             );
                             history.push(next_prompt);
-                            history
-                                .push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                            history.push(assistant_tool_message(
+                                &text,
+                                &reasoning_items,
+                                std::slice::from_ref(done_tc),
+                            ));
                             history.push(Message::tool_result(
                                 done_tc.id.clone(),
                                 done_tc.function.name.clone(),
@@ -1108,7 +1120,11 @@ async fn run_agent_loop_core(
                         // Budget exhausted — accept anyway. Python
                         // verify_produced catches missing files.
                         history.push(next_prompt.clone());
-                        history.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                        history.push(assistant_tool_message(
+                            &text,
+                            &reasoning_items,
+                            std::slice::from_ref(done_tc),
+                        ));
                     }
                 }
 
@@ -1168,7 +1184,11 @@ async fn run_agent_loop_core(
                 // tool-result message.
                 let mut messages = history.clone();
                 messages.push(next_prompt.clone());
-                messages.push(assistant_tool_message(&text, std::slice::from_ref(done_tc)));
+                messages.push(assistant_tool_message(
+                    &text,
+                    &reasoning_items,
+                    std::slice::from_ref(done_tc),
+                ));
                 messages.push(Message::tool_result(
                     done_tc.id.clone(),
                     done_tc.function.name.clone(),
@@ -1199,9 +1219,14 @@ async fn run_agent_loop_core(
             }
 
             // Reasoning-only turn — the model is thinking. Just loop.
+            // Record an assistant message carrying the structured reasoning
+            // items so the next request preserves them (and the provider's
+            // ordering invariant) rather than emitting two consecutive user
+            // messages with the reasoning dropped.
             if text.is_empty() && !reasoning.is_empty() {
                 log::debug!("reasoning-only turn: turn={turn_num} — continuing",);
                 history.push(next_prompt);
+                history.push(assistant_tool_message("", &reasoning_items, &[]));
                 next_prompt = Message::user("Continue.");
                 continue;
             }
@@ -1223,7 +1248,7 @@ async fn run_agent_loop_core(
                         reminder_budget,
                     );
                     history.push(next_prompt);
-                    history.push(assistant_tool_message(&text, &[]));
+                    history.push(assistant_tool_message(&text, &reasoning_items, &[]));
                     let reminder = artifact_reminder(&missing);
                     write_raw(
                         raw,
@@ -1257,7 +1282,7 @@ async fn run_agent_loop_core(
                     evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
                 }
                 history.push(next_prompt);
-                history.push(assistant_tool_message(&text, &[]));
+                history.push(assistant_tool_message(&text, &reasoning_items, &[]));
                 next_prompt = Message::user(nudge_msg.to_string());
                 continue;
             }
@@ -1294,7 +1319,7 @@ async fn run_agent_loop_core(
             // complete model context even on the exhausted path.
             let mut messages = history.clone();
             messages.push(next_prompt.clone());
-            messages.push(assistant_tool_message(&text, &[]));
+            messages.push(assistant_tool_message(&text, &reasoning_items, &[]));
             return Ok(completed_run(
                 Some(final_text),
                 None,
@@ -1319,7 +1344,7 @@ async fn run_agent_loop_core(
         });
 
         history.push(next_prompt.clone());
-        history.push(assistant_tool_message(&text, &tool_calls));
+        history.push(assistant_tool_message(&text, &reasoning_items, &tool_calls));
 
         // Phase 1: emit tool-start events, collect owned data for concurrent execution
         let mut jobs: Vec<Job> = Vec::new();
@@ -1571,12 +1596,14 @@ pub(crate) fn apply_chunk(
     chunk: Item<StreamEvent>,
     text: &mut String,
     reasoning: &mut String,
+    reasoning_items: &mut Vec<Sealed<Reasoning>>,
     tool_calls: &mut Vec<ToolCall>,
 ) {
     match chunk {
         Item::Event(StreamEvent::End { content, .. }) => match content {
             AssistantContent::Text(t) => text.push_str(&t.text),
             AssistantContent::ToolCall(tc) => tool_calls.push(tc),
+            AssistantContent::Reasoning(sealed) => reasoning_items.push(sealed),
             _ => {}
         },
         Item::Event(StreamEvent::Reasoning { text: r, .. }) => reasoning.push_str(&r),
@@ -1636,8 +1663,30 @@ pub(crate) fn format_tool_call(tc: &ToolCall) -> String {
     }
 }
 
-pub(crate) fn assistant_tool_message(text: &str, tool_calls: &[ToolCall]) -> Message {
+pub(crate) fn assistant_tool_message(
+    text: &str,
+    reasoning_items: &[Sealed<Reasoning>],
+    tool_calls: &[ToolCall],
+) -> Message {
+    // Reasoning items are emitted before text and tool calls deliberately.
+    // This mirrors rig's own canonical ordering (`ordered_assistant_content` /
+    // `canonical_streamed_choice`), which regroups a streamed choice as
+    // reasoning -> text -> tool calls, preserving order *within* each group.
+    // The OpenAI Responses encoder (`input_items`) additionally resorts
+    // reasoning items ahead of all other items regardless of their stored
+    // positions, so a reasoning item's ordinal relative to a later text or
+    // tool-call item never affects the wire. The invariants that actually
+    // matter are (a) the structured reasoning item survives with its provider
+    // id and issuer intact — so `open_for`/`openai_reasoning_from_core` re-serialize
+    // it instead of dropping it — and (b) it precedes the `function_call` that
+    // references it so the latter is not orphaned.
     let mut contents = Vec::new();
+    contents.extend(
+        reasoning_items
+            .iter()
+            .cloned()
+            .map(AssistantContent::Reasoning),
+    );
     if !text.is_empty() {
         contents.push(AssistantContent::text(text.to_string()));
     }
@@ -1921,7 +1970,7 @@ mod tests {
     use super::*;
     use crate::clients::interactive::InteractiveChannels;
     use http::StatusCode;
-    use rig_core::message::UserContent;
+    use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
     use std::collections::HashMap;
     use tokio::sync::broadcast::error::RecvError;
 
@@ -2301,6 +2350,250 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e["message"]["content"][0]["type"] == "tool_result"));
+    }
+
+    /// A prior turn's structured `reasoning` item (with an id) must survive
+    /// into the reconstructed history so that a `function_call` referencing
+    /// it is re-serialized beside its reasoning item — not orphaned.
+    #[test]
+    fn assistant_tool_message_retains_reasoning_items() {
+        let reasoning = Reasoning {
+            id: Some("rs_reasoning_item".to_string()),
+            content: vec![ReasoningContent::Text {
+                text: "thinking hard".to_string(),
+                signature: None,
+            }],
+        }
+        .sealed("openai");
+        let call = ToolCall::from_dual_wire(
+            "fc_item",
+            "call_1",
+            ToolFunction::new(
+                ToolName::new("Read").unwrap(),
+                serde_json::json!({ "file_path": "/tmp/x" }),
+            ),
+        );
+
+        let message = assistant_tool_message(
+            "",
+            std::slice::from_ref(&reasoning),
+            std::slice::from_ref(&call),
+        );
+
+        let Message::Assistant { content, .. } = message else {
+            panic!("expected an assistant message");
+        };
+        assert_eq!(content.len(), 2);
+        match &content[0] {
+            AssistantContent::Reasoning(sealed) => {
+                let opened = sealed
+                    .open(&Issuer::from("openai"))
+                    .expect("issuer preserved");
+                assert_eq!(opened.id.as_deref(), Some("rs_reasoning_item"));
+            }
+            other => panic!("first item must be reasoning, got {other:?}"),
+        }
+        // The referencing `function_call` must stay beside its reasoning item,
+        // with its provider `item_id` naming that reasoning id so the replayed
+        // `input` array does not orphan it.
+        match &content[1] {
+            AssistantContent::ToolCall(tc) => {
+                let provider = tc
+                    .id
+                    .provider()
+                    .expect("dual-wire call keeps a provider id");
+                assert_eq!(provider.item_id.as_deref(), Some("fc_item"));
+            }
+            other => panic!("second item must be the tool call, got {other:?}"),
+        }
+    }
+
+    /// End-to-end: a turn that streams a structured `reasoning` item followed
+    /// by a `function_call` referencing it must replay that reasoning item on
+    /// the next request, so it is not orphaned in the reconstructed history.
+    #[tokio::test]
+    async fn loop_replays_reasoning_item_beside_function_call() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-reasoning-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "content").unwrap();
+
+        // Turn 0: reasoning (rs_1) then a Read tool call referencing it.
+        // Turn 1: Done. The second request must carry rs_1 beside the call.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::reasoning("thinking")
+                    .with_reasoning_id("rs_1"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({ "file_path": f.to_str().unwrap() }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({ "summary": "done" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            model.clone().erase(),
+            "read then finish",
+            ctx,
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let reqs = model.requests();
+        assert_eq!(reqs.len(), 2);
+        let second = &reqs[1];
+        let assistant = second
+            .chat_history
+            .iter()
+            .find(|m| matches!(m, Message::Assistant { .. }))
+            .expect("second request carries the prior assistant turn");
+        let Message::Assistant { content, .. } = assistant else {
+            unreachable!()
+        };
+        let reasoning = content.iter().find_map(|c| match c {
+            AssistantContent::Reasoning(sealed) => {
+                sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            reasoning.flatten().as_deref(),
+            Some("rs_1"),
+            "reasoning item id must survive into the replay"
+        );
+        // The reasoning item must precede the referencing function_call in the
+        // replayed content so the call is not orphaned.
+        let reasoning_at = content
+            .iter()
+            .position(|c| matches!(c, AssistantContent::Reasoning(_)));
+        let call_at = content
+            .iter()
+            .position(|c| matches!(c, AssistantContent::ToolCall(_)));
+        assert!(
+            reasoning_at.is_some() && call_at.is_some(),
+            "replayed turn must carry both reasoning and the function call"
+        );
+        assert!(
+            reasoning_at.unwrap() < call_at.unwrap(),
+            "reasoning item must precede its referencing function_call"
+        );
+    }
+
+    /// A reasoning-only turn (reasoning deltas but no text and no tool call)
+    /// must still record an assistant message carrying the structured
+    /// reasoning item before nudging with "Continue.". Dropping it would both
+    /// omit the item from the next request and leave two consecutive user
+    /// messages — breaking the replay invariant the provider relies on.
+    #[tokio::test]
+    async fn loop_replays_reasoning_item_on_reasoning_only_turn() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-reasoning-only-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Turn 0: reasoning only (rs_0), no text, no tool call — the loop
+        // records the reasoning item and continues with "Continue.".
+        // Turn 1: Done. The second request must carry rs_0 as an assistant
+        // message, not as two consecutive user messages.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::reasoning_delta_with_id("rs_0", "thinking"),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({ "summary": "done" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            model.clone().erase(),
+            "think then finish",
+            ctx,
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let reqs = model.requests();
+        assert_eq!(reqs.len(), 2);
+        let second = &reqs[1];
+
+        // The reasoning-only turn must be replayed as an assistant message.
+        let assistant = second
+            .chat_history
+            .iter()
+            .find(|m| matches!(m, Message::Assistant { .. }))
+            .expect("second request carries the prior assistant turn");
+        let Message::Assistant { content, .. } = assistant else {
+            unreachable!()
+        };
+        let reasoning = content.iter().find_map(|c| match c {
+            AssistantContent::Reasoning(sealed) => {
+                sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            reasoning.flatten().as_deref(),
+            Some("rs_0"),
+            "reasoning-only turn's structured item must survive into the replay"
+        );
+
+        // No two consecutive user messages: the assistant turn (with its
+        // reasoning item) must sit between the original prompt and "Continue.".
+        let mut prev_user = false;
+        for m in &second.chat_history {
+            match m {
+                Message::User { .. } => {
+                    assert!(
+                        !prev_user,
+                        "replayed history must not contain consecutive user messages"
+                    );
+                    prev_user = true;
+                }
+                _ => prev_user = false,
+            }
+        }
     }
 
     /// A 429 on turn N must back off and retry turn N in place — not restart
