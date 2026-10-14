@@ -30,8 +30,8 @@ use ratatui::{
 
 use crate::tui::app::App;
 use crate::tui::widgets::{
-    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, ReasoningWidget, RenderContext,
-    TranscriptWidget, WatchSingleWidget,
+    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, RenderContext, TranscriptWidget,
+    WatchSingleWidget,
 };
 
 /// Approximate number of rows reserved at the bottom of the screen for the
@@ -53,8 +53,8 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     /// Whether [`Drop`] should restore the terminal (raw mode, cursor).
     needs_terminal_cleanup: bool,
     /// Ordered widget stack, top-to-bottom. The initial stack is transcript,
-    /// reasoning, input bar, info bar. Overlays are pushed/popped at the top
-    /// of the stack.
+    /// input bar, info bar. Overlays are pushed/popped at the top of the
+    /// stack.
     widgets: Vec<Box<dyn LiveAreaWidget>>,
     /// Rows occupied by the bottom bars (input + info) in the most recent
     /// frame. These rows are excluded from the scrollback region.
@@ -78,7 +78,6 @@ impl<B: Backend> LiveArea<B> {
             needs_terminal_cleanup: false,
             widgets: vec![
                 Box::new(TranscriptWidget::new()),
-                Box::new(ReasoningWidget::new()),
                 Box::new(InputBarWidget::new()),
                 Box::new(InfoBarWidget),
             ],
@@ -249,8 +248,8 @@ impl<B: Backend> LiveArea<B> {
     /// Lays all widgets out top-to-bottom in a single ordered pipeline:
     ///
     /// 1. **Finalize.** Every widget brings its buffer into its final state
-    ///    for the frame (the transcript rebuilds a dirty response region;
-    ///    the reasoning widget flushes its trailing partial).
+    ///    for the frame (the transcript rebuilds a dirty response region and
+    ///    trims its embedded reasoning slot to the capped band).
     /// 2. **Measure.** Each widget reports its desired height from finalized
     ///    content, clamped to `[min, max]`.
     /// 3. **Allocate.** Priority-aware shrink/expand passes fit the heights
@@ -448,9 +447,9 @@ impl<B: Backend> LiveArea<B> {
     /// Remove the most recently added overlay widget, if any. The initial
     /// content widgets are never popped.
     pub fn pop_overlay(&mut self) -> Option<Box<dyn LiveAreaWidget>> {
-        // The first four widgets are the fixed content stack; only pop
+        // The first three widgets are the fixed content stack; only pop
         // widgets pushed on top of them.
-        if self.widgets.len() > 4 {
+        if self.widgets.len() > 3 {
             Some(self.widgets.remove(0))
         } else {
             None
@@ -464,13 +463,6 @@ impl<B: Backend> LiveArea<B> {
             .iter_mut()
             .find_map(|w| w.as_any_mut().downcast_mut::<TranscriptWidget>())
             .expect("transcript widget present")
-    }
-
-    fn reasoning_mut(&mut self) -> &mut ReasoningWidget {
-        self.widgets
-            .iter_mut()
-            .find_map(|w| w.as_any_mut().downcast_mut::<ReasoningWidget>())
-            .expect("reasoning widget present")
     }
 
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
@@ -495,9 +487,9 @@ impl<B: Backend> LiveArea<B> {
     // ── Widget mutation (moved from `App`) ───────────────────────
 
     /// Start a new turn with the given prompt: push a separator and the
-    /// markdown-rendered prompt, then pin the turn start.
+    /// markdown-rendered prompt, then pin the turn start. The transcript
+    /// clears its embedded reasoning slot with the new prompt.
     pub fn submit_prompt(&mut self, prompt: String) {
-        self.reasoning_mut().clear();
         self.transcript_mut().submit_prompt(prompt);
     }
 
@@ -518,12 +510,12 @@ impl<B: Backend> LiveArea<B> {
     /// reasoning line.
     #[allow(dead_code)]
     pub fn flush_reasoning(&mut self) {
-        self.reasoning_mut().flush_reasoning();
+        self.transcript_mut().flush_reasoning();
     }
 
     /// Append reasoning text (may be a partial chunk).
     pub fn push_reasoning_text(&mut self, text: &str) {
-        self.reasoning_mut().push_reasoning_text(text);
+        self.transcript_mut().push_reasoning_text(text);
     }
 
     /// Record a tool call.
@@ -549,8 +541,9 @@ impl<B: Backend> LiveArea<B> {
 
     /// Unpin the current turn and clear its draft state. Tool-call lines are
     /// already part of the transcript FIFO (inserted above the response), so
-    /// they survive the turn as ordinary scrollback. Reasoning stays in its
-    /// own widget and is cleared by the next prompt.
+    /// they survive the turn as ordinary scrollback. The embedded reasoning
+    /// slot is cleared so finished history reads prompt → answer with no
+    /// thinking in between.
     pub fn finish_turn(&mut self) {
         self.transcript_mut().finish_turn();
     }
@@ -608,14 +601,10 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().clear_current_turn();
     }
 
-    /// Clear the transcript/scrollback.
+    /// Clear the transcript/scrollback, including the embedded reasoning
+    /// slot.
     pub fn clear_transcript(&mut self) {
         self.transcript_mut().clear_scrollable();
-    }
-
-    /// Clear the live reasoning widget.
-    pub fn clear_live_widgets(&mut self) {
-        self.reasoning_mut().clear();
     }
 
     /// Append a system message to the transcript with default style and
@@ -1198,6 +1187,192 @@ mod tests {
     }
 
     #[test]
+    fn compose_renders_prompt_reasoning_response_in_order() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+        live_area.replace_response("answer");
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        let lines: Vec<&str> = visible.lines().collect();
+        let prompt = lines.iter().position(|l| l.contains("▍» hi"));
+        let reasoning = lines.iter().position(|l| l.contains("thinking"));
+        let response = lines.iter().position(|l| l.contains("answer"));
+        assert!(
+            prompt.is_some() && reasoning.is_some() && response.is_some(),
+            "prompt, reasoning, and response should all be visible.\nBuffer:\n{visible}"
+        );
+        let (Some(prompt), Some(reasoning), Some(response)) = (prompt, reasoning, response) else {
+            unreachable!("checked above");
+        };
+        assert!(
+            prompt < reasoning && reasoning < response,
+            "a turn must render prompt → reasoning → response.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn finish_turn_clears_embedded_reasoning() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+        live_area.replace_response("answer");
+        live_area.finish_turn();
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("answer"),
+            "finished response should remain in the FIFO.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("thinking"),
+            "reasoning must vanish when the turn finishes.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn clear_transcript_clears_embedded_reasoning() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+        live_area.clear_transcript();
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            !visible.contains("thinking"),
+            "reasoning must vanish when the transcript is cleared.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn clear_current_turn_clears_embedded_reasoning_and_truncates_fifo() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+        live_area.replace_response("partial answer");
+        live_area.clear_current_turn();
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            !visible.contains("thinking"),
+            "reasoning must vanish when the current turn is cancelled.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("▍» hi") && !visible.contains("partial answer"),
+            "clearing the current turn must truncate the prompt and draft response.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn overflow_commits_fifo_lines_only_never_reasoning() {
+        let cols: u16 = 80;
+        let rows: u16 = 8;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        // Enough FIFO content to force overflow while reasoning streams.
+        for i in 0..6 {
+            live_area.push_transcript_line(format!("completed line {i}"));
+        }
+        live_area.submit_prompt("hi".to_string());
+        for i in 0..6 {
+            live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
+        }
+        live_area.replace_response("answer");
+
+        live_area.compose(&app).unwrap();
+
+        let scrollback = live_area.scrollback().join("\n");
+        assert!(
+            scrollback.contains("completed line") || scrollback.contains("▍» hi"),
+            "transcript FIFO head lines should be committed to scrollback.\nScrollback:\n{scrollback}"
+        );
+        assert!(
+            !scrollback.contains("reasoning"),
+            "reasoning is display-only and must never enter scrollback.\nScrollback:\n{scrollback}"
+        );
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("reasoning line 5"),
+            "the reasoning tail should remain visible.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn short_reasoning_band_keeps_newest_lines() {
+        let cols: u16 = 80;
+        let rows: u16 = 6;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        for i in 0..6 {
+            live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
+        }
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        // With 4 transcript rows (1 reserved for the prompt + 3 for the
+        // reasoning band) shaving the band below its 5-row cap must keep the
+        // newest reasoning lines, not the head, and later taller frames must
+        // not resurrect lines trimmed from this shorter band.
+        for i in 3..6 {
+            assert!(
+                visible.contains(&format!("reasoning line {i}")),
+                "reasoning line {i} should be visible in the short-band tail.\nBuffer:\n{visible}"
+            );
+        }
+        for i in 0..3 {
+            assert!(
+                !visible.contains(&format!("reasoning line {i}")),
+                "reasoning line {i} should be trimmed by the short band.\nBuffer:\n{visible}"
+            );
+        }
+    }
+
+    #[test]
     fn compose_short_viewport_reserves_bars_and_skips_overflow() {
         let cols: u16 = 80;
         let rows: u16 = 2;
@@ -1281,29 +1456,29 @@ mod tests {
         use crate::tui::widgets::{DebugWidget, WatchTableWidget};
 
         let mut live = new_live(80, 24);
-        assert_eq!(live.widgets.len(), 4);
+        assert_eq!(live.widgets.len(), 3);
 
         // Popping with no overlay is a no-op.
         assert!(live.pop_overlay().is_none());
 
         live.push_overlay(Box::new(WatchTableWidget::new()));
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 4);
 
         live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
-        assert_eq!(live.widgets.len(), 6);
+        assert_eq!(live.widgets.len(), 5);
 
         // Pop removes the most recently added (debug) first.
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<DebugWidget>().is_some());
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 4);
 
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<WatchTableWidget>().is_some());
-        assert_eq!(live.widgets.len(), 4);
+        assert_eq!(live.widgets.len(), 3);
 
         // Cannot pop the fixed content stack.
         assert!(live.pop_overlay().is_none());
-        assert_eq!(live.widgets.len(), 4);
+        assert_eq!(live.widgets.len(), 3);
     }
 
     #[test]
@@ -1512,7 +1687,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_fills_available_rows_beyond_five() {
+    fn reasoning_band_trims_to_five_rows() {
         let cols: u16 = 80;
         let rows: u16 = 24;
         let mut live_area = new_live(cols, rows);
@@ -1521,8 +1696,8 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
-        // 8 reasoning lines should all be visible when no other widget
-        // contests the space.
+        // The embedded reasoning band caps at 5 rows; only the newest 5
+        // lines stay visible even when no other widget contests the space.
         for i in 0..8 {
             live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
         }
@@ -1530,10 +1705,16 @@ mod tests {
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
-        for i in 0..8 {
+        for i in 3..8 {
             assert!(
                 visible.contains(&format!("reasoning line {i}")),
-                "reasoning line {i} should be visible (no 5-row cap).\nBuffer:\n{visible}"
+                "reasoning line {i} should be visible (tail of the 5-row band).\nBuffer:\n{visible}"
+            );
+        }
+        for i in 0..3 {
+            assert!(
+                !visible.contains(&format!("reasoning line {i}")),
+                "reasoning line {i} should be trimmed from the band head.\nBuffer:\n{visible}"
             );
         }
     }

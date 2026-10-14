@@ -1088,10 +1088,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         live_area.clear_current_turn();
                                         // Clear the transcript/scrollback so the
                                         // UI no longer shows the old conversation
-                                        // after the daemon has discarded it.
+                                        // after the daemon has discarded it. The
+                                        // transcript also clears its embedded
+                                        // reasoning slot.
                                         live_area.clear_transcript();
-                                        // Clear the live reasoning/tool widgets.
-                                        live_area.clear_live_widgets();
                                         live_area.push_styled_line(motif::marble_line());
                                         // `/clear` closes the current session and
                                         // opens a fresh one. The daemon cancels

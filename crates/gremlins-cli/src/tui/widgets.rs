@@ -87,9 +87,8 @@ pub trait LiveAreaWidget {
 
     /// Bring this widget's buffer into its final state for the frame. This
     /// is the single place content is mutated before measurement: the
-    /// transcript rebuilds a dirty response region into its FIFO, and the
-    /// reasoning widget flushes its trailing partial into a completed line.
-    /// Defaults to a no-op.
+    /// transcript rebuilds a dirty response region into its FIFO and trims
+    /// its embedded reasoning slot to the capped band. Defaults to a no-op.
     fn finalize(&mut self, _width: u16) {}
 
     /// Render this widget into `area`. This is paint-only: overflow is
@@ -171,8 +170,11 @@ macro_rules! as_any_methods {
 /// region's height. The transcript is a plain FIFO: it drains its head and
 /// renders its tail regardless of whether a turn is in progress.
 pub struct TranscriptWidget {
-    /// The single styled FIFO — the only thing `render` reads.
+    /// The single styled FIFO — the only transcript content that overflows.
     scrollable: LineBuffer,
+    /// The current turn's ephemeral reasoning slot, rendered between the
+    /// pre-response transcript head and the streaming response tail.
+    reasoning: ReasoningWidget,
     /// Raw response accumulator (for reconciliation).
     response_accumulator: String,
     /// FIFO index where the current turn starts (the pinned boundary).
@@ -202,9 +204,13 @@ pub struct TranscriptWidget {
 }
 
 impl TranscriptWidget {
+    /// Cap on the embedded reasoning band height in rows.
+    const REASONING_MAX_ROWS: u16 = 5;
+
     pub fn new() -> Self {
         Self {
             scrollable: LineBuffer::new(),
+            reasoning: ReasoningWidget::new(),
             response_accumulator: String::new(),
             turn_start: None,
             response_start: None,
@@ -220,6 +226,18 @@ impl TranscriptWidget {
     /// Invalidate the cached desired height after any content mutation.
     fn invalidate_desired_cache(&self) {
         self.desired_cache.set(None);
+    }
+
+    /// Append reasoning text (may be a partial chunk) to the current turn's
+    /// ephemeral reasoning slot.
+    pub fn push_reasoning_text(&mut self, text: &str) {
+        self.reasoning.push_text(text);
+    }
+
+    /// Flush the reasoning slot's trailing partial into a completed line.
+    #[allow(dead_code)]
+    pub fn flush_reasoning(&mut self) {
+        self.reasoning.flush();
     }
 
     /// Append a system message. When a turn is active, the message is
@@ -318,9 +336,11 @@ impl TranscriptWidget {
     }
 
     /// Start a new turn with the given prompt: push a separator rule and the
-    /// markdown-rendered prompt, then pin the turn start.
+    /// markdown-rendered prompt, then pin the turn start. Any reasoning from
+    /// the previous turn is cleared before the new turn begins.
     pub fn submit_prompt(&mut self, prompt: String) {
         self.invalidate_desired_cache();
+        self.reasoning.clear();
         let mut sep_index = None;
         if !self.scrollable.is_empty() {
             // Placeholder width; regenerated at `finalize` with the real
@@ -436,6 +456,7 @@ impl TranscriptWidget {
     pub fn finish_turn(&mut self) {
         self.rebuild_response();
         self.invalidate_desired_cache();
+        self.reasoning.clear();
         self.turn_start = None;
         self.response_start = None;
         self.prompt_end = 0;
@@ -449,6 +470,7 @@ impl TranscriptWidget {
     /// and clear the draft state.
     pub fn clear_current_turn(&mut self) {
         self.invalidate_desired_cache();
+        self.reasoning.clear();
         if let Some(t) = self.turn_start {
             self.scrollable.truncate(t);
             // The separator rule before the turn (pushed by `submit_prompt`)
@@ -474,6 +496,7 @@ impl TranscriptWidget {
     /// Clear the scrollable FIFO.
     pub fn clear_scrollable(&mut self) {
         self.invalidate_desired_cache();
+        self.reasoning.clear();
         self.scrollable.clear();
         self.turn_start = None;
         self.response_start = None;
@@ -522,8 +545,7 @@ impl TranscriptWidget {
     /// happens on finalized content, so no prediction of a dirty response
     /// region is needed. The transcript paints with a one-cell left margin,
     /// so measurement uses `width - 1`.
-    fn desired_height(&self, width: u16) -> u16 {
-        let width = width.saturating_sub(1);
+    fn fifo_desired_height(&self, width: u16) -> u16 {
         if let Some((w, h)) = self.desired_cache.get() {
             if w == width {
                 return h;
@@ -534,15 +556,36 @@ impl TranscriptWidget {
         h
     }
 
+    /// Wrapped height of the composite transcript: the FIFO plus the
+    /// ephemeral reasoning band, capped at [`Self::REASONING_MAX_ROWS`].
+    fn desired_height(&self, width: u16) -> u16 {
+        let width = width.saturating_sub(1);
+        let fifo = self.fifo_desired_height(width);
+        let reasoning = self
+            .reasoning
+            .desired_rows(width)
+            .min(Self::REASONING_MAX_ROWS);
+        fifo.saturating_add(reasoning)
+    }
+
     /// Drain the head of the transcript FIFO that does not fit in
-    /// `available_rows`. The FIFO is drained unconditionally: an in-progress
-    /// turn overflows into terminal scrollback exactly like completed
-    /// history.
+    /// `available_rows`. The embedded reasoning band reserves its rows first,
+    /// and the FIFO is drained unconditionally: an in-progress turn overflows
+    /// into terminal scrollback exactly like completed history. Reasoning is
+    /// never returned as overflow.
     pub fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
         self.invalidate_desired_cache();
         let width = width.saturating_sub(1);
+        let reasoning_rows = self
+            .reasoning
+            .desired_rows(width)
+            .min(Self::REASONING_MAX_ROWS);
+        // The FIFO keeps a one-row floor; the reasoning band yields its rows
+        // before the FIFO shrinks below that floor.
+        let reserved = reasoning_rows.min(available_rows.saturating_sub(1));
+        let fifo_rows = available_rows.saturating_sub(reserved);
         let (_overflow_rows, overflow_lines): (_, Vec<_>) =
-            split_overflow(&self.scrollable, available_rows, width);
+            split_overflow(&self.scrollable, fifo_rows, width);
         if overflow_lines.is_empty() {
             return Vec::new();
         }
@@ -808,7 +851,7 @@ impl ReasoningWidget {
     /// Append reasoning text (may be a partial chunk). Completed lines are
     /// pushed into the buffer; the trailing partial is kept as a live line.
     /// Each line is prefixed with a brass telemetry diamond.
-    pub fn push_reasoning_text(&mut self, text: &str) {
+    pub fn push_text(&mut self, text: &str) {
         self.partial.push_str(text);
         while let Some(newline_pos) = self.partial.find('\n') {
             let line: String = self.partial[..newline_pos].into();
@@ -821,7 +864,7 @@ impl ReasoningWidget {
 
     /// Flush the trailing partial (if any) into a completed line.
     #[allow(dead_code)]
-    pub fn flush_reasoning(&mut self) {
+    pub fn flush(&mut self) {
         if !self.partial.is_empty() {
             let line = std::mem::take(&mut self.partial);
             let hollow = self.line_count % 2 == 1;
@@ -975,7 +1018,7 @@ impl ReasoningWidget {
 
     /// Desired height: the full wrapped height of the remaining live tail
     /// minus the wrapped rows that have already scrolled off the top.
-    fn desired_rows(&self, width: u16) -> u16 {
+    pub fn desired_rows(&self, width: u16) -> u16 {
         if self.is_empty() || width == 0 {
             return 0;
         }
@@ -1003,40 +1046,14 @@ impl Default for ReasoningWidget {
     }
 }
 
-impl LiveAreaWidget for ReasoningWidget {
-    as_any_methods!();
-
-    #[cfg(feature = "telemetry")]
-    fn name(&self) -> &'static str {
-        "reasoning"
-    }
-
-    fn size_priority(&self) -> i32 {
-        5
-    }
-
-    fn min_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
-        self.desired_rows(width).min(5)
-    }
-
-    fn flexible(&self, _ctx: &RenderContext) -> bool {
-        true
-    }
-
-    fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
-        self.desired_rows(width)
-    }
-
-    fn max_height(&self, _ctx: &RenderContext) -> u16 {
-        u16::MAX
-    }
-
-    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
-        // Keep the visible tail; the head is discarded, never committed to
-        // terminal scrollback. Zero-area viewports are transient, so defer
-        // trimming rather than dropping content that had no chance to paint.
+impl ReasoningWidget {
+    /// Keep only the visible tail of the reasoning stream; the head is
+    /// discarded, never committed to terminal scrollback. Zero-area
+    /// viewports are transient, so defer trimming rather than dropping
+    /// content that had no chance to paint.
+    pub fn trim_to(&mut self, available_rows: u16, width: u16) {
         if width == 0 || available_rows == 0 {
-            return Vec::new();
+            return;
         }
 
         self.normalize_scroll(width);
@@ -1045,7 +1062,7 @@ impl LiveAreaWidget for ReasoningWidget {
         let visible = total.saturating_sub(self.scrolled.get());
         let excess = visible.saturating_sub(available_rows as usize);
         if excess == 0 {
-            return Vec::new();
+            return;
         }
 
         // Advance the scrolled offset by exactly the overflow amount. The
@@ -1055,11 +1072,11 @@ impl LiveAreaWidget for ReasoningWidget {
         let next_scrolled = self.consume_head(&rendered, self.scrolled.get() + excess, width);
         self.scrolled.set(next_scrolled);
         self.last_width.set(width);
-        Vec::new()
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        if area.width == 0 {
+    /// Paint the maintained wrapped tail of the reasoning stream into `area`.
+    pub fn render_band(&mut self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
             return;
         }
         self.normalize_scroll(area.width);
@@ -1118,6 +1135,10 @@ impl LiveAreaWidget for TranscriptWidget {
         self.last_width = width;
         self.rebuild_separator(width);
         self.rebuild_response();
+        // Trim the reasoning slot to its capped band before measurement so
+        // layout never sees a taller ephemeral child than render will paint.
+        self.reasoning
+            .trim_to(Self::REASONING_MAX_ROWS, width.saturating_sub(1));
     }
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
@@ -1136,7 +1157,8 @@ impl LiveAreaWidget for TranscriptWidget {
             return;
         }
 
-        // One-cell left margin: paint into an inner rect.
+        // One-cell left margin: all three bands paint inside the same inner
+        // rect so reasoning aligns with prompt and response.
         let inner = Rect::new(
             area.x + 1,
             area.y,
@@ -1153,53 +1175,70 @@ impl LiveAreaWidget for TranscriptWidget {
             return;
         }
 
-        let full_rows = wrapped_height(lines, width);
-        if full_rows == 0 {
-            return;
-        }
+        // Split at the response boundary: everything before the boundary is
+        // the top-anchored head (prompt + tool-call lines), everything after
+        // is the bottom-anchored streaming response.
+        let response_start = self.response_start.unwrap_or(lines.len()).min(lines.len());
+        let head = &lines[..response_start];
+        let tail = &lines[response_start..];
 
-        // Tail-anchored, wrapping-aware paint. When the FIFO fits, paint it
-        // top-anchored directly. Otherwise skip the wrapped rows above the
-        // visible window and render only the tail slice, so the most recent
-        // content is always visible without materializing the whole history.
-        let skip = full_rows.saturating_sub(inner.height as usize);
-        if skip == 0 {
-            Paragraph::new(lines.to_vec())
+        let reasoning_rows = self
+            .reasoning
+            .desired_rows(width)
+            .min(Self::REASONING_MAX_ROWS)
+            .min(area.height.saturating_sub(1));
+        let fifo_rows = area.height.saturating_sub(reasoning_rows);
+
+        let head_rows = wrapped_height(head, width);
+        let tail_rows = wrapped_height(tail, width);
+
+        let (head_band, tail_band) = if tail.is_empty() {
+            (head_rows.min(fifo_rows as usize) as u16, 0)
+        } else {
+            // The response keeps at least one FIFO row after the reasoning
+            // band. Only a single over-tall head line can still exceed this
+            // after overflow; it is clipped top-anchored.
+            let tail_floor = fifo_rows.min(1);
+            let head_band = (head_rows as u16).min(fifo_rows.saturating_sub(tail_floor));
+            (head_band, fifo_rows.saturating_sub(head_band))
+        };
+
+        let mut y = inner.y;
+        if head_band > 0 && !head.is_empty() {
+            let head_area = Rect::new(inner.x, y, width, head_band);
+            Paragraph::new(head.to_vec())
                 .wrap(Wrap { trim: false })
-                .render(inner, buf);
-            return;
+                .render(head_area, buf);
         }
 
-        // Find the first line that contributes wrapped rows to the window.
-        let mut cum = 0usize;
-        let mut start = 0usize;
-        for (i, line) in lines.iter().enumerate() {
-            let h = line_wrapped_height(line, width);
-            if cum + h > skip {
-                start = i;
-                break;
-            }
-            cum += h;
+        y = inner.y + head_band;
+        if reasoning_rows > 0 && !self.reasoning.is_empty() {
+            // The allocation pipeline trims to the 5-row cap in `finalize`,
+            // but this frame may paint a shorter band on a short viewport.
+            // Re-trim here so the maintained tail matches what is actually
+            // painted, and a later taller frame cannot resurrect rows.
+            self.reasoning.trim_to(reasoning_rows, width);
+            let reasoning_area = Rect::new(inner.x, y, width, reasoning_rows);
+            self.reasoning.render_band(reasoning_area, buf);
         }
-        // Wrapped rows of `lines[start]` that sit above the visible window.
-        let partial = skip - cum;
 
-        // Render the tail slice into a buffer tall enough to hold the window
-        // plus the partial head, then copy the last `area.height` rows.
-        let render_rows = (partial + inner.height as usize) as u16;
-        let render_area = Rect::new(0, 0, width, render_rows);
-        let mut render_buf = Buffer::empty(render_area);
-        Paragraph::new(lines[start..].to_vec())
-            .wrap(Wrap { trim: false })
-            .render(render_area, &mut render_buf);
-
-        for y in 0..inner.height {
-            let src_y = partial as u16 + y;
-            if src_y >= render_rows {
-                break;
-            }
-            for x in 0..width {
-                buf[(inner.x + x, inner.y + y)] = render_buf[(x, src_y)].clone();
+        y = inner.y + head_band + reasoning_rows;
+        if tail_band > 0 && !tail.is_empty() {
+            if tail_rows <= tail_band as usize {
+                // Bottom-anchor the short response inside its allocated band
+                // so the blank rows sit between reasoning and response.
+                let tail_area = Rect::new(
+                    inner.x,
+                    inner.y + area.height.saturating_sub(tail_rows as u16),
+                    width,
+                    tail_rows as u16,
+                );
+                Paragraph::new(tail.to_vec())
+                    .wrap(Wrap { trim: false })
+                    .render(tail_area, buf);
+            } else {
+                let tail_area = Rect::new(inner.x, y, width, tail_band);
+                render_wrapped_tail(tail, tail_area, buf, tail_band as usize);
             }
         }
     }
@@ -2093,7 +2132,7 @@ mod tests {
         let mut reasoning = ReasoningWidget::new();
 
         transcript.submit_prompt("hi".to_string());
-        reasoning.push_reasoning_text("thinking\n");
+        reasoning.push_text("thinking\n");
         transcript.push_tool_line("Done");
         transcript.push_response("**answer**");
         transcript.finish_turn();
@@ -2559,7 +2598,7 @@ mod tests {
     #[test]
     fn reasoning_partial_is_visible_in_reasoning_widget() {
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("thinking");
+        reasoning.push_text("thinking");
         // The partial reasoning line must be visible before any newline.
         let text: Vec<String> = reasoning
             .rendered_lines()
@@ -2570,13 +2609,12 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_widget_take_overflow_keeps_wrapped_tail() {
+    fn reasoning_trim_keeps_wrapped_tail() {
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
-        reasoning.flush_reasoning();
+        reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
+        reasoning.flush();
 
-        let overflow = reasoning.take_overflow(2, 10);
-        assert!(overflow.is_empty());
+        reasoning.trim_to(2, 10);
 
         // The single long line is taller than the 2 visible rows, but the
         // live tail keeps it and scrolls the visible tail one wrapped row at
@@ -2586,61 +2624,60 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_widget_scrolled_tail_grows_with_streaming_chunks() {
+    fn reasoning_scrolled_tail_grows_with_streaming_chunks() {
         let mut reasoning = ReasoningWidget::new();
         for i in 0..5 {
-            reasoning.push_reasoning_text(&format!("reasoning line {i}\n"));
+            reasoning.push_text(&format!("reasoning line {i}\n"));
         }
         assert_eq!(reasoning.desired_rows(80), 5);
 
-        reasoning.take_overflow(2, 80);
+        reasoning.trim_to(2, 80);
         assert_eq!(reasoning.desired_rows(80), 2);
 
         // Chunks that arrive after the trim grow the visible tail instead of
         // being hidden behind a stale retained-visible-rows window.
-        reasoning.push_reasoning_text("reasoning line 5\n");
-        reasoning.push_reasoning_text("reasoning line 6\n");
+        reasoning.push_text("reasoning line 5\n");
+        reasoning.push_text("reasoning line 6\n");
         assert_eq!(reasoning.desired_rows(80), 4);
     }
 
     #[test]
-    fn reasoning_widget_taller_allocation_does_not_resurrect_scrolled_rows() {
+    fn reasoning_taller_allocation_does_not_resurrect_scrolled_rows() {
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
-        reasoning.flush_reasoning();
+        reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
+        reasoning.flush();
 
-        reasoning.take_overflow(2, 10);
+        reasoning.trim_to(2, 10);
         assert_eq!(reasoning.desired_rows(10), 2);
 
         // A later taller allocation must not bring back the wrapped rows
         // that already scrolled off the head of this live tail.
-        let overflow = reasoning.take_overflow(4, 10);
-        assert!(overflow.is_empty());
+        reasoning.trim_to(4, 10);
         assert_eq!(reasoning.desired_rows(10), 2);
     }
 
     #[test]
-    fn reasoning_widget_short_trailing_line_does_not_unscroll_head() {
+    fn reasoning_short_trailing_line_does_not_unscroll_head() {
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
-        reasoning.push_reasoning_text("tail\n");
+        reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
+        reasoning.push_text("tail\n");
 
         // The prefixed head line wraps to 4 rows at width 10; the short
         // trailing line is 1 row. With a 2-row allocation the scrolled
         // offset must stay 3 (three rows of the head line hidden), not be
         // clamped against the short tail line back to zero.
-        reasoning.take_overflow(2, 10);
+        reasoning.trim_to(2, 10);
         assert_eq!(reasoning.desired_rows(10), 2);
         assert_eq!(reasoning.scrolled.get(), 3);
     }
 
     #[test]
-    fn reasoning_widget_wider_viewport_does_not_resurrect_scrolled_head() {
+    fn reasoning_wider_viewport_does_not_resurrect_scrolled_head() {
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
-        reasoning.flush_reasoning();
+        reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
+        reasoning.flush();
 
-        reasoning.take_overflow(2, 10);
+        reasoning.trim_to(2, 10);
         assert_eq!(reasoning.desired_rows(10), 2);
         assert_eq!(reasoning.scrolled.get(), 2);
 
@@ -2653,10 +2690,10 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_widget_narrower_viewport_does_not_hide_new_wraps() {
+    fn reasoning_narrower_viewport_does_not_hide_new_wraps() {
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
-        reasoning.flush_reasoning();
+        reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
+        reasoning.flush();
 
         assert_eq!(reasoning.desired_rows(10), 4);
         // Nothing has scrolled off yet, so narrowing to width 5 must ask for
@@ -2666,56 +2703,52 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_widget_clear_resets_scrolled_tail() {
+    fn reasoning_clear_resets_scrolled_tail() {
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("first\nsecond\nthird\n");
-        reasoning.take_overflow(1, 80);
+        reasoning.push_text("first\nsecond\nthird\n");
+        reasoning.trim_to(1, 80);
         assert_eq!(reasoning.desired_rows(80), 1);
 
         reasoning.clear();
         assert!(reasoning.is_empty());
         assert_eq!(reasoning.desired_rows(80), 0);
 
-        reasoning.push_reasoning_text("fresh\n");
+        reasoning.push_text("fresh\n");
         assert_eq!(reasoning.desired_rows(80), 1);
     }
 
     #[test]
-    fn reasoning_widget_collapses_to_zero_height_when_empty() {
+    fn reasoning_is_empty_when_never_fed() {
         let reasoning = ReasoningWidget::new();
+        assert!(reasoning.is_empty());
         assert_eq!(reasoning.desired_rows(80), 0);
-        assert_eq!(reasoning.min_height(80, &input_ctx("", 0)), 0);
-        assert!(reasoning.flexible(&input_ctx("", 0)));
     }
 
     #[test]
-    fn reasoning_widget_reports_uncapped_desired_height() {
+    fn reasoning_reports_uncapped_desired_height() {
         let mut reasoning = ReasoningWidget::new();
         for i in 0..10 {
-            reasoning.push_reasoning_text(&format!("reasoning line {i}\n"));
+            reasoning.push_text(&format!("reasoning line {i}\n"));
         }
-        // 10 lines, uncapped: desired height is 10, not 5.
+        // The child component itself is uncapped; the transcript enforces
+        // the 5-row band cap during finalize/measurement.
         assert_eq!(reasoning.desired_rows(80), 10);
-        assert_eq!(reasoning.min_height(80, &input_ctx("", 0)), 5);
-        assert!(reasoning.flexible(&input_ctx("", 0)));
-        assert_eq!(reasoning.max_height(&input_ctx("", 0)), u16::MAX);
     }
 
     #[test]
-    fn reasoning_widget_floor_is_wrapped_rows_capped_at_5() {
+    fn reasoning_desired_rows_are_wrapped_rows() {
         // A single long line with a `◈ ` prefix: the prefix occupies row 1
         // and the long word wraps onto the following rows, so a 26-char word
-        // reports a floor of 4 (prefix row + 3 word rows).
+        // reports 4 rows (prefix row + 3 word rows).
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz");
+        reasoning.push_text("abcdefghijklmnopqrstuvwxyz");
         assert_eq!(reasoning.desired_rows(10), 4);
-        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 4);
 
-        // A long line wrapping past 5 rows caps the floor at 5.
+        // A long line wrapping past the transcript's 5-row band still
+        // reports its natural wrapped height at the component level.
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
+        reasoning.push_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
         assert_eq!(reasoning.desired_rows(10), 7);
-        assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 5);
     }
 
     // ── input bar cursor positioning ────────────────────────────
