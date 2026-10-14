@@ -1146,35 +1146,43 @@ agent loop (§3.1) to completion. The daemon owns all context management.
 Front-ends are thin clients that send text into a gremlin and stream events
 back out.
 
-### 9.1 A chat is a gremlin
+### 9.1 A chat is a gremlin owned by a session
 
-The `chat_id` is a `gremlin_id`. A chat gremlin lives in the run map alongside
-pipeline gremlins, appears in `gremlins ls`, and supports every op a normal
-gremlin does — `stop`, `resume`, `debug`, `info`, `log`. Multiple chats can
-coexist; each is an independent gremlin with its own worktree, artifact
-registry, and state.
+A chat gremlin lives in the run map alongside pipeline gremlins, appears in
+`gremlins ls`, and supports every daemon op a normal gremlin does — `stop`,
+`debug`, `info`, `log`. The gremlin id is an internal daemon detail, however:
+front-ends never address it directly. They address the **session** that owns
+the gremlin, and the session dies (reaping the gremlin) when the front-end
+disconnects or closes the session.
 
 A chat gremlin's definition is built programmatically at creation time and
 grows with every user message — each turn appends a new Agent stage to the
 chain. The definition is never written to `.gremlins/`; it lives in the
-gremlin's state directory as `definition.yaml`.
+ephemeral gremlin's state directory as `definition.yaml`.
 
 ### 9.2 Daemon owns context; front-ends are thin
 
-The TUI (or any front-end) sends exactly:
+The TUI (or any front-end) first creates a session:
 
 ```json
-{"op": "chat", "id": "<gremlin_id>", "text": "<user message>"}
+{"op": "create_session"}
 ```
 
-No history, no transcript, no tool records — the front-end holds no
-conversation state beyond the gremlin id it is attached to. The daemon
-manages the entire context lifecycle internally. A front-end that disconnects
-and reconnects to the same gremlin id picks up exactly where it left off.
+The daemon replies with a session id and a session socket name. Conversation
+turns are then sent on that session socket:
+
+```json
+{"op": "chat", "session_id": "sess-…", "text": "<user message>"}
+```
+
+No history, no transcript, no tool records, and no gremlin id — the
+front-end holds no conversation state beyond the session id. The daemon
+manages the entire context lifecycle internally. When a session dies, its chat
+gremlin dies with it.
 
 This makes the chat backend front-end-agnostic: the TUI, a CLI one-shot
 (`gremlins chat <id> "message"`), a web dashboard, or an API all speak the
-same protocol against the same gremlin.
+same protocol: create a session, then address it by session id.
 
 ### 9.3 Per-turn Agent stages with full context
 
@@ -1236,12 +1244,14 @@ rewinds the artifact registry to the snapshot at that point, and sets the
 stage cursor. The next user message resumes from there. No message editing,
 no partial rewrites — the boundary is the stage boundary.
 
-`/clear` (or `/new`) destroys the gremlin and creates a fresh one. The old
-gremlin remains inspectable in the run map until cleaned up.
+`/clear` (or `/new`) closes the session and opens a fresh one. The old
+session's chat gremlin is torn down immediately — cancelled, reaped, and
+removed from the run map — rather than remaining inspectable.
 
 ### 9.6 Relationship to the TUI
 
-The TUI (§8) is one front-end for the chat backend. It sends `{"op": "chat",
-"id": "<gremlin_id>", "text": "..."}` and renders stream events (reasoning
-chunks, tool results, response text, turn completion) as transcript widgets.
-The TUI holds no conversation history — the daemon is the authority.
+The TUI (§8) is one front-end for the chat backend. It creates a session,
+sends `{"op": "chat", "session_id": "sess-…", "text": "..."}` on that
+session socket, and renders stream events (reasoning chunks, tool results,
+response text, turn completion) as transcript widgets. The TUI holds no
+conversation history — the daemon is the authority.

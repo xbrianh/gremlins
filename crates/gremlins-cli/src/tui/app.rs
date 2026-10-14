@@ -21,9 +21,6 @@ pub struct App {
     /// When Some, the TUI is following a gremlin's log and printing log lines
     /// to the transcript as they arrive.
     pub following_log: Option<String>,
-    /// The persistent chat gremlin id, captured from the first `Done` event
-    /// and sent with subsequent chat requests. Cleared on `/clear`/`/new`.
-    pub chat_id: Option<String>,
     /// Whether a chat request is currently in-flight (guards against concurrent submissions).
     pub active_request: bool,
     /// Active ephemeral overlay, if any.
@@ -104,7 +101,6 @@ impl App {
             active_runs: HashMap::new(),
             project_name,
             following_log: None,
-            chat_id: None,
             active_request: false,
             overlay: None,
             input_history: Vec::new(),
