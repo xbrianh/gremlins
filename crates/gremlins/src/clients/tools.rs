@@ -84,6 +84,19 @@ pub(crate) struct ToolContext {
     /// Point-in-time snapshot of the parent conversation, available to Task
     /// tool calls (used only by `Fork`). `None` when unavailable.
     pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
+    /// Optional live-output channel for streaming tool output lines from
+    /// `Bash` and `WebSearch` into the interactive TUI live pane.
+    pub(crate) tool_output: Option<tokio::sync::broadcast::Sender<(String, String)>>,
+}
+
+impl ToolContext {
+    /// Send one completed live-output line for `name` to the optional
+    /// display channel. Tool results returned to the model are unaffected.
+    pub(crate) fn emit_output(&self, name: &str, text: &str) {
+        if let Some(tx) = &self.tool_output {
+            let _ = tx.send((name.to_string(), text.to_string()));
+        }
+    }
 }
 
 pub(crate) fn project_root() -> PathBuf {
@@ -1416,6 +1429,29 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
+fn emit_live_lines(name: &str, ctx: &ToolContext, bytes: &[u8], scan: &mut usize, flush: bool) {
+    // Emit each completed line as a separate chunk. A trailing newline is
+    // included so downstream line-buffered widgets can split without further
+    // knowledge of the tool's line discipline.
+    while *scan < bytes.len() {
+        let pos = match bytes[*scan..].iter().position(|&b| b == b'\n') {
+            Some(pos) => pos,
+            None => break,
+        };
+        let end = *scan + pos;
+        let mut line = String::from_utf8_lossy(&bytes[*scan..end]).into_owned();
+        line.push('\n');
+        ctx.emit_output(name, &line);
+        *scan = end + 1;
+    }
+    if flush && *scan < bytes.len() {
+        let mut line = String::from_utf8_lossy(&bytes[*scan..]).into_owned();
+        line.push('\n');
+        ctx.emit_output(name, &line);
+        *scan = bytes.len();
+    }
+}
+
 pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
@@ -1458,7 +1494,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
         cmd.env_clear().envs(env);
     }
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
@@ -1467,7 +1503,79 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     // kills the whole group — not just the direct `bash` child.
     #[cfg(unix)]
     let mut process_group_guard = ProcessGroupGuard::new(child.id());
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+
+    // Take the pipes explicitly so the read loop can process stdout and
+    // stderr concurrently and emit completed lines to the live pane while
+    // keeping the exact same raw stdout-then-stderr result string.
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut out_buf = [0u8; 8192];
+    let mut err_buf = [0u8; 8192];
+    let read_all = async {
+        use tokio::io::AsyncReadExt;
+        let mut stdout_done = stdout.is_none();
+        let mut stderr_done = stderr.is_none();
+        let mut read_error: Option<std::io::Error> = None;
+        let mut out_scan = 0usize;
+        let mut err_scan = 0usize;
+        loop {
+            if read_error.is_some() || (stdout_done && stderr_done) {
+                break;
+            }
+            tokio::select! {
+                r = async {
+                    stdout.as_mut().unwrap().read(&mut out_buf).await
+                }, if !stdout_done => {
+                    match r {
+                        Ok(0) => {
+                            stdout_done = true;
+                            stdout = None;
+                        }
+                        Ok(n) => {
+                            out.extend_from_slice(&out_buf[..n]);
+                            emit_live_lines("Bash", ctx, &out, &mut out_scan, false);
+                        }
+                        Err(e) => {
+                            stdout = None;
+                            read_error = Some(e);
+                        }
+                    }
+                }
+                r = async {
+                    stderr.as_mut().unwrap().read(&mut err_buf).await
+                }, if !stderr_done => {
+                    match r {
+                        Ok(0) => {
+                            stderr_done = true;
+                            stderr = None;
+                        }
+                        Ok(n) => {
+                            err.extend_from_slice(&err_buf[..n]);
+                            emit_live_lines("Bash", ctx, &err, &mut err_scan, false);
+                        }
+                        Err(e) => {
+                            stderr = None;
+                            read_error = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(e) = read_error {
+            return Err(e);
+        }
+        emit_live_lines("Bash", ctx, &out, &mut out_scan, true);
+        emit_live_lines("Bash", ctx, &err, &mut err_scan, true);
+        Ok(())
+    };
+
+    let run = async {
+        read_all.await?;
+        child.wait().await
+    };
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), run).await {
         Err(_) => {
             // `process_group_guard` fires as this function returns; the
             // direct child is also covered by `kill_on_drop` when the
@@ -1479,15 +1587,15 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
             process_group_guard.disarm();
             format!("Error: {e}")
         }
-        Ok(Ok(output)) => {
+        Ok(Ok(status)) => {
             #[cfg(unix)]
             process_group_guard.disarm();
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            if output.status.success() {
+            let mut text = String::from_utf8_lossy(&out).into_owned();
+            text.push_str(&String::from_utf8_lossy(&err));
+            if status.success() {
                 text
             } else {
-                format!("[exit {}]\n{text}", output.status.code().unwrap_or(1))
+                format!("[exit {}]\n{text}", status.code().unwrap_or(1))
             }
         }
     }
@@ -1599,6 +1707,8 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
         let mut stderr_done = stderr.is_none();
         let out_limit = data_limit;
         let err_limit = data_limit;
+        let mut out_scan = 0usize;
+        let mut err_scan = 0usize;
         loop {
             if capped || (stdout_done && stderr_done) {
                 break;
@@ -1617,6 +1727,7 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
                             }
                             let take = n.min(remaining);
                             out.extend_from_slice(&out_buf[..take]);
+                            emit_live_lines("WebSearch", ctx, &out, &mut out_scan, false);
                             if take < n {
                                 capped = true;
                                 break;
@@ -1641,6 +1752,7 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
                             if body_room > 0 {
                                 let take = n.min(err_room);
                                 err.extend_from_slice(&err_buf[..take]);
+                                emit_live_lines("WebSearch", ctx, &err, &mut err_scan, false);
                             } else if err_room == 0 {
                                 stderr_done = true;
                             }
@@ -1649,6 +1761,8 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
                 }
             }
         }
+        emit_live_lines("WebSearch", ctx, &out, &mut out_scan, true);
+        emit_live_lines("WebSearch", ctx, &err, &mut err_scan, true);
         capped
     };
     let capped = match tokio::time::timeout(Duration::from_secs(timeout_secs), read_all).await {
@@ -2500,6 +2614,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         }
     }
 
@@ -2660,6 +2775,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
         let output = bash_invoke(&c, &args).await;
@@ -2687,6 +2803,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let expected = std::env::current_dir().unwrap();
         let args = serde_json::json!({"command": "pwd"}).to_string();
@@ -3610,6 +3727,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let write_args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"})
@@ -4017,6 +4135,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -4042,6 +4161,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -4065,6 +4185,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -4095,6 +4216,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
         let result = invoke("Task", &c, &args).await;
@@ -4120,6 +4242,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         assert_eq!(invoke("Task", &c, &args).await, "# Scout\n\nbody");
@@ -4472,6 +4595,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
@@ -4499,6 +4623,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         }
     }
 

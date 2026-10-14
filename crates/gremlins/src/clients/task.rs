@@ -464,6 +464,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         }
     }
 

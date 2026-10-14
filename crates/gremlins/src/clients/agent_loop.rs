@@ -223,6 +223,7 @@ pub(crate) async fn run_agent_loop(
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
+    let (tool_output_tx, _) = tokio::sync::broadcast::channel::<(String, String)>(1024);
     let mut tool_ctx = ToolContext {
         cwd: cwd.clone(),
         extra_env,
@@ -233,6 +234,7 @@ pub(crate) async fn run_agent_loop(
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         parent_history: None,
+        tool_output: Some(tool_output_tx),
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter);
 
@@ -1385,6 +1387,31 @@ async fn run_agent_loop_core(
         // interrupt a long-running tool batch.
         let mut ctx = tool_ctx.clone();
         ctx.parent_history = fork_parent_history;
+        // Forward live tool output only for the duration of this batch. The
+        // receiver is borrowed by the select below and is dropped as soon as
+        // the batch completes or is cancelled, so later batches never hear
+        // stale subscribers and Esc/clear cannot resurrect old chunks.
+        let mut live_rx = ctx.tool_output.as_ref().map(|tx| tx.subscribe());
+        let forward_live_output = async {
+            if let Some(rx) = live_rx.as_mut() {
+                loop {
+                    match rx.recv().await {
+                        Ok((name, text)) => {
+                            if let Some(se) = &stream_events {
+                                if se.wants_events() {
+                                    se.send(InteractiveEvent::ToolOutputChunk { name, text });
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+            // Park forever so this branch never resolves the select; the
+            // sender intentionally outlives an individual tool batch.
+            std::future::pending::<()>().await;
+        };
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             async move {
@@ -1401,6 +1428,7 @@ async fn run_agent_loop_core(
 
         let results = tokio::select! {
             results = exec_fut => results,
+            _ = forward_live_output => unreachable!("live-output forwarder parks forever"),
             _ = cancel.cancelled() => {
                 // Esc / cancel_chat during a tool batch: drop the join_all
                 // future (cancelling pending tool futures) and unwind the
@@ -1477,6 +1505,26 @@ async fn run_agent_loop_core(
                 continue;
             }
         };
+
+        // Tools send their final chunks just before returning. The select
+        // above stops at the first completed future, so drain anything still
+        // sitting in the receiver before emitting ToolResult events.
+        if let Some(rx) = live_rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok((name, text)) => {
+                        if let Some(se) = &stream_events {
+                            if se.wants_events() {
+                                se.send(InteractiveEvent::ToolOutputChunk { name, text });
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                    | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                }
+            }
+        }
 
         // Phase 3: emit results in order
         let mut result_msgs = Vec::new();
@@ -4690,6 +4738,7 @@ mod tests {
             task_fn: None,
             audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
             parent_history: None,
+            tool_output: None,
         }
     }
 

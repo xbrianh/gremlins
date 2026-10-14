@@ -15,6 +15,11 @@ pub enum ChatEvent {
         text: String,
         turn: Option<String>,
     },
+    ToolOutputChunk {
+        name: String,
+        text: String,
+        turn: Option<String>,
+    },
     ToolResult {
         name: String,
         output: String,
@@ -56,6 +61,19 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
             turn,
         }),
         Some("reasoning_chunk") => Some(ChatEvent::ReasoningChunk {
+            text: value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            turn,
+        }),
+        Some("tool_output_chunk") => Some(ChatEvent::ToolOutputChunk {
+            name: value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             text: value
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -170,6 +188,24 @@ mod tests {
                 assert_eq!(summary, "");
             }
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_output_chunk_carries_name_and_turn() {
+        let value = serde_json::json!({
+            "type": "tool_output_chunk",
+            "name": "Bash",
+            "text": "hello\n",
+            "turn": "7",
+        });
+        match parse_chat_event(&value) {
+            Some(ChatEvent::ToolOutputChunk { name, text, turn }) => {
+                assert_eq!(name, "Bash");
+                assert_eq!(text, "hello\n");
+                assert_eq!(turn.as_deref(), Some("7"));
+            }
+            other => panic!("expected ToolOutputChunk, got {other:?}"),
         }
     }
 }

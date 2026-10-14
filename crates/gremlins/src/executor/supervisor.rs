@@ -2556,6 +2556,13 @@ async fn handle_debug(
                             break;
                         }
                     }
+                    Ok(InteractiveEvent::ToolOutputChunk { name, text }) => {
+                        let payload = serde_json::json!({"type": "tool_output_chunk", "name": name, "text": text});
+                        if writer.write_json_line(&payload).await.is_err() {
+                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
+                            break;
+                        }
+                    }
                     Ok(InteractiveEvent::StreamReset) => {
                         let payload = serde_json::json!({"type": "stream_reset"});
                         if writer.write_json_line(&payload).await.is_err() {
@@ -3058,6 +3065,12 @@ async fn run_chat_turn(
                     }
                     Some(InteractiveEvent::ReasoningChunk { text }) => {
                         let payload = chat_payload(&turn, serde_json::json!({"type": "reasoning_chunk", "text": text}));
+                        if writer.write_json_line(&payload).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(InteractiveEvent::ToolOutputChunk { name, text }) => {
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "tool_output_chunk", "name": name, "text": text}));
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
@@ -4749,5 +4762,17 @@ stages: []
             !socket::session_socket_path(&state_root, &session_id).exists(),
             "session socket file must be unlinked on main socket EOF"
         );
+    }
+
+    #[test]
+    fn chat_payload_serializes_tool_output_chunk() {
+        let value = super::chat_payload(
+            &Some("t-9".to_string()),
+            serde_json::json!({"type": "tool_output_chunk", "name": "Bash", "text": "hi\n"}),
+        );
+        assert_eq!(value["type"], "tool_output_chunk");
+        assert_eq!(value["name"], "Bash");
+        assert_eq!(value["text"], "hi\n");
+        assert_eq!(value["turn"], "t-9");
     }
 }

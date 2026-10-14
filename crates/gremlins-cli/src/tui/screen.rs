@@ -30,8 +30,8 @@ use ratatui::{
 
 use crate::tui::app::App;
 use crate::tui::widgets::{
-    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, RenderContext, TranscriptWidget,
-    WatchSingleWidget,
+    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, LiveToolWidget, RenderContext,
+    TranscriptWidget, WatchSingleWidget,
 };
 
 /// Approximate number of rows reserved at the bottom of the screen for the
@@ -78,6 +78,7 @@ impl<B: Backend> LiveArea<B> {
             needs_terminal_cleanup: false,
             widgets: vec![
                 Box::new(TranscriptWidget::new()),
+                Box::new(LiveToolWidget::new()),
                 Box::new(InputBarWidget::new()),
                 Box::new(InfoBarWidget),
             ],
@@ -392,12 +393,18 @@ impl<B: Backend> LiveArea<B> {
         }
 
         // Derive reserved rows from the allocated heights of the actual
-        // input-bar and info-bar widgets, not positionally.
+        // pin-to-screen widgets, not positionally. The live tool pane is
+        // ephemeral but sticky while active: it is kept out of the terminal
+        // scroll region so its display-only output never reaches scrollback.
         self.reserved_rows = self
             .widgets
             .iter()
             .enumerate()
-            .filter(|(_, w)| w.as_any().is::<InputBarWidget>() || w.as_any().is::<InfoBarWidget>())
+            .filter(|(_, w)| {
+                w.as_any().is::<LiveToolWidget>()
+                    || w.as_any().is::<InputBarWidget>()
+                    || w.as_any().is::<InfoBarWidget>()
+            })
             .map(|(i, _)| heights[i])
             .sum();
 
@@ -447,9 +454,9 @@ impl<B: Backend> LiveArea<B> {
     /// Remove the most recently added overlay widget, if any. The initial
     /// content widgets are never popped.
     pub fn pop_overlay(&mut self) -> Option<Box<dyn LiveAreaWidget>> {
-        // The first three widgets are the fixed content stack; only pop
+        // The first four widgets are the fixed content stack; only pop
         // widgets pushed on top of them.
-        if self.widgets.len() > 3 {
+        if self.widgets.len() > 4 {
             Some(self.widgets.remove(0))
         } else {
             None
@@ -463,6 +470,13 @@ impl<B: Backend> LiveArea<B> {
             .iter_mut()
             .find_map(|w| w.as_any_mut().downcast_mut::<TranscriptWidget>())
             .expect("transcript widget present")
+    }
+
+    fn live_tool_mut(&mut self) -> &mut LiveToolWidget {
+        self.widgets
+            .iter_mut()
+            .find_map(|w| w.as_any_mut().downcast_mut::<LiveToolWidget>())
+            .expect("live tool widget present")
     }
 
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
@@ -516,6 +530,16 @@ impl<B: Backend> LiveArea<B> {
     /// Append reasoning text (may be a partial chunk).
     pub fn push_reasoning_text(&mut self, text: &str) {
         self.transcript_mut().push_reasoning_text(text);
+    }
+
+    /// Append a live tool-output chunk to the ephemeral tool pane.
+    pub fn push_tool_output_chunk(&mut self, text: &str) {
+        self.live_tool_mut().push_text(text);
+    }
+
+    /// Clear the ephemeral tool pane at a turn boundary.
+    pub fn clear_tool_output(&mut self) {
+        self.live_tool_mut().clear();
     }
 
     /// Record a tool call.
@@ -952,6 +976,34 @@ mod tests {
                 "INFO BAR LEAKED TO SCROLLBACK: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn live_tool_output_never_reaches_scrollback() {
+        let mut live = new_live(40, 8);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        for i in 0..10 {
+            live.push_transcript_line(format!("transcript line {i}"));
+        }
+        for i in 0..20 {
+            live.push_tool_output_chunk(&format!("tool live {i}\n"));
+        }
+
+        live.compose(&app).unwrap();
+
+        let scrollback = live.scrollback().join("\n");
+        assert!(
+            !scrollback.contains("tool live"),
+            "live tool output must never enter terminal scrollback.\nScrollback:\n{scrollback}"
+        );
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("tool live"),
+            "live tool tail should remain visible.\nBuffer:\n{visible}"
+        );
     }
 
     #[test]
@@ -1456,29 +1508,29 @@ mod tests {
         use crate::tui::widgets::{DebugWidget, WatchTableWidget};
 
         let mut live = new_live(80, 24);
-        assert_eq!(live.widgets.len(), 3);
+        assert_eq!(live.widgets.len(), 4);
 
         // Popping with no overlay is a no-op.
         assert!(live.pop_overlay().is_none());
 
         live.push_overlay(Box::new(WatchTableWidget::new()));
-        assert_eq!(live.widgets.len(), 4);
+        assert_eq!(live.widgets.len(), 5);
 
         live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 6);
 
         // Pop removes the most recently added (debug) first.
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<DebugWidget>().is_some());
-        assert_eq!(live.widgets.len(), 4);
+        assert_eq!(live.widgets.len(), 5);
 
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<WatchTableWidget>().is_some());
-        assert_eq!(live.widgets.len(), 3);
+        assert_eq!(live.widgets.len(), 4);
 
         // Cannot pop the fixed content stack.
         assert!(live.pop_overlay().is_none());
-        assert_eq!(live.widgets.len(), 3);
+        assert_eq!(live.widgets.len(), 4);
     }
 
     #[test]

@@ -722,6 +722,73 @@ fn tool_line(name: &str) -> Line<'static> {
     ])
 }
 
+/// Strip common ANSI control sequences from live tool output.
+///
+/// This is display-only tidying: the tool result returned to the model is
+/// never passed through here. The stripper is deliberately simple — CSI,
+/// OSC, and single-character escapes — and drops any trailing escape prefix
+/// so an interrupted sequence cannot leak escape garbage into a rendered
+/// line.
+fn strip_ansi(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            let ch = text[i..].chars().next().expect("valid utf-8 boundary");
+            // Keep printable characters and tab; drop carriage returns and
+            // other C0/C1 control characters so progress-style output cannot
+            // become a single control-laden line or skew wrap math.
+            if ch == '\t' || !ch.is_control() {
+                out.push(ch);
+            }
+            i += ch.len_utf8();
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            // Trailing escape prefix; drop it.
+            break;
+        }
+        match bytes[i + 1] {
+            b'[' => {
+                i += 2;
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b']' => {
+                i += 2;
+                while i < bytes.len() {
+                    if bytes[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {
+                // A bare ESC plus the following character (for example ESC )
+                // or ESC c); neither carries printable payload. Advance by the
+                // following character's UTF-8 width so a raw ESC before a
+                // multibyte character cannot split inside that character.
+                i += 1;
+                if i < bytes.len() {
+                    let next = text[i..].chars().next().expect("valid utf-8 boundary");
+                    i += next.len_utf8();
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Find a prefix of `buffer` that does not fit within `available_rows`.
 ///
 /// The head is drained unconditionally; an in-progress turn is treated like
@@ -1084,6 +1151,264 @@ impl ReasoningWidget {
         let total = wrapped_height(&lines, area.width);
         let visible_rows = total.saturating_sub(self.scrolled.get());
         render_wrapped_tail(&lines, area, buf, visible_rows);
+    }
+}
+
+/// Ephemeral, sticky live tail for running tools.
+///
+/// This is the `Bash`/`WebSearch` live pane. It buffers completed lines plus
+/// a trailing partial (mirroring [`ReasoningWidget`]), trims its head to its
+/// allocated height, collapses to zero when idle, and never reports overflow.
+pub struct LiveToolWidget {
+    lines: LineBuffer,
+    partial: String,
+    /// Wrapped rows scrolled off the top of the current remaining live tail.
+    /// This behaves exactly like [`ReasoningWidget`]'s scrolling field.
+    scrolled: Cell<usize>,
+    last_width: Cell<u16>,
+}
+
+impl LiveToolWidget {
+    /// Active floor: a small number of rows are reserved while output is
+    /// present so the tail stays visible; otherwise the widget collapses to
+    /// zero.
+    pub const ACTIVE_MIN_ROWS: u16 = 3;
+
+    pub fn new() -> Self {
+        Self {
+            lines: LineBuffer::new(),
+            partial: String::new(),
+            scrolled: Cell::new(0),
+            last_width: Cell::new(0),
+        }
+    }
+
+    /// Append tool output text. Completed lines are pushed into the buffer
+    /// with ANSI escapes stripped; the trailing partial is kept as a live
+    /// line.
+    pub fn push_text(&mut self, text: &str) {
+        self.partial.push_str(text);
+        while let Some(newline_pos) = self.partial.find('\n') {
+            let raw_line: String = self.partial[..newline_pos].into();
+            self.partial = self.partial[newline_pos + 1..].into();
+            self.lines.push(Line::from(Span::styled(
+                strip_ansi(&raw_line),
+                Style::default().fg(DEFAULT_THEME.subtle),
+            )));
+        }
+    }
+
+    /// Reset the live region for a new turn.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.partial.clear();
+        self.scrolled.set(0);
+        self.last_width.set(0);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty() && self.partial.is_empty()
+    }
+
+    /// Re-anchor `scrolled` when the wrap width changes.
+    fn normalize_scroll(&self, width: u16) {
+        if width == 0 {
+            return;
+        }
+        let last = self.last_width.get();
+        if last == 0 {
+            self.last_width.set(width);
+            return;
+        }
+        if last == width {
+            return;
+        }
+
+        let scrolled = self.scrolled.get();
+        if scrolled == 0 {
+            self.last_width.set(width);
+            return;
+        }
+
+        let rendered = self.rendered_lines();
+        let Some(head) = rendered.first() else {
+            self.scrolled.set(0);
+            self.last_width.set(width);
+            return;
+        };
+        self.scrolled
+            .set(Self::reanchor_scrolled(head, scrolled, last, width));
+        self.last_width.set(width);
+    }
+
+    fn reanchor_scrolled(
+        line: &Line<'static>,
+        scrolled: usize,
+        old_width: u16,
+        new_width: u16,
+    ) -> usize {
+        if scrolled == 0 || old_width == 0 || new_width == 0 {
+            return 0;
+        }
+        let content = line.to_string();
+        if content.is_empty() {
+            return 0;
+        }
+
+        let mut boundary = 0usize;
+        for (idx, _) in content.char_indices() {
+            if idx == 0 {
+                continue;
+            }
+            let prefix = &content[..idx];
+            let prefix_rows =
+                line_wrapped_height(&Line::from(Span::raw(prefix.to_string())), old_width);
+            if prefix_rows == scrolled {
+                boundary = idx;
+            } else if prefix_rows > scrolled {
+                break;
+            }
+        }
+
+        if boundary == 0 {
+            return 0;
+        }
+        let prefix = &content[..boundary];
+        line_wrapped_height(&Line::from(Span::raw(prefix.to_string())), new_width)
+    }
+
+    fn consume_head(&mut self, rendered: &[Line<'static>], mut hidden: usize, width: u16) -> usize {
+        if rendered.is_empty() {
+            return 0;
+        }
+
+        let mut drop_count = 0usize;
+        while drop_count + 1 < rendered.len() {
+            let line_rows = line_wrapped_height(&rendered[drop_count], width);
+            if hidden < line_rows {
+                break;
+            }
+            hidden -= line_rows;
+            drop_count += 1;
+        }
+
+        if drop_count + 1 >= rendered.len() {
+            if let Some(last) = rendered.last() {
+                let rows = line_wrapped_height(last, width);
+                hidden = hidden.min(rows.saturating_sub(1));
+            }
+        }
+
+        let drop_from_buffer = drop_count.min(self.lines.len());
+        self.lines.drain_head(drop_from_buffer);
+        if drop_count > drop_from_buffer {
+            self.partial.clear();
+        }
+        hidden
+    }
+
+    /// Desired height: the full wrapped height of the remaining live tail
+    /// minus the wrapped rows that have already scrolled off the top.
+    pub fn desired_rows(&self, width: u16) -> u16 {
+        if self.is_empty() || width == 0 {
+            return 0;
+        }
+        self.normalize_scroll(width);
+        let rendered = self.rendered_lines();
+        let total = wrapped_height(&rendered, width);
+        total
+            .saturating_sub(self.scrolled.get())
+            .min(u16::MAX as usize) as u16
+    }
+
+    fn rendered_lines(&self) -> Vec<Line<'static>> {
+        let mut out = self.lines.visible_lines().to_vec();
+        if !self.partial.is_empty() {
+            out.push(Line::from(Span::styled(
+                strip_ansi(&self.partial),
+                Style::default().fg(DEFAULT_THEME.subtle),
+            )));
+        }
+        out
+    }
+
+    /// Keep only the visible tail of the live stream; the head is discarded,
+    /// never committed to terminal scrollback.
+    pub fn trim_to(&mut self, available_rows: u16, width: u16) {
+        if width == 0 || available_rows == 0 {
+            return;
+        }
+
+        self.normalize_scroll(width);
+        let rendered = self.rendered_lines();
+        let total = wrapped_height(&rendered, width);
+        let visible = total.saturating_sub(self.scrolled.get());
+        let excess = visible.saturating_sub(available_rows as usize);
+        if excess == 0 {
+            return;
+        }
+
+        let next_scrolled = self.consume_head(&rendered, self.scrolled.get() + excess, width);
+        self.scrolled.set(next_scrolled);
+        self.last_width.set(width);
+    }
+
+    /// Paint the maintained wrapped tail of the live stream into `area`.
+    pub fn render_band(&mut self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        self.normalize_scroll(area.width);
+        let lines = self.rendered_lines();
+        let total = wrapped_height(&lines, area.width);
+        let visible_rows = total.saturating_sub(self.scrolled.get());
+        render_wrapped_tail(&lines, area, buf, visible_rows);
+    }
+}
+
+impl Default for LiveToolWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveAreaWidget for LiveToolWidget {
+    as_any_methods!();
+
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "live_tool"
+    }
+
+    fn size_priority(&self) -> i32 {
+        // Below the transcript (priority 10) and above the embedded
+        // reasoning slot / fixed bars.
+        5
+    }
+
+    fn min_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
+        if ctx.blocking_overlay() || self.is_empty() {
+            0
+        } else {
+            Self::ACTIVE_MIN_ROWS
+        }
+    }
+
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        if ctx.blocking_overlay() {
+            0
+        } else {
+            self.desired_rows(width)
+        }
+    }
+
+    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+        self.trim_to(available_rows, width);
+        Vec::new()
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        self.render_band(area, buf);
     }
 }
 
@@ -2749,6 +3074,82 @@ mod tests {
         let mut reasoning = ReasoningWidget::new();
         reasoning.push_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
         assert_eq!(reasoning.desired_rows(10), 7);
+    }
+
+    // ── live tool widget ──────────────────────────────────────
+
+    #[test]
+    fn live_tool_buffers_completed_lines_and_trailing_partial() {
+        let mut live = LiveToolWidget::new();
+        live.push_text("first\nsecond");
+        let lines: Vec<String> = live
+            .rendered_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(lines, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn live_tool_trims_head_to_visible_height() {
+        let mut live = LiveToolWidget::new();
+        for i in 0..8 {
+            live.push_text(&format!("line {i}\n"));
+        }
+        assert_eq!(live.desired_rows(80), 8);
+
+        live.trim_to(3, 80);
+        assert_eq!(live.desired_rows(80), 3);
+        let lines: Vec<String> = live
+            .rendered_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "line 5".to_string(),
+                "line 6".to_string(),
+                "line 7".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn live_tool_clear_resets_tail() {
+        let mut live = LiveToolWidget::new();
+        live.push_text("one\ntwo\nthree\n");
+        live.trim_to(1, 80);
+        assert_eq!(live.desired_rows(80), 1);
+
+        live.clear();
+        assert!(live.is_empty());
+        assert_eq!(live.desired_rows(80), 0);
+
+        live.push_text("fresh\n");
+        assert_eq!(live.desired_rows(80), 1);
+    }
+
+    #[test]
+    fn live_tool_strips_ansi_escape_sequences() {
+        let mut live = LiveToolWidget::new();
+        live.push_text("\u{1b}[31mred\u{1b}[0m normal\n");
+        let lines: Vec<String> = live
+            .rendered_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(lines, vec!["red normal".to_string()]);
+    }
+
+    #[test]
+    fn strip_ansi_drops_trailing_incomplete_escape() {
+        assert_eq!(strip_ansi("ok\u{1b}[31mred\u{1b}["), "okred");
+    }
+
+    #[test]
+    fn strip_ansi_drops_carriage_returns_and_other_controls_but_keeps_tab() {
+        assert_eq!(strip_ansi("a\r b\u{1}c\td"), "a bc\td");
     }
 
     // ── input bar cursor positioning ────────────────────────────

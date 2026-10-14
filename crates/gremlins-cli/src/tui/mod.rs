@@ -77,6 +77,10 @@ fn handle_esc_reset(
     active_turn: &mut Option<String>,
     client: &Arc<client::DaemonClient>,
 ) -> bool {
+    // Esc is a turn boundary for the ephemeral live tool pane regardless of
+    // whether it dismisses an overlay or resets the main input/chat state.
+    live_area.clear_tool_output();
+
     // Blocking overlays (single-watch, debug) dismiss first.
     if app.dismiss_blocking_overlay() {
         live_area.pop_overlay();
@@ -180,6 +184,7 @@ fn send_chat_input(
     }
 
     // Start a new turn with the prompt.
+    live_area.clear_tool_output();
     live_area.submit_prompt(input.clone());
 
     // Force an immediate frame so the pinned prompt appears without waiting
@@ -324,6 +329,10 @@ enum DebugEvent {
     ReasoningChunk {
         text: String,
     },
+    ToolOutputChunk {
+        name: String,
+        output: String,
+    },
     ToolResult {
         name: String,
         output: String,
@@ -381,6 +390,18 @@ fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
         },
         Some("reasoning_chunk") => DebugEvent::ReasoningChunk {
             text: value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        Some("tool_output_chunk") => DebugEvent::ToolOutputChunk {
+            name: value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            output: value
                 .get("text")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -1525,6 +1546,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 let event_turn = match &event {
                     ChatEvent::StreamChunk { turn, .. }
                     | ChatEvent::ReasoningChunk { turn, .. }
+                    | ChatEvent::ToolOutputChunk { turn, .. }
                     | ChatEvent::ToolResult { turn, .. }
                     | ChatEvent::TurnComplete { turn, .. }
                     | ChatEvent::Done { turn, .. }
@@ -1555,6 +1577,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         log::debug!("ReasoningChunk len={}", text.len());
                         live_area.push_reasoning_text(&text);
                     }
+                    ChatEvent::ToolOutputChunk { name, text, .. } => {
+                        log::debug!("ToolOutputChunk name={name} len={}", text.len());
+                        live_area.push_tool_output_chunk(&text);
+                    }
                     ChatEvent::ToolResult { name, output, .. } => {
                         // The bare tool result is intentionally not rendered;
                         // `ChatEvent::TurnComplete` is the sole source of
@@ -1565,6 +1591,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     ChatEvent::TurnComplete { text, tool_calls, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
+                        live_area.clear_tool_output();
                         // `text` is the model's full response for the just-completed
                         // turn — the same text streamed via StreamChunk. Reconcile
                         // `response_text` so the display shows the complete response
@@ -1602,6 +1629,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // Unpin the turn and clear its draft state so the
                         // finished response is committed to the transcript.
                         live_area.finish_turn();
+                        live_area.clear_tool_output();
 
                         // Build usage summary line.
                         if let Some(usage) = usage {
@@ -1643,6 +1671,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         active_turn = None;
                         let msg = format!("chat ended: {reason}");
                         live_area.finish_turn();
+                        live_area.clear_tool_output();
                         live_area.push_transcript_line(msg);
 
                         // Repaint immediately so the ended state is visible
@@ -1657,6 +1686,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         active_turn = None;
                         let full = format!("chat error: {msg}");
                         live_area.finish_turn();
+                        live_area.clear_tool_output();
                         live_area.push_transcript_line(full);
 
                         // Repaint immediately so the error state is visible
@@ -1706,6 +1736,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     DebugEvent::ReasoningChunk { text } => {
                         live_area.push_debug_output(text);
+                    }
+                    DebugEvent::ToolOutputChunk { name, output } => {
+                        log::debug!(
+                            "debug ToolOutputChunk name={name} len={}",
+                            output.len()
+                        );
+                        live_area.push_tool_output_chunk(&output);
                     }
                     DebugEvent::ToolResult { name, output } => {
                         live_area.push_debug_output(format!("[tool: {name}] {output}"));
