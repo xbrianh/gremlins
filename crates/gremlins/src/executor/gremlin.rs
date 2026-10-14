@@ -438,13 +438,12 @@ impl Gremlin {
                 RunError::Message(format!("failed to write hermetic definition: {e}"))
             })?;
         }
-        let hermetic = state.state_dir().join("definition.yaml");
-        let hermetic = hermetic.canonicalize().unwrap_or(hermetic);
 
-        // Point the stub at the hermetic snapshot so init_runtime
-        // loads from it rather than reparsing the original source.
+        // Point the stub at the source path: `init_runtime` reads the hermetic
+        // snapshot through the store and falls back to the source only when no
+        // snapshot blob exists.
         let mut stub = StaticDefinition::stub();
-        stub.path = hermetic.clone();
+        stub.path = definition_path.clone();
         let stub: Box<dyn GremlinDefinition> = Box::new(stub);
 
         // Snapshot the runtime config before gremlin_id is moved.
@@ -452,7 +451,7 @@ impl Gremlin {
 
         let gremlin = Gremlin {
             id: gremlin_id,
-            definition_path: Some(hermetic),
+            definition_path: Some(definition_path),
             client_override: client_override.map(String::from),
             definition: stub,
             workdir: Some(workdir),
@@ -541,12 +540,12 @@ impl Gremlin {
         let workdir: Option<WorkDir> =
             (!workdir.is_empty()).then(|| WorkDir::Persistent(PathBuf::from(&workdir)));
 
-        // A hermetic `definition.yaml` next to the state pins the definition the
-        // run actually used; otherwise fall back to resolving the kind. Either
-        // way the path is only recorded here — `init_runtime` reads it.
-        let definition_path = if state_data.exists("definition.yaml") {
-            Some(state_dir.join("definition.yaml"))
-        } else if !kind.is_empty() {
+        // `definition_path` records the *source* path the run was launched
+        // from (or the kind-resolved path): the hermetic `definition.yaml`
+        // snapshot is loaded through the store by `init_runtime`, not read by
+        // filesystem path here. When neither the snapshot nor a kind is
+        // available, fall back to the recorded source path for display.
+        let definition_path = if !kind.is_empty() {
             resolve_definition_in_project(&kind, &project_root)
         } else {
             None
@@ -644,12 +643,39 @@ impl Gremlin {
             )));
         };
 
-        let mut definition = StaticDefinition::from_yaml_file(
-            &definition_path,
-            self.client_override.as_deref(),
-            self.runtime_config.default_client.as_deref(),
-        )
-        .map_err(|error| RunError::Message(error.to_string()))?;
+        let mut definition = if self.state.exists("definition.yaml") {
+            // Read the hermetic snapshot through the store's name-validated
+            // blob path, then parse the already-expanded bytes directly.
+            let bytes = {
+                let mut blob = self
+                    .state
+                    .open_blob("definition.yaml", state::BlobMode::ReadWrite)
+                    .map_err(|error| RunError::Message(error.to_string()))?;
+                let mut bytes = Vec::new();
+                use std::io::Read;
+                blob.read_to_end(&mut bytes)
+                    .map_err(|error| RunError::Message(error.to_string()))?;
+                bytes
+            };
+            StaticDefinition::from_expanded_bytes(
+                &bytes,
+                self.client_override.as_deref(),
+                self.runtime_config.default_client.as_deref(),
+            )
+            .map_err(|error| RunError::Message(error.to_string()))?
+        } else {
+            StaticDefinition::from_yaml_file(
+                &definition_path,
+                self.client_override.as_deref(),
+                self.runtime_config.default_client.as_deref(),
+            )
+            .map_err(|error| RunError::Message(error.to_string()))?
+        };
+
+        // Persist the loaded definition's path so `definition.path()` still
+        // names the definition this run used, even when it was loaded from the
+        // hermetic snapshot blob.
+        definition.path = definition_path.clone();
 
         // Write the hermetic definition.yaml snapshot so every entry point
         // that calls run() gets one — resume, fork, and fresh launch alike.
@@ -1089,12 +1115,7 @@ impl Gremlin {
         self.clean_scratch();
 
         if remove_state_dir {
-            if let Err(error) = std::fs::remove_dir_all(self.state.state_dir()) {
-                log::warn!(
-                    "clean: could not remove state dir {}: {error}",
-                    self.state.state_dir().display()
-                );
-            }
+            self.state.clean();
         }
     }
 

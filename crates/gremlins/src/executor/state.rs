@@ -241,6 +241,15 @@ pub trait StateStore: Send + Sync + Debug {
         None
     }
 
+    /// Remove the store's private state directory. Best-effort: a failed
+    /// removal logs a warning and never aborts teardown.
+    ///
+    /// Defaults to a no-op so backends without a removable directory (or
+    /// whose directory is owned elsewhere) are unaffected.
+    fn clean(&self) {
+        // Default no-op.
+    }
+
     // --- locality ---
 
     /// The state directory.
@@ -1216,6 +1225,15 @@ impl StateStore for FileSystemStateStore {
         Some(self)
     }
 
+    fn clean(&self) {
+        if let Err(error) = std::fs::remove_dir_all(self.root.path()) {
+            log::warn!(
+                "clean: could not remove state dir {}: {error}",
+                self.root.path().display()
+            );
+        }
+    }
+
     #[allow(deprecated)]
     fn state_dir(&self) -> &Path {
         self.root.path()
@@ -1390,6 +1408,10 @@ impl StateStore for ScopedFileSystemStateStore {
         self.inner.checkout_registry(keys).await
     }
 
+    fn clean(&self) {
+        self.inner.clean()
+    }
+
     #[allow(deprecated)]
     fn state_dir(&self) -> &Path {
         self.inner.state_dir()
@@ -1522,12 +1544,20 @@ impl StateData {
 
     // --- locality ---
 
+    #[allow(deprecated)]
     pub fn state_dir(&self) -> &Path {
         self.store.state_dir()
     }
 
+    #[allow(deprecated)]
     pub fn artifact_dir(&self) -> PathBuf {
         self.store.artifact_dir()
+    }
+
+    /// Remove the store's private state directory. Best-effort — delegates to
+    /// the underlying store's `clean`.
+    pub fn clean(&self) {
+        self.store.clean();
     }
 
     // --- artifact delegating methods ---
