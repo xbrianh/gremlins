@@ -543,17 +543,20 @@ impl Gremlin {
         // `definition_path` records the *source* path the run was launched
         // from (or the kind-resolved path): the hermetic `definition.yaml`
         // snapshot is loaded through the store by `init_runtime`, not read by
-        // filesystem path here. When neither the snapshot nor a kind is
-        // available, fall back to the recorded source path for display.
-        let definition_path = if !kind.is_empty() {
-            resolve_definition_in_project(&kind, &project_root)
-        } else {
-            None
-        }
-        .or_else(|| (!recorded_path.is_empty()).then(|| PathBuf::from(&recorded_path)))
-        // Canonicalise so a caller comparing the handle's path to a resolved
-        // one (the way `definition.path` is read) sees the same string.
-        .map(|path| path.canonicalize().unwrap_or(path));
+        // filesystem path here. Prefer the exact recorded source path, and
+        // only resolve by kind when no path was recorded, so a same-named
+        // project definition added or changed since launch does not replace
+        // the path the run actually used.
+        let definition_path = (!recorded_path.is_empty())
+            .then(|| PathBuf::from(&recorded_path))
+            .or_else(|| {
+                (!kind.is_empty())
+                    .then(|| resolve_definition_in_project(&kind, &project_root))
+                    .flatten()
+            })
+            // Canonicalise so a caller comparing the handle's path to a resolved
+            // one (the way `definition.path` is read) sees the same string.
+            .map(|path| path.canonicalize().unwrap_or(path));
 
         // `stage_inputs` is what bootstrap's `bind_artifact` resolves against;
         // an absent or null field is an empty map, exactly as the Python
