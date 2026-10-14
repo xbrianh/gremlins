@@ -587,6 +587,92 @@ mod tests {
         );
     }
 
+    /// A parent's resolved `temperature`, `max_tokens`, and passthrough
+    /// (`extra`) must be the exact values the nested task's `LoopOpts` uses —
+    /// not dropped or swapped during the task-runner wiring.
+    #[tokio::test]
+    async fn resolved_params_propagate_to_nested_task() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let ctx = depth_test_ctx();
+
+        let task_call = |id: &str| {
+            MockStreamEvent::tool_call(
+                id,
+                "Task",
+                serde_json::json!({"kind": "Scout", "prompt": "look"}),
+            )
+        };
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({"summary": summary}))
+        };
+
+        let parent = MockCompletionModel::from_stream_turns([
+            vec![
+                task_call("t1"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                done_call("d1", "outer done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let child = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("scout result"),
+            done_call("d2", "scout result"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+
+        let child_handle = child.clone();
+        let factory: TaskModelFactory =
+            Arc::new(move |_spec: &str| Some(child_handle.clone().erase()));
+        let selector = TaskModelSelector::new(
+            HashMap::from([(TaskKind::Scout, "openai:mini".to_string())]),
+            factory,
+        )
+        .expect("configured");
+
+        let cancel = super::super::agent_loop::CancelToken::new();
+        let extra = serde_json::json!({"parallel_tool_calls": true, "foo": "bar"});
+        let runner = make_task_runner(
+            parent.clone().erase(),
+            Some(selector),
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            "model".into(),
+            5.0,
+            10,
+            0,
+            None,
+            Some(0.7),
+            Some(8192),
+            Some(extra.clone()),
+        );
+
+        let output = runner(TaskKind::Scout, "go".into(), None).await;
+        assert!(!output.contains("Task error"), "unexpected error: {output}");
+
+        for req in child.requests() {
+            assert_eq!(
+                req.temperature,
+                Some(0.7),
+                "nested turn must carry temperature"
+            );
+            assert_eq!(
+                req.max_tokens,
+                Some(8192),
+                "nested turn must carry max_tokens"
+            );
+            assert_eq!(
+                req.additional_params,
+                Some(extra.clone()),
+                "nested turn must carry the parent passthrough"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn make_task_runner_rejects_at_max_depth() {
         let ctx = depth_test_ctx();

@@ -250,8 +250,11 @@ pub(crate) fn resolve_openai_protocol(
 
     let mut temperature = None;
     let mut max_tokens = None;
-    // reasoning effort: client param > env var.
-    let mut reasoning_effort = crate::config::reasoning_effort();
+    // reasoning effort: client param > env var. Both are validated strictly.
+    let mut reasoning_effort = match crate::config::reasoning_effort() {
+        Some(effort) => Some(validate_reasoning(provider, &effort)?),
+        None => None,
+    };
 
     for (k, v) in raw {
         match k.as_str() {
@@ -477,6 +480,19 @@ mod tests {
         let map: IndexMap<String, String> = [("reasoning".to_string(), "extreme".to_string())]
             .into_iter()
             .collect();
+        let err = resolve_openai_protocol("openai", &map).unwrap_err();
+        assert!(err.contains("reasoning"), "{err}");
+        assert!(err.contains("extreme"), "{err}");
+    }
+
+    /// An invalid `GREMLINS_REASONING_EFFORT` env fallback must fail the
+    /// client build, not silently produce a malformed `reasoning` object.
+    #[test]
+    fn malformed_env_reasoning_fails() {
+        let mut guard = crate::test_support::EnvGuard::lock();
+        guard.set("GREMLINS_REASONING_EFFORT", "extreme");
+
+        let map: IndexMap<String, String> = IndexMap::new();
         let err = resolve_openai_protocol("openai", &map).unwrap_err();
         assert!(err.contains("reasoning"), "{err}");
         assert!(err.contains("extreme"), "{err}");

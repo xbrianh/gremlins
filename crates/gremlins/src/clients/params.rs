@@ -39,11 +39,17 @@ fn type_error(provider: &str, key: &str, expected: &str, value: &str) -> String 
     format!("{provider}: invalid value {value:?} for client param {key:?}: expected {expected}")
 }
 
-/// Parse a strict `f64` typed value.
+/// Parse a strict `f64` typed value. `NaN` and infinities are rejected: they
+/// are not representable as JSON numbers and would serialize as `null`.
 pub fn parse_f64(provider: &str, key: &str, value: &str) -> Result<f64, String> {
-    value
+    let parsed = value
         .parse::<f64>()
-        .map_err(|_| type_error(provider, key, "a number (f64)", value))
+        .map_err(|_| type_error(provider, key, "a number (f64)", value))?;
+    if parsed.is_finite() {
+        Ok(parsed)
+    } else {
+        Err(type_error(provider, key, "a finite number (f64)", value))
+    }
 }
 
 /// Parse a strict `u64` typed value.
@@ -94,6 +100,15 @@ mod tests {
         assert!(err.contains("openai"), "{err}");
         assert!(err.contains("temperature"), "{err}");
         assert!(err.contains("hot"), "{err}");
+    }
+
+    #[test]
+    fn parse_f64_rejects_non_finite() {
+        for v in ["NaN", "inf", "-inf", "infinity"] {
+            let err = parse_f64("openai", "temperature", v).unwrap_err();
+            assert!(err.contains("temperature"), "{err}");
+            assert!(err.contains(v), "{err}");
+        }
     }
 
     #[test]
