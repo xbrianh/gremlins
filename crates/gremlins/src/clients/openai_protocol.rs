@@ -250,11 +250,10 @@ pub(crate) fn resolve_openai_protocol(
 
     let mut temperature = None;
     let mut max_tokens = None;
-    // reasoning effort: client param > env var. Both are validated strictly.
-    let mut reasoning_effort = match crate::config::reasoning_effort() {
-        Some(effort) => Some(validate_reasoning(provider, &effort)?),
-        None => None,
-    };
+    // reasoning effort: client param > env var. The explicit value is resolved
+    // and validated first; the env fallback is only read/validated when the
+    // spec omits the key, so a valid override wins over a malformed env var.
+    let mut reasoning_effort = None;
 
     for (k, v) in raw {
         match k.as_str() {
@@ -269,6 +268,13 @@ pub(crate) fn resolve_openai_protocol(
                 additional.insert(k.clone(), params::coerce(v));
             }
         }
+    }
+
+    if reasoning_effort.is_none() {
+        reasoning_effort = match crate::config::reasoning_effort() {
+            Some(effort) => Some(validate_reasoning(provider, &effort)?),
+            None => None,
+        };
     }
 
     if let Some(effort) = reasoning_effort {
@@ -496,6 +502,22 @@ mod tests {
         let err = resolve_openai_protocol("openai", &map).unwrap_err();
         assert!(err.contains("reasoning"), "{err}");
         assert!(err.contains("extreme"), "{err}");
+    }
+
+    /// A valid client `reasoning=` override wins over a malformed env var:
+    /// the explicit value is resolved and validated before the env fallback is
+    /// ever read, so the build succeeds.
+    #[test]
+    fn client_reasoning_overrides_malformed_env() {
+        let mut guard = crate::test_support::EnvGuard::lock();
+        guard.set("GREMLINS_REASONING_EFFORT", "extreme");
+
+        let map: IndexMap<String, String> = [("reasoning".to_string(), "low".to_string())]
+            .into_iter()
+            .collect();
+        let r = resolve_openai_protocol("openai", &map).unwrap();
+        let additional = r.additional_value().unwrap();
+        assert_eq!(additional["reasoning"]["effort"], "low");
     }
 
     #[test]

@@ -677,6 +677,14 @@ passes through to `additional_params` unchanged. Knowing which is which matters:
 a typed key parses strictly, so `temperature=hot` fails the client build rather
 than being forwarded as a string.
 
+A value may be a JSON object or array, in which case commas inside balanced
+braces/brackets or double-quoted strings do not split parameters. This is how a
+JSON-shaped typed key such as `cache_control` carries more than one field:
+
+```
+anthropic:claude-sonnet-4:cache_control={"type":"ephemeral","ttl":"1h"},max_tokens=4096
+```
+
 **Typed keys** (accepted value shapes):
 
 | Key | Shape | Backends |
