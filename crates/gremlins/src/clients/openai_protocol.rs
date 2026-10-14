@@ -375,6 +375,12 @@ mod tests {
     use super::*;
 
     fn resolve(raw: &[(&str, &str)]) -> ResolvedParams {
+        // `resolve_openai_protocol` falls back to `GREMLINS_REASONING_EFFORT`
+        // from the environment. Take the shared EnvGuard lock so these
+        // env-independent cases serialize with the tests that set that
+        // variable (e.g. `malformed_env_reasoning_fails`) instead of racing
+        // them and observing a transient value.
+        let _guard = crate::test_support::EnvGuard::lock();
         let map: IndexMap<String, String> = raw
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
