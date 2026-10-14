@@ -14,6 +14,7 @@ use tokio::io::BufReader;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::clients::agent_loop::CancelToken;
@@ -78,13 +79,9 @@ struct CurrentTurn {
 /// keep working, but their ownership lives here.
 struct ClientSession {
     session_id: String,
-    /// True once the first connection on the session socket has claimed the
-    /// role of main connection.
-    main_claimed: bool,
-    /// The main socket's read half, stored here so the session object is the
-    /// owner of the socket binding. The session reader takes it out while the
-    /// main connection is active.
-    main_read: Option<OwnedReadHalf>,
+    /// The task that owns the session's [`UnixListener`]. Stored so teardown
+    /// can stop accepting new connections before the socket is unlinked.
+    listener_task: Option<tokio::task::JoinHandle<()>>,
     /// Chat gremlins currently parked in the session, keyed by gremlin id.
     /// A gremlin is moved out while a turn is running and re-inserted when
     /// the turn finishes.
@@ -107,8 +104,7 @@ impl ClientSession {
     fn new(session_id: String) -> Self {
         Self {
             session_id,
-            main_claimed: false,
-            main_read: None,
+            listener_task: None,
             chat_gremlins: HashMap::new(),
             chat_ids: HashSet::new(),
             current_turn: None,
@@ -215,6 +211,34 @@ fn init_connection_counter() -> &'static Arc<AtomicUsize> {
 
 fn get_connection_count() -> &'static AtomicUsize {
     init_connection_counter().as_ref()
+}
+
+/// RAII guard that keeps the global connection count accurate even when a
+/// spawned connection task is aborted. The decrement (and idle-shutdown
+/// check) runs on drop, which tokio guarantees before an aborted task's
+/// handle is considered finished.
+struct ConnectionGuard {
+    shutdown_tx: Option<watch::Sender<bool>>,
+}
+
+impl ConnectionGuard {
+    fn new(shutdown_tx: &watch::Sender<bool>) -> Self {
+        get_connection_count().fetch_add(1, Ordering::Relaxed);
+        Self {
+            shutdown_tx: Some(shutdown_tx.clone()),
+        }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        let prev = get_connection_count().fetch_sub(1, Ordering::Relaxed);
+        if prev == 1 {
+            if let Some(tx) = &self.shutdown_tx {
+                check_shutdown(tx);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -340,16 +364,11 @@ pub async fn run_supervisor(
                 match result {
                     Ok((stream, _addr)) => {
                         log::info!("supervisor: accepted connection");
-                        get_connection_count().fetch_add(1, Ordering::Relaxed);
                         let state_root = state_root.clone();
                         let shutdown_tx = shutdown_tx.clone();
-                        let shutdown_tx2 = shutdown_tx.clone();
                         tokio::spawn(async move {
+                            let _guard = ConnectionGuard::new(&shutdown_tx);
                             handle_connection(stream, state_root, shutdown_tx).await;
-                            let prev = get_connection_count().fetch_sub(1, Ordering::Relaxed);
-                            if prev == 1 {
-                                check_shutdown(&shutdown_tx2);
-                            }
                         });
                     }
                     Err(e) => {
@@ -362,9 +381,13 @@ pub async fn run_supervisor(
     }
 
     log::info!("supervisor: shutting down");
-    let session_ids: Vec<String> = session_map().lock().unwrap().keys().cloned().collect();
-    for session_id in session_ids {
-        socket::unlink_session_socket(&state_root, &session_id);
+    // Stop session listeners first so no new session connections are
+    // accepted, then tear each session down (which cancels chat turns and
+    // reaps gremlins) before unlinking the control socket.
+    let _ = shutdown_tx.send(true);
+    let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
+    for session in &sessions {
+        teardown_session(session, &state_root).await;
     }
     socket::unlink_socket(&state_root);
 }
@@ -475,11 +498,55 @@ async fn run_session_listener(
     state_root: PathBuf,
     shutdown_tx: watch::Sender<bool>,
 ) {
+    const SESSION_MAIN_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     // Set once the main connection has shut down and the session has been
     // torn down. The accept loop watches it so it can stop accepting new
     // aux connections and drop the listener.
     let (death_tx, mut death_rx) = watch::channel(false);
+    let mut shutdown_rx = shutdown_tx.subscribe();
 
+    // The first connection must be the session main connection. Bound the
+    // wait so a client that crashes between `create_session` and connect
+    // does not leave a zombie session in `SESSION_MAP` forever.
+    let first = tokio::time::timeout(SESSION_MAIN_CONNECT_TIMEOUT, listener.accept()).await;
+    match first {
+        Ok(Ok((stream, _addr))) => {
+            let (read_half, write_half) = stream.into_split();
+            let session_for_task = Arc::clone(&session);
+            let state_root_for_task = state_root.clone();
+            let shutdown_tx_for_task = shutdown_tx.clone();
+            let death_tx_for_task = death_tx.clone();
+            let _main_handle = tokio::spawn(async move {
+                let _guard = ConnectionGuard::new(&shutdown_tx_for_task);
+                let writer = SharedWriter::new(write_half);
+                handle_session_main(
+                    read_half,
+                    writer,
+                    Arc::clone(&session_for_task),
+                    &state_root_for_task,
+                )
+                .await;
+                let _ = death_tx_for_task.send(true);
+            });
+        }
+        Ok(Err(e)) => {
+            log::error!("session {session_id}: first accept error: {e}");
+            teardown_session_from_listener(&session, &state_root).await;
+            return;
+        }
+        Err(_) => {
+            log::warn!("session {session_id}: timed out waiting for main connection");
+            teardown_session_from_listener(&session, &state_root).await;
+            return;
+        }
+    }
+
+    // Subsequent connections are auxiliary sockets on the same session
+    // socket. The main connection death signal and the supervisor shutdown
+    // signal both stop the loop without torn-down here: the main task and
+    // `run_supervisor` own teardown respectively.
+    let mut tear_down_on_exit = false;
     loop {
         tokio::select! {
             _ = death_rx.changed() => {
@@ -487,79 +554,38 @@ async fn run_session_listener(
                     break;
                 }
             }
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
             result = listener.accept() => {
                 match result {
                     Ok((stream, _addr)) => {
-                        get_connection_count().fetch_add(1, Ordering::Relaxed);
                         let (read_half, write_half) = stream.into_split();
-                        let mut read_half = Some(read_half);
-
-                        // Claim the main-connection slot if it is still free.
-                        let is_main = {
-                            let mut s = session.lock().await;
-                            if !s.main_claimed {
-                                s.main_claimed = true;
-                                s.main_read = read_half.take();
-                                true
-                            } else {
-                                false
-                            }
-                        };
-
                         let session_for_task = Arc::clone(&session);
-                        let shutdown_tx_for_task = shutdown_tx.clone();
                         let state_root_for_task = state_root.clone();
-                        if is_main {
-                            let death_tx_for_task = death_tx.clone();
-                            tokio::spawn(async move {
-                                let main_read = session_for_task
-                                    .lock()
-                                    .await
-                                    .main_read
-                                    .take()
-                                    .expect("session main read half is present");
-                                let writer = SharedWriter::new(write_half);
-                                handle_session_main(
-                                    main_read,
-                                    writer,
-                                    Arc::clone(&session_for_task),
-                                    &state_root_for_task,
-                                )
-                                .await;
-                                teardown_session(&session_for_task, &state_root_for_task).await;
-                                let _ = death_tx_for_task.send(true);
-                                let prev = get_connection_count().fetch_sub(1, Ordering::Relaxed);
-                                if prev == 1 {
-                                    check_shutdown(&shutdown_tx_for_task);
-                                }
-                            });
+                        let shutdown_tx_for_task = shutdown_tx.clone();
+                        let aux_task = tokio::spawn(async move {
+                            let _guard = ConnectionGuard::new(&shutdown_tx_for_task);
+                            handle_session_aux(
+                                read_half,
+                                write_half,
+                                Arc::clone(&session_for_task),
+                                &state_root_for_task,
+                            )
+                            .await;
+                        });
+                        let mut s = session.lock().await;
+                        if s.closed {
+                            aux_task.abort();
                         } else {
-                            let aux_read_half = read_half.take().expect("aux read half is present");
-                            let aux_task = tokio::spawn(async move {
-                                handle_session_aux(
-                                    aux_read_half,
-                                    write_half,
-                                    Arc::clone(&session_for_task),
-                                    &state_root_for_task,
-                                )
-                                .await;
-                                let prev = get_connection_count().fetch_sub(1, Ordering::Relaxed);
-                                if prev == 1 {
-                                    check_shutdown(&shutdown_tx_for_task);
-                                }
-                            });
-                            {
-                                let mut s = session.lock().await;
-                                if s.closed {
-                                    aux_task.abort();
-                                } else {
-                                    s.aux_sockets.push(aux_task);
-                                }
-                            }
+                            s.aux_sockets.push(aux_task);
                         }
                     }
                     Err(e) => {
                         log::error!("session {session_id}: accept error: {e}");
+                        tear_down_on_exit = true;
                         break;
                     }
                 }
@@ -567,22 +593,58 @@ async fn run_session_listener(
         }
     }
 
-    // Best-effort cleanup when the listener exits (e.g. accept error rather
-    // than a normal main-socket teardown). Teardown already unlinked it on
-    // the normal path.
-    socket::unlink_session_socket(&state_root, &session_id);
+    if tear_down_on_exit {
+        teardown_session_from_listener(&session, &state_root).await;
+    }
 }
 
 /// Serve the single main connection of a session.
 ///
-/// This connection stays free for `chat`/`cancel_chat` and request/response
-/// ops. Streaming `log`/`debug` ops arrive on auxiliary session sockets.
-/// When this connection reaches EOF/error the caller tears the session down.
+/// Reading is split from op handling: the reader stays on the socket so EOF
+/// is observed immediately even when an op (e.g. a chat turn) is blocked, and
+/// dispatches requests over a channel to a sequential op task. The dispatcher
+/// owns all request/response writes, preserving FIFO ordering.
 async fn handle_session_main(
     main_read: OwnedReadHalf,
     writer: SharedWriter,
     session: SessionHandle,
     state_root: &Path,
+) {
+    let (request_tx, request_rx) = mpsc::channel::<Value>(64);
+
+    let reader_session = Arc::clone(&session);
+    let reader_handle = tokio::spawn(async move {
+        run_session_main_reader(main_read, request_tx, reader_session).await;
+    });
+
+    let dispatcher_session = Arc::clone(&session);
+    let dispatcher_writer = writer.clone();
+    let dispatcher_state_root = state_root.to_path_buf();
+    let dispatcher_handle = tokio::spawn(async move {
+        run_session_dispatcher(
+            request_rx,
+            dispatcher_writer,
+            dispatcher_session,
+            dispatcher_state_root,
+        )
+        .await;
+    });
+
+    // Wait for the socket to die, then for the in-flight op (if any) to
+    // observe the session-closed flag and return. Teardown is idempotent and
+    // is also called by `close_session`; this call is the EOF/error path.
+    let _ = reader_handle.await;
+    let _ = dispatcher_handle.await;
+    teardown_session(&session, state_root).await;
+}
+
+/// Read JSON-lines from the main session socket and forward them to the op
+/// dispatcher. On EOF/error mark the session closed and cancel the in-flight
+/// turn so a blocked `chat` handler returns promptly.
+async fn run_session_main_reader(
+    main_read: OwnedReadHalf,
+    request_tx: mpsc::Sender<Value>,
+    session: SessionHandle,
 ) {
     let mut reader = BufReader::new(main_read);
     let session_id = {
@@ -591,13 +653,49 @@ async fn handle_session_main(
     };
 
     loop {
-        let request = match socket::read_json_line(&mut reader).await {
-            Ok(Some(v)) => v,
-            Ok(None) => break,
-            Err(e) => {
-                log::warn!("session {session_id}: read error: {e}");
+        match socket::read_json_line(&mut reader).await {
+            Ok(Some(request)) => {
+                if request_tx.send(request).await.is_err() {
+                    break;
+                }
+            }
+            Ok(None) | Err(_) => {
+                log::debug!("session {session_id}: main socket EOF/error");
+                let mut s = session.lock().await;
+                if !s.closed {
+                    s.closed = true;
+                    if let Some(cur) = &s.current_turn {
+                        cur.cancel.cancel();
+                    }
+                }
                 break;
             }
+        }
+    }
+}
+
+enum SessionOp {
+    Continue,
+    CloseRequested,
+}
+
+/// Process session-socket requests sequentially, preserving the response
+/// order the client's FIFO relies on.
+async fn run_session_dispatcher(
+    mut request_rx: mpsc::Receiver<Value>,
+    writer: SharedWriter,
+    session: SessionHandle,
+    state_root: PathBuf,
+) {
+    let session_id = {
+        let s = session.lock().await;
+        s.session_id.clone()
+    };
+
+    loop {
+        let request = match request_rx.recv().await {
+            Some(request) => request,
+            None => break,
         };
 
         let op = request
@@ -607,35 +705,64 @@ async fn handle_session_main(
             .to_string();
         log::debug!("session {session_id}: received op={op:?}");
 
-        let verify = verify_session_id(&request, &session_id);
-        if let Err(resp) = verify {
+        if let Err(resp) = verify_session_id(&request, &session_id) {
             let _ = writer.write_json_line(&resp).await;
             continue;
         }
 
-        match op.as_str() {
-            "chat" => {
-                handle_chat(&request, state_root, &writer, &session).await;
-            }
-            "cancel_chat" => {
-                handle_cancel_chat(&request, &writer, &session).await;
-            }
-            "stop" => {
-                let resp = handle_session_stop(&request, &session).await;
-                let _ = writer.write_json_line(&resp).await;
-            }
-            "close_session" => {
+        match handle_session_op(op.as_str(), &request, &state_root, &writer, &session).await {
+            SessionOp::CloseRequested => {
+                // Tear down before acknowledging so the client cannot race
+                // ahead while the gremlin is still live.
+                teardown_session(&session, &state_root).await;
                 let _ = writer
                     .write_json_line(&ok_response(serde_json::json!({})))
                     .await;
                 return;
             }
-            _ => {
-                let resp = error_response(&format!("unknown session op: {op:?}"));
-                let _ = writer.write_json_line(&resp).await;
-            }
+            SessionOp::Continue => {}
+        }
+
+        // EOF may have been observed while this op was still running. Stop
+        // processing queued requests for the now-dead session.
+        if session_is_closed(&session).await {
+            break;
         }
     }
+}
+
+async fn handle_session_op(
+    op: &str,
+    request: &Value,
+    state_root: &Path,
+    writer: &SharedWriter,
+    session: &SessionHandle,
+) -> SessionOp {
+    match op {
+        "chat" => {
+            handle_chat(request, state_root, writer, session).await;
+            SessionOp::Continue
+        }
+        "cancel_chat" => {
+            handle_cancel_chat(request, writer, session).await;
+            SessionOp::Continue
+        }
+        "stop" => {
+            let resp = handle_session_stop(request, session).await;
+            let _ = writer.write_json_line(&resp).await;
+            SessionOp::Continue
+        }
+        "close_session" => SessionOp::CloseRequested,
+        _ => {
+            let resp = error_response(&format!("unknown session op: {op:?}"));
+            let _ = writer.write_json_line(&resp).await;
+            SessionOp::Continue
+        }
+    }
+}
+
+async fn session_is_closed(session: &SessionHandle) -> bool {
+    session.lock().await.closed
 }
 
 /// Serve a single auxiliary connection on a session socket.
@@ -703,23 +830,74 @@ fn verify_session_id(request: &Value, expected: &str) -> Result<(), Value> {
 /// Tear down a session: cancel the in-flight turn, abort aux sockets, drop
 /// chat gremlins, remove session state, and unlink the session socket.
 async fn teardown_session(session: &SessionHandle, state_root: &Path) {
-    let (chat_ids, aux_sockets, session_id) = {
+    teardown_session_impl(session, state_root, true).await;
+}
+
+/// Listener-exit variant of [`teardown_session`].
+///
+/// The listener calls this on accept error/timeout and must not abort its
+/// own task; every other teardown caller wants the listener stopped too.
+async fn teardown_session_from_listener(session: &SessionHandle, state_root: &Path) {
+    teardown_session_impl(session, state_root, false).await;
+}
+
+async fn teardown_session_impl(session: &SessionHandle, state_root: &Path, abort_listener: bool) {
+    let (chat_ids, chat_gremlins, aux_sockets, listener_task, session_id, turn_done) = {
         let mut s = session.lock().await;
-        s.closed = true;
-        if let Some(cur) = &s.current_turn {
-            cur.cancel.cancel();
+        if s.closed {
+            return;
         }
+        s.closed = true;
+
+        let turn_done = if let Some(cur) = &s.current_turn {
+            cur.cancel.cancel();
+            Some(Arc::clone(&cur.done))
+        } else {
+            None
+        };
+
         let chat_ids: Vec<String> = s.chat_ids.drain().collect();
+        let chat_gremlins = std::mem::take(&mut s.chat_gremlins);
         let aux_sockets = std::mem::take(&mut s.aux_sockets);
-        (chat_ids, aux_sockets, s.session_id.clone())
+        let listener_task = s.listener_task.take();
+        (
+            chat_ids,
+            chat_gremlins,
+            aux_sockets,
+            listener_task,
+            s.session_id.clone(),
+            turn_done,
+        )
     };
 
+    if abort_listener {
+        if let Some(listener_task) = listener_task {
+            listener_task.abort();
+        }
+    } else {
+        drop(listener_task);
+    }
+
+    // Abort aux sockets and await them so their connection-count guards run
+    // before we reap the gremlins and remove the session.
     for aux in aux_sockets {
         aux.abort();
+        let _ = aux.await;
     }
+
+    // Wait for a cancelled in-flight turn to finish and relinquish its
+    // `Gremlin` before we clean up the run map entry it may still touch.
+    if let Some(done) = turn_done {
+        done.notified().await;
+    }
+
     for id in &chat_ids {
         cleanup_chat_gremlin(id).await;
     }
+
+    // Drop any parked gremlins only after `cleanup_chat_gremlin` has removed
+    // their run-map entries and reaped their clients.
+    drop(chat_gremlins);
 
     session_map().lock().unwrap().remove(&session_id);
     socket::unlink_session_socket(state_root, &session_id);
@@ -753,6 +931,9 @@ async fn dispatch_op(
             DispatchOutcome::Continue
         }
         "stop" => {
+            if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
+                stop_session_chat_gremlin(id).await;
+            }
             let resp = handle_stop(request, shutdown_tx).await;
             let _ = writer.write_json_line(&resp).await;
             DispatchOutcome::Continue
@@ -850,16 +1031,21 @@ async fn handle_create_session(
     let shutdown_tx = shutdown_tx.clone();
     let state_root = state_root.to_path_buf();
     let session_id_for_listener = session_id.clone();
-    tokio::spawn(async move {
+    let listener_session = Arc::clone(&session);
+    let listener_task = tokio::spawn(async move {
         run_session_listener(
             listener,
             session_id_for_listener,
-            session,
+            listener_session,
             state_root,
             shutdown_tx,
         )
         .await;
     });
+
+    // Stash the listener handle so teardown/supervisor shutdown can abort it
+    // and stop accepting new connections.
+    session.lock().await.listener_task = Some(listener_task);
 
     ok_response(serde_json::json!({
         "session_id": session_id,
@@ -881,6 +1067,26 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
         }
     }
     handle_stop(request, &watch::channel(false).0).await
+}
+
+/// Remove a chat gremlin from whichever session owns it and cancel its
+/// in-flight turn (if any). Called by the control-socket `stop` so
+/// `gremlins stop` cannot reap the run-map entry while the session keeps
+/// running its agent.
+async fn stop_session_chat_gremlin(id: &str) {
+    let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
+    for session in sessions {
+        let mut s = session.lock().await;
+        if s.chat_ids.remove(id) {
+            s.chat_gremlins.remove(id);
+            if let Some(cur) = &s.current_turn {
+                if cur.id == id {
+                    cur.cancel.cancel();
+                }
+            }
+            return;
+        }
+    }
 }
 
 async fn send_debug_status(writer: &SharedWriter, stage: &str) {
@@ -3914,6 +4120,56 @@ mod tests {
         }
 
         super::teardown_session(&session, &state_root).await;
+
+        {
+            let s = session.lock().await;
+            assert!(
+                s.chat_ids.is_empty(),
+                "teardown must drain session chat ids"
+            );
+            assert!(
+                s.chat_gremlins.is_empty(),
+                "teardown must drop parked chat gremlins"
+            );
+        }
+        assert!(
+            !super::get_run_map().lock().unwrap().contains_key(&id),
+            "teardown must remove the chat gremlin from the run map"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_session_chat_gremlin_removes_ownership_and_cancels_turn() {
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-stop-test".to_string()),
+        ));
+        let cancel = super::CancelToken::new();
+        {
+            let mut s = session.lock().await;
+            s.chat_ids.insert("chat-stop".to_string());
+            s.current_turn = Some(super::CurrentTurn {
+                id: "chat-stop".to_string(),
+                turn: Some("1".to_string()),
+                cancel: cancel.clone(),
+                done: Arc::new(tokio::sync::Notify::new()),
+            });
+        }
+
+        super::session_map()
+            .lock()
+            .unwrap()
+            .insert("sess-stop-test".to_string(), Arc::clone(&session));
+
+        super::stop_session_chat_gremlin("chat-stop").await;
+        super::session_map()
+            .lock()
+            .unwrap()
+            .remove("sess-stop-test");
+
+        assert!(cancel.is_cancelled());
+        let s = session.lock().await;
+        assert!(!s.chat_ids.contains("chat-stop"));
+        assert!(s.chat_gremlins.is_empty());
     }
 
     #[test]

@@ -434,7 +434,8 @@ async fn start_debug_session(
     let stream = client.open_aux_stream().await?;
     let (read_half, mut write_half) = stream.into_split();
 
-    let request = serde_json::json!({ "op": "debug", "id": id, "session_id": client.session_id() });
+    let request =
+        serde_json::json!({ "op": "debug", "id": id, "session_id": client.session_id().await });
     socket::write_json_line(&mut write_half, &request).await?;
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<serde_json::Value>();
@@ -1082,7 +1083,24 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // opens a fresh one. The daemon cancels
                                         // any in-flight turn and drops the old
                                         // chat gremlin when the session closes.
+                                        // Drop every socket/stream that belonged
+                                        // to the dying session first, before the
+                                        // new session is installed.
                                         turn_gen += 1;
+                                        active_turn = None;
+                                        app.active_request = false;
+                                        if let Some(handle) = log_follow_handle.take() {
+                                            handle.abort();
+                                        }
+                                        app.following_log = None;
+                                        abort_overlay_log_follow(&mut overlay_log_handle);
+                                        overlay_log_following = None;
+                                        if let Some(handle) = debug_task.take() {
+                                            handle.abort();
+                                        }
+                                        debug_cmd_tx = None;
+                                        debug_evt_rx = None;
+                                        live_area.set_debug_connected(false);
                                         let c = Arc::clone(&client);
                                         let tx = result_tx.clone();
                                         tokio::spawn(async move {
@@ -1094,8 +1112,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         app.input_cursor = 0;
                                         app.clear_completion();
                                         live_area.reset_input_scroll();
-                                        app.active_request = false;
-                                        active_turn = None;
                                     }
                                     CommandResult::Quit => {
                                         break;
@@ -1471,11 +1487,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     | ChatEvent::Ended { turn, .. }
                     | ChatEvent::Error { turn, .. } => turn.clone(),
                 };
-                if let (Some(active), Some(ev)) = (&active_turn, &event_turn) {
-                    if active != ev {
+                match (&active_turn, &event_turn) {
+                    (Some(active), Some(ev)) if active != ev => {
                         log::debug!("dropping stale chat event for turn {ev} (active {active})");
                         continue;
                     }
+                    // No active turn means `/clear` or Esc has retired the
+                    // conversation; any queued turn-tagged terminal events
+                    // belong to the dead session and must not be applied.
+                    (None, Some(ev)) => {
+                        log::debug!("dropping retired-session chat event for turn {ev}");
+                        continue;
+                    }
+                    _ => {}
                 }
 
                 match event {

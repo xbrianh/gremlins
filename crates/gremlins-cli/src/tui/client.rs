@@ -36,7 +36,10 @@ struct OutState {
 
 /// One persistent socket connection and its background reader.
 struct Connection {
-    write_half: Mutex<OwnedWriteHalf>,
+    /// Outbound socket plus, for session connections, the session id that
+    /// belongs to that socket. Guarded by one lock so a send can never write
+    /// a request stamped with the previous session id to the new socket.
+    write: Mutex<WriteState>,
     /// Pending response waiters in request order. The daemon processes
     /// requests sequentially on a connection and writes each response in
     /// order, so FIFO delivery is correct.
@@ -48,10 +51,34 @@ struct Connection {
     out: Arc<OutState>,
 }
 
+struct WriteState {
+    write_half: OwnedWriteHalf,
+    /// `Some` for the session connection; `None` for the control socket.
+    session_id: Option<String>,
+}
+
 impl Connection {
+    fn new_control(
+        reader: BufReader<OwnedReadHalf>,
+        write_half: OwnedWriteHalf,
+        out: Arc<OutState>,
+    ) -> Self {
+        Self::new(reader, write_half, None, out)
+    }
+
+    fn new_session(
+        reader: BufReader<OwnedReadHalf>,
+        write_half: OwnedWriteHalf,
+        session_id: String,
+        out: Arc<OutState>,
+    ) -> Self {
+        Self::new(reader, write_half, Some(session_id), out)
+    }
+
     fn new(
         reader: BufReader<OwnedReadHalf>,
         write_half: OwnedWriteHalf,
+        session_id: Option<String>,
         out: Arc<OutState>,
     ) -> Self {
         let responses: Arc<Mutex<VecDeque<oneshot::Sender<Value>>>> =
@@ -63,7 +90,10 @@ impl Connection {
         });
 
         Self {
-            write_half: Mutex::new(write_half),
+            write: Mutex::new(WriteState {
+                write_half,
+                session_id,
+            }),
             responses,
             read_handle: Mutex::new(Some(read_handle)),
             out,
@@ -75,39 +105,73 @@ impl Connection {
     /// Serialises waiter registration and the socket write under the same
     /// lock so that request order on the wire matches response order.
     async fn send(&self, request: Value) -> Result<Value, String> {
+        self.send_with(request, false).await
+    }
+
+    /// Send a request on the session connection, stamping the session id
+    /// that is atomically paired with the current session write half.
+    async fn send_on_session(&self, request: Value) -> Result<Value, String> {
+        self.send_with(request, true).await
+    }
+
+    async fn send_with(&self, mut request: Value, session_scoped: bool) -> Result<Value, String> {
         let (tx, rx) = oneshot::channel();
 
-        // Hold the write lock across enqueue + write so concurrent callers
-        // cannot interleave.
-        let mut write_half = self.write_half.lock().await;
+        // Hold the write lock across stamping, enqueue, and write so
+        // concurrent callers cannot interleave and a session restart cannot
+        // publish a new write half while a request is being stamped.
+        let mut write = self.write.lock().await;
+        if session_scoped {
+            let session_id = write
+                .session_id
+                .clone()
+                .ok_or_else(|| "session connection not initialized".to_string())?;
+            if let Some(obj) = request.as_object_mut() {
+                obj.insert("session_id".to_string(), Value::String(session_id));
+            } else {
+                return Err("request body must be a JSON object".to_string());
+            }
+        }
+
         {
             let mut guard = self.responses.lock().await;
             guard.push_back(tx);
         }
 
-        if let Err(e) = socket::write_json_line(&mut *write_half, &request).await {
+        if let Err(e) = socket::write_json_line(&mut write.write_half, &request).await {
             // Write failed — remove our waiter so the queue stays aligned.
             let mut guard = self.responses.lock().await;
             guard.pop_back();
             return Err(e);
         }
-        drop(write_half);
+        drop(write);
 
         rx.await.map_err(|_| "connection closed".to_string())
     }
 
-    /// Abort the current read loop and install a fresh reader/writer
+    /// Abort, await, and replace the current read loop plus its write half
     /// (used after `/clear` recreates the session socket).
-    async fn restart(&self, reader: BufReader<OwnedReadHalf>, write_half: OwnedWriteHalf) {
+    async fn restart(
+        &self,
+        reader: BufReader<OwnedReadHalf>,
+        write_half: OwnedWriteHalf,
+        new_session_id: String,
+    ) {
+        // Abort and await the old reader first. Awaiting guarantees its
+        // terminal queue clear can no longer race the new connection's
+        // waiters.
         if let Some(handle) = self.read_handle.lock().await.take() {
             handle.abort();
+            let _ = handle.await;
         }
 
-        // Hold the write lock across queue draining and read-loop
-        // installation so a concurrent send can neither enqueue against the
-        // old connection nor have its waiter dropped after the fact.
-        let mut write_guard = self.write_half.lock().await;
-        *write_guard = write_half;
+        // Hold the write lock across queue draining, write-half replacement,
+        // session-id publication, and read-loop installation so a concurrent
+        // send can neither enqueue against the old connection nor have its
+        // waiter dropped after the fact.
+        let mut write = self.write.lock().await;
+        write.write_half = write_half;
+        write.session_id = Some(new_session_id);
         self.responses.lock().await.clear();
 
         let read_out = Arc::clone(&self.out);
@@ -116,13 +180,24 @@ impl Connection {
             read_loop(reader, read_out, read_responses).await;
         });
         *self.read_handle.lock().await = Some(read_handle);
-        drop(write_guard);
+        drop(write);
+    }
+
+    /// The session id paired with the current session write half.
+    async fn current_session_id(&self) -> String {
+        self.write
+            .lock()
+            .await
+            .session_id
+            .clone()
+            .unwrap_or_default()
     }
 
     /// Abort the background read loop, closing the socket read half.
     async fn shutdown(&self) {
         if let Some(handle) = self.read_handle.lock().await.take() {
             handle.abort();
+            let _ = handle.await;
         }
     }
 }
@@ -136,14 +211,14 @@ impl Connection {
 pub struct DaemonClient {
     control: Connection,
     session: Connection,
-    session_id: std::sync::Mutex<String>,
     out: Arc<OutState>,
 }
 
 impl DaemonClient {
-    /// The current session id.
-    pub fn session_id(&self) -> String {
-        self.session_id.lock().unwrap().clone()
+    /// The current session id, atomically paired with the session socket in
+    /// [`Connection::write`].
+    pub async fn session_id(&self) -> String {
+        self.session.current_session_id().await
     }
 
     /// Send a request on the control socket.
@@ -152,14 +227,11 @@ impl DaemonClient {
     }
 
     /// Send a request on the session socket. The current session id is
-    /// stamped into the request before it is written, so callers only build
-    /// the op-specific fields.
+    /// stamped into the request under the same lock that publishes the
+    /// session write half, so a `/clear` restart can never write a request
+    /// bearing the old id to the new socket.
     pub async fn send_session_request(&self, request: Value) -> Result<Value, String> {
-        let mut request = request;
-        if let Some(obj) = request.as_object_mut() {
-            obj.insert("session_id".to_string(), Value::String(self.session_id()));
-        }
-        self.session.send(request).await
+        self.session.send_on_session(request).await
     }
 
     /// Open an auxiliary connection on the session socket.
@@ -170,7 +242,7 @@ impl DaemonClient {
     /// dies.
     pub async fn open_aux_stream(&self) -> Result<tokio::net::UnixStream, String> {
         let state_root = gremlins::config::state_root();
-        socket::connect_session_socket(&state_root, &self.session_id()).await
+        socket::connect_session_socket(&state_root, &self.session_id().await).await
     }
 
     /// Open a dedicated session connection for a streaming log follow.
@@ -178,7 +250,7 @@ impl DaemonClient {
         &self,
         id: &str,
     ) -> Result<(mpsc::UnboundedReceiver<Value>, tokio::task::JoinHandle<()>), String> {
-        let session_id = self.session_id();
+        let session_id = self.session_id().await;
         let mut stream = self.open_aux_stream().await?;
 
         let request =
@@ -205,10 +277,8 @@ impl DaemonClient {
     /// dance. The old session socket is closed by the daemon after its
     /// `close_session` ack.
     pub async fn recreate_session(&self) -> Result<(), String> {
-        let old_session_id = self.session_id();
-        let close_request =
-            serde_json::json!({"op": "close_session", "session_id": old_session_id});
-        let _ = self.session.send(close_request).await?;
+        let close_request = serde_json::json!({"op": "close_session"});
+        let _ = self.session.send_on_session(close_request).await?;
 
         let create_request = serde_json::json!({"op": "create_session"});
         let resp = self.control.send(create_request).await?;
@@ -229,8 +299,9 @@ impl DaemonClient {
         let stream = socket::connect_session_socket(&state_root, &new_session_id).await?;
         let (read_half, write_half) = stream.into_split();
         let reader = BufReader::new(read_half);
-        self.session.restart(reader, write_half).await;
-        *self.session_id.lock().unwrap() = new_session_id;
+        self.session
+            .restart(reader, write_half, new_session_id.clone())
+            .await;
         Ok(())
     }
 
@@ -296,20 +367,24 @@ pub async fn connect() -> Result<
         .ok_or("create_session response missing 'session_id'")?
         .to_string();
 
-    let control = Connection::new(control_reader, control_write_half, Arc::clone(&out));
+    let control = Connection::new_control(control_reader, control_write_half, Arc::clone(&out));
 
     // 2. Connect the fresh session socket and hand it a permanent reader.
     let state_root = gremlins::config::state_root();
     let session_stream = socket::connect_session_socket(&state_root, &session_id).await?;
     let (session_read_half, session_write_half) = session_stream.into_split();
     let session_reader = BufReader::new(session_read_half);
-    let session = Connection::new(session_reader, session_write_half, Arc::clone(&out));
+    let session = Connection::new_session(
+        session_reader,
+        session_write_half,
+        session_id.clone(),
+        Arc::clone(&out),
+    );
 
     Ok((
         DaemonClient {
             control,
             session,
-            session_id: std::sync::Mutex::new(session_id),
             out,
         },
         event_rx,
