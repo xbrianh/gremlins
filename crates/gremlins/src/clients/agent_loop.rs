@@ -58,8 +58,6 @@ pub(crate) fn default_classify(err: ProviderError) -> ClientError {
     }
 }
 
-pub(crate) const DEFAULT_TEMPERATURE: f64 = 0.4;
-
 /// Classify a provider error and report whether it is retryable at the turn
 /// boundary (429 / 5xx / no-HTTP-status mid-stream drops). Reuses the same
 /// `default_classify` (or the caller-supplied classifier) used for the
@@ -135,7 +133,6 @@ pub(crate) struct LoopOpts<'a> {
     pub(crate) tool_filter: Option<&'a [String]>,
     pub(crate) classify_error: Option<ErrorClassifier>,
     pub(crate) max_tokens: Option<u64>,
-    pub(crate) skip_temperature: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -250,7 +247,6 @@ pub(crate) async fn run_agent_loop(
         ctx.completion_nudge_budget,
         ctx.params.log_tx.clone(),
         opts.max_tokens,
-        opts.skip_temperature,
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -297,7 +293,6 @@ pub(crate) async fn run_agent_loop_nested(
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
-    skip_temperature: bool,
     prepopulated_messages: Option<Vec<Message>>,
 ) -> Result<CompletedRun, ClientError> {
     if let Some(ref tx) = log_tx {
@@ -308,7 +303,6 @@ pub(crate) async fn run_agent_loop_nested(
         tool_filter,
         classify_error: None,
         max_tokens,
-        skip_temperature,
     };
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;
@@ -680,9 +674,6 @@ async fn run_agent_loop_core(
         let mut builder = CompletionRequest::new(next_prompt.clone())
             .messages(history.clone())
             .tools(tool_defs.to_vec());
-        if !opts.skip_temperature {
-            builder = builder.temperature(DEFAULT_TEMPERATURE);
-        }
         if let Some(ref sys) = system_prompt {
             builder = builder.preamble(sys.clone());
         }
@@ -2052,7 +2043,6 @@ mod tests {
             tool_filter: filter,
             classify_error: None,
             max_tokens: None,
-            skip_temperature: false,
         }
     }
 
@@ -4236,6 +4226,84 @@ mod tests {
                 req.max_tokens,
                 Some(8192),
                 "nested task turn must carry max_tokens"
+            );
+        }
+    }
+
+    /// Regression: the agent loop must never inject a `temperature` field on
+    /// its own. No `LoopOpts` knob exists for it, so every request — parent
+    /// loop and nested Task alike — must leave `temperature` unset.
+    #[tokio::test]
+    async fn temperature_is_never_set() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let task_call = |id: &str| {
+            MockStreamEvent::tool_call(
+                id,
+                "Task",
+                serde_json::json!({"kind": "Scout", "prompt": "look"}),
+            )
+        };
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
+        };
+
+        let parent = MockCompletionModel::from_stream_turns([
+            vec![
+                task_call("t1"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                done_call("d1", "outer done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let child = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("scout result"),
+            done_call("d2", "scout result"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+
+        let child_handle = child.clone();
+        let factory: super::super::task::TaskModelFactory =
+            Arc::new(move |_spec: &str| Some(child_handle.clone().erase()));
+
+        let selector = super::super::task::TaskModelSelector::new(
+            HashMap::from([(
+                super::super::task_kind::TaskKind::Scout,
+                "openai:mini".to_string(),
+            )]),
+            factory,
+        )
+        .expect("configured");
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.params.task_clients = Some(selector);
+
+        run_agent_loop(
+            parent.clone().erase(),
+            "go",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        for req in parent.requests() {
+            assert_eq!(
+                req.temperature, None,
+                "parent turn must not set temperature"
+            );
+        }
+        for req in child.requests() {
+            assert_eq!(
+                req.temperature, None,
+                "nested task turn must not set temperature"
             );
         }
     }

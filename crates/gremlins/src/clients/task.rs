@@ -176,7 +176,6 @@ pub(crate) fn make_task_runner(
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
-    skip_temperature: bool,
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
@@ -193,7 +192,6 @@ pub(crate) fn make_task_runner(
         completion_nudge_budget,
         log_tx,
         max_tokens,
-        skip_temperature,
     )
 }
 
@@ -213,7 +211,6 @@ fn make_task_runner_at_depth(
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     max_tokens: Option<u64>,
-    skip_temperature: bool,
 ) -> tools::TaskFn {
     Arc::new(
         move |kind: TaskKind, task: String, parent_history: Option<Vec<Message>>| {
@@ -277,7 +274,6 @@ fn make_task_runner_at_depth(
                     completion_nudge_budget,
                     log_tx.clone(),
                     max_tokens,
-                    skip_temperature,
                 ));
 
                 let work_root = tools::worktree_root(task_cwd.as_deref());
@@ -311,7 +307,6 @@ fn make_task_runner_at_depth(
                     completion_nudge_budget,
                     log_tx.clone(),
                     max_tokens,
-                    skip_temperature,
                     prepopulated_messages,
                 )
                 .await;
@@ -485,7 +480,6 @@ mod tests {
             0,
             None,
             None,
-            false,
         );
 
         // First invocation: depth 0 < 3, should succeed.
@@ -551,7 +545,6 @@ mod tests {
             0,
             None,
             None,
-            false,
         );
 
         let parent_history = vec![Message::user("earlier parent turn".to_string())];
@@ -599,7 +592,6 @@ mod tests {
             0,
             None,
             None,
-            false,
         );
 
         let blocked = runner(TaskKind::Scout, "too deep".into(), None).await;
@@ -638,7 +630,6 @@ mod tests {
             0,
             None,
             None,
-            false,
         );
 
         let handle = tokio::spawn(runner(TaskKind::Scout, "transient".into(), None));
@@ -682,7 +673,6 @@ mod tests {
             0,
             None,
             None,
-            false,
         );
 
         let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into(), None));
@@ -741,7 +731,6 @@ mod tests {
             0,
             None,
             None,
-            false,
         );
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
@@ -840,7 +829,6 @@ mod tests {
                 0,
                 Some(log_tx),
                 None,
-                false,
             );
             (runner, log_rx)
         }
