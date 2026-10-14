@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use indexmap::IndexMap;
-use regex::Regex;
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::backends;
@@ -49,16 +48,111 @@ pub fn is_known_provider(provider: &str) -> bool {
         .any(|(name, _)| *name == provider)
 }
 
-/// The regex matching a trailing `:k=v,k=v` parameter list.
+/// A trailing `:k=v,k=v,...` parameter list, or a signal that the suffix is
+/// not a list at all.
+enum ParamsList {
+    NotAList,
+    Duplicate(String),
+    Ok(IndexMap<String, String>),
+}
+
+/// True when `k` is a valid client-param key (`[a-zA-Z_][a-zA-Z0-9_]*`).
+fn is_valid_key(k: &str) -> bool {
+    let mut chars = k.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Parse a trailing `k=v,k=v,...` list.
 ///
-/// Compiled once: spec parsing happens for every stage in every definition load,
-/// and the pattern never changes.
-fn params_re() -> &'static Regex {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r":([a-zA-Z_][a-zA-Z0-9_]*=[^,]+)(?:,([a-zA-Z_][a-zA-Z0-9_]*=[^,]+))*$")
-            .expect("invalid client params regex")
-    })
+/// Commas inside balanced JSON braces/brackets or double-quoted strings do not
+/// split parameters, so a value such as `cache_control={"type":"ephemeral","ttl":"1h"}`
+/// keeps its embedded commas. Returns [`ParamsList::NotAList`] when `s` is not
+/// a well-formed list, [`ParamsList::Duplicate`] on a repeated key, and
+/// [`ParamsList::Ok`] otherwise.
+fn parse_params_list(s: &str) -> ParamsList {
+    let mut params = IndexMap::new();
+    let bytes = s.as_bytes();
+    let mut seg_start = 0usize;
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else {
+            match c {
+                '"' => in_string = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    let seg = &s[seg_start..i];
+                    let Some((k, v)) = seg.split_once('=') else {
+                        return ParamsList::NotAList;
+                    };
+                    if !is_valid_key(k) || v.is_empty() {
+                        return ParamsList::NotAList;
+                    }
+                    if params.contains_key(k) {
+                        return ParamsList::Duplicate(k.to_string());
+                    }
+                    params.insert(k.to_string(), v.to_string());
+                    seg_start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+
+    let seg = &s[seg_start..];
+    let Some((k, v)) = seg.split_once('=') else {
+        return ParamsList::NotAList;
+    };
+    if !is_valid_key(k) || v.is_empty() {
+        return ParamsList::NotAList;
+    }
+    if params.contains_key(k) {
+        return ParamsList::Duplicate(k.to_string());
+    }
+    params.insert(k.to_string(), v.to_string());
+    ParamsList::Ok(params)
+}
+
+/// The result of splitting a spec's model/params suffix: the model portion
+/// plus the parsed params, or `None` when the suffix is not a params list.
+type SplitParams<'a> = Option<(&'a str, IndexMap<String, String>)>;
+
+/// Split `rest` into `(model, params)` at the leftmost colon whose remainder
+/// is a valid parameter list, mirroring the old anchored-regex behaviour.
+fn split_params_suffix(rest: &str) -> Result<SplitParams<'_>, String> {
+    for (i, b) in rest.bytes().enumerate() {
+        if b == b':' {
+            match parse_params_list(&rest[i + 1..]) {
+                ParamsList::Ok(params) => return Ok(Some((&rest[..i], params))),
+                ParamsList::Duplicate(k) => {
+                    return Err(format!(
+                        "duplicate key {k:?} in client params {:?}",
+                        &rest[i + 1..]
+                    ));
+                }
+                ParamsList::NotAList => {}
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Split `provider:model[:k=v,...]`. Returns `(provider, model, extra params)`.
@@ -92,21 +186,12 @@ pub fn parse_spec(s: &str) -> Result<(String, String, IndexMap<String, String>),
     let model = if provider == "cmd" {
         rest.to_string()
     } else {
-        if let Some(m) = params_re().find(rest) {
-            let params_str = &m.as_str()[1..];
-            for pair in params_str.split(',') {
-                if let Some((k, v)) = pair.split_once('=') {
-                    if extra_params.contains_key(k) {
-                        return Err(format!(
-                            "duplicate key {k:?} in client params {params_str:?}"
-                        ));
-                    }
-                    extra_params.insert(k.to_string(), v.to_string());
-                }
+        match split_params_suffix(rest)? {
+            Some((model, params)) => {
+                extra_params = params;
+                model.to_string()
             }
-            rest[..m.start()].to_string()
-        } else {
-            rest.to_string()
+            None => rest.to_string(),
         }
     };
     if model.is_empty() {
@@ -366,6 +451,41 @@ mod tests {
         assert_eq!(e.get("reasoning").unwrap(), "high");
         assert_eq!(e.get("thinking").unwrap(), "deepseek");
         assert_eq!(e.get("foo").unwrap(), "bar");
+    }
+
+    #[test]
+    fn parse_spec_json_value_with_commas() {
+        let (p, m, e) = parse_spec(
+            r#"anthropic:claude-sonnet-4:cache_control={"type":"ephemeral","ttl":"1h"},max_tokens=4096"#,
+        )
+        .unwrap();
+        assert_eq!(p, "anthropic");
+        assert_eq!(m, "claude-sonnet-4");
+        assert_eq!(
+            e.get("cache_control").unwrap(),
+            r#"{"type":"ephemeral","ttl":"1h"}"#
+        );
+        assert_eq!(e.get("max_tokens").unwrap(), "4096");
+    }
+
+    #[test]
+    fn parse_spec_json_array_value_with_commas() {
+        let (_, _, e) = parse_spec("openai:gpt-4o:stop=[\"END\",\"STOP\"],foo=bar").unwrap();
+        assert_eq!(e.get("stop").unwrap(), "[\"END\",\"STOP\"]");
+        assert_eq!(e.get("foo").unwrap(), "bar");
+    }
+
+    #[test]
+    fn parse_spec_json_value_roundtrips() {
+        let spec = r#"anthropic:claude:cache_control={"type":"ephemeral","ttl":"1h"}"#;
+        let (p, m, e) = parse_spec(spec).unwrap();
+        let mut s = format!("{p}:{m}");
+        if !e.is_empty() {
+            let params: Vec<String> = e.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            s.push(':');
+            s.push_str(&params.join(","));
+        }
+        assert_eq!(s, spec);
     }
 
     #[test]

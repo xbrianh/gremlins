@@ -10,6 +10,7 @@ use rig_core::providers::openai::{OpenAI, wire};
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
+use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 
 const PROVIDER_NAME: &str = "openai";
@@ -26,7 +27,7 @@ impl OpenAiBackend {
         client: OpenAI,
         model: String,
         tool_filter: Option<Vec<String>>,
-        client_params: HashMap<String, String>,
+        resolved: ResolvedParams,
     ) -> Self {
         let model = if model.is_empty() {
             DEFAULT_MODEL.to_string()
@@ -38,7 +39,7 @@ impl OpenAiBackend {
                 client,
                 model,
                 tool_filter,
-                client_params,
+                resolved,
                 "OpenAiBackend".to_string(),
             ),
         }
@@ -65,7 +66,7 @@ impl OpenAiBackend {
             client,
             model.to_string(),
             openai_protocol::tool_filter(native_block),
-            openai_protocol::string_map(extra_params),
+            Self::resolve_params(extra_params)?,
         )))
     }
 }
@@ -107,6 +108,10 @@ impl Backend for OpenAiBackend {
             None
         }
     }
+
+    fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
+        openai_protocol::resolve_openai_protocol(PROVIDER_NAME, raw)
+    }
 }
 
 #[cfg(test)]
@@ -125,7 +130,7 @@ mod tests {
     #[test]
     fn reap_all_cancels_only_own_tokens() {
         let client = OpenAI::new("sk-test");
-        let backend = OpenAiBackend::new(client, "gpt-4o".into(), None, HashMap::new());
+        let backend = OpenAiBackend::new(client, "gpt-4o".into(), None, ResolvedParams::default());
         let a = CancelToken::new();
         let b = CancelToken::new();
         let sibling = CancelToken::new();

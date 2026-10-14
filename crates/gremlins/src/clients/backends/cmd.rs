@@ -12,6 +12,7 @@ use tokio::process::{Child, Command};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
+use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
@@ -623,5 +624,11 @@ impl Backend for CmdBackend {
 
     fn total_cost_usd(&self) -> Option<f64> {
         None
+    }
+
+    fn resolve_params(_raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
+        // A command backend never receives extra params — its model *is* the
+        // shell command, so the resolver returns the empty default.
+        Ok(ResolvedParams::default())
     }
 }

@@ -10,6 +10,7 @@ use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
 use super::backend::{ClientError, RunParams};
 use super::interactive::InteractiveSession;
+use super::params::{self, ResolvedParams};
 use super::protocol::CompletedRun;
 
 /// Shared state for OpenAI-protocol backends.
@@ -22,7 +23,7 @@ pub(crate) struct OpenAiRunState {
     pub(crate) client: OpenAI,
     pub(crate) model: String,
     pub(crate) tool_filter: Option<Vec<String>>,
-    pub(crate) client_params: HashMap<String, String>,
+    pub(crate) resolved: ResolvedParams,
     pub(crate) last_ctx: Mutex<Option<RunContext>>,
     pub(crate) cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
     pub(crate) next_id: AtomicU64,
@@ -34,14 +35,14 @@ impl OpenAiRunState {
         client: OpenAI,
         model: String,
         tool_filter: Option<Vec<String>>,
-        client_params: HashMap<String, String>,
+        resolved: ResolvedParams,
         log_label: String,
     ) -> Self {
         Self {
             client,
             model,
             tool_filter,
-            client_params,
+            resolved,
             last_ctx: Mutex::new(None),
             cancels: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -50,7 +51,7 @@ impl OpenAiRunState {
     }
 
     pub(crate) fn extra_params(&self) -> Option<serde_json::Value> {
-        build_extra_params(&self.client_params)
+        self.resolved.additional_value()
     }
 
     pub(crate) fn effective_model(&self, override_model: Option<&str>) -> String {
@@ -126,6 +127,8 @@ pub(crate) async fn run_openai_compat(
         state.extra_params(),
         state.tool_filter.as_deref(),
         classify_error,
+        state.resolved.temperature,
+        state.resolved.max_tokens,
         interactive,
     )
     .await;
@@ -225,12 +228,78 @@ pub(crate) fn tool_filter(native_block: &HashMap<String, Vec<String>>) -> Option
     native_block.get("allowed_tools").cloned()
 }
 
-/// Copy an insertion-ordered param map into the plain map the backends take.
-pub(crate) fn string_map(params: &IndexMap<String, String>) -> HashMap<String, String> {
-    params.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+// ── shared helpers ───────────────────────────────────────────────────────
+
+/// Resolve raw client params for an OpenAI-protocol backend.
+///
+/// `temperature` and `max_tokens` are typed top-level fields.  `reasoning` is
+/// a shaped param (client-param-first, env-var-fallback) expanded to the
+/// harness `{"effort": .., "summary": "auto"}` object, and
+/// `parallel_tool_calls` is a typed bool defaulted to `true`.  Every other key
+/// passes through JSON-coerced.
+pub(crate) fn resolve_openai_protocol(
+    provider: &str,
+    raw: &IndexMap<String, String>,
+) -> Result<ResolvedParams, String> {
+    let mut additional = serde_json::Map::new();
+    // Default: parallel tool calls enabled.
+    additional.insert(
+        "parallel_tool_calls".to_string(),
+        serde_json::Value::Bool(true),
+    );
+
+    let mut temperature = None;
+    let mut max_tokens = None;
+    // reasoning effort: client param > env var. The explicit value is resolved
+    // and validated first; the env fallback is only read/validated when the
+    // spec omits the key, so a valid override wins over a malformed env var.
+    let mut reasoning_effort = None;
+
+    for (k, v) in raw {
+        match k.as_str() {
+            "temperature" => temperature = Some(params::parse_f64(provider, k, v)?),
+            "max_tokens" => max_tokens = Some(params::parse_u64(provider, k, v)?),
+            "reasoning" => reasoning_effort = Some(validate_reasoning(provider, v)?),
+            "parallel_tool_calls" => {
+                let b = params::parse_bool(provider, k, v)?;
+                additional.insert(k.clone(), serde_json::Value::Bool(b));
+            }
+            _ => {
+                additional.insert(k.clone(), params::coerce(v));
+            }
+        }
+    }
+
+    if reasoning_effort.is_none() {
+        reasoning_effort = match crate::config::reasoning_effort() {
+            Some(effort) => Some(validate_reasoning(provider, &effort)?),
+            None => None,
+        };
+    }
+
+    if let Some(effort) = reasoning_effort {
+        additional.insert(
+            "reasoning".to_string(),
+            serde_json::json!({ "effort": effort, "summary": "auto" }),
+        );
+    }
+
+    Ok(ResolvedParams {
+        temperature,
+        max_tokens,
+        additional,
+    })
 }
 
-// ── shared helpers ───────────────────────────────────────────────────────
+/// Validate a `reasoning` effort value (`low`/`medium`/`high`).
+fn validate_reasoning(provider: &str, value: &str) -> Result<String, String> {
+    match value {
+        "low" | "medium" | "high" => Ok(value.to_string()),
+        _ => Err(format!(
+            "{provider}: invalid value {value:?} for client param \"reasoning\": expected one of low, medium, high"
+        )),
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_with_agent_loop(
@@ -242,6 +311,8 @@ pub(crate) async fn run_with_agent_loop(
     extra: Option<serde_json::Value>,
     tool_filter: Option<&[String]>,
     classify_error: Option<ErrorClassifier>,
+    temperature: Option<f64>,
+    max_tokens: Option<u64>,
     interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
     let model = client.completion(model_name).erase();
@@ -257,7 +328,8 @@ pub(crate) async fn run_with_agent_loop(
             extra,
             tool_filter,
             classify_error,
-            max_tokens: None,
+            temperature,
+            max_tokens,
         },
         interactive,
     )
@@ -296,135 +368,156 @@ pub(crate) fn provider_and_model(spec: &str) -> Option<(&str, &str)> {
     Some((provider, model))
 }
 
-pub(crate) fn build_extra_params(
-    client_params: &HashMap<String, String>,
-) -> Option<serde_json::Value> {
-    let mut params = serde_json::Map::new();
-
-    params.insert("parallel_tool_calls".into(), serde_json::Value::Bool(true));
-
-    // reasoning effort: client param > env var
-    let effort = client_params
-        .get("reasoning")
-        .cloned()
-        .or_else(crate::config::reasoning_effort);
-    if let Some(effort) = effort {
-        params.insert(
-            "reasoning".into(),
-            serde_json::json!({"effort": effort, "summary": "auto"}),
-        );
-    }
-
-    // Pass through any other client params. Parse each value as JSON so
-    // numbers/bools survive as their natural types; fall back to a plain
-    // string if the value isn't valid JSON (e.g. an opaque enum like
-    // thinking=deepseek).
-    // "reasoning" and "parallel_tool_calls" are excluded — reserved keys with
-    // provider-specific handling above.
-    for (k, v) in client_params {
-        if k != "reasoning" && k != "parallel_tool_calls" {
-            let val = match serde_json::from_str::<serde_json::Value>(v) {
-                Ok(parsed) => parsed,
-                Err(_) => serde_json::Value::String(v.clone()),
-            };
-            params.insert(k.clone(), val);
-        }
-    }
-
-    if params.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(params))
-    }
-}
-
 // ── tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn extra_params_default_no_reasoning() {
-        let p = build_extra_params(&HashMap::new()).unwrap();
-        assert_eq!(p["parallel_tool_calls"], true);
-        assert!(p.get("reasoning").is_none());
+    fn resolve(raw: &[(&str, &str)]) -> ResolvedParams {
+        let map: IndexMap<String, String> = raw
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        resolve_openai_protocol("openai", &map).unwrap()
     }
 
     #[test]
-    fn extra_params_client_reasoning_overrides() {
-        let mut cp = HashMap::new();
-        cp.insert("reasoning".into(), "low".into());
-        let p = build_extra_params(&cp).unwrap();
-        assert_eq!(p["reasoning"]["effort"], "low");
-        assert_eq!(p["reasoning"]["summary"], "auto");
+    fn default_parallel_tool_calls_true() {
+        let r = resolve(&[]);
+        let additional = r.additional_value().unwrap();
+        assert_eq!(additional["parallel_tool_calls"], true);
+        assert!(additional.get("reasoning").is_none());
     }
 
-    /// Lock the contract between [`build_extra_params`] output shape and the
-    /// `opts.extra -> reasoning.effort` extraction in [`run_agent_loop`]. If
-    /// the JSON structure produced by `build_extra_params` ever changes, this
-    /// test must also change — preventing silent `reasoning_effort=default`
-    /// degradation in stage-init telemetry.
     #[test]
-    fn build_extra_params_to_reasoning_effort_extraction_locked() {
-        let mut cp = HashMap::new();
-        cp.insert("reasoning".into(), "low".into());
-        let extra = build_extra_params(&cp).unwrap();
-        let effort = extra
-            .get("reasoning")
-            .and_then(|r| r.get("effort"))
-            .and_then(|e| e.as_str());
-        assert_eq!(effort, Some("low"));
+    fn client_reasoning_overrides() {
+        let r = resolve(&[("reasoning", "low")]);
+        let additional = r.additional_value().unwrap();
+        assert_eq!(additional["reasoning"]["effort"], "low");
+        assert_eq!(additional["reasoning"]["summary"], "auto");
+    }
 
-        // Without reasoning, extraction returns None
-        let extra = build_extra_params(&HashMap::new()).unwrap();
-        let effort = extra
-            .get("reasoning")
-            .and_then(|r| r.get("effort"))
-            .and_then(|e| e.as_str());
+    #[test]
+    fn reasoning_effort_extraction_locked() {
+        let r = resolve(&[("reasoning", "low")]);
+        let effort = r
+            .additional_value()
+            .and_then(|v| v.get("reasoning").cloned())
+            .and_then(|v| v.get("effort").and_then(|e| e.as_str().map(String::from)));
+        assert_eq!(effort.as_deref(), Some("low"));
+
+        let r = resolve(&[]);
+        let effort = r
+            .additional_value()
+            .and_then(|v| v.get("reasoning").cloned())
+            .and_then(|v| v.get("effort").and_then(|e| e.as_str().map(String::from)));
         assert_eq!(effort, None);
     }
 
     #[test]
-    fn extra_params_client_passthrough() {
-        let mut cp = HashMap::new();
-        cp.insert("thinking".into(), "deepseek".into());
-        cp.insert("foo".into(), "bar".into());
-        let p = build_extra_params(&cp).unwrap();
-        assert_eq!(p["thinking"], "deepseek");
-        assert_eq!(p["foo"], "bar");
-        assert!(p.get("reasoning").is_none());
+    fn client_passthrough() {
+        let r = resolve(&[("thinking", "deepseek"), ("foo", "bar")]);
+        let additional = r.additional_value().unwrap();
+        assert_eq!(additional["thinking"], "deepseek");
+        assert_eq!(additional["foo"], "bar");
+        assert!(additional.get("reasoning").is_none());
     }
 
     #[test]
-    fn extra_params_client_passthrough_json_types() {
-        let mut cp = HashMap::new();
-        cp.insert("temperature".into(), "0.7".into());
-        cp.insert("top_p".into(), "0.95".into());
-        cp.insert("stream".into(), "true".into());
-        cp.insert("max_tokens".into(), "4096".into());
-        cp.insert("stop".into(), "[\"END\"]".into()); // JSON array
-        let p = build_extra_params(&cp).unwrap();
-        // numbers
-        assert_eq!(p["temperature"], serde_json::json!(0.7));
-        assert_eq!(p["top_p"], serde_json::json!(0.95));
-        assert_eq!(p["max_tokens"], serde_json::json!(4096));
-        // bool
-        assert_eq!(p["stream"], serde_json::json!(true));
-        // JSON array passthrough
-        assert_eq!(p["stop"], serde_json::json!(["END"]));
+    fn typed_fields_not_in_passthrough() {
+        let r = resolve(&[
+            ("temperature", "0.7"),
+            ("max_tokens", "4096"),
+            ("top_p", "0.95"),
+            ("stream", "true"),
+            ("stop", "[\"END\"]"),
+        ]);
+        assert_eq!(r.temperature, Some(0.7));
+        assert_eq!(r.max_tokens, Some(4096));
+        let additional = r.additional_value().unwrap();
+        assert!(additional.get("temperature").is_none());
+        assert!(additional.get("max_tokens").is_none());
+        assert_eq!(additional["top_p"], serde_json::json!(0.95));
+        assert_eq!(additional["stream"], serde_json::json!(true));
+        assert_eq!(additional["stop"], serde_json::json!(["END"]));
     }
 
     #[test]
-    fn extra_params_client_reasoning_plus_passthrough() {
-        let mut cp = HashMap::new();
-        cp.insert("reasoning".into(), "high".into());
-        cp.insert("thinking".into(), "deepseek".into());
-        let p = build_extra_params(&cp).unwrap();
-        assert_eq!(p["reasoning"]["effort"], "high");
-        assert_eq!(p["thinking"], "deepseek");
-        // xai auto-inserts parallel_tool_calls alongside reasoning + passthrough
-        assert_eq!(p["parallel_tool_calls"], true);
+    fn reasoning_plus_passthrough() {
+        let r = resolve(&[("reasoning", "high"), ("thinking", "deepseek")]);
+        let additional = r.additional_value().unwrap();
+        assert_eq!(additional["reasoning"]["effort"], "high");
+        assert_eq!(additional["thinking"], "deepseek");
+        assert_eq!(additional["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn parallel_tool_calls_override_and_malformed() {
+        let r = resolve(&[("parallel_tool_calls", "false")]);
+        assert_eq!(r.additional_value().unwrap()["parallel_tool_calls"], false);
+
+        let map: IndexMap<String, String> =
+            [("parallel_tool_calls".to_string(), "notabool".to_string())]
+                .into_iter()
+                .collect();
+        let err = resolve_openai_protocol("openai", &map).unwrap_err();
+        assert!(err.contains("parallel_tool_calls"), "{err}");
+        assert!(err.contains("notabool"), "{err}");
+    }
+
+    #[test]
+    fn malformed_temperature_and_max_tokens_fail() {
+        let map: IndexMap<String, String> = [("temperature".to_string(), "hot".to_string())]
+            .into_iter()
+            .collect();
+        let err = resolve_openai_protocol("openai", &map).unwrap_err();
+        assert!(err.contains("temperature"), "{err}");
+
+        let map: IndexMap<String, String> = [("max_tokens".to_string(), "lots".to_string())]
+            .into_iter()
+            .collect();
+        let err = resolve_openai_protocol("openai", &map).unwrap_err();
+        assert!(err.contains("max_tokens"), "{err}");
+    }
+
+    #[test]
+    fn malformed_reasoning_fails() {
+        let map: IndexMap<String, String> = [("reasoning".to_string(), "extreme".to_string())]
+            .into_iter()
+            .collect();
+        let err = resolve_openai_protocol("openai", &map).unwrap_err();
+        assert!(err.contains("reasoning"), "{err}");
+        assert!(err.contains("extreme"), "{err}");
+    }
+
+    /// An invalid `GREMLINS_REASONING_EFFORT` env fallback must fail the
+    /// client build, not silently produce a malformed `reasoning` object.
+    #[test]
+    fn malformed_env_reasoning_fails() {
+        let mut guard = crate::test_support::EnvGuard::lock();
+        guard.set("GREMLINS_REASONING_EFFORT", "extreme");
+
+        let map: IndexMap<String, String> = IndexMap::new();
+        let err = resolve_openai_protocol("openai", &map).unwrap_err();
+        assert!(err.contains("reasoning"), "{err}");
+        assert!(err.contains("extreme"), "{err}");
+    }
+
+    /// A valid client `reasoning=` override wins over a malformed env var:
+    /// the explicit value is resolved and validated before the env fallback is
+    /// ever read, so the build succeeds.
+    #[test]
+    fn client_reasoning_overrides_malformed_env() {
+        let mut guard = crate::test_support::EnvGuard::lock();
+        guard.set("GREMLINS_REASONING_EFFORT", "extreme");
+
+        let map: IndexMap<String, String> = [("reasoning".to_string(), "low".to_string())]
+            .into_iter()
+            .collect();
+        let r = resolve_openai_protocol("openai", &map).unwrap();
+        let additional = r.additional_value().unwrap();
+        assert_eq!(additional["reasoning"]["effort"], "low");
     }
 
     #[test]

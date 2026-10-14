@@ -13,6 +13,7 @@ use crate::clients::agent_loop::{
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
+use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::CompletedRun;
 
 const PROVIDER_NAME: &str = "copilot";
@@ -49,29 +50,42 @@ struct CopilotRunState {
     intent: Option<CopilotIntent>,
     strict_tools: bool,
     tool_result_array_content: bool,
+    resolved: ResolvedParams,
     last_ctx: Mutex<Option<RunContext>>,
     cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
     next_id: AtomicU64,
     log_label: String,
 }
 
-/// Parse Copilot-specific extra params from the client-spec parameter map.
+/// Parse Copilot-specific typed flags from the client-spec parameter map.
+///
+/// `intent` accepts `edits` or `panel`; `strict_tools` and
+/// `tool_result_array_content` are strict bools.  A malformed value is a
+/// build-time error, never a silent fallback.
 fn parse_extra_params(
     extra_params: &indexmap::IndexMap<String, String>,
-) -> (Option<CopilotIntent>, bool, bool) {
-    let intent = extra_params.get("intent").map(|v| match v.as_str() {
-        "edits" => CopilotIntent::Edits,
-        _ => CopilotIntent::Panel,
-    });
-    let strict_tools = extra_params
-        .get("strict_tools")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
-    let tool_result_array_content = extra_params
-        .get("tool_result_array_content")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
-    (intent, strict_tools, tool_result_array_content)
+) -> Result<(Option<CopilotIntent>, bool, bool), String> {
+    let intent = match extra_params.get("intent") {
+        Some(v) => match v.as_str() {
+            "edits" => Some(CopilotIntent::Edits),
+            "panel" => Some(CopilotIntent::Panel),
+            _ => {
+                return Err(format!(
+                    "copilot: invalid value {v:?} for client param \"intent\": expected one of edits, panel"
+                ))
+            }
+        },
+        None => None,
+    };
+    let strict_tools = match extra_params.get("strict_tools") {
+        Some(v) => params::parse_bool("copilot", "strict_tools", v)?,
+        None => false,
+    };
+    let tool_result_array_content = match extra_params.get("tool_result_array_content") {
+        Some(v) => params::parse_bool("copilot", "tool_result_array_content", v)?,
+        None => false,
+    };
+    Ok((intent, strict_tools, tool_result_array_content))
 }
 
 impl CopilotRunState {
@@ -120,8 +134,9 @@ impl CopilotBackend {
 
         let tool_filter = openai_protocol::tool_filter(native_block);
 
+        let resolved = Self::resolve_params(extra_params)?;
         let (intent, strict_tools, tool_result_array_content) =
-            parse_extra_params(extra_params);
+            parse_extra_params(extra_params)?;
 
         Ok(Arc::new(Self {
             state: CopilotRunState {
@@ -131,6 +146,7 @@ impl CopilotBackend {
                 intent,
                 strict_tools,
                 tool_result_array_content,
+                resolved,
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
@@ -201,10 +217,11 @@ impl Backend for CopilotBackend {
             ctx,
             cancel.clone(),
             LoopOpts {
-                extra: None,
+                extra: self.state.resolved.additional_value(),
                 tool_filter: self.state.tool_filter.as_deref(),
                 classify_error: Some(default_classify as ErrorClassifier),
-                max_tokens: None,
+                temperature: self.state.resolved.temperature,
+                max_tokens: self.state.resolved.max_tokens,
             },
             interactive,
         )
@@ -254,6 +271,33 @@ impl Backend for CopilotBackend {
     fn total_cost_usd(&self) -> Option<f64> {
         None
     }
+
+    fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
+        // Validate the typed flags strictly (so a malformed value errors at
+        // build time), then resolve temperature/max_tokens and passthrough.
+        parse_extra_params(raw)?;
+
+        let mut additional = serde_json::Map::new();
+        let mut temperature = None;
+        let mut max_tokens = None;
+
+        for (k, v) in raw {
+            match k.as_str() {
+                "temperature" => temperature = Some(params::parse_f64("copilot", k, v)?),
+                "max_tokens" => max_tokens = Some(params::parse_u64("copilot", k, v)?),
+                "intent" | "strict_tools" | "tool_result_array_content" => {}
+                _ => {
+                    additional.insert(k.clone(), params::coerce(v));
+                }
+            }
+        }
+
+        Ok(ResolvedParams {
+            temperature,
+            max_tokens,
+            additional,
+        })
+    }
 }
 
 // ── tests ────────────────────────────────────────────────────────────────
@@ -299,6 +343,7 @@ mod tests {
                 intent: None,
                 strict_tools: false,
                 tool_result_array_content: false,
+                resolved: ResolvedParams::default(),
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
@@ -405,21 +450,30 @@ mod tests {
     fn extra_params_intent_edits() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("intent".into(), "edits".into());
-        let (intent, _, _) = parse_extra_params(&ep);
+        let (intent, _, _) = parse_extra_params(&ep).unwrap();
         assert_eq!(intent, Some(CopilotIntent::Edits));
     }
 
     #[test]
-    fn extra_params_intent_defaults_to_panel() {
+    fn extra_params_intent_panel() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
-        ep.insert("intent".into(), "bogus".into());
-        let (intent, _, _) = parse_extra_params(&ep);
+        ep.insert("intent".into(), "panel".into());
+        let (intent, _, _) = parse_extra_params(&ep).unwrap();
         assert_eq!(intent, Some(CopilotIntent::Panel));
     }
 
     #[test]
+    fn extra_params_intent_bogus_is_error() {
+        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        ep.insert("intent".into(), "bogus".into());
+        let err = parse_extra_params(&ep).unwrap_err();
+        assert!(err.contains("intent"), "{err}");
+        assert!(err.contains("bogus"), "{err}");
+    }
+
+    #[test]
     fn extra_params_intent_missing_is_none() {
-        let (intent, _, _) = parse_extra_params(&indexmap::IndexMap::new());
+        let (intent, _, _) = parse_extra_params(&indexmap::IndexMap::new()).unwrap();
         assert_eq!(intent, None);
     }
 
@@ -427,7 +481,7 @@ mod tests {
     fn extra_params_strict_tools_true() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("strict_tools".into(), "true".into());
-        let (_, strict_tools, _) = parse_extra_params(&ep);
+        let (_, strict_tools, _) = parse_extra_params(&ep).unwrap();
         assert!(strict_tools);
     }
 
@@ -435,13 +489,21 @@ mod tests {
     fn extra_params_strict_tools_one() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("strict_tools".into(), "1".into());
-        let (_, strict_tools, _) = parse_extra_params(&ep);
+        let (_, strict_tools, _) = parse_extra_params(&ep).unwrap();
         assert!(strict_tools);
     }
 
     #[test]
+    fn extra_params_strict_tools_malformed_is_error() {
+        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        ep.insert("strict_tools".into(), "yes".into());
+        let err = parse_extra_params(&ep).unwrap_err();
+        assert!(err.contains("strict_tools"), "{err}");
+    }
+
+    #[test]
     fn extra_params_strict_tools_false_by_default() {
-        let (_, strict_tools, _) = parse_extra_params(&indexmap::IndexMap::new());
+        let (_, strict_tools, _) = parse_extra_params(&indexmap::IndexMap::new()).unwrap();
         assert!(!strict_tools);
     }
 
@@ -449,7 +511,7 @@ mod tests {
     fn extra_params_tool_result_array_content_true() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("tool_result_array_content".into(), "true".into());
-        let (_, _, tool_result_array_content) = parse_extra_params(&ep);
+        let (_, _, tool_result_array_content) = parse_extra_params(&ep).unwrap();
         assert!(tool_result_array_content);
     }
 
@@ -457,14 +519,14 @@ mod tests {
     fn extra_params_tool_result_array_content_one() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("tool_result_array_content".into(), "1".into());
-        let (_, _, tool_result_array_content) = parse_extra_params(&ep);
+        let (_, _, tool_result_array_content) = parse_extra_params(&ep).unwrap();
         assert!(tool_result_array_content);
     }
 
     #[test]
     fn extra_params_tool_result_array_content_false_by_default() {
         let (_, _, tool_result_array_content) =
-            parse_extra_params(&indexmap::IndexMap::new());
+            parse_extra_params(&indexmap::IndexMap::new()).unwrap();
         assert!(!tool_result_array_content);
     }
 }

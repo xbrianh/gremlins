@@ -3,12 +3,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use rig_core::completion::Message;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
 use super::agent_loop::CancelToken;
 use super::interactive::{InteractiveSession, StreamEventSender};
+use super::params::ResolvedParams;
 use super::protocol::CompletedRun;
 use super::task::TaskModelSelector;
 
@@ -127,4 +129,15 @@ pub trait Backend: Send + Sync {
     fn reap_all(&self, gremlin_id: &str);
 
     fn total_cost_usd(&self) -> Option<f64>;
+
+    /// Resolve the raw `provider:model:k=v,...` param map into typed request
+    /// fields plus the `additional_params` passthrough object.
+    ///
+    /// This is the single place extra-param meaning is decided: a key either
+    /// sets a typed field (overriding this backend's default for that key) or
+    /// passes through unchanged.  A malformed typed value is a build-time
+    /// error, never a silent fallback.
+    fn resolve_params(raw: &IndexMap<String, String>) -> Result<ResolvedParams, String>
+    where
+        Self: Sized;
 }

@@ -15,6 +15,7 @@ use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::lazy_auth_http::LazyBearerHttpClient;
 use crate::clients::openai_protocol;
+use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::CompletedRun;
 use crate::clients::token_provider::{self, TokenProvider};
 use crate::clients::config::ProviderAuth;
@@ -45,8 +46,7 @@ struct AnthropicRunState {
     client_state: AnthropicClientState,
     model: String,
     tool_filter: Option<Vec<String>>,
-    client_params: HashMap<String, String>,
-    max_tokens: u64,
+    resolved: ResolvedParams,
     last_ctx: Mutex<Option<RunContext>>,
     cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
     next_id: AtomicU64,
@@ -55,7 +55,7 @@ struct AnthropicRunState {
 
 impl AnthropicRunState {
     fn extra_params(&self) -> Option<serde_json::Value> {
-        build_anthropic_extra_params(&self.client_params)
+        self.resolved.additional_value()
     }
 
     fn effective_model(&self, override_model: Option<&str>) -> String {
@@ -132,7 +132,8 @@ impl AnthropicRunState {
                         extra: self.extra_params(),
                         tool_filter: self.tool_filter.as_deref(),
                         classify_error: Some(default_classify as ErrorClassifier),
-                        max_tokens: Some(self.max_tokens),
+                        temperature: self.resolved.temperature,
+                        max_tokens: self.resolved.max_tokens,
                     },
                     interactive,
                 )
@@ -171,7 +172,8 @@ impl AnthropicRunState {
                             extra: self.extra_params(),
                             tool_filter: self.tool_filter.as_deref(),
                             classify_error: Some(default_classify as ErrorClassifier),
-                            max_tokens: Some(self.max_tokens),
+                            temperature: self.resolved.temperature,
+                            max_tokens: self.resolved.max_tokens,
                         },
                         interactive,
                     )
@@ -246,30 +248,7 @@ impl AnthropicBackend {
         };
 
         let tool_filter = openai_protocol::tool_filter(native_block);
-        let mut client_params = openai_protocol::string_map(extra_params);
-
-        // Enable prompt caching by default (5-min TTL).
-        // Users can override via cache_control=... or disable with cache_control=null.
-        if !client_params.contains_key("cache_control") {
-            client_params.insert(
-                "cache_control".to_string(),
-                "{\"type\":\"ephemeral\"}".to_string(),
-            );
-        }
-
-        // Resolve max_tokens: client-spec override > default 128_000.
-        let max_tokens: u64 = match client_params.remove("max_tokens") {
-            Some(v) => match v.parse::<u64>() {
-                Ok(n) => n,
-                Err(_) => {
-                    log::warn!(
-                        "Anthropic: max_tokens={v:?} is not a valid u64, falling back to {DEFAULT_MAX_TOKENS}"
-                    );
-                    DEFAULT_MAX_TOKENS
-                }
-            },
-            None => DEFAULT_MAX_TOKENS,
-        };
+        let resolved = Self::resolve_params(extra_params)?;
 
         let http_client = DynHttpClient::new(ReqwestClient::default());
 
@@ -325,8 +304,7 @@ impl AnthropicBackend {
                 client_state,
                 model,
                 tool_filter,
-                client_params,
-                max_tokens,
+                resolved,
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
@@ -414,37 +392,44 @@ impl Backend for AnthropicBackend {
     fn total_cost_usd(&self) -> Option<f64> {
         None
     }
-}
 
-// ── Anthropic-specific extra params ────────────────────────────────────
+    fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
+        let mut additional = serde_json::Map::new();
+        // Enable prompt caching by default (5-min TTL). Users can override via
+        // cache_control=... or disable with cache_control=null.
+        additional.insert(
+            "cache_control".to_string(),
+            serde_json::json!({ "type": "ephemeral" }),
+        );
 
-/// Build the `extra` JSON blob for Anthropic requests.
-///
-/// Unlike the OpenAI-protocol helper, this does **not** inject
-/// `parallel_tool_calls` (Anthropic controls parallelism via
-/// `tool_choice.disable_parallel_tool_use`) or the OpenAI `reasoning`
-/// object.  Only passthrough client params are forwarded.
-fn build_anthropic_extra_params(
-    client_params: &HashMap<String, String>,
-) -> Option<serde_json::Value> {
-    let mut params = serde_json::Map::new();
+        let mut temperature = None;
+        let mut max_tokens = Some(DEFAULT_MAX_TOKENS);
 
-    for (k, v) in client_params {
-        // max_tokens is handled as a top-level field; skip it here.
-        if k == "max_tokens" {
-            continue;
+        for (k, v) in raw {
+            match k.as_str() {
+                "temperature" => temperature = Some(params::parse_f64("anthropic", k, v)?),
+                "max_tokens" => max_tokens = Some(params::parse_u64("anthropic", k, v)?),
+                "cache_control" => {
+                    // `null` disables prompt caching; anything else must be a
+                    // JSON object.
+                    if v == "null" {
+                        additional.insert(k.clone(), serde_json::Value::Null);
+                    } else {
+                        let obj = params::parse_json_object("anthropic", k, v)?;
+                        additional.insert(k.clone(), obj);
+                    }
+                }
+                _ => {
+                    additional.insert(k.clone(), params::coerce(v));
+                }
+            }
         }
-        let val = match serde_json::from_str::<serde_json::Value>(v) {
-            Ok(parsed) => parsed,
-            Err(_) => serde_json::Value::String(v.clone()),
-        };
-        params.insert(k.clone(), val);
-    }
 
-    if params.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(params))
+        Ok(ResolvedParams {
+            temperature,
+            max_tokens,
+            additional,
+        })
     }
 }
 
@@ -661,8 +646,7 @@ mod tests {
                 client_state: AnthropicClientState::Static(client),
                 model: "claude-sonnet-4-6".into(),
                 tool_filter: None,
-                client_params: HashMap::new(),
-                max_tokens: DEFAULT_MAX_TOKENS,
+                resolved: ResolvedParams::default(),
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
@@ -755,7 +739,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            backend.state.max_tokens, 128_000,
+            backend.state.resolved.max_tokens,
+            Some(128_000),
             "default max_tokens must be 128_000"
         );
     }
@@ -769,47 +754,44 @@ mod tests {
         let mut extra = indexmap::IndexMap::new();
         extra.insert("max_tokens".into(), "8192".into());
 
-        let backend = AnthropicBackend::build(
-            "claude-sonnet-4-6",
-            &HashMap::new(),
-            &extra,
-        )
-        .unwrap();
-        drop(backend);
-    }
-
-    /// A malformed `max_tokens` value (not a valid u64) logs a warning
-    /// and falls back to 128_000.
-    #[test]
-    fn build_max_tokens_malformed_falls_back() {
-        let mut guard = isolated_env();
-        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
-
-        let mut extra = indexmap::IndexMap::new();
-        extra.insert("max_tokens".into(), "not-a-number".into());
-
         let backend = AnthropicBackend::build_concrete(
             "claude-sonnet-4-6",
             &HashMap::new(),
             &extra,
         )
         .unwrap();
-        assert_eq!(
-            backend.state.max_tokens, 128_000,
-            "malformed max_tokens must fall back to 128_000"
-        );
+        assert_eq!(backend.state.resolved.max_tokens, Some(8192));
+    }
+
+    /// A malformed `max_tokens` value (not a valid u64) is a build error.
+    #[test]
+    fn build_max_tokens_malformed_is_error() {
+        let mut guard = isolated_env();
+        guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
+
+        let mut extra = indexmap::IndexMap::new();
+        extra.insert("max_tokens".into(), "not-a-number".into());
+
+        let err = AnthropicBackend::build(
+            "claude-sonnet-4-6",
+            &HashMap::new(),
+            &extra,
+        )
+        .err()
+        .expect("malformed max_tokens must error");
+        assert!(err.contains("max_tokens"), "{err}");
     }
 
     /// `max_tokens` is stripped from `additional_params` so it is not
     /// sent twice (once as the top-level field and once in the extras blob).
     #[test]
     fn extra_params_excludes_max_tokens() {
-        let mut params = HashMap::new();
-        params.insert("max_tokens".into(), "4096".into());
-        params.insert("thinking".into(), "{\"type\":\"enabled\"}".into());
+        let mut extra = indexmap::IndexMap::new();
+        extra.insert("max_tokens".into(), "4096".into());
+        extra.insert("thinking".into(), "{\"type\":\"enabled\"}".into());
 
-        let extra = build_anthropic_extra_params(&params);
-        let obj = extra.unwrap();
+        let resolved = AnthropicBackend::resolve_params(&extra).unwrap();
+        let obj = resolved.additional_value().unwrap();
         assert!(
             obj.get("max_tokens").is_none(),
             "max_tokens must not appear in extra params"
@@ -818,15 +800,6 @@ mod tests {
             obj.get("thinking").is_some(),
             "other params must still be forwarded"
         );
-    }
-
-    /// When `max_tokens` is the *only* client param, `extra_params()`
-    /// returns `None` (not an empty object).
-    #[test]
-    fn extra_params_none_when_only_max_tokens() {
-        let mut params = HashMap::new();
-        params.insert("max_tokens".into(), "4096".into());
-        assert!(build_anthropic_extra_params(&params).is_none());
     }
 
     // ── cache_control default / override tests ───────────────────────
@@ -844,14 +817,14 @@ mod tests {
         )
         .unwrap();
 
-        let val = backend.state.client_params.get("cache_control");
+        let val = backend.state.resolved.additional.get("cache_control");
         assert!(
             val.is_some(),
             "cache_control must be present when not explicitly set"
         );
         assert_eq!(
             val.unwrap(),
-            "{\"type\":\"ephemeral\"}",
+            &serde_json::json!({"type": "ephemeral"}),
             "default cache_control must be ephemeral"
         );
     }
@@ -872,14 +845,14 @@ mod tests {
         )
         .unwrap();
 
-        let val = backend.state.client_params.get("cache_control");
+        let val = backend.state.resolved.additional.get("cache_control");
         assert!(
             val.is_some(),
             "cache_control key must still be present when set to null"
         );
         assert_eq!(
             val.unwrap(),
-            "null",
+            &serde_json::Value::Null,
             "explicit cache_control=null must not be overwritten"
         );
     }
@@ -954,14 +927,14 @@ mod tests {
         )
         .unwrap();
 
-        let val = backend.state.client_params.get("cache_control");
+        let val = backend.state.resolved.additional.get("cache_control");
         assert!(
             val.is_some(),
             "cache_control must be present when explicitly set"
         );
         assert_eq!(
             val.unwrap(),
-            "{\"type\":\"ephemeral\",\"ttl\":\"1h\"}",
+            &serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
             "user-supplied cache_control must not be overwritten"
         );
     }
