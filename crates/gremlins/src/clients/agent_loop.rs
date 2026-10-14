@@ -1219,9 +1219,14 @@ async fn run_agent_loop_core(
             }
 
             // Reasoning-only turn — the model is thinking. Just loop.
+            // Record an assistant message carrying the structured reasoning
+            // items so the next request preserves them (and the provider's
+            // ordering invariant) rather than emitting two consecutive user
+            // messages with the reasoning dropped.
             if text.is_empty() && !reasoning.is_empty() {
                 log::debug!("reasoning-only turn: turn={turn_num} — continuing",);
                 history.push(next_prompt);
+                history.push(assistant_tool_message("", &reasoning_items, &[]));
                 next_prompt = Message::user("Continue.");
                 continue;
             }
@@ -2496,6 +2501,99 @@ mod tests {
             reasoning_at.unwrap() < call_at.unwrap(),
             "reasoning item must precede its referencing function_call"
         );
+    }
+
+    /// A reasoning-only turn (reasoning deltas but no text and no tool call)
+    /// must still record an assistant message carrying the structured
+    /// reasoning item before nudging with "Continue.". Dropping it would both
+    /// omit the item from the next request and leave two consecutive user
+    /// messages — breaking the replay invariant the provider relies on.
+    #[tokio::test]
+    async fn loop_replays_reasoning_item_on_reasoning_only_turn() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-reasoning-only-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Turn 0: reasoning only (rs_0), no text, no tool call — the loop
+        // records the reasoning item and continues with "Continue.".
+        // Turn 1: Done. The second request must carry rs_0 as an assistant
+        // message, not as two consecutive user messages.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::reasoning_delta_with_id("rs_0", "thinking"),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({ "summary": "done" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            model.clone().erase(),
+            "think then finish",
+            ctx,
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let reqs = model.requests();
+        assert_eq!(reqs.len(), 2);
+        let second = &reqs[1];
+
+        // The reasoning-only turn must be replayed as an assistant message.
+        let assistant = second
+            .chat_history
+            .iter()
+            .find(|m| matches!(m, Message::Assistant { .. }))
+            .expect("second request carries the prior assistant turn");
+        let Message::Assistant { content, .. } = assistant else {
+            unreachable!()
+        };
+        let reasoning = content.iter().find_map(|c| match c {
+            AssistantContent::Reasoning(sealed) => {
+                sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            reasoning.flatten().as_deref(),
+            Some("rs_0"),
+            "reasoning-only turn's structured item must survive into the replay"
+        );
+
+        // No two consecutive user messages: the assistant turn (with its
+        // reasoning item) must sit between the original prompt and "Continue.".
+        let mut prev_user = false;
+        for m in &second.chat_history {
+            match m {
+                Message::User { .. } => {
+                    assert!(
+                        !prev_user,
+                        "replayed history must not contain consecutive user messages"
+                    );
+                    prev_user = true;
+                }
+                _ => prev_user = false,
+            }
+        }
     }
 
     /// A 429 on turn N must back off and retry turn N in place — not restart
