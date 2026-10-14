@@ -18,9 +18,7 @@
 use std::io::{self, Stdout};
 
 use crossterm::{
-    cursor,
-    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
-    execute,
+    cursor, execute,
     terminal::{disable_raw_mode, enable_raw_mode, size},
 };
 use ratatui::{
@@ -687,13 +685,6 @@ impl LiveArea<CrosstermBackend<Stdout>> {
     pub fn new() -> io::Result<Self> {
         let mut guard = RawModeGuard::enter()?;
         execute!(io::stdout(), cursor::Hide)?;
-        // Enable the enhanced keyboard protocol so Shift+Enter (and other
-        // modifier combos) arrive as distinct key events instead of being
-        // collapsed into their unmodified equivalents by legacy terminals.
-        execute!(
-            io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::all())
-        )?;
 
         let (cols, rows) = size()?;
         let mut live = Self::with_backend(CrosstermBackend::new(io::stdout()), cols, rows);
@@ -759,7 +750,6 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.0 {
             execute!(io::stdout(), cursor::Show).ok();
-            execute!(io::stdout(), PopKeyboardEnhancementFlags).ok();
             disable_raw_mode().ok();
         }
     }
@@ -769,7 +759,6 @@ impl<B: Backend> Drop for LiveArea<B> {
     fn drop(&mut self) {
         if self.needs_terminal_cleanup {
             execute!(io::stdout(), cursor::Show).ok();
-            execute!(io::stdout(), PopKeyboardEnhancementFlags).ok();
             disable_raw_mode().ok();
         }
     }
