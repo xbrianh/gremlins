@@ -87,6 +87,73 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 payload: serde_json::json!({"op": "info", "id": id}),
             })
         }
+        "artifact" => {
+            let id = args.first().copied().unwrap_or("");
+            if id.is_empty() {
+                return Some(CommandResult::Lines(vec![
+                    "> /artifact".to_string(),
+                    "usage: /artifact <id> --list".to_string(),
+                    "usage: /artifact <id> <artifact://uri> [--json-path <path>]".to_string(),
+                ]));
+            }
+
+            let rest = &args[1..];
+            if rest.first().copied() == Some("--list") {
+                if rest.len() > 1 {
+                    return Some(CommandResult::Lines(vec![
+                        "> /artifact".to_string(),
+                        "usage: /artifact <id> --list".to_string(),
+                    ]));
+                }
+                return Some(CommandResult::SocketOp {
+                    op: "artifact".to_string(),
+                    payload: serde_json::json!({"op": "artifact", "id": id, "list": true}),
+                });
+            }
+
+            let Some(artifact) = rest.first().copied() else {
+                return Some(CommandResult::Lines(vec![
+                    "> /artifact".to_string(),
+                    "usage: /artifact <id> --list".to_string(),
+                    "usage: /artifact <id> <artifact://uri> [--json-path <path>]".to_string(),
+                ]));
+            };
+
+            // Parse an optional --json-path <path> tail.
+            let mut json_path: Option<String> = None;
+            let mut tail = &rest[1..];
+            while let Some((flag, rest_after)) = tail.split_first() {
+                match *flag {
+                    "--json-path" => {
+                        let Some(value) = rest_after.first() else {
+                            return Some(CommandResult::Lines(vec![
+                                "> /artifact".to_string(),
+                                "usage: /artifact <id> <artifact://uri> [--json-path <path>]"
+                                    .to_string(),
+                            ]));
+                        };
+                        json_path = Some((*value).to_string());
+                        tail = &rest_after[1..];
+                    }
+                    _ => {
+                        return Some(CommandResult::Lines(vec![
+                            "> /artifact".to_string(),
+                            "usage: /artifact <id> <artifact://uri> [--json-path <path>]"
+                                .to_string(),
+                        ]));
+                    }
+                }
+            }
+
+            let mut payload = serde_json::json!({"op": "artifact", "id": id, "artifact": artifact});
+            if let Some(jp) = json_path {
+                payload["json_path"] = serde_json::Value::String(jp);
+            }
+            Some(CommandResult::SocketOp {
+                op: "artifact".to_string(),
+                payload,
+            })
+        }
         "stop" => {
             let id = args.first().copied().unwrap_or("");
             if id.is_empty() {
@@ -191,6 +258,8 @@ fn help_text() -> Vec<String> {
         "  /ls              — list gremlins".to_string(),
         "  /launch <definition> — start a gremlin".to_string(),
         "  /info <id>       — show gremlin info".to_string(),
+        "  /artifact <id> --list          — list a gremlin's artifact keys".to_string(),
+        "  /artifact <id> <uri> [--json-path <path>] — show artifact content".to_string(),
         "  /stop <id>       — stop a gremlin".to_string(),
         "  /resume <id>     — resume a gremlin".to_string(),
         "  /log <id>        — show gremlin log".to_string(),
@@ -230,8 +299,21 @@ mod tests {
             .collect();
 
         let help_names = [
-            "/ls", "/launch", "/info", "/stop", "/resume", "/log", "/watch", "/debug", "/model",
-            "/chat", "/clear", "/new", "/help", "/quit",
+            "/ls",
+            "/launch",
+            "/info",
+            "/artifact",
+            "/stop",
+            "/resume",
+            "/log",
+            "/watch",
+            "/debug",
+            "/model",
+            "/chat",
+            "/clear",
+            "/new",
+            "/help",
+            "/quit",
         ];
 
         for cmd in help_names {
@@ -247,5 +329,90 @@ mod tests {
         let text = help_text().join("\n");
         assert!(text.contains("Ctrl+G") && text.contains("external editor"));
         assert!(!text.contains("(stub)"));
+    }
+
+    fn artifact_socket_op(input: &str) -> Option<(String, serde_json::Value)> {
+        match dispatch(input) {
+            Some(CommandResult::SocketOp { op, payload }) => Some((op, payload)),
+            _ => None,
+        }
+    }
+
+    fn artifact_usage_lines(input: &str) -> Vec<String> {
+        match dispatch(input) {
+            Some(CommandResult::Lines(lines)) => lines,
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn artifact_requires_an_id() {
+        let lines = artifact_usage_lines("/artifact");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> --list")));
+    }
+
+    #[test]
+    fn artifact_list_rejects_trailing_arguments() {
+        let lines = artifact_usage_lines("/artifact gr-1 --list extra");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> --list")));
+        assert!(artifact_socket_op("/artifact gr-1 --list extra").is_none());
+    }
+
+    #[test]
+    fn artifact_list_builds_list_payload() {
+        let (op, payload) = artifact_socket_op("/artifact gr-1 --list").expect("socket op");
+        assert_eq!(op, "artifact");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "op": "artifact", "id": "gr-1", "list": true })
+        );
+    }
+
+    #[test]
+    fn artifact_requires_a_uri() {
+        let lines = artifact_usage_lines("/artifact gr-1");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> <artifact://uri>")));
+    }
+
+    #[test]
+    fn artifact_content_builds_payload() {
+        let (op, payload) = artifact_socket_op("/artifact gr-1 artifact://out").expect("socket op");
+        assert_eq!(op, "artifact");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "op": "artifact", "id": "gr-1", "artifact": "artifact://out" })
+        );
+    }
+
+    #[test]
+    fn artifact_content_accepts_json_path() {
+        let (_, payload) =
+            artifact_socket_op("/artifact gr-1 artifact://out --json-path a.b").expect("socket op");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "op": "artifact", "id": "gr-1", "artifact": "artifact://out", "json_path": "a.b" })
+        );
+    }
+
+    #[test]
+    fn artifact_json_path_requires_a_value() {
+        let lines = artifact_usage_lines("/artifact gr-1 artifact://out --json-path");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> <artifact://uri> [--json-path <path>]")));
+    }
+
+    #[test]
+    fn artifact_rejects_unknown_tail_flags() {
+        let lines = artifact_usage_lines("/artifact gr-1 artifact://out --bogus");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> <artifact://uri> [--json-path <path>]")));
     }
 }

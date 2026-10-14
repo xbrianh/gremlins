@@ -1698,6 +1698,23 @@ fn format_socket_response(op: &str, resp: &serde_json::Value) -> Vec<String> {
             let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("");
             vec![id.to_string()]
         }
+        "artifact" => {
+            if let Some(keys) = resp.get("keys").and_then(|v| v.as_array()) {
+                if keys.is_empty() {
+                    return vec!["(no artifacts)".to_string()];
+                }
+                keys.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            } else if let Some(content) = resp.get("content").and_then(|v| v.as_str()) {
+                // Content may contain embedded newlines; split so each vector
+                // element is one logical transcript line (preserving a trailing
+                // empty line produced by `split`).
+                content.split('\n').map(String::from).collect()
+            } else {
+                vec![serde_json::to_string_pretty(resp).unwrap_or_else(|_| format!("{resp:#?}"))]
+            }
+        }
         "launch" => match resp.get("id").and_then(|v| v.as_str()) {
             Some(id) => vec![id.to_string()],
             None => {
@@ -1796,8 +1813,15 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_chat_request;
+    use super::{build_chat_request, format_socket_response};
     use std::collections::HashMap;
+
+    #[test]
+    fn format_artifact_content_splits_embedded_newlines() {
+        let resp = serde_json::json!({ "id": "gr-1", "content": "line one\nline two\n" });
+        let lines = format_socket_response("artifact", &resp);
+        assert_eq!(lines, vec!["line one", "line two", ""]);
+    }
 
     #[test]
     fn chat_request_carries_project_root() {
