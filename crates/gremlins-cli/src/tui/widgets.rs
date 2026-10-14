@@ -26,7 +26,7 @@ use ratatui::{
 };
 
 use crate::tui::app::{ActiveRun, Overlay};
-use crate::tui::buffer::{line_wrapped_height, wrapped_height, LineBuffer};
+use crate::tui::buffer::{line_wrapped_height, tail_window, wrapped_height, LineBuffer};
 use crate::tui::markdown;
 use crate::tui::motif::{self, glyph};
 use crate::tui::theme::DEFAULT_THEME;
@@ -651,28 +651,115 @@ fn split_overflow(
     (dropped, overflow_lines)
 }
 
-/// Trims a live-tail buffer to the rows that fit in `available_rows`,
-/// wrapping-aware, discarding the head. Returns nothing: the head is never
-/// committed to terminal scrollback.
-fn trim_to_tail(buffer: &mut LineBuffer, available_rows: u16, width: u16) {
-    if available_rows == 0 || width == 0 {
-        buffer.clear();
-        return;
+/// Recompute a live tail's visible wrapped-row count at the current width.
+///
+/// The widget stores the number of wrapped rows that survived the previous
+/// trim. That count is width-independent, so a resize keeps the same number of
+/// rows visible and clamps only when the new width can no longer produce that
+/// many rows. Storing the visible count directly — instead of deriving it from
+/// the current total — means rows appended after the previous trim do not
+/// inflate the preserved window.
+fn live_tail_visible_rows(
+    lines: &[Line<'static>],
+    visible_rows: Option<usize>,
+    width: u16,
+) -> usize {
+    if lines.is_empty() || width == 0 {
+        return 0;
     }
 
-    let available = available_rows as usize;
-    let total = buffer.wrapped_height(width);
-    if total <= available {
-        return;
+    match visible_rows {
+        Some(rows) => rows.min(wrapped_height(lines, width)),
+        None => wrapped_height(lines, width),
     }
+}
+
+/// Trim a live-tail slice to `available_rows`, wrapping-aware.
+///
+/// Returns `(drop_count, visible_rows)`: the number of leading logical lines
+/// to drop and the number of wrapped rows now kept visible. A logical line is
+/// dropped only after every one of its wrapped rows has been consumed, so a
+/// single over-tall line scrolls off one wrapped row at a time.
+fn live_tail_trim(lines: &[Line<'static>], available_rows: u16, width: u16) -> (usize, usize) {
+    if lines.is_empty() || width == 0 {
+        return (0, 0);
+    }
+
+    let total = wrapped_height(lines, width);
+    let visible_rows = (available_rows as usize).min(total);
+    let scrolled_rows = total - visible_rows;
 
     let mut drop_count = 0usize;
-    let mut dropped = 0usize;
-    while total - dropped > available && drop_count < buffer.len() {
-        dropped += line_wrapped_height(&buffer.visible_lines()[drop_count], width);
+    let mut remaining = scrolled_rows;
+    while drop_count < lines.len() {
+        let line_rows = line_wrapped_height(&lines[drop_count], width);
+        if remaining < line_rows {
+            break;
+        }
+        remaining -= line_rows;
         drop_count += 1;
     }
-    buffer.drain_head(drop_count);
+
+    if drop_count == lines.len() {
+        (drop_count, 0)
+    } else {
+        (drop_count, visible_rows)
+    }
+}
+
+/// Paint only the maintained wrapped tail of `lines` into `area`.
+///
+/// `visible_rows` is the tail window maintained by the widget, recomputed for
+/// `area.width` by the caller. Rendering exactly that window — rather than the
+/// last `area.height` rows of the full content — keeps rows that were already
+/// scrolled off hidden even when the allocated area is temporarily taller than
+/// the requested height.
+fn render_wrapped_tail(lines: &[Line<'static>], area: Rect, buf: &mut Buffer, visible_rows: usize) {
+    // Clear the region first so a shorter frame cannot leave stale cells from
+    // a previous, taller live tail.
+    for y in 0..area.height {
+        for x in 0..area.width {
+            buf[(area.x + x, area.y + y)].reset();
+        }
+    }
+
+    let height = (visible_rows.min(area.height as usize)) as u16;
+    if lines.is_empty() || area.width == 0 || height == 0 {
+        return;
+    }
+
+    let window = tail_window(lines, area.width, height as usize);
+    if window.skip == 0 {
+        Paragraph::new(lines.to_vec())
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+        return;
+    }
+
+    // Render the tail slice into a scratch buffer tall enough to hold the
+    // partial head plus the visible window, then copy the visible rows. The
+    // scratch height is capped at `u16::MAX`; pathological single lines that
+    // wrap past that many rows cannot be addressed by a `u16`-tall buffer,
+    // and the copy loop below simply stops before the unavailable rows.
+    let render_rows = (window.partial + height as usize).min(u16::MAX as usize) as u16;
+    let render_area = Rect::new(0, 0, area.width, render_rows);
+    let mut render_buf = Buffer::empty(render_area);
+    Paragraph::new(lines[window.start..].to_vec())
+        .wrap(Wrap { trim: false })
+        .render(render_area, &mut render_buf);
+
+    for y in 0..height {
+        let Some(src_y) = window.partial.checked_add(y as usize) else {
+            break;
+        };
+        if src_y > u16::MAX as usize || src_y >= render_rows as usize {
+            break;
+        }
+        let src_y = src_y as u16;
+        for x in 0..area.width {
+            buf[(area.x + x, area.y + y)] = render_buf[(x, src_y)].clone();
+        }
+    }
 }
 
 /// Live tail for reasoning text. Accumulates partial chunks into complete
@@ -683,6 +770,9 @@ pub struct ReasoningWidget {
     /// Number of completed lines pushed, used to alternate the telemetry
     /// diamond glyph for free streaming motion.
     line_count: usize,
+    /// Wrapped rows kept visible after the last trim; `None` until the first
+    /// trim, when the desired height is the full wrapped content height.
+    visible_rows: Option<usize>,
 }
 
 impl ReasoningWidget {
@@ -691,6 +781,7 @@ impl ReasoningWidget {
             lines: LineBuffer::new(),
             partial: String::new(),
             line_count: 0,
+            visible_rows: None,
         }
     }
 
@@ -724,18 +815,22 @@ impl ReasoningWidget {
         self.lines.clear();
         self.partial.clear();
         self.line_count = 0;
+        self.visible_rows = None;
     }
 
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty() && self.partial.is_empty()
     }
 
-    /// Desired height: the full wrapped content height (uncapped).
+    /// Desired height: only the wrapped rows still visible below the scrolled
+    /// head offset (uncapped).
     fn desired_rows(&self, width: u16) -> u16 {
-        if self.is_empty() {
+        if self.is_empty() || width == 0 {
             return 0;
         }
-        (wrapped_height(&self.rendered_lines(), width).min(u16::MAX as usize)) as u16
+        let rendered = self.rendered_lines();
+        let visible_rows = live_tail_visible_rows(&rendered, self.visible_rows, width);
+        visible_rows.min(u16::MAX as usize) as u16
     }
 
     fn rendered_lines(&self) -> Vec<Line<'static>> {
@@ -779,38 +874,32 @@ impl LiveAreaWidget for ReasoningWidget {
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
         // Keep the visible tail; the head is discarded, never committed to
-        // terminal scrollback.
+        // terminal scrollback. A zero-width viewport is transient, so defer
+        // trimming rather than dropping every logical line.
+        if width == 0 {
+            return Vec::new();
+        }
+
         let rendered = self.rendered_lines();
-        let total = wrapped_height(&rendered, width);
-        if total > available_rows as usize {
-            // Rebuild `lines` from the rendered tail.
-            let mut drop_count = 0usize;
-            let mut dropped = 0usize;
-            while total - dropped > available_rows as usize && drop_count < rendered.len() {
-                dropped += line_wrapped_height(&rendered[drop_count], width);
-                drop_count += 1;
-            }
-            if drop_count == 0 {
-                return Vec::new();
-            }
-            // Drop the first `drop_count` source lines. Partial lines are
-            // always at the tail, so only buffer lines are dropped.
+        let (drop_count, visible_rows) = live_tail_trim(&rendered, available_rows, width);
+
+        if drop_count > 0 {
+            // Partial lines are always at the tail, so only buffer lines are
+            // dropped until the drop window reaches past the buffer.
             let drop_from_buffer = drop_count.min(self.lines.len());
             self.lines.drain_head(drop_from_buffer);
             if drop_count > drop_from_buffer {
                 self.partial.clear();
             }
         }
+        self.visible_rows = Some(visible_rows);
         Vec::new()
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
         let lines = self.rendered_lines();
-        if !lines.is_empty() {
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .render(area, buf);
-        }
+        let visible_rows = live_tail_visible_rows(&lines, self.visible_rows, area.width);
+        render_wrapped_tail(&lines, area, buf, visible_rows);
     }
 }
 
@@ -818,12 +907,16 @@ impl LiveAreaWidget for ReasoningWidget {
 /// growing freely with its content.
 pub struct ToolEventsWidget {
     lines: LineBuffer,
+    /// Wrapped rows kept visible after the last trim; `None` until the first
+    /// trim, when the desired height is the full wrapped content height.
+    visible_rows: Option<usize>,
 }
 
 impl ToolEventsWidget {
     pub fn new() -> Self {
         Self {
             lines: LineBuffer::new(),
+            visible_rows: None,
         }
     }
 
@@ -835,18 +928,22 @@ impl ToolEventsWidget {
     /// Reset the live region for a new turn.
     pub fn clear(&mut self) {
         self.lines.clear();
+        self.visible_rows = None;
     }
 
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
 
-    /// Desired height: the full wrapped content height (uncapped).
+    /// Desired height: only the wrapped rows still visible below the scrolled
+    /// head offset (uncapped).
     fn desired_rows(&self, width: u16) -> u16 {
-        if self.is_empty() {
+        if self.is_empty() || width == 0 {
             return 0;
         }
-        (self.lines.wrapped_height(width).min(u16::MAX as usize)) as u16
+        let lines = self.lines.visible_lines();
+        let visible_rows = live_tail_visible_rows(lines, self.visible_rows, width);
+        visible_rows.min(u16::MAX as usize) as u16
     }
 }
 
@@ -880,17 +977,23 @@ impl LiveAreaWidget for ToolEventsWidget {
     }
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
-        trim_to_tail(&mut self.lines, available_rows, width);
+        // A zero-width viewport is transient, so defer trimming rather than
+        // dropping every logical line.
+        if width == 0 {
+            return Vec::new();
+        }
+
+        let lines = self.lines.visible_lines().to_vec();
+        let (drop_count, visible_rows) = live_tail_trim(&lines, available_rows, width);
+        self.lines.drain_head(drop_count);
+        self.visible_rows = Some(visible_rows);
         Vec::new()
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        let tail = self.lines.visible_lines().to_vec();
-        if !tail.is_empty() {
-            Paragraph::new(tail)
-                .wrap(Wrap { trim: false })
-                .render(area, buf);
-        }
+        let lines = self.lines.visible_lines().to_vec();
+        let visible_rows = live_tail_visible_rows(&lines, self.visible_rows, area.width);
+        render_wrapped_tail(&lines, area, buf, visible_rows);
     }
 }
 
@@ -2229,18 +2332,104 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_widget_take_overflow_trims_wrapped_lines_to_cap() {
+    fn reasoning_widget_take_overflow_keeps_wrapped_tail() {
         let mut reasoning = ReasoningWidget::new();
-        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n"); // 26 chars → 3 rows at width 10
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.flush_reasoning();
 
         let overflow = reasoning.take_overflow(2, 10);
         assert!(overflow.is_empty());
 
-        // The single long line wraps to 3 rows and cannot fit in 2 visible
-        // rows, so the live tail discards it entirely.
-        assert!(reasoning.rendered_lines().is_empty());
-        assert_eq!(reasoning.desired_rows(10), 0);
+        // The single long line is taller than the 2 visible rows, but the
+        // live tail keeps it and scrolls the visible tail one wrapped row at
+        // a time instead of dropping the whole logical line.
+        assert_eq!(reasoning.rendered_lines().len(), 1);
+        assert_eq!(reasoning.desired_rows(10), 2);
+    }
+
+    #[test]
+    fn tool_events_widget_keeps_wrapped_tail_of_oversized_line() {
+        let mut tools = ToolEventsWidget::new();
+        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
+
+        let overflow = tools.take_overflow(2, 10);
+        assert!(overflow.is_empty());
+
+        // The oversized tool name stays in the buffer; only its wrapped head
+        // rows scroll off.
+        assert_eq!(tools.lines.len(), 1);
+        assert_eq!(tools.desired_rows(10), 2);
+    }
+
+    #[test]
+    fn live_tail_resize_preserves_visible_tail_between_wrapped_widths() {
+        let mut tools = ToolEventsWidget::new();
+        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
+
+        let overflow = tools.take_overflow(2, 10);
+        assert!(overflow.is_empty());
+        assert_eq!(tools.desired_rows(10), 2);
+
+        // Both widths wrap the single tool line to more than two rows.
+        // Resizing must keep the line and its last two wrapped rows rather
+        // than dropping the whole line from a stale narrow-width offset.
+        let overflow = tools.take_overflow(2, 8);
+        assert!(overflow.is_empty());
+        assert_eq!(tools.lines.len(), 1);
+        assert_eq!(tools.desired_rows(8), 2);
+
+        let full = full_rendered_rows(tools.lines.visible_lines(), 8);
+        let area = Rect::new(0, 0, 8, 2);
+        let mut buf = Buffer::empty(area);
+        tools.render(area, &mut buf, &input_ctx("", 0));
+        assert_eq!(rendered_rows(&buf, 8, 2), full[full.len() - 2..]);
+    }
+
+    #[test]
+    fn live_tail_render_keeps_wrapped_tail_and_reveals_retained_head() {
+        let mut tools = ToolEventsWidget::new();
+        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
+        let full = full_rendered_rows(tools.lines.visible_lines(), 10);
+
+        tools.take_overflow(3, 10);
+        let area = Rect::new(0, 0, 10, 3);
+        let mut buf = Buffer::empty(area);
+        tools.render(area, &mut buf, &input_ctx("", 0));
+        assert_eq!(rendered_rows(&buf, 10, 3), full[full.len() - 3..]);
+
+        // Shrinking to two rows scrolls one more wrapped row off the head.
+        tools.take_overflow(2, 10);
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        tools.render(area, &mut buf, &input_ctx("", 0));
+        assert_eq!(rendered_rows(&buf, 10, 2), full[full.len() - 2..]);
+
+        // A later taller allocation reveals the retained head rows instead of
+        // keeping the smaller offset permanently.
+        tools.take_overflow(4, 10);
+        assert_eq!(tools.desired_rows(10), 4);
+        let area = Rect::new(0, 0, 10, 4);
+        let mut buf = Buffer::empty(area);
+        tools.render(area, &mut buf, &input_ctx("", 0));
+        assert_eq!(rendered_rows(&buf, 10, 4), full);
+    }
+
+    #[test]
+    fn live_tail_zero_width_defers_trimming() {
+        let mut tools = ToolEventsWidget::new();
+        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
+
+        let overflow = tools.take_overflow(2, 0);
+        assert!(overflow.is_empty());
+        assert_eq!(tools.lines.len(), 1);
+        assert_eq!(tools.visible_rows, None);
+
+        // Once a nonzero width is available, the live tail trims normally and
+        // still keeps the over-tall line as a wrapped tail.
+        let overflow = tools.take_overflow(2, 10);
+        assert!(overflow.is_empty());
+        assert_eq!(tools.lines.len(), 1);
+        assert_eq!(tools.desired_rows(10), 2);
     }
 
     #[test]
@@ -2337,6 +2526,26 @@ mod tests {
             content_height: 0,
             completion_preview: None,
         }
+    }
+
+    fn rendered_rows(buf: &Buffer, width: u16, height: u16) -> Vec<String> {
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn full_rendered_rows(lines: &[Line<'static>], width: u16) -> Vec<String> {
+        let height = wrapped_height(lines, width) as u16;
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        Paragraph::new(lines.to_vec())
+            .wrap(Wrap { trim: false })
+            .render(area, &mut buf);
+        rendered_rows(&buf, width, height)
     }
 
     #[test]
