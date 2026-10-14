@@ -1663,6 +1663,18 @@ pub(crate) fn assistant_tool_message(
     reasoning_items: &[Sealed<Reasoning>],
     tool_calls: &[ToolCall],
 ) -> Message {
+    // Reasoning items are emitted before text and tool calls deliberately.
+    // This mirrors rig's own canonical ordering (`ordered_assistant_content` /
+    // `canonical_streamed_choice`), which regroups a streamed choice as
+    // reasoning -> text -> tool calls, preserving order *within* each group.
+    // The OpenAI Responses encoder (`input_items`) additionally resorts
+    // reasoning items ahead of all other items regardless of their stored
+    // positions, so a reasoning item's ordinal relative to a later text or
+    // tool-call item never affects the wire. The invariants that actually
+    // matter are (a) the structured reasoning item survives with its provider
+    // id and issuer intact — so `open_for`/`openai_reasoning_from_core` re-serialize
+    // it instead of dropping it — and (b) it precedes the `function_call` that
+    // references it so the latter is not orphaned.
     let mut contents = Vec::new();
     contents.extend(
         reasoning_items
@@ -2376,7 +2388,19 @@ mod tests {
             }
             other => panic!("first item must be reasoning, got {other:?}"),
         }
-        assert!(matches!(&content[1], AssistantContent::ToolCall(_)));
+        // The referencing `function_call` must stay beside its reasoning item,
+        // with its provider `item_id` naming that reasoning id so the replayed
+        // `input` array does not orphan it.
+        match &content[1] {
+            AssistantContent::ToolCall(tc) => {
+                let provider = tc
+                    .id
+                    .provider()
+                    .expect("dual-wire call keeps a provider id");
+                assert_eq!(provider.item_id.as_deref(), Some("fc_item"));
+            }
+            other => panic!("second item must be the tool call, got {other:?}"),
+        }
     }
 
     /// End-to-end: a turn that streams a structured `reasoning` item followed
@@ -2456,11 +2480,21 @@ mod tests {
             Some("rs_1"),
             "reasoning item id must survive into the replay"
         );
+        // The reasoning item must precede the referencing function_call in the
+        // replayed content so the call is not orphaned.
+        let reasoning_at = content
+            .iter()
+            .position(|c| matches!(c, AssistantContent::Reasoning(_)));
+        let call_at = content
+            .iter()
+            .position(|c| matches!(c, AssistantContent::ToolCall(_)));
         assert!(
-            content
-                .iter()
-                .any(|c| matches!(c, AssistantContent::ToolCall(_))),
-            "the referencing function_call must stay beside the reasoning item"
+            reasoning_at.is_some() && call_at.is_some(),
+            "replayed turn must carry both reasoning and the function call"
+        );
+        assert!(
+            reasoning_at.unwrap() < call_at.unwrap(),
+            "reasoning item must precede its referencing function_call"
         );
     }
 
