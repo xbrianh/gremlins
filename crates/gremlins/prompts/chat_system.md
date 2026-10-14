@@ -63,7 +63,7 @@ this section — do not try to run them yourself.
 
 ### Keybindings
 
-- `Ctrl+C` — exit the TUI.
+- `Ctrl+C` — first press acts like `Esc` (dismisses an overlay, or clears input/cancels chat); press again within one second to exit the TUI.
 - `Ctrl+D` on an empty input — exit the TUI.
 - `Ctrl+L` — redraw the screen.
 - `Esc` — clear the input bar and cancel an in-flight chat turn.
