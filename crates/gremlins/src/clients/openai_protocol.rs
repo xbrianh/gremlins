@@ -277,6 +277,13 @@ pub(crate) fn resolve_openai_protocol(
         };
     }
 
+    // `openrouter` and `xai` reason by default: when neither the per-client
+    // param nor the env var supplied an effort, default these two providers to
+    // `high`. `openai` and `azure-openai` stay opt-in.
+    if reasoning_effort.is_none() && matches!(provider, "openrouter" | "xai") {
+        reasoning_effort = Some("high".to_string());
+    }
+
     if let Some(effort) = reasoning_effort {
         additional.insert(
             "reasoning".to_string(),
@@ -402,6 +409,43 @@ mod tests {
         let additional = r.additional_value().unwrap();
         assert_eq!(additional["reasoning"]["effort"], "low");
         assert_eq!(additional["reasoning"]["summary"], "auto");
+    }
+
+    /// `openrouter` and `xai` default `reasoning` to `high` when neither a
+    /// per-client `reasoning=` param nor `GREMLINS_REASONING_EFFORT` is set,
+    /// while `openai` and `azure-openai` stay opt-in.
+    #[test]
+    fn reasoning_by_default_for_openrouter_and_xai() {
+        let _guard = crate::test_support::EnvGuard::lock();
+        let map: IndexMap<String, String> = IndexMap::new();
+
+        for provider in ["openrouter", "xai"] {
+            let r = resolve_openai_protocol(provider, &map).unwrap();
+            let additional = r.additional_value().unwrap();
+            assert_eq!(additional["reasoning"]["effort"], "high");
+            assert_eq!(additional["reasoning"]["summary"], "auto");
+        }
+
+        for provider in ["openai", "azure-openai"] {
+            let r = resolve_openai_protocol(provider, &map).unwrap();
+            let additional = r.additional_value().unwrap();
+            assert!(additional.get("reasoning").is_none());
+        }
+    }
+
+    /// An explicit `reasoning=` client param still wins over the `high`
+    /// default for the reasoning-by-default providers.
+    #[test]
+    fn explicit_reasoning_overrides_default_for_openrouter_and_xai() {
+        let _guard = crate::test_support::EnvGuard::lock();
+        for provider in ["openrouter", "xai"] {
+            let map: IndexMap<String, String> = [("reasoning".to_string(), "low".to_string())]
+                .into_iter()
+                .collect();
+            let r = resolve_openai_protocol(provider, &map).unwrap();
+            let additional = r.additional_value().unwrap();
+            assert_eq!(additional["reasoning"]["effort"], "low");
+        }
     }
 
     #[test]
