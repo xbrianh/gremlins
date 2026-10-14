@@ -108,6 +108,14 @@ pub trait LiveAreaWidget {
     /// Mutable downcast helper.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
+    /// Short, stable label for telemetry. Concrete widgets that benefit
+    /// from a stable name override this; the fallback is the full type
+    /// path, which is unique but verbose.
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Layout priority when the viewport is too short for every widget's
     /// requested height. **Lower value is downsized first.** The input bar
     /// returns the highest value so it is the last widget to lose rows.
@@ -894,6 +902,11 @@ impl Default for ReasoningWidget {
 impl LiveAreaWidget for ReasoningWidget {
     as_any_methods!();
 
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "reasoning"
+    }
+
     fn size_priority(&self) -> i32 {
         5
     }
@@ -947,6 +960,12 @@ impl LiveAreaWidget for ReasoningWidget {
 
 impl LiveAreaWidget for TranscriptWidget {
     as_any_methods!();
+
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "transcript"
+    }
+
     fn size_priority(&self) -> i32 {
         10
     }
@@ -1270,6 +1289,12 @@ impl Default for InputBarWidget {
 
 impl LiveAreaWidget for InputBarWidget {
     as_any_methods!();
+
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "input"
+    }
+
     fn size_priority(&self) -> i32 {
         100
     }
@@ -1351,6 +1376,12 @@ pub struct InfoBarWidget;
 
 impl LiveAreaWidget for InfoBarWidget {
     as_any_methods!();
+
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "info"
+    }
+
     fn size_priority(&self) -> i32 {
         90
     }
@@ -1456,6 +1487,12 @@ impl Default for WatchTableWidget {
 
 impl LiveAreaWidget for WatchTableWidget {
     as_any_methods!();
+
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "watch_table"
+    }
+
     fn size_priority(&self) -> i32 {
         50
     }
@@ -1564,6 +1601,12 @@ impl WatchSingleWidget {
 
 impl LiveAreaWidget for WatchSingleWidget {
     as_any_methods!();
+
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "watch_single"
+    }
+
     fn size_priority(&self) -> i32 {
         50
     }
@@ -1686,6 +1729,12 @@ impl DebugWidget {
 
 impl LiveAreaWidget for DebugWidget {
     as_any_methods!();
+
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "debug"
+    }
+
     fn size_priority(&self) -> i32 {
         50
     }

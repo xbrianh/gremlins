@@ -370,6 +370,28 @@ impl<B: Backend> LiveArea<B> {
             heights[i] = heights[i].min(max_heights[i]);
         }
 
+        #[cfg(feature = "telemetry")]
+        {
+            let segments: Vec<String> = self
+                .widgets
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    format!(
+                        "{} min={} desired={} max={} allocated={} flexible={} priority={}",
+                        w.name(),
+                        min_heights[i],
+                        desired_heights[i],
+                        max_heights[i],
+                        heights[i],
+                        w.flexible(&ctx),
+                        w.size_priority()
+                    )
+                })
+                .collect();
+            log::info!("WIDGET_LAYOUT {}", segments.join("; "));
+        }
+
         // Derive reserved rows from the allocated heights of the actual
         // input-bar and info-bar widgets, not positionally.
         self.reserved_rows = self
