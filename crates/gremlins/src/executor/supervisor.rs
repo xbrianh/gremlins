@@ -1451,8 +1451,9 @@ async fn handle_log(
     }
 
     // Resolve the log source: for live gremlins (including ephemeral) the
-    // historical log is read through the store's `log` blob; otherwise fall
-    // back to `config::state_root().join(id).join("log")`.
+    // historical log is read through the store's `log` blob; for persisted
+    // gremlins open the store via StateData (matching handle_debug); only
+    // when that fails fall back to direct filesystem read.
     enum LogSource {
         Store(Arc<dyn state::StateStore + Send + Sync>),
         Path(PathBuf),
@@ -1463,12 +1464,17 @@ async fn handle_log(
         if let Some(handle) = map.get(id) {
             (LogSource::Store(handle.store.clone()), false)
         } else {
-            let sd = config::state_root().join(id);
-            let sf = sd.join("state.json");
-            if !sd.is_dir() || !sf.is_file() {
-                (LogSource::Path(PathBuf::new()), true)
-            } else {
-                (LogSource::Path(sd), false)
+            match state::StateData::open(id) {
+                Ok(sd) => (LogSource::Store(sd.store_handle()), false),
+                Err(_) => {
+                    let sd = config::state_root().join(id);
+                    let sf = sd.join("state.json");
+                    if !sd.is_dir() || !sf.is_file() {
+                        (LogSource::Path(PathBuf::new()), true)
+                    } else {
+                        (LogSource::Path(sd), false)
+                    }
+                }
             }
         }
     };
@@ -2741,16 +2747,22 @@ fn spawn_log_writer(
         // fragments, so the async task never blocks on the synchronous
         // `StateBlob` handle and no blocking-pool job is spawned per line.
         let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let broadcast_tx2 = broadcast_tx.clone();
         let writer = file.map(|file| {
             tokio::task::spawn_blocking(move || {
                 while let Some(stamped) = write_rx.blocking_recv() {
-                    let mut guard = match file.lock() {
-                        Ok(guard) => guard,
-                        Err(_) => return,
-                    };
-                    let _ = guard.write_all(stamped.as_bytes());
-                    let _ = guard.write_all(b"\n");
-                    let _ = guard.flush();
+                    {
+                        let mut guard = match file.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => return,
+                        };
+                        let _ = guard.write_all(stamped.as_bytes());
+                        let _ = guard.write_all(b"\n");
+                        let _ = guard.flush();
+                    }
+                    // Broadcast only after write+flush so handle_log
+                    // replay/deduplication stays consistent.
+                    let _ = broadcast_tx2.send(stamped);
                 }
             })
         });
@@ -2765,8 +2777,6 @@ fn spawn_log_writer(
                 if writer.is_some() {
                     let _ = write_tx.send(stamped.clone());
                 }
-                // Broadcast to live subscribers — ignore errors (no subscribers).
-                let _ = broadcast_tx.send(stamped);
                 // Best-effort relay into the parent log: send the raw,
                 // un-timestamped part with the relay prefix applied (the
                 // parent's log writer adds its own timestamp). A failed

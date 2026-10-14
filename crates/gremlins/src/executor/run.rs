@@ -58,7 +58,8 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
         .ok_or_else(|| {
             RunError::Message("agent raw stream: store is not filesystem-backed".to_string())
         })?;
-    let blob_name = format!("artifacts/stream-{name}.jsonl");
+    let safe_name = crate::core::proc::sanitize_log_filename(name);
+    let blob_name = format!("artifacts/stream-{safe_name}.jsonl");
     // Validate the blob name and create its parent directory through the store
     // seam; the agent loop re-opens the same path for append.
     store

@@ -652,7 +652,7 @@ impl Gremlin {
             let bytes = {
                 let mut blob = self
                     .state
-                    .open_blob("definition.yaml", state::BlobMode::ReadWrite)
+                    .open_blob("definition.yaml", state::BlobMode::Read)
                     .map_err(|error| RunError::Message(error.to_string()))?;
                 let mut bytes = Vec::new();
                 use std::io::Read;

@@ -883,7 +883,11 @@ impl StateStore for FileSystemStateStore {
         }
         let path = self.root.path().join(name);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            // Only create parent directories for write-capable modes.
+            // Read mode must not mutate the store.
+            if !matches!(mode, BlobMode::Read) {
+                std::fs::create_dir_all(parent)?;
+            }
         }
         let mut opts = std::fs::OpenOptions::new();
         match mode {
