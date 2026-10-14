@@ -464,10 +464,13 @@ mod tests {
 
     /// Test-only isolation for the process-global config and the environment
     /// variables its path resolvers read. The production provider loads the
-    /// global config lazily, so tests that exercise the settings.yaml overlay
-    /// override must never observe the operator's real `settings.yaml`.
+    /// global config lazily, and the discovery layer resolves the overlay dir
+    /// through that config, so every test that builds chat context must pin
+    /// the config root to a throwaway sandbox — otherwise a test would observe
+    /// the operator's real `~/.config/gremlins/settings.yaml`.
     struct ConfigEnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
+        _sandbox: tempfile::TempDir,
         undo: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
 
@@ -476,10 +479,16 @@ mod tests {
             static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let mut guard = Self {
                 _lock: LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+                // An empty config root: `global_config()` resolves against this
+                // and finds no settings.yaml, so overlay resolution falls back
+                // to the project's own `.gremlins/` rather than any real file.
+                _sandbox: tempfile::TempDir::new().unwrap(),
                 undo: Vec::new(),
             };
             guard.remove("GREMLINS_SANDBOX_ROOT");
             guard.remove("GREMLINS_OVERLAY_DIR");
+            let sandbox_path = guard._sandbox.path().to_path_buf();
+            guard.set_sandbox(&sandbox_path);
             gremlins::config::clear_global();
             guard
         }
@@ -627,6 +636,7 @@ mod tests {
     /// mutating the process-global `PATH`, which would race other tests.
     #[test]
     fn chat_context_stubbed_failing_git_omits_git_sections() {
+        let _guard = ConfigEnvGuard::lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
