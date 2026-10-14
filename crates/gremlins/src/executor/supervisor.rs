@@ -483,6 +483,11 @@ async fn dispatch_op(
             let _ = writer.write_json_line(&resp).await;
             DispatchOutcome::Continue
         }
+        "artifact" => {
+            let resp = handle_artifact(request).await;
+            let _ = writer.write_json_line(&resp).await;
+            DispatchOutcome::Continue
+        }
         "chat" => {
             handle_chat(request, state_root, writer, chat_state).await;
             DispatchOutcome::Continue
@@ -1369,6 +1374,58 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         "kind": gremlin.state.read_str("kind"),
         "bail_info": gremlin.state.stage_error().map(Value::Object).unwrap_or(Value::Null),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// artifact
+// ---------------------------------------------------------------------------
+
+async fn handle_artifact(request: &Value) -> Value {
+    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if id.is_empty() {
+        return error_response("missing 'id' field");
+    }
+
+    if validate_gremlin_id(id).is_err() {
+        return error_response(&format!("invalid gremlin id {id:?}"));
+    }
+
+    // Resolve the store: run map first for live gremlins (including ephemeral
+    // ones whose state lives in a TempDir), otherwise open the persisted state.
+    let store: Arc<dyn state::StateStore + Send + Sync> = {
+        let map = get_run_map().lock().unwrap();
+        if let Some(handle) = map.get(id) {
+            handle.store.clone()
+        } else {
+            match state::StateData::open(id) {
+                Ok(sd) => sd.store_handle(),
+                Err(_) => return error_response(&format!("unknown gremlin {id:?}")),
+            }
+        }
+    };
+
+    let list = request
+        .get("list")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if list {
+        let keys = store.keys().await;
+        return ok_response(serde_json::json!({ "id": id, "keys": keys }));
+    }
+
+    let artifact = request
+        .get("artifact")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if artifact.is_empty() {
+        return error_response("missing 'artifact' field");
+    }
+
+    let json_path = request.get("json_path").and_then(|v| v.as_str());
+    match store.content(artifact, json_path).await {
+        Ok(content) => ok_response(serde_json::json!({ "id": id, "content": content })),
+        Err(e) => error_response(&format!("artifact {artifact:?}: {e}")),
+    }
 }
 
 // ---------------------------------------------------------------------------

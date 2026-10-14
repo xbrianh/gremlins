@@ -1716,6 +1716,20 @@ fn format_socket_response(op: &str, resp: &serde_json::Value) -> Vec<String> {
             let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("");
             vec![id.to_string()]
         }
+        "artifact" => {
+            if let Some(keys) = resp.get("keys").and_then(|v| v.as_array()) {
+                if keys.is_empty() {
+                    return vec!["(no artifacts)".to_string()];
+                }
+                keys.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            } else if let Some(content) = resp.get("content").and_then(|v| v.as_str()) {
+                vec![content.to_string()]
+            } else {
+                vec![serde_json::to_string_pretty(resp).unwrap_or_else(|_| format!("{resp:#?}"))]
+            }
+        }
         "launch" => match resp.get("id").and_then(|v| v.as_str()) {
             Some(id) => vec![id.to_string()],
             None => {
