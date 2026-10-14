@@ -261,6 +261,33 @@ impl TranscriptWidget {
         }
     }
 
+    /// Insert a tool-call line into the active turn, directly above the
+    /// streaming response region. Tool lines stack contiguously (no blank-line
+    /// padding) and must survive response rebuilds and reconciliations, so
+    /// they are inserted at the response-boundary marker and that marker is
+    /// advanced past the inserted line.
+    ///
+    /// Outside a turn (degenerate — tool calls only arrive during a turn) the
+    /// line is appended as ordinary styled scrollback content.
+    pub fn push_tool_line(&mut self, name: &str) {
+        let line = tool_line(name);
+        self.invalidate_desired_cache();
+        match self.turn_start {
+            Some(_) => {
+                let idx = self.response_start.unwrap_or(self.scrollable.len());
+                self.scrollable.insert(idx, line);
+                // Advance the response-boundary marker past the inserted line
+                // so the response region keeps opening (or re-opening) below
+                // the tool lines it precedes, even when no response text has
+                // streamed yet.
+                self.response_start = Some(idx + 1);
+            }
+            None => {
+                self.push_styled_line(line);
+            }
+        }
+    }
+
     /// Append a block of system messages with the default body text style,
     /// forwarding to [`push_styled_block`](Self::push_styled_block).
     pub fn push_transcript_block(&mut self, block: Vec<String>) {
@@ -761,7 +788,6 @@ fn render_wrapped_tail(lines: &[Line<'static>], area: Rect, buf: &mut Buffer, vi
         }
     }
 }
-
 /// Live tail for reasoning text. Accumulates partial chunks into complete
 /// lines and renders them unstyled, growing freely with its content.
 pub struct ReasoningWidget {
@@ -898,100 +924,6 @@ impl LiveAreaWidget for ReasoningWidget {
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
         let lines = self.rendered_lines();
-        let visible_rows = live_tail_visible_rows(&lines, self.visible_rows, area.width);
-        render_wrapped_tail(&lines, area, buf, visible_rows);
-    }
-}
-
-/// Live tail for tool-call events. Owns a FIFO of unstyled tool-name lines,
-/// growing freely with its content.
-pub struct ToolEventsWidget {
-    lines: LineBuffer,
-    /// Wrapped rows kept visible after the last trim; `None` until the first
-    /// trim, when the desired height is the full wrapped content height.
-    visible_rows: Option<usize>,
-}
-
-impl ToolEventsWidget {
-    pub fn new() -> Self {
-        Self {
-            lines: LineBuffer::new(),
-            visible_rows: None,
-        }
-    }
-
-    /// Append a tool-name line.
-    pub fn push_tool(&mut self, name: &str) {
-        self.lines.push(tool_line(name));
-    }
-
-    /// Reset the live region for a new turn.
-    pub fn clear(&mut self) {
-        self.lines.clear();
-        self.visible_rows = None;
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
-
-    /// Desired height: only the wrapped rows still visible below the scrolled
-    /// head offset (uncapped).
-    fn desired_rows(&self, width: u16) -> u16 {
-        if self.is_empty() || width == 0 {
-            return 0;
-        }
-        let lines = self.lines.visible_lines();
-        let visible_rows = live_tail_visible_rows(lines, self.visible_rows, width);
-        visible_rows.min(u16::MAX as usize) as u16
-    }
-}
-
-impl Default for ToolEventsWidget {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LiveAreaWidget for ToolEventsWidget {
-    as_any_methods!();
-
-    fn size_priority(&self) -> i32 {
-        1
-    }
-
-    fn min_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
-        self.desired_rows(width).min(5)
-    }
-
-    fn flexible(&self, _ctx: &RenderContext) -> bool {
-        true
-    }
-
-    fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
-        self.desired_rows(width)
-    }
-
-    fn max_height(&self, _ctx: &RenderContext) -> u16 {
-        u16::MAX
-    }
-
-    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
-        // A zero-width viewport is transient, so defer trimming rather than
-        // dropping every logical line.
-        if width == 0 {
-            return Vec::new();
-        }
-
-        let lines = self.lines.visible_lines().to_vec();
-        let (drop_count, visible_rows) = live_tail_trim(&lines, available_rows, width);
-        self.lines.drain_head(drop_count);
-        self.visible_rows = Some(visible_rows);
-        Vec::new()
-    }
-
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        let lines = self.lines.visible_lines().to_vec();
         let visible_rows = live_tail_visible_rows(&lines, self.visible_rows, area.width);
         render_wrapped_tail(&lines, area, buf, visible_rows);
     }
@@ -1912,14 +1844,13 @@ mod tests {
     }
 
     #[test]
-    fn finish_turn_unpins_and_keeps_content_split_across_widgets() {
+    fn finish_turn_keeps_tool_lines_in_transcript_between_prompt_and_response() {
         let mut transcript = TranscriptWidget::new();
         let mut reasoning = ReasoningWidget::new();
-        let mut tools = ToolEventsWidget::new();
 
         transcript.submit_prompt("hi".to_string());
         reasoning.push_reasoning_text("thinking\n");
-        tools.push_tool("Done");
+        transcript.push_tool_line("Done");
         transcript.push_response("**answer**");
         transcript.finish_turn();
 
@@ -1930,9 +1861,9 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(transcript_text, vec!["▍» hi", "answer"]);
+        // Tool line sits between the prompt and the response, in order.
+        assert_eq!(transcript_text, vec!["▍» hi", "◆ Done", "answer"]);
         assert!(!transcript_text.contains(&"thinking".to_string()));
-        assert!(!transcript_text.contains(&"Done".to_string()));
 
         let reasoning_text: Vec<String> = reasoning
             .rendered_lines()
@@ -1940,14 +1871,41 @@ mod tests {
             .map(|l| l.to_string())
             .collect();
         assert_eq!(reasoning_text, vec!["◈ thinking"]);
+    }
 
-        let tool_text: Vec<String> = tools
-            .lines
+    #[test]
+    fn tool_line_inserted_above_streaming_response_survives_rebuild() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("streamed");
+        // Finalize renders the response into the FIFO.
+        LiveAreaWidget::finalize(&mut transcript, 80);
+
+        // A tool call arriving after the response was rendered is inserted
+        // above the response region and must survive a later rebuild.
+        transcript.push_tool_line("grep");
+        transcript.reconcile_response("streamed complete");
+        transcript.finish_turn();
+
+        let transcript_text: Vec<String> = transcript
+            .scrollable
             .visible_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(tool_text, vec!["◆ Done"]);
+        assert!(
+            transcript_text.contains(&"◆ grep".to_string()),
+            "{transcript_text:?}"
+        );
+        assert!(
+            transcript_text
+                .iter()
+                .any(|l| l.contains("streamed complete")),
+            "{transcript_text:?}"
+        );
+        // Ordering: prompt, tool line, response.
+        assert_eq!(transcript_text[0], "▍» hi");
+        assert_eq!(transcript_text[1], "◆ grep");
     }
 
     #[test]
@@ -2297,42 +2255,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_line_after_response_is_preserved_in_separate_widget() {
-        let mut transcript = TranscriptWidget::new();
-        let mut tools = ToolEventsWidget::new();
-
-        transcript.submit_prompt("hi".to_string());
-        transcript.push_response("streamed");
-        // A tool call arriving after response streaming began is stored in
-        // the tool events widget and must not be erased when the response
-        // region is rebuilt.
-        tools.push_tool("grep");
-        transcript.reconcile_response("streamed complete");
-        transcript.finish_turn();
-
-        let transcript_text: Vec<String> = transcript
-            .scrollable
-            .visible_lines()
-            .iter()
-            .map(|l| l.to_string())
-            .collect();
-        assert!(
-            transcript_text.contains(&"streamed complete".to_string()),
-            "{transcript_text:?}"
-        );
-        assert!(!transcript_text.contains(&"grep".to_string()));
-
-        let tool_text: Vec<String> = tools
-            .lines
-            .visible_lines()
-            .iter()
-            .map(|l| l.to_string())
-            .collect();
-        assert!(tool_text.contains(&"◆ grep".to_string()), "{tool_text:?}");
-    }
-
-    #[test]
-    fn reasoning_widget_take_overflow_keeps_wrapped_tail() {
+    fn reasoning_widget_take_overflow_trims_wrapped_lines_to_cap() {
         let mut reasoning = ReasoningWidget::new();
         reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.flush_reasoning();
@@ -2348,122 +2271,15 @@ mod tests {
     }
 
     #[test]
-    fn tool_events_widget_keeps_wrapped_tail_of_oversized_line() {
-        let mut tools = ToolEventsWidget::new();
-        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
-
-        let overflow = tools.take_overflow(2, 10);
-        assert!(overflow.is_empty());
-
-        // The oversized tool name stays in the buffer; only its wrapped head
-        // rows scroll off.
-        assert_eq!(tools.lines.len(), 1);
-        assert_eq!(tools.desired_rows(10), 2);
-    }
-
-    #[test]
-    fn live_tail_resize_preserves_visible_tail_between_wrapped_widths() {
-        let mut tools = ToolEventsWidget::new();
-        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
-
-        let overflow = tools.take_overflow(2, 10);
-        assert!(overflow.is_empty());
-        assert_eq!(tools.desired_rows(10), 2);
-
-        // Both widths wrap the single tool line to more than two rows.
-        // Resizing must keep the line and its last two wrapped rows rather
-        // than dropping the whole line from a stale narrow-width offset.
-        let overflow = tools.take_overflow(2, 8);
-        assert!(overflow.is_empty());
-        assert_eq!(tools.lines.len(), 1);
-        assert_eq!(tools.desired_rows(8), 2);
-
-        let full = full_rendered_rows(tools.lines.visible_lines(), 8);
-        let area = Rect::new(0, 0, 8, 2);
-        let mut buf = Buffer::empty(area);
-        tools.render(area, &mut buf, &input_ctx("", 0));
-        assert_eq!(rendered_rows(&buf, 8, 2), full[full.len() - 2..]);
-    }
-
-    #[test]
-    fn live_tail_render_keeps_wrapped_tail_and_reveals_retained_head() {
-        let mut tools = ToolEventsWidget::new();
-        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
-        let full = full_rendered_rows(tools.lines.visible_lines(), 10);
-
-        tools.take_overflow(3, 10);
-        let area = Rect::new(0, 0, 10, 3);
-        let mut buf = Buffer::empty(area);
-        tools.render(area, &mut buf, &input_ctx("", 0));
-        assert_eq!(rendered_rows(&buf, 10, 3), full[full.len() - 3..]);
-
-        // Shrinking to two rows scrolls one more wrapped row off the head.
-        tools.take_overflow(2, 10);
-        let area = Rect::new(0, 0, 10, 2);
-        let mut buf = Buffer::empty(area);
-        tools.render(area, &mut buf, &input_ctx("", 0));
-        assert_eq!(rendered_rows(&buf, 10, 2), full[full.len() - 2..]);
-
-        // A later taller allocation reveals the retained head rows instead of
-        // keeping the smaller offset permanently.
-        tools.take_overflow(4, 10);
-        assert_eq!(tools.desired_rows(10), 4);
-        let area = Rect::new(0, 0, 10, 4);
-        let mut buf = Buffer::empty(area);
-        tools.render(area, &mut buf, &input_ctx("", 0));
-        assert_eq!(rendered_rows(&buf, 10, 4), full);
-    }
-
-    #[test]
-    fn live_tail_zero_width_defers_trimming() {
-        let mut tools = ToolEventsWidget::new();
-        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
-
-        let overflow = tools.take_overflow(2, 0);
-        assert!(overflow.is_empty());
-        assert_eq!(tools.lines.len(), 1);
-        assert_eq!(tools.visible_rows, None);
-
-        // Once a nonzero width is available, the live tail trims normally and
-        // still keeps the over-tall line as a wrapped tail.
-        let overflow = tools.take_overflow(2, 10);
-        assert!(overflow.is_empty());
-        assert_eq!(tools.lines.len(), 1);
-        assert_eq!(tools.desired_rows(10), 2);
-    }
-
-    #[test]
-    fn tool_events_widget_trims_to_visible_tail_discarding_head() {
-        let mut tools = ToolEventsWidget::new();
-        for i in 0..6 {
-            tools.push_tool(&format!("tool-{i}"));
-        }
-
-        let overflow = tools.take_overflow(2, 80);
-        assert!(overflow.is_empty());
-
-        let text: Vec<String> = tools
-            .lines
-            .visible_lines()
-            .iter()
-            .map(|l| l.to_string())
-            .collect();
-        assert_eq!(text, vec!["◆ tool-4", "◆ tool-5"]);
-    }
-
-    #[test]
-    fn live_tail_widgets_collapse_to_zero_height_when_empty() {
+    fn reasoning_widget_collapses_to_zero_height_when_empty() {
         let reasoning = ReasoningWidget::new();
-        let tools = ToolEventsWidget::new();
         assert_eq!(reasoning.desired_rows(80), 0);
         assert_eq!(reasoning.min_height(80, &input_ctx("", 0)), 0);
         assert!(reasoning.flexible(&input_ctx("", 0)));
-        assert_eq!(tools.min_height(80, &input_ctx("", 0)), 0);
-        assert!(tools.flexible(&input_ctx("", 0)));
     }
 
     #[test]
-    fn live_tail_widgets_report_uncapped_desired_height() {
+    fn reasoning_widget_reports_uncapped_desired_height() {
         let mut reasoning = ReasoningWidget::new();
         for i in 0..10 {
             reasoning.push_reasoning_text(&format!("reasoning line {i}\n"));
@@ -2473,42 +2289,23 @@ mod tests {
         assert_eq!(reasoning.min_height(80, &input_ctx("", 0)), 5);
         assert!(reasoning.flexible(&input_ctx("", 0)));
         assert_eq!(reasoning.max_height(&input_ctx("", 0)), u16::MAX);
-
-        let mut tools = ToolEventsWidget::new();
-        for i in 0..10 {
-            tools.push_tool(&format!("tool-{i}"));
-        }
-        assert_eq!(tools.desired_rows(80), 10);
-        assert_eq!(tools.min_height(80, &input_ctx("", 0)), 5);
-        assert!(tools.flexible(&input_ctx("", 0)));
-        assert_eq!(tools.max_height(&input_ctx("", 0)), u16::MAX);
     }
 
     #[test]
-    fn live_tail_widgets_floor_is_wrapped_rows_capped_at_5() {
-        // A single long line with a `◈ `/`◆ ` prefix: the prefix occupies
-        // row 1 and the long word wraps onto the following rows, so a
-        // 26-char word reports a floor of 4 (prefix row + 3 word rows).
+    fn reasoning_widget_floor_is_wrapped_rows_capped_at_5() {
+        // A single long line with a `◈ ` prefix: the prefix occupies row 1
+        // and the long word wraps onto the following rows, so a 26-char word
+        // reports a floor of 4 (prefix row + 3 word rows).
         let mut reasoning = ReasoningWidget::new();
         reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz");
         assert_eq!(reasoning.desired_rows(10), 4);
         assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 4);
-
-        let mut tools = ToolEventsWidget::new();
-        tools.push_tool("abcdefghijklmnopqrstuvwxyz");
-        assert_eq!(tools.desired_rows(10), 4);
-        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 4);
 
         // A long line wrapping past 5 rows caps the floor at 5.
         let mut reasoning = ReasoningWidget::new();
         reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
         assert_eq!(reasoning.desired_rows(10), 7);
         assert_eq!(reasoning.min_height(10, &input_ctx("", 0)), 5);
-
-        let mut tools = ToolEventsWidget::new();
-        tools.push_tool("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
-        assert_eq!(tools.desired_rows(10), 7);
-        assert_eq!(tools.min_height(10, &input_ctx("", 0)), 5);
     }
 
     // ── input bar cursor positioning ────────────────────────────
@@ -2528,6 +2325,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn rendered_rows(buf: &Buffer, width: u16, height: u16) -> Vec<String> {
         (0..height)
             .map(|y| {
@@ -2538,6 +2336,7 @@ mod tests {
             .collect()
     }
 
+    #[allow(dead_code)]
     fn full_rendered_rows(lines: &[Line<'static>], width: u16) -> Vec<String> {
         let height = wrapped_height(lines, width) as u16;
         let area = Rect::new(0, 0, width, height);

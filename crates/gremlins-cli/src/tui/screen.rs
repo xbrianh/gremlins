@@ -31,7 +31,7 @@ use ratatui::{
 use crate::tui::app::App;
 use crate::tui::widgets::{
     DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, ReasoningWidget, RenderContext,
-    ToolEventsWidget, TranscriptWidget, WatchSingleWidget,
+    TranscriptWidget, WatchSingleWidget,
 };
 
 /// Approximate number of rows reserved at the bottom of the screen for the
@@ -53,8 +53,8 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     /// Whether [`Drop`] should restore the terminal (raw mode, cursor).
     needs_terminal_cleanup: bool,
     /// Ordered widget stack, top-to-bottom. The initial stack is transcript,
-    /// input bar, info bar. Overlays are pushed/popped at the top of the
-    /// stack.
+    /// reasoning, input bar, info bar. Overlays are pushed/popped at the top
+    /// of the stack.
     widgets: Vec<Box<dyn LiveAreaWidget>>,
     /// Rows occupied by the bottom bars (input + info) in the most recent
     /// frame. These rows are excluded from the scrollback region.
@@ -79,7 +79,6 @@ impl<B: Backend> LiveArea<B> {
             widgets: vec![
                 Box::new(TranscriptWidget::new()),
                 Box::new(ReasoningWidget::new()),
-                Box::new(ToolEventsWidget::new()),
                 Box::new(InputBarWidget::new()),
                 Box::new(InfoBarWidget),
             ],
@@ -427,9 +426,9 @@ impl<B: Backend> LiveArea<B> {
     /// Remove the most recently added overlay widget, if any. The initial
     /// content widgets are never popped.
     pub fn pop_overlay(&mut self) -> Option<Box<dyn LiveAreaWidget>> {
-        // The first five widgets are the fixed content stack; only pop
+        // The first four widgets are the fixed content stack; only pop
         // widgets pushed on top of them.
-        if self.widgets.len() > 5 {
+        if self.widgets.len() > 4 {
             Some(self.widgets.remove(0))
         } else {
             None
@@ -450,13 +449,6 @@ impl<B: Backend> LiveArea<B> {
             .iter_mut()
             .find_map(|w| w.as_any_mut().downcast_mut::<ReasoningWidget>())
             .expect("reasoning widget present")
-    }
-
-    fn tool_events_mut(&mut self) -> &mut ToolEventsWidget {
-        self.widgets
-            .iter_mut()
-            .find_map(|w| w.as_any_mut().downcast_mut::<ToolEventsWidget>())
-            .expect("tool events widget present")
     }
 
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
@@ -484,7 +476,6 @@ impl<B: Backend> LiveArea<B> {
     /// markdown-rendered prompt, then pin the turn start.
     pub fn submit_prompt(&mut self, prompt: String) {
         self.reasoning_mut().clear();
-        self.tool_events_mut().clear();
         self.transcript_mut().submit_prompt(prompt);
     }
 
@@ -515,7 +506,7 @@ impl<B: Backend> LiveArea<B> {
 
     /// Record a tool call.
     pub fn push_tool(&mut self, name: &str) {
-        self.tool_events_mut().push_tool(name);
+        self.transcript_mut().push_tool_line(name);
     }
 
     /// Append streaming response text.
@@ -534,9 +525,10 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().reconcile_response(text);
     }
 
-    /// Unpin the current turn and clear its draft state. Reasoning and
-    /// tool-event content stays in its own widgets (it is not flattened
-    /// into the transcript); the next prompt clears those widgets.
+    /// Unpin the current turn and clear its draft state. Tool-call lines are
+    /// already part of the transcript FIFO (inserted above the response), so
+    /// they survive the turn as ordinary scrollback. Reasoning stays in its
+    /// own widget and is cleared by the next prompt.
     pub fn finish_turn(&mut self) {
         self.transcript_mut().finish_turn();
     }
@@ -599,10 +591,9 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().clear_scrollable();
     }
 
-    /// Clear the live reasoning and tool-event widgets.
+    /// Clear the live reasoning widget.
     pub fn clear_live_widgets(&mut self) {
         self.reasoning_mut().clear();
-        self.tool_events_mut().clear();
     }
 
     /// Append a system message to the transcript with default style and
@@ -1268,29 +1259,29 @@ mod tests {
         use crate::tui::widgets::{DebugWidget, WatchTableWidget};
 
         let mut live = new_live(80, 24);
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 4);
 
         // Popping with no overlay is a no-op.
         assert!(live.pop_overlay().is_none());
 
         live.push_overlay(Box::new(WatchTableWidget::new()));
-        assert_eq!(live.widgets.len(), 6);
+        assert_eq!(live.widgets.len(), 5);
 
         live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
-        assert_eq!(live.widgets.len(), 7);
+        assert_eq!(live.widgets.len(), 6);
 
         // Pop removes the most recently added (debug) first.
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<DebugWidget>().is_some());
-        assert_eq!(live.widgets.len(), 6);
+        assert_eq!(live.widgets.len(), 5);
 
         let popped = live.pop_overlay().unwrap();
         assert!(popped.as_any().downcast_ref::<WatchTableWidget>().is_some());
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 4);
 
         // Cannot pop the fixed content stack.
         assert!(live.pop_overlay().is_none());
-        assert_eq!(live.widgets.len(), 5);
+        assert_eq!(live.widgets.len(), 4);
     }
 
     #[test]
@@ -1526,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn response_wins_and_shrinks_reasoning_and_tools() {
+    fn response_wins_and_shrinks_reasoning_while_tools_stay_in_transcript() {
         let cols: u16 = 80;
         let rows: u16 = 12;
         let mut live_area = new_live(cols, rows);
@@ -1535,7 +1526,7 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
-        // Plenty of reasoning and tool content, then a tall response.
+        // Plenty of reasoning content and tool lines, then a tall response.
         for i in 0..10 {
             live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
         }
@@ -1568,77 +1559,57 @@ mod tests {
             !visible.contains("reasoning line 0"),
             "reasoning head should be trimmed.\nBuffer:\n{visible}"
         );
-        // Tools (lowest priority) shrink the most: their head is trimmed,
-        // keeping only the tail.
+        // Tool lines are now ordinary transcript content: they overflow into
+        // scrollback ahead of the tall response rather than being trimmed.
+        let scrollback = live_area.scrollback().join("\n");
         assert!(
-            !visible.contains("tool-0"),
-            "tools head should be trimmed.\nBuffer:\n{visible}"
+            scrollback.contains("tool-0") && scrollback.contains("tool-9"),
+            "tool lines should overflow into scrollback.\nScrollback:\n{scrollback}"
         );
+        // Reasoning content is never committed to scrollback.
         assert!(
-            visible.contains("tool-9"),
-            "tools should keep their tail.\nBuffer:\n{visible}"
-        );
-        // Reasoning and tools are trimmed to their allocated rows; their
-        // content is never committed to scrollback. The transcript's tall
-        // in-progress response, however, now overflows into scrollback.
-        let scrollback = live_area.scrollback();
-        assert!(
-            scrollback
-                .iter()
-                .all(|l| !l.contains("reasoning") && !l.contains("tool-")),
-            "reasoning/tool content must not reach scrollback: {scrollback:?}"
+            !scrollback.contains("reasoning"),
+            "reasoning content must not reach scrollback: {scrollback}"
         );
     }
 
     #[test]
-    fn tools_yield_to_reasoning_when_space_contested() {
+    fn tool_lines_survive_turn_and_overflow_with_transcript() {
         let cols: u16 = 80;
-        let rows: u16 = 12;
+        let rows: u16 = 8;
         let mut live_area = new_live(cols, rows);
 
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
-        // Equal reasoning and tool content; the viewport cannot hold both at
-        // full height, so tools (priority 1) shrink before reasoning (5).
-        for i in 0..12 {
-            live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
-        }
         for i in 0..12 {
             live_area.push_tool(&format!("tool-{i}"));
         }
+        live_area.replace_response("answer");
+        live_area.finish_turn();
 
         live_area.compose(&app).unwrap();
 
+        // Tool lines persist as transcript content and are visible or in
+        // scrollback, between the prompt and the response.
         let visible = dump_buffer(live_area.backend().buffer());
-        // Tools (priority 1) shrink before reasoning (5): they keep only
-        // their tail and trim the head.
+        let sb = live_area.scrollback().join("\n");
+        let combined = format!("{sb}\n{visible}");
+        for i in 0..12 {
+            assert!(
+                combined.contains(&format!("tool-{i}")),
+                "tool line {i} must survive as transcript content.\nCombined:\n{combined}"
+            );
+        }
         assert!(
-            visible.contains("tool-11"),
-            "tools should keep their tail.\nBuffer:\n{visible}"
-        );
-        assert!(
-            !visible.contains("tool-0"),
-            "tool head should be trimmed.\nBuffer:\n{visible}"
-        );
-        // Reasoning keeps more rows than tools, proving it yields after them.
-        assert!(
-            visible.contains("reasoning line 11"),
-            "reasoning tail should be visible.\nBuffer:\n{visible}"
-        );
-        assert!(
-            visible.contains("reasoning line 7"),
-            "reasoning should keep more rows than tools.\nBuffer:\n{visible}"
-        );
-        assert!(
-            !visible.contains("reasoning line 0"),
-            "reasoning head should be trimmed.\nBuffer:\n{visible}"
+            combined.contains("answer"),
+            "response must survive.\nCombined:\n{combined}"
         );
     }
 
     #[test]
-    fn empty_reasoning_and_tools_leave_no_blank_gap() {
+    fn empty_reasoning_leaves_no_blank_gap() {
         let cols: u16 = 80;
         let rows: u16 = 6;
         let mut live_area = new_live(cols, rows);
@@ -1653,11 +1624,9 @@ mod tests {
 
         let visible = dump_buffer(live_area.backend().buffer());
         // The transcript content sits directly above the input/info bars with
-        // no rows consumed by the empty reasoning/tool widgets.
+        // no rows consumed by the empty reasoning widget.
         assert!(visible.contains("▍» hi"));
         assert!(visible.contains("answer"));
-        // The answer is contiguous with the prompt (no reasoning/tool rows
-        // interleaved), and no reasoning/tool content is rendered.
         let lines: Vec<&str> = visible.lines().collect();
         let prompt_idx = lines
             .iter()
@@ -1668,8 +1637,8 @@ mod tests {
             "answer should sit directly below the prompt.\nBuffer:\n{visible}"
         );
         assert!(
-            !visible.contains("reasoning") && !visible.contains("tool"),
-            "empty reasoning/tool widgets should render nothing.\nBuffer:\n{visible}"
+            !visible.contains("reasoning"),
+            "empty reasoning widget should render nothing.\nBuffer:\n{visible}"
         );
     }
 
@@ -1697,8 +1666,8 @@ mod tests {
         live_area.replace_response(&body);
         live_area.finish_response(&body, "final summary line");
 
-        // Turn end: commit the transcript response. Reasoning and tools
-        // stay in their own widgets (not flattened into the transcript).
+        // Turn end: commit the transcript response. Tool lines are now part
+        // of the transcript FIFO and overflow with it.
         live_area.finish_turn();
         live_area.push_transcript_line("42 tokens".to_string());
 
@@ -1714,15 +1683,16 @@ mod tests {
             "summary should not be dropped.\nCombined:\n{combined}"
         );
 
-        // Reasoning and tool lines remain in their own widgets and are
-        // never committed to terminal scrollback.
+        // Tool lines persist as transcript content in scrollback.
+        assert!(
+            combined.contains("Done") && combined.contains("grep"),
+            "tool lines should survive as transcript content.\nCombined:\n{combined}"
+        );
+        // Reasoning stays in its own widget and is never committed to
+        // terminal scrollback.
         assert!(
             !sb.contains("thinking..."),
             "reasoning must not be flattened into the transcript/scrollback.\nScrollback:\n{sb}"
-        );
-        assert!(
-            !sb.contains("grep"),
-            "tool events must not be flattened into the transcript/scrollback.\nScrollback:\n{sb}"
         );
     }
 }

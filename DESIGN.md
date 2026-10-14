@@ -697,9 +697,8 @@ The initial stack is:
 
 | Widget | Constraint | Overflow? | Notes |
 |---|---|---|---|
-| `TranscriptWidget` | `Min(0)` | Yes | Owns the `ScrollableBuffer`. The only widget that produces overflow. |
+| `TranscriptWidget` | `Min(0)` | Yes | Owns the `ScrollableBuffer`. The only widget that produces overflow. Prompt, response, tool-call, and system lines all live here. |
 | `ReasoningWidget` | `Length(h)` | No | Owns a `BoundedBuffer` (5 visible rows); `h` is 0 when empty. |
-| `ToolsWidget` | `Length(h)` | No | Owns a `BoundedBuffer` (5 visible rows); `h` is 0 when empty. |
 | `InputBarWidget` | `Length(1)` | No | Stateless — reads `input` from the render context. |
 | `InfoBarWidget` | `Length(1)` | No | Stateless — reads gremlin count, project name, etc. |
 
@@ -720,15 +719,9 @@ element:
 
 ```
   > add rate limiting                                     ← prompt (bold magenta/white)
-                                                          ← blank line
-    reading auth.rs...                                    ← reasoning (last 2–3
-    auth.rs: 120 lines                                      visible lines, dim italic)
-                                                          ← blank line
-    run_tests                                             ← tool list (non-read/edit
-      cargo test: 12 passed                                 tools, output indented)
-    grep_files
-      found 3 matches
-                                                          ← blank line
+    ◆ run_tests                                           ← tool line (chrome ◆ +
+    ◆ grep_files                                            nickel italic name, in
+                                                            transcript, above response)
   Here's the rate limiting implementation:               ← response (normal weight)
   We'll add a token bucket in the middleware layer...
                                                           ← blank line (finished only)
@@ -738,21 +731,25 @@ element:
 | Section | Content | Style |
 |---------|---------|-------|
 | Prompt line | `> {user input}` | Bold magenta/white |
-| Reasoning | Last 2–3 visible lines of reasoning text | Dim italic |
-| Tool list | Each non-read/edit tool call, output indented below | Dim italic |
+| Tool lines | Each non-read/edit tool call, one line each | Chrome `◆` + nickel italic name |
 | Response | Model output text | Normal weight |
 | Stats line | Tool count, token count, cache percentage | Normal weight |
 
-**Reasoning window.** While streaming, new reasoning chunks push old lines out
+**Reasoning window.** Reasoning lives in its own widget (not shown in the
+transcript above). While streaming, new reasoning chunks push old lines out
 of a 2–3 *visible* line window (a long line that wraps counts as multiple
 lines). On finish, the window freezes at its last 2–3 lines. If no reasoning
 arrived, the section is absent (no blank-line gap).
 
 **Tool list.** Each tool call that is not a read or edit variant (`read`,
-`edit`, and obvious aliases) appears with its name and output indented below.
-Tools appear when their `tool_result` arrives (complete output); active-tool
-streaming is deferred. Read/edit tools are filtered from display but still
-count toward the stats tool count. If no tools ran, the section is absent.
+`edit`, and obvious aliases) appears in the transcript between the prompt and
+the response, styled with the deco manifest marker (chrome `◆` diamond +
+nickel italic tool name). Tool-call lines are inserted as the call completes
+(TurnComplete enrichment) directly above the streaming response region; they
+survive response rebuilds and reconciliations and become permanent
+scrollback-committed history. Read/edit tools are filtered from display but
+still count toward the stats tool count. If no tools ran, the section is
+absent.
 
 **Sizing.** The widget uses its natural height — it is never greedy and never
 expandable. As content streams in, its height grows and the layout pass
@@ -764,14 +761,15 @@ submitted. Every line reaches the terminal so tmux captures it.
 partials; the widget stays in place and gains a stats footer. It does not
 vanish.
 
-#### 8.2.2 Reasoning and tools widgets
+#### 8.2.2 Reasoning widget
 
-The current turn's reasoning and active-tool output are separate widgets, each
-owning a `BoundedBuffer` capped at 5 visible rows. They sit between the
-transcript and the input bar and grow only while a turn is streaming. When
-empty they report `Length(0)` and consume no space. Their content stays in
-these widgets for the life of the turn; it is not flattened into the
-transcript. The buffers are reset when the next prompt is submitted.
+The current turn's reasoning is a separate widget owning a `BoundedBuffer`
+capped at 5 visible rows. It sits between the transcript and the input bar
+and grows only while a turn is streaming. When empty it reports `Length(0)`
+and consumes no space. Reasoning stays in this widget for the life of the
+turn; it is not flattened into the transcript, and the buffer is reset when
+the next prompt is submitted. (Tool-call lines, in contrast, are folded
+straight into the transcript FIFO — see § 8.2.1.)
 
 #### 8.2.3 System content
 
@@ -983,10 +981,10 @@ bar waits for the next message.
 ```
 
 The active turn sits at the bottom of the transcript area, just above the
-input bar. It renders the prompt, a capped reasoning window, a tool list that
-populates as results arrive, and the accumulating response. The widget grows
-as content arrives; older finished turns scroll off the top of the viewport
-into terminal scrollback.
+input bar. It renders the prompt, tool-call lines between the prompt and the
+response, a capped reasoning window, and the accumulating response. The
+widget grows as content arrives; older finished turns scroll off the top of
+the viewport into terminal scrollback.
 
 #### 8.4.3 Finished turn with stats footer
 
@@ -1074,22 +1072,19 @@ the overlay is non-blocking.
                          │
                          ▼
               ┌─────────────────────┐
-              │ transcript widget   │  prompt + response; grows with content
-              │ (streaming)         │
+              │ transcript widget   │  prompt + tool lines + response;
+              │ (streaming)         │  grows with content
               └─────────┬───────────┘
               ┌─────────────────────┐
               │ reasoning widget    │  live tail (dim italic); 5-row cap
               │ (streaming)         │
               └─────────┬───────────┘
-              ┌─────────────────────┐
-              │ tool events widget  │  live tool list (dim italic); 5-row cap
-              │ (streaming)         │
-              └─────────┬───────────┘
-                        │ Done / Ended / Error / Esc
+                        │ Done / Ended
                         ▼
               ┌─────────────────────┐
-              │ transcript widget   │  same layout, frozen reasoning and tool
-              │ (finished)          │  widgets, plus stats footer
+              │ transcript widget   │  same layout; tool lines, prompt and
+              │ (finished)          │  response committed as history; reasoning
+              │                     │  frozen in its own widget
               └─────────────────────┘
                         │
            session ends / cleared
@@ -1097,10 +1092,25 @@ the overlay is non-blocking.
                         ▼
                     discarded
 
-  Reasoning and tool-event widgets are ephemeral: they populate during a turn
-  and are cleared when the next prompt is submitted. Their content is never
-  flattened into the transcript — only the prompt and response survive across
-  turns.
+              ┌─────────────────────┐
+              │ reasoning widget    │  Error / Esc
+              │ (streaming)         │
+              └─────────┬───────────┘
+                        │
+              Esc / Error during an active turn
+                        │
+                        ▼
+              ┌─────────────────────┐
+              │ transcript widget   │  `clear_current_turn` truncates the FIFO
+              │ (discarded)         │  back to the turn start: prompt, tool
+              │                     │  lines, and in-flight response all dropped
+              └─────────────────────┘
+
+  The reasoning widget is ephemeral: it populates during a turn and is cleared
+  when the next prompt is submitted; its content is never flattened into the
+  transcript. Tool-call lines, however, are folded directly into the transcript
+  FIFO between the prompt and the response, so they — like the prompt and
+  response — survive across turns as ordinary scrollback history.
 
   system content (banner, events, command output) is pushed directly into the
   transcript widget. Overlay widgets exist outside this lifecycle — they are
