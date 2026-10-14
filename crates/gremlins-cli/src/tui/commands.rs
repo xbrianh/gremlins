@@ -299,8 +299,21 @@ mod tests {
             .collect();
 
         let help_names = [
-            "/ls", "/launch", "/info", "/stop", "/resume", "/log", "/watch", "/debug", "/model",
-            "/chat", "/clear", "/new", "/help", "/quit",
+            "/ls",
+            "/launch",
+            "/info",
+            "/artifact",
+            "/stop",
+            "/resume",
+            "/log",
+            "/watch",
+            "/debug",
+            "/model",
+            "/chat",
+            "/clear",
+            "/new",
+            "/help",
+            "/quit",
         ];
 
         for cmd in help_names {

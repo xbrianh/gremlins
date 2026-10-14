@@ -49,6 +49,7 @@ this section — do not try to run them yourself.
 | `/ls` | list gremlins |
 | `/launch <definition>` | start a gremlin |
 | `/info <id>` | show gremlin info |
+| `/artifact <id> --list` / `/artifact <id> <uri> [--json-path <path>]` | list a gremlin's artifact keys / show artifact content |
 | `/stop <id>` | stop a gremlin |
 | `/resume <id>` | resume a gremlin |
 | `/log <id>` | show gremlin log |
@@ -91,6 +92,7 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 | `/resume <id>` | `gremlins resume <id>` |
 | `/log <id>` | `gremlins log <id>` |
 | `/debug <id>` | `gremlins debug <id>` |
+| `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |
 | `/watch` / `/watch <id>` | none — TUI-only |
 | `/model` | none — TUI-only |
 | `/chat` | none — TUI-only |

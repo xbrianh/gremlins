@@ -1401,11 +1401,15 @@ async fn handle_artifact(request: &Value) -> Value {
     let store: Arc<dyn state::StateStore + Send + Sync> = if let Some(store) = live_store {
         store
     } else {
+        // A bare directory under the state root is not a gremlin; require the
+        // state file before opening the persisted store, matching
+        // handle_status / handle_info.
+        let state_dir = config::state_root().join(id);
+        if !state_dir.is_dir() || !state_dir.join("state.json").is_file() {
+            return error_response(&format!("unknown gremlin {id:?}"));
+        }
         match state::StateData::open(id) {
             Ok(sd) => sd.store_handle(),
-            Err(state::StateError::Other(msg)) if msg.starts_with("no state directory:") => {
-                return error_response(&format!("unknown gremlin {id:?}"))
-            }
             Err(e) => return error_response(&format!("gremlin {id}: {e}")),
         }
     };
@@ -3062,8 +3066,11 @@ mod tests {
     use crate::test_support::Sandbox;
     use serde_json::Value;
     use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::{broadcast, watch};
 
     async fn read_until_type(
         reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
@@ -3216,6 +3223,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_artifact_reads_live_run_map_store() {
+        let _sandbox = Sandbox::new();
+
+        // Ephemeral store — its state lives in a TempDir, unreachable via
+        // config::state_root(), so this exercises the run-map branch that makes
+        // the op work for live/ephemeral chat gremlins.
+        let store: Arc<dyn crate::executor::state::StateStore + Send + Sync> = Arc::new(
+            crate::executor::state::FileSystemStateStore::create(
+                "gr-live",
+                &serde_json::Map::new(),
+                /* ephemeral */ true,
+            )
+            .unwrap(),
+        );
+        store
+            .write_into_registry(
+                &crate::artifacts::uri::Uri::parse("artifact://live").unwrap(),
+                "live artifact",
+            )
+            .await
+            .unwrap();
+
+        let channels = super::InteractiveChannels::new();
+        let (interactive, _session) = channels.split();
+        let (state_tx, _state_rx) = watch::channel(super::RunState {
+            id: "gr-live".to_string(),
+            status: "running".to_string(),
+            stage: "starting".to_string(),
+            started_at: String::new(),
+        });
+        let (log_broadcast, _) = broadcast::channel(1);
+
+        let handle = super::RunHandle {
+            cancel: super::CancelToken::new(),
+            task: None,
+            aborted: Arc::new(AtomicBool::new(false)),
+            state_tx,
+            log_broadcast,
+            interactive,
+            store: store.clone(),
+            scratch_dir: PathBuf::new(),
+        };
+        super::get_run_map()
+            .lock()
+            .unwrap()
+            .insert("gr-live".to_string(), handle);
+
+        let list_resp =
+            handle_artifact(&serde_json::json!({"op": "artifact", "id": "gr-live", "list": true}))
+                .await;
+        assert_eq!(list_resp.get("type").and_then(Value::as_str), Some("ok"));
+        assert_eq!(
+            list_resp
+                .get("keys")
+                .and_then(Value::as_array)
+                .map(|keys| { keys.iter().filter_map(Value::as_str).collect::<Vec<_>>() }),
+            Some(vec!["artifact://live"])
+        );
+
+        let content_resp = handle_artifact(
+            &serde_json::json!({"op": "artifact", "id": "gr-live", "artifact": "artifact://live"}),
+        )
+        .await;
+        assert_eq!(content_resp.get("type").and_then(Value::as_str), Some("ok"));
+        assert_eq!(
+            content_resp.get("content").and_then(Value::as_str),
+            Some("live artifact")
+        );
+
+        // Clean up the run-map entry so it does not leak into other tests.
+        super::get_run_map().lock().unwrap().remove("gr-live");
+    }
+
+    #[tokio::test]
     async fn handle_artifact_returns_error_for_unbound_artifact() {
         let _sandbox = Sandbox::new();
         let _store = crate::executor::state::FileSystemStateStore::create(
@@ -3355,8 +3436,21 @@ mod tests {
         );
 
         for cmd in [
-            "/ls", "/launch", "/info", "/stop", "/resume", "/log", "/watch", "/debug", "/model",
-            "/chat", "/clear", "/new", "/help", "/quit",
+            "/ls",
+            "/launch",
+            "/info",
+            "/artifact",
+            "/stop",
+            "/resume",
+            "/log",
+            "/watch",
+            "/debug",
+            "/model",
+            "/chat",
+            "/clear",
+            "/new",
+            "/help",
+            "/quit",
         ] {
             assert!(
                 prompt.contains(cmd),
@@ -3383,6 +3477,7 @@ mod tests {
         }
 
         for row in [
+            "| `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |",
             "| `/watch` / `/watch <id>` | none — TUI-only |",
             "| `/model` | none — TUI-only |",
             "| `/chat` | none — TUI-only |",
