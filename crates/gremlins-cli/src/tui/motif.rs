@@ -187,7 +187,7 @@ pub fn spire_banner() -> Vec<Line<'static>> {
 /// The one-line tagline under the wordmark, in nickel italic.
 pub fn tagline() -> Line<'static> {
     Line::from(Span::styled(
-        "   type /help for commands — Ctrl+C to exit",
+        "   type /help for commands — Ctrl+C clears/cancels (repeat within 1s to exit)",
         Style::default()
             .fg(DEFAULT_THEME.subtle)
             .add_modifier(ratatui::style::Modifier::ITALIC),

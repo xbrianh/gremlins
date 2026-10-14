@@ -15,7 +15,7 @@ pub mod widgets;
 use std::collections::HashMap;
 use std::io::{self, IsTerminal};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use tokio::io::BufReader;
@@ -34,6 +34,94 @@ fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
     if let Some(handle) = handle.take() {
         handle.abort();
     }
+}
+
+/// Ctrl+C is treated as a reset key (exactly like Esc). A second press
+/// within this window quits the TUI; a later press becomes a fresh first
+/// press. `/quit` and Ctrl+D on empty input remain the explicit exits.
+const PENDING_QUIT_WINDOW: Duration = Duration::from_secs(1);
+
+/// Classify a Ctrl+C press at `now` against the pending-quit state.
+///
+/// Returns `true` when a prior first press is still within
+/// `PENDING_QUIT_WINDOW`, in which case this press should quit the TUI.
+/// Otherwise the press becomes the new first press — (re-)arming the
+/// confirmation window — and `false` is returned.
+fn ctrl_c_should_quit(pending_quit: &mut Option<Instant>, now: Instant) -> bool {
+    let quit = pending_quit.is_some_and(|first| now.duration_since(first) <= PENDING_QUIT_WINDOW);
+    if !quit {
+        *pending_quit = Some(now);
+    }
+    quit
+}
+
+/// Run the shared Esc / first-Ctrl+C reset path.
+///
+/// Ordering is deliberate: a blocking overlay is dismissed first, then the
+/// watch table, then the main input bar is cleared and any in-flight chat
+/// turn is cancelled.
+///
+/// Returns `true` when an overlay was dismissed, in which case the caller
+/// should `continue` the event loop immediately; the clear/cancel path
+/// returns `false` and falls through, exactly as the original Esc arm did.
+#[allow(clippy::too_many_arguments)]
+fn handle_esc_reset(
+    app: &mut App,
+    live_area: &mut LiveArea,
+    overlay_log_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    overlay_log_following: &mut Option<String>,
+    debug_task: &mut Option<tokio::task::JoinHandle<()>>,
+    debug_cmd_tx: &mut Option<mpsc::UnboundedSender<serde_json::Value>>,
+    debug_evt_rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>,
+    turn_gen: &mut u64,
+    active_turn: &mut Option<String>,
+    client: &Arc<client::DaemonClient>,
+) -> bool {
+    // Blocking overlays (single-watch, debug) dismiss first.
+    if app.dismiss_blocking_overlay() {
+        live_area.pop_overlay();
+        abort_overlay_log_follow(overlay_log_handle);
+        *overlay_log_following = None;
+        // Drop the debug socket so the daemon sees EOF.
+        if let Some(handle) = debug_task.take() {
+            handle.abort();
+        }
+        *debug_cmd_tx = None;
+        *debug_evt_rx = None;
+        return true;
+    }
+    // Then the non-blocking watch table.
+    if app.dismiss_watch_overlay() {
+        live_area.pop_overlay();
+        return true;
+    }
+
+    app.input.clear();
+    app.input_cursor = 0;
+    app.clear_completion();
+    live_area.reset_input_scroll();
+    // If a chat request is in-flight, cancel it on the daemon. Do not abort
+    // `chat_task` — it may be inside `send_request`, and aborting mid-write
+    // would desync the response FIFO. The task finishes on its own once the
+    // ack arrives.
+    if app.active_request {
+        *turn_gen += 1;
+        let cancel_turn = active_turn.clone();
+        let c = Arc::clone(client);
+        tokio::spawn(async move {
+            let mut req = serde_json::json!({"op": "cancel_chat"});
+            if let Some(t) = cancel_turn {
+                req["turn"] = serde_json::Value::String(t);
+            }
+            let _ = c.send_request(req).await;
+        });
+        // Discard the current turn without committing to history.
+        live_area.clear_current_turn();
+        app.active_request = false;
+        *active_turn = None;
+    }
+
+    false
 }
 
 /// Overall deadline for the whole repository-context snapshot. Each git
@@ -641,6 +729,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     }
     live_area.push_styled_line(motif::tagline());
 
+    // ── Ctrl+C pending-quit state (event-loop-local input routing) ──
+    let mut pending_quit: Option<Instant> = None;
+
     // ── Event loop ────────────────────────────────────────────────
     loop {
         let (cols, _rows) = live_area.size();
@@ -655,7 +746,27 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Char('c')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
-                            break;
+                            let now = Instant::now();
+                            if ctrl_c_should_quit(&mut pending_quit, now) {
+                                break;
+                            }
+                            // First press (or an expired previous press): reset
+                            // exactly like Esc. The one-second quit window is
+                            // already armed by `ctrl_c_should_quit`.
+                            if handle_esc_reset(
+                                &mut app,
+                                live_area,
+                                &mut overlay_log_handle,
+                                &mut overlay_log_following,
+                                &mut debug_task,
+                                &mut debug_cmd_tx,
+                                &mut debug_evt_rx,
+                                &mut turn_gen,
+                                &mut active_turn,
+                                &client,
+                            ) {
+                                continue;
+                            }
                         }
                         KeyCode::Char('d')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
@@ -753,50 +864,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
 
                         KeyCode::Esc => {
-                            // Blocking overlays (single-watch, debug) dismiss first.
-                            if app.dismiss_blocking_overlay() {
-                                live_area.pop_overlay();
-                                abort_overlay_log_follow(&mut overlay_log_handle);
-                                overlay_log_following = None;
-                                // Drop the debug socket so the daemon sees EOF.
-                                if let Some(handle) = debug_task.take() {
-                                    handle.abort();
-                                }
-                                debug_cmd_tx = None;
-                                debug_evt_rx = None;
+                            if handle_esc_reset(
+                                &mut app,
+                                live_area,
+                                &mut overlay_log_handle,
+                                &mut overlay_log_following,
+                                &mut debug_task,
+                                &mut debug_cmd_tx,
+                                &mut debug_evt_rx,
+                                &mut turn_gen,
+                                &mut active_turn,
+                                &client,
+                            ) {
                                 continue;
-                            }
-                            // Then the non-blocking watch table.
-                            if app.dismiss_watch_overlay() {
-                                live_area.pop_overlay();
-                                continue;
-                            }
-
-                            app.input.clear();
-                            app.input_cursor = 0;
-                            app.clear_completion();
-                            live_area.reset_input_scroll();
-                            // If a chat request is in-flight, cancel it on the
-                            // daemon. Do not abort `chat_task` — it may be
-                            // inside `send_request`, and aborting mid-write
-                            // would desync the response FIFO. The task finishes
-                            // on its own once the ack arrives.
-                            if app.active_request {
-                                turn_gen += 1;
-                                let cancel_turn = active_turn.clone();
-                                let c = Arc::clone(&client);
-                                tokio::spawn(async move {
-                                    let mut req = serde_json::json!({"op": "cancel_chat"});
-                                    if let Some(t) = cancel_turn {
-                                        req["turn"] = serde_json::Value::String(t);
-                                    }
-                                    let _ = c.send_request(req).await;
-                                });
-                                // Discard the current turn without
-                                // committing to history.
-                                live_area.clear_current_turn();
-                                app.active_request = false;
-                                active_turn = None;
                             }
                         }
                         KeyCode::Tab => {
@@ -1811,8 +1891,9 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_chat_request, format_socket_response};
+    use super::{build_chat_request, ctrl_c_should_quit, format_socket_response};
     use std::collections::HashMap;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn format_artifact_content_splits_embedded_newlines() {
@@ -1855,5 +1936,29 @@ mod tests {
         let req = build_chat_request("hello", "1", None, "/p", "", &env);
         assert!(req.get("context").is_none());
         assert_eq!(req["text"], "hello");
+    }
+
+    #[test]
+    fn ctrl_c_first_press_arms_window_and_does_not_quit() {
+        let mut pending = None;
+        assert!(!ctrl_c_should_quit(&mut pending, Instant::now()));
+        assert!(pending.is_some());
+    }
+
+    #[test]
+    fn ctrl_c_second_press_within_window_quits() {
+        let first = Instant::now();
+        let mut pending = Some(first);
+        assert!(ctrl_c_should_quit(
+            &mut pending,
+            first + Duration::from_millis(500)
+        ));
+    }
+
+    #[test]
+    fn ctrl_c_second_press_after_window_rearms_and_does_not_quit() {
+        let mut pending = Some(Instant::now() - Duration::from_secs(2));
+        assert!(!ctrl_c_should_quit(&mut pending, Instant::now()));
+        assert!(pending.is_some());
     }
 }
