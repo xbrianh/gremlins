@@ -132,6 +132,7 @@ pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,
     pub(crate) classify_error: Option<ErrorClassifier>,
+    pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
 }
 
@@ -246,7 +247,9 @@ pub(crate) async fn run_agent_loop(
         max_turns,
         ctx.completion_nudge_budget,
         ctx.params.log_tx.clone(),
+        opts.temperature,
         opts.max_tokens,
+        opts.extra.clone(),
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -292,16 +295,19 @@ pub(crate) async fn run_agent_loop_nested(
     max_turns: usize,
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    temperature: Option<f64>,
     max_tokens: Option<u64>,
+    extra: Option<serde_json::Value>,
     prepopulated_messages: Option<Vec<Message>>,
 ) -> Result<CompletedRun, ClientError> {
     if let Some(ref tx) = log_tx {
         let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
     }
     let opts = LoopOpts {
-        extra: None,
+        extra,
         tool_filter,
         classify_error: None,
+        temperature,
         max_tokens,
     };
     let tool_defs = tools::tool_definitions(tool_filter);
@@ -679,6 +685,9 @@ async fn run_agent_loop_core(
         }
         if let Some(params) = opts.extra.clone() {
             builder = builder.additional_params(params);
+        }
+        if let Some(t) = opts.temperature {
+            builder = builder.temperature(t);
         }
         if let Some(mt) = opts.max_tokens {
             builder = builder.max_tokens(mt);
@@ -2042,6 +2051,7 @@ mod tests {
             extra: None,
             tool_filter: filter,
             classify_error: None,
+            temperature: None,
             max_tokens: None,
         }
     }

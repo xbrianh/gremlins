@@ -646,7 +646,7 @@ The boss resumes from its child-spawn stage and proceeds with the next iteration
 
 | Variable | Default | Description |
 |---|---|---|
-| `GREMLINS_REASONING_EFFORT` | *(unset)* | Reasoning effort for OpenAI-compatible backends (`openai`, `xai`, `openrouter`). One of `low`, `medium`, `high`. Unset disables reasoning entirely (no token cost). Only takes effect for models that support reasoning. Per-client `reasoning=` params override this default — see [Client specifier syntax](#client-specifier-syntax) below. |
+| `GREMLINS_REASONING_EFFORT` | *(unset)* | Reasoning effort for OpenAI-compatible backends (`openai`, `xai`, `openrouter`, `azure-openai`). One of `low`, `medium`, `high`. Unset disables reasoning entirely (no token cost). Only takes effect for models that support reasoning. Per-client `reasoning=` params override this default — see [Client specifier syntax](#client-specifier-syntax) below. |
 | `GREMLINS_STREAM_IDLE_TIMEOUT` | `600` | Stream idle timeout in seconds for OpenAI-compatible backends. If the model produces no output for this duration the stream is cancelled and the call is retried. |
 | `GREMLINS_AGENT_MAX_TURNS` | `1000` | Maximum agent loop turns. Guards against runaway tool-call loops. Falls back to `GREMLINS_OPENAI_AGENTS_MAX_TURNS` for backward compatibility. |
 | `GREMLINS_LOG_LEVEL` | `INFO` | Log level for gremlins output. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. Also respects `RUST_LOG` (takes precedence when both are set). |
@@ -671,18 +671,42 @@ openrouter:deepseek/deepseek-v4-pro:reasoning=high,thinking=deepseek
 openai:gpt-4o-mini:temperature=0.7
 ```
 
-Params are passed directly to the model backend as additional request
-parameters. The `reasoning` param gets special handling — it is expanded
-into the nested `{"effort": "<value>", "summary": "auto"}` object expected
-by OpenAI-compatible reasoning APIs. All other params are forwarded as
-literal values.
+Params after the second colon are resolved per backend. A key either sets a
+**typed** request field — overriding that backend's default for the key — or
+passes through to `additional_params` unchanged. Knowing which is which matters:
+a typed key parses strictly, so `temperature=hot` fails the client build rather
+than being forwarded as a string.
 
-- A per-client `reasoning=` param overrides `GREMLINS_REASONING_EFFORT` for
-  that client.
+**Typed keys** (accepted value shapes):
+
+| Key | Shape | Backends |
+|---|---|---|
+| `temperature` | `f64` (e.g. `0.7`) | all native backends |
+| `max_tokens` | `u64` (e.g. `4096`) | all native backends |
+| `reasoning` | `low` / `medium` / `high`, expanded to `{"effort": .., "summary": "auto"}` | `openai`, `xai`, `openrouter`, `azure-openai` |
+| `parallel_tool_calls` | `bool` (default `true`) | `openai`, `xai`, `openrouter`, `azure-openai` |
+| `cache_control` | JSON object (default `{"type":"ephemeral"}`; `null` disables) | `anthropic` |
+| `intent` | `edits` / `panel` | `copilot` |
+| `strict_tools` | `bool` | `copilot` |
+| `tool_result_array_content` | `bool` | `copilot` |
+
+`temperature` and `max_tokens` are emitted as typed top-level request fields
+(never into `additional_params`). `max_tokens` defaults to `128_000` on
+`anthropic` and is opt-in elsewhere. `temperature` is opt-in only — it is
+emitted solely from a resolved `temperature`, with no default re-introduced.
+
+**Override precedence:** a client-spec key always wins over any backend or
+harness default for the same key. A default is applied only when the spec omits
+the key. A per-client `reasoning=` param overrides `GREMLINS_REASONING_EFFORT`
+for that client.
+
+**Malformed typed values are a client-build error**, replacing the old lenient
+behavior — for example, an invalid Copilot `intent` no longer silently falls
+back to `Panel`. Unknown keys (e.g. `foo=bar`) pass through to
+`additional_params` with JSON-coerced typing and never displace a default.
+
 - The `cmd` provider does not parse params — the full string after `cmd:` is
   treated as the shell command.
-- Reserved keys `reasoning` and `parallel_tool_calls` are handled by the
-  backend and should not be set directly by the user.
 
 ### Filesystem overrides
 

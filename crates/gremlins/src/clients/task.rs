@@ -175,7 +175,9 @@ pub(crate) fn make_task_runner(
     max_turns: usize,
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    temperature: Option<f64>,
     max_tokens: Option<u64>,
+    extra: Option<serde_json::Value>,
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
@@ -191,7 +193,9 @@ pub(crate) fn make_task_runner(
         String::new(),
         completion_nudge_budget,
         log_tx,
+        temperature,
         max_tokens,
+        extra,
     )
 }
 
@@ -210,7 +214,9 @@ fn make_task_runner_at_depth(
     id_chain: String,
     completion_nudge_budget: usize,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    temperature: Option<f64>,
     max_tokens: Option<u64>,
+    extra: Option<serde_json::Value>,
 ) -> tools::TaskFn {
     Arc::new(
         move |kind: TaskKind, task: String, parent_history: Option<Vec<Message>>| {
@@ -221,6 +227,7 @@ fn make_task_runner_at_depth(
             let mut child_ctx = ctx.clone();
             let prefix = prefix.clone();
             let id_chain = id_chain.clone();
+            let extra = extra.clone();
 
             let task_cwd = ctx.cwd.clone();
             let log_tx = log_tx.clone();
@@ -273,7 +280,9 @@ fn make_task_runner_at_depth(
                     new_chain,
                     completion_nudge_budget,
                     log_tx.clone(),
+                    temperature,
                     max_tokens,
+                    extra.clone(),
                 ));
 
                 let work_root = tools::worktree_root(task_cwd.as_deref());
@@ -306,7 +315,9 @@ fn make_task_runner_at_depth(
                     max_turns,
                     completion_nudge_budget,
                     log_tx.clone(),
+                    temperature,
                     max_tokens,
+                    extra.clone(),
                     prepopulated_messages,
                 )
                 .await;
@@ -480,6 +491,8 @@ mod tests {
             0,
             None,
             None,
+            None,
+            None,
         );
 
         // First invocation: depth 0 < 3, should succeed.
@@ -545,6 +558,8 @@ mod tests {
             0,
             None,
             None,
+            None,
+            None,
         );
 
         let parent_history = vec![Message::user("earlier parent turn".to_string())];
@@ -592,6 +607,8 @@ mod tests {
             0,
             None,
             None,
+            None,
+            None,
         );
 
         let blocked = runner(TaskKind::Scout, "too deep".into(), None).await;
@@ -628,6 +645,8 @@ mod tests {
             5.0,
             10,
             0,
+            None,
+            None,
             None,
             None,
         );
@@ -671,6 +690,8 @@ mod tests {
             5.0,
             10,
             0,
+            None,
+            None,
             None,
             None,
         );
@@ -729,6 +750,8 @@ mod tests {
             0.2,
             10,
             0,
+            None,
+            None,
             None,
             None,
         );
@@ -828,6 +851,8 @@ mod tests {
                 10,
                 0,
                 Some(log_tx),
+                None,
+                None,
                 None,
             );
             (runner, log_rx)

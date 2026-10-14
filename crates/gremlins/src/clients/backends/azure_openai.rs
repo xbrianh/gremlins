@@ -16,6 +16,7 @@ use crate::clients::azure_openai_responses_http::AzureResponsesHttpClient;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::openai_protocol;
+use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::token_provider::TokenProvider;
 use crate::clients::config::ProviderAuth;
@@ -45,7 +46,7 @@ struct AzureOpenAiRunState {
     client_state: AzureOpenAiClientState,
     model: String,
     tool_filter: Option<Vec<String>>,
-    client_params: HashMap<String, String>,
+    resolved: ResolvedParams,
     last_ctx: Mutex<Option<RunContext>>,
     cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
     next_id: AtomicU64,
@@ -54,7 +55,7 @@ struct AzureOpenAiRunState {
 
 impl AzureOpenAiRunState {
     fn extra_params(&self) -> Option<serde_json::Value> {
-        openai_protocol::build_extra_params(&self.client_params)
+        self.resolved.additional_value()
     }
 
     fn effective_model(&self, override_model: Option<&str>) -> String {
@@ -131,7 +132,8 @@ impl AzureOpenAiRunState {
                         extra: self.extra_params(),
                         tool_filter: self.tool_filter.as_deref(),
                         classify_error: Some(default_classify as ErrorClassifier),
-                        max_tokens: None,
+                        temperature: self.resolved.temperature,
+                        max_tokens: self.resolved.max_tokens,
                     },
                     interactive,
                 )
@@ -173,7 +175,8 @@ impl AzureOpenAiRunState {
                             extra: self.extra_params(),
                             tool_filter: self.tool_filter.as_deref(),
                             classify_error: Some(default_classify as ErrorClassifier),
-                            max_tokens: None,
+                            temperature: self.resolved.temperature,
+                            max_tokens: self.resolved.max_tokens,
                         },
                         interactive,
                     )
@@ -261,7 +264,7 @@ impl AzureOpenAiBackend {
         };
 
         let tool_filter = openai_protocol::tool_filter(native_block);
-        let client_params = openai_protocol::string_map(extra_params);
+        let resolved = Self::resolve_params(extra_params)?;
 
         let http_client = DynHttpClient::new(ReqwestClient::default());
 
@@ -333,7 +336,7 @@ impl AzureOpenAiBackend {
                 client_state,
                 model,
                 tool_filter,
-                client_params,
+                resolved,
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
@@ -425,6 +428,10 @@ impl Backend for AzureOpenAiBackend {
 
     fn total_cost_usd(&self) -> Option<f64> {
         None
+    }
+
+    fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
+        openai_protocol::resolve_openai_protocol("azure-openai", raw)
     }
 }
 
@@ -665,7 +672,7 @@ mod tests {
         extra.insert("max_tokens".into(), "1024".into());
         extra.insert("temperature".into(), "0.7".into());
 
-        let client_params = openai_protocol::string_map(&extra);
+        let resolved = AzureOpenAiBackend::resolve_params(&extra).unwrap();
         let state = AzureOpenAiRunState {
             client_state: AzureOpenAiClientState::Static(Box::new(
                 OpenAIConfig::with_key(&AZURE, "fake-key")
@@ -676,16 +683,20 @@ mod tests {
             )),
             model: "gpt-4o".into(),
             tool_filter: None,
-            client_params,
+            resolved,
             last_ctx: Mutex::new(None),
             cancels: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             log_label: "test".into(),
         };
 
+        assert_eq!(state.resolved.max_tokens, Some(1024));
+        assert_eq!(state.resolved.temperature, Some(0.7));
+        // Typed fields must not leak into additional_params.
         let obj = state.extra_params().expect("extra_params should be Some");
-        assert_eq!(obj["max_tokens"], 1024);
-        assert_eq!(obj["temperature"], 0.7);
+        assert!(obj.get("max_tokens").is_none());
+        assert!(obj.get("temperature").is_none());
+        assert_eq!(obj["parallel_tool_calls"], true);
     }
 
     #[test]
@@ -705,7 +716,7 @@ mod tests {
                 client_state: AzureOpenAiClientState::Static(Box::new(client)),
                 model: "gpt-4o".into(),
                 tool_filter: None,
-                client_params: HashMap::new(),
+                resolved: ResolvedParams::default(),
                 last_ctx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(1),
