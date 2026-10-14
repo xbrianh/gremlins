@@ -55,7 +55,6 @@ pub struct ExecPrepared {
     pub cmds: Vec<String>,
     pub cwd: PathBuf,
     pub artifact_dir: PathBuf,
-    pub state_dir: PathBuf,
     pub timeout: Option<f64>,
     /// The environment the commands run under.
     ///
@@ -196,7 +195,6 @@ pub async fn prepare_exec(
         cmds,
         cwd: PathBuf::new(),
         artifact_dir: PathBuf::new(),
-        state_dir: PathBuf::new(),
         timeout,
         env: HashMap::new(),
         base_env: HashMap::new(),
@@ -475,7 +473,6 @@ mod tests {
             cmds: vec!["printf '%s' \"${GREMLINS_PR_TITLE}\"".to_string()],
             cwd: tmp.path().to_path_buf(),
             artifact_dir: artifact_dir.clone(),
-            state_dir: state_dir.clone(),
             timeout: Some(5.0),
             env: HashMap::new(),
             base_env: HashMap::new(),
@@ -505,7 +502,6 @@ mod tests {
             cmds: cmds.into_iter().map(|s| s.to_string()).collect(),
             cwd: std::env::current_dir().unwrap(),
             artifact_dir: state_dir.join("artifacts"),
-            state_dir: state_dir.to_path_buf(),
             timeout: Some(5.0),
             env: HashMap::new(),
             base_env: HashMap::new(),

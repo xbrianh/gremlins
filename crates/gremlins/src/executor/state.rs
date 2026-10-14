@@ -70,6 +70,8 @@ impl<T: std::io::Read + std::io::Write + std::io::Seek + Send> StateBlob for T {
 /// How to open a named blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobMode {
+    /// Open an existing file for reading only. Fails if absent.
+    Read,
     /// Open an existing file for reading and writing. Fails if absent.
     #[allow(dead_code)]
     ReadWrite,
@@ -477,6 +479,15 @@ impl FileSystemStateStore {
         }
     }
 
+    /// The store's root (state) directory.
+    ///
+    /// Persistent stores live under `config::state_root()`; ephemeral stores
+    /// live in a temp directory. This is the concrete accessor used by
+    /// display-only paths — it is not part of the `StateStore` trait.
+    pub fn root_dir(&self) -> &Path {
+        self.root.path()
+    }
+
     // --- registry helpers ---
 
     /// The artifact storage directory, derived from `state_dir`.
@@ -876,6 +887,9 @@ impl StateStore for FileSystemStateStore {
         }
         let mut opts = std::fs::OpenOptions::new();
         match mode {
+            BlobMode::Read => {
+                opts.read(true);
+            }
             BlobMode::ReadWrite => {
                 opts.read(true).write(true).create(false);
             }

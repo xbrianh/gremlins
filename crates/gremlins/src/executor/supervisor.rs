@@ -23,7 +23,7 @@ use crate::clients::interactive::{
 use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
-use crate::executor::state;
+use crate::executor::state::{self, FileSystemStateStore};
 
 // ---------------------------------------------------------------------------
 // SharedWriter — Arc<Mutex<WriteHalf>> for concurrent socket writes
@@ -644,10 +644,10 @@ async fn handle_launch(
     ));
     gremlin.interactive_session = Some(interactive_session);
 
-    // Spawn the log writer: reads from the channel, appends to $state_dir/log,
-    // and broadcasts to live subscribers.
-    let log_path = gremlin.state.state_dir().join("log");
-    spawn_log_writer(log_rx, log_path, log_broadcast.clone(), None);
+    // Spawn the log writer: reads from the channel, appends to the state
+    // store's `log` blob, and broadcasts to live subscribers.
+    let store = gremlin.state.store_handle();
+    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), None);
 
     let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
@@ -668,9 +668,7 @@ async fn handle_launch(
     // to the backend.
     gremlin.cancel_token = Some(cancel_token.clone());
 
-    // Capture state store handle and scratch_dir before gremlin is moved into the
-    // spawned task.
-    let store = gremlin.state.store_handle();
+    // Capture the scratch_dir before gremlin is moved into the spawned task.
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
     // Spawn before inserting into run_map so the JoinHandle is available
@@ -896,8 +894,8 @@ async fn handle_resume(
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.
-    let log_path = gremlin.state.state_dir().join("log");
-    spawn_log_writer(log_rx, log_path, log_broadcast.clone(), None);
+    let store = gremlin.state.store_handle();
+    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), None);
 
     let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
@@ -916,9 +914,7 @@ async fn handle_resume(
 
     gremlin.cancel_token = Some(cancel_token.clone());
 
-    // Capture state store handle and scratch_dir before gremlin is moved into the
-    // spawned task.
-    let store = gremlin.state.store_handle();
+    // Capture the scratch_dir before gremlin is moved into the spawned task.
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
     let definition_name = gremlin.state.read_str("kind");
 
@@ -1109,7 +1105,7 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
             return error_response(&format!("gremlin {id}: state is empty"));
         }
 
-        let state_dir = store.state_dir();
+        let state_dir = live_state_dir(&store, id);
         let status = "running".to_string();
         let stage = tree
             .get("stage")
@@ -1206,8 +1202,8 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
         "definition": definition_display_name(&gremlin),
         "project_root": gremlin.project_root.to_string_lossy(),
         "workdir": gremlin.workdir.as_ref().map(|w| w.path().to_string_lossy().to_string()).unwrap_or_default(),
-        "state_dir": gremlin.state.state_dir().to_string_lossy(),
-        "artifact_dir": gremlin.state.artifact_dir().to_string_lossy(),
+        "state_dir": state_dir.to_string_lossy(),
+        "artifact_dir": state_dir.join("artifacts").to_string_lossy(),
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
@@ -1247,7 +1243,7 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
             return error_response(&format!("gremlin {id}: state is empty"));
         }
 
-        let state_dir = store.state_dir();
+        let state_dir = live_state_dir(&store, id);
         let status = "running".to_string();
         let stage = tree
             .get("stage")
@@ -1304,17 +1300,10 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        // Read bail_info from the state directory.
-        let bail_info = tree
-            .get("attempt")
-            .and_then(|v| v.as_str())
-            .filter(|a| !a.is_empty())
-            .and_then(|attempt| {
-                let bail_path = state_dir.join(format!("bail_{attempt}.json"));
-                std::fs::read_to_string(bail_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<Map<String, Value>>(&s).ok())
-            })
+        // Read bail info from the store rather than joining a path onto a
+        // resolved state directory.
+        let bail_info = store
+            .stage_error()
             .map(Value::Object)
             .unwrap_or(Value::Null);
 
@@ -1361,10 +1350,10 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         "definition": definition_display_name(&gremlin),
         "project_root": gremlin.project_root.to_string_lossy(),
         "workdir": gremlin.workdir.as_ref().map(|w| w.path().to_string_lossy().to_string()).unwrap_or_default(),
-        "state_dir": gremlin.state.state_dir().to_string_lossy(),
-        "artifact_dir": gremlin.state.artifact_dir().to_string_lossy(),
-        "scratch_dir": gremlin.scratch_dir.path().to_string_lossy(),
-        "log_file": gremlin.state.state_dir().join("log").to_string_lossy(),
+        "state_dir": state_dir.to_string_lossy(),
+        "artifact_dir": state_dir.join("artifacts").to_string_lossy(),
+        "scratch_dir": config::scratch_root(Some(id)).to_string_lossy(),
+        "log_file": state_dir.join("log").to_string_lossy(),
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
@@ -1461,20 +1450,25 @@ async fn handle_log(
         return;
     }
 
-    // Resolve the state directory: for live gremlins (including ephemeral),
-    // use the store handle stored in the RunHandle; otherwise fall back to
-    // config::state_root().
-    let (state_dir, unknown) = {
+    // Resolve the log source: for live gremlins (including ephemeral) the
+    // historical log is read through the store's `log` blob; otherwise fall
+    // back to `config::state_root().join(id).join("log")`.
+    enum LogSource {
+        Store(Arc<dyn state::StateStore + Send + Sync>),
+        Path(PathBuf),
+    }
+
+    let (source, unknown) = {
         let map = get_run_map().lock().unwrap();
         if let Some(handle) = map.get(id) {
-            (handle.store.state_dir().to_path_buf(), false)
+            (LogSource::Store(handle.store.clone()), false)
         } else {
             let sd = config::state_root().join(id);
             let sf = sd.join("state.json");
             if !sd.is_dir() || !sf.is_file() {
-                (PathBuf::new(), true)
+                (LogSource::Path(PathBuf::new()), true)
             } else {
-                (sd, false)
+                (LogSource::Path(sd), false)
             }
         }
     };
@@ -1484,8 +1478,6 @@ async fn handle_log(
         let _ = writer.write_json_line(&resp).await;
         return;
     }
-
-    let log_path = state_dir.join("log");
 
     let follow = request
         .get("follow")
@@ -1504,20 +1496,35 @@ async fn handle_log(
         None
     };
 
-    // 1. Send historical lines from the log file.
+    // 1. Send historical lines from the log.
+    let content = match source {
+        LogSource::Store(store) => match store.open("log", state::BlobMode::Read) {
+            Ok(mut blob) => tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                let mut s = String::new();
+                blob.read_to_string(&mut s).ok();
+                s
+            })
+            .await
+            .unwrap_or_default(),
+            Err(_) => String::new(),
+        },
+        LogSource::Path(state_dir) => tokio::fs::read_to_string(state_dir.join("log"))
+            .await
+            .unwrap_or_default(),
+    };
+
     let mut offset: u64 = 0;
-    if let Ok(content) = tokio::fs::read_to_string(&log_path).await {
-        for line in content.lines() {
-            let payload = serde_json::json!({
-                "type": "log_line",
-                "line": line,
-                "offset": offset,
-            });
-            if writer.write_json_line(&payload).await.is_err() {
-                return;
-            }
-            offset += 1;
+    for line in content.lines() {
+        let payload = serde_json::json!({
+            "type": "log_line",
+            "line": line,
+            "offset": offset,
+        });
+        if writer.write_json_line(&payload).await.is_err() {
+            return;
         }
+        offset += 1;
     }
 
     // 2. If follow, drain duplicates (lines broadcast during file replay),
@@ -1593,46 +1600,63 @@ async fn handle_debug(
         return;
     }
 
-    // Resolve the state directory: for live gremlins (including ephemeral),
-    // use the store handle stored in the RunHandle; otherwise fall back to
-    // config::state_root().
-    let (state_dir, unknown) = {
+    // Resolve a StateStore: for live gremlins (including ephemeral) use the
+    // handle stored in the RunHandle; otherwise open the persistent store
+    // under `config::state_root()`. The non-live open happens outside the
+    // run_map lock so disk IO never stalls other supervisor lookups, and its
+    // error is reported rather than folded into "unknown".
+    enum StoreSource {
+        Live(Arc<dyn state::StateStore + Send + Sync>),
+        PendingPersistent,
+        Unknown,
+    }
+
+    let source = {
         let map = get_run_map().lock().unwrap();
-        if let Some(handle) = map.get(id) {
-            (handle.store.state_dir().to_path_buf(), false)
-        } else {
-            let sd = config::state_root().join(id);
-            let sf = sd.join("state.json");
-            if !sd.is_dir() || !sf.is_file() {
-                (PathBuf::new(), true)
-            } else {
-                (sd, false)
+        match map.get(id) {
+            Some(handle) => StoreSource::Live(handle.store.clone()),
+            None => {
+                let sd = config::state_root().join(id);
+                let sf = sd.join("state.json");
+                if !sd.is_dir() || !sf.is_file() {
+                    StoreSource::Unknown
+                } else {
+                    StoreSource::PendingPersistent
+                }
             }
         }
     };
 
-    if unknown {
-        log::debug!("handle_debug: unknown gremlin {id:?}");
-        let resp = error_response(&format!("unknown gremlin {id:?}"));
-        let _ = writer.write_json_line(&resp).await;
-        return;
-    }
+    let store = match source {
+        StoreSource::Live(store) => store,
+        StoreSource::Unknown => {
+            log::debug!("handle_debug: unknown gremlin {id:?}");
+            let resp = error_response(&format!("unknown gremlin {id:?}"));
+            let _ = writer.write_json_line(&resp).await;
+            return;
+        }
+        StoreSource::PendingPersistent => match state::StateData::open(id) {
+            Ok(sd) => sd.store_handle(),
+            Err(e) => {
+                log::debug!("handle_debug: failed to open state store for {id:?}: {e}");
+                let resp = error_response(&format!("gremlin {id}: failed to open state: {e}"));
+                let _ = writer.write_json_line(&resp).await;
+                return;
+            }
+        },
+    };
 
     // Validate that the gremlin is currently in an agent stage.
-    // Read the current stage name from state.json and cross-reference
-    // with the definition YAML to check its type.
+    // Read the current stage name from the state tree and cross-reference
+    // with the definition snapshot to check its type.
     send_debug_status(writer, "checking_stage_type").await;
     {
-        let sf = state_dir.join("state.json");
-        let stage_name = if sf.is_file() {
-            std::fs::read_to_string(&sf)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v.get("stage").and_then(|s| s.as_str()).map(String::from))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let stage_name = store
+            .state_tree()
+            .get("stage")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         if stage_name.is_empty() {
             log::debug!("handle_debug: gremlin {id} has no recorded stage");
@@ -1641,22 +1665,48 @@ async fn handle_debug(
             return;
         }
 
-        let def_path = state_dir.join("definition.yaml");
-        let is_agent = def_path.is_file()
-            && std::fs::read_to_string(&def_path)
-                .ok()
-                .and_then(|s| serde_yaml::from_str::<serde_yaml::Value>(&s).ok())
-                .and_then(|root| {
-                    root.get("stages")
-                        .and_then(|stages| stages.as_sequence())
-                        .map(|seq| {
-                            seq.iter().any(|s| {
-                                s.get("name").and_then(|n| n.as_str()) == Some(&stage_name)
-                                    && s.get("type").and_then(|t| t.as_str()) == Some("agent")
-                            })
-                        })
-                })
-                .unwrap_or(false);
+        let default_client = config::global_config()
+            .ok()
+            .and_then(|c| c.default_client().map(String::from));
+        let store_for_read = Arc::clone(&store);
+        let stage_name_for_def = stage_name.clone();
+        let is_agent = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut blob = match store_for_read.open("definition.yaml", state::BlobMode::Read) {
+                Ok(b) => b,
+                Err(e) => return Err(format!("failed to read definition snapshot: {e}")),
+            };
+            let mut bytes = Vec::new();
+            blob.read_to_end(&mut bytes)
+                .map_err(|e| format!("failed to read definition snapshot: {e}"))?;
+            let def = crate::definition::StaticDefinition::from_expanded_bytes(
+                &bytes,
+                None,
+                default_client.as_deref(),
+            )
+            .map_err(|e| format!("failed to load definition: {e}"))?;
+            Ok(def
+                .stages
+                .iter()
+                .any(|s| s.name() == stage_name_for_def.as_str() && s.stage_type() == "agent"))
+        })
+        .await;
+
+        let is_agent = match is_agent {
+            Ok(Ok(agent)) => agent,
+            Ok(Err(e)) => {
+                log::debug!("handle_debug: gremlin {id}: {e}");
+                let resp = error_response(&format!("gremlin {id}: {e}"));
+                let _ = writer.write_json_line(&resp).await;
+                return;
+            }
+            Err(e) => {
+                log::debug!("handle_debug: gremlin {id}: blocking task failed: {e}");
+                let resp = error_response(&format!("gremlin {id}: {e}"));
+                let _ = writer.write_json_line(&resp).await;
+                return;
+            }
+        };
 
         if !is_agent {
             log::debug!(
@@ -2498,8 +2548,8 @@ async fn register_chat_gremlin(mut gremlin: Gremlin) {
     let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
     let (log_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.log_tx = Some(log_tx.clone());
-    let log_path = gremlin.state.state_dir().join("log");
-    spawn_log_writer(log_rx, log_path, log_broadcast.clone(), None);
+    let store = gremlin.state.store_handle();
+    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), None);
 
     // Interactive channels so debug can attach to the current stage.
     let channels = InteractiveChannels::new();
@@ -2517,7 +2567,6 @@ async fn register_chat_gremlin(mut gremlin: Gremlin) {
         started_at: state::now_stamp(),
     });
 
-    let store = gremlin.state.store_handle();
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
     let handle = RunHandle {
@@ -2616,8 +2665,6 @@ fn create_chat_gremlin(
         std::io::Write::write_all(&mut blob, &yaml_bytes)
             .map_err(|e| format!("failed to write definition: {e}"))?;
     }
-    let def_path = state.state_dir().join("definition.yaml");
-    let def_path = def_path.canonicalize().unwrap_or(def_path);
 
     // Create empty log file via state blob.
     let _ = state
@@ -2634,7 +2681,7 @@ fn create_chat_gremlin(
 
     Ok(Gremlin {
         id: gremlin_id,
-        definition_path: Some(def_path),
+        definition_path: None,
         client_override: None,
         definition: Box::new(definition.clone()),
         workdir: None,
@@ -2673,28 +2720,40 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
 }
 
 /// Spawn a background task that reads from the log channel, appends each
-/// line to `log_path`, and broadcasts it to live subscribers.
+/// line to the `"log"` state blob, and broadcasts it to live subscribers.
 fn spawn_log_writer(
     mut log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-    log_path: PathBuf,
+    store: Arc<dyn state::StateStore + Send + Sync>,
     broadcast_tx: broadcast::Sender<String>,
     relay: Option<LogRelay>,
 ) {
     tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
+        let file: Option<Arc<std::sync::Mutex<Box<dyn state::StateBlob>>>> =
+            match store.open("log", state::BlobMode::Append) {
+                Ok(blob) => Some(Arc::new(std::sync::Mutex::new(blob))),
+                Err(e) => {
+                    log::error!("log writer: failed to open log blob: {e}");
+                    None
+                }
+            };
 
-        let mut file = match tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .await
-        {
-            Ok(f) => Some(f),
-            Err(e) => {
-                log::error!("log writer: failed to open {}: {e}", log_path.display());
-                None
-            }
-        };
+        // A single long-lived blocking writer drains a channel of stamped
+        // fragments, so the async task never blocks on the synchronous
+        // `StateBlob` handle and no blocking-pool job is spawned per line.
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let writer = file.map(|file| {
+            tokio::task::spawn_blocking(move || {
+                while let Some(stamped) = write_rx.blocking_recv() {
+                    let mut guard = match file.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return,
+                    };
+                    let _ = guard.write_all(stamped.as_bytes());
+                    let _ = guard.write_all(b"\n");
+                    let _ = guard.flush();
+                }
+            })
+        });
 
         while let Some(line) = log_rx.recv().await {
             let ts = crate::executor::state::now_stamp_millis();
@@ -2703,10 +2762,8 @@ fn spawn_log_writer(
             // embedded newlines (e.g. stage names or error text).
             for part in line.split('\n') {
                 let stamped = format!("{ts} {part}");
-                if let Some(ref mut f) = file {
-                    let _ = f.write_all(stamped.as_bytes()).await;
-                    let _ = f.write_all(b"\n").await;
-                    let _ = f.flush().await;
+                if writer.is_some() {
+                    let _ = write_tx.send(stamped.clone());
                 }
                 // Broadcast to live subscribers — ignore errors (no subscribers).
                 let _ = broadcast_tx.send(stamped);
@@ -2720,6 +2777,18 @@ fn spawn_log_writer(
             }
         }
     });
+}
+
+/// The on-disk state directory for a live gremlin's store. Prefers the
+/// concrete filesystem store's real root (ephemeral runs live in a TempDir
+/// and never appear under `config::state_root()`); falls back to
+/// `config::state_root().join(id)` for persistent runs.
+fn live_state_dir(store: &Arc<dyn state::StateStore + Send + Sync>, id: &str) -> PathBuf {
+    store
+        .as_any()
+        .and_then(|a| a.downcast_ref::<FileSystemStateStore>())
+        .map(|fs| fs.root_dir().to_path_buf())
+        .unwrap_or_else(|| config::state_root().join(id))
 }
 
 /// When the run_map says the gremlin is live, always report "running".
@@ -2857,8 +2926,8 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
     gremlin.interactive_session = Some(interactive_session);
 
     // Spawn the log writer.
-    let log_path = gremlin.state.state_dir().join("log");
-    spawn_log_writer(log_rx, log_path, log_broadcast.clone(), relay);
+    let store = gremlin.state.store_handle();
+    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), relay);
 
     // Reuse the cancel token inherited from the parent via Gremlin::fork;
     // create a fresh one only when there is no parent token.
@@ -2883,9 +2952,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
 
     let id_clone = id.clone();
 
-    // Capture state store handle and scratch_dir before gremlin is moved into the
-    // spawned task.
-    let store = gremlin.state.store_handle();
+    // Capture the scratch_dir before gremlin is moved into the spawned task.
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
     // Spawn before inserting into run_map so the JoinHandle is available

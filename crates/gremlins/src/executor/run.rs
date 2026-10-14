@@ -30,7 +30,7 @@ use crate::executor::gremlin::Gremlin;
 use crate::executor::gremlin::{GremlinConfig, ScratchDir, WorkDir};
 use crate::executor::parallel::run_parallel;
 use crate::executor::state;
-use crate::executor::state::{Checkout, Collision, StateStore};
+use crate::executor::state::{Checkout, Collision, FileSystemStateStore, StateStore};
 use crate::executor::supervisor::get_run_map;
 use crate::executor::vars;
 use crate::executor::RunError;
@@ -41,6 +41,30 @@ fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: String
     if let Some(tx) = tx {
         let _ = tx.send(msg);
     }
+}
+
+/// The on-disk path the agent raw stream is written to.
+///
+/// Routed through the store's blob seam (validating the name and creating the
+/// parent directory) and derived from the concrete filesystem store's root,
+/// preserving the historical `artifacts/` location. Fails — rather than falling
+/// back to `config::state_root()` — when the store is not filesystem-backed or
+/// the blob cannot be opened.
+fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunError> {
+    let store = gremlin.state.store_ref();
+    let fs = store
+        .as_any()
+        .and_then(|a| a.downcast_ref::<FileSystemStateStore>())
+        .ok_or_else(|| {
+            RunError::Message("agent raw stream: store is not filesystem-backed".to_string())
+        })?;
+    let blob_name = format!("artifacts/stream-{name}.jsonl");
+    // Validate the blob name and create its parent directory through the store
+    // seam; the agent loop re-opens the same path for append.
+    store
+        .open(&blob_name, state::BlobMode::Append)
+        .map_err(|e| RunError::Message(format!("agent raw stream: {e}")))?;
+    Ok(fs.root_dir().join(&blob_name))
 }
 
 // ---------------------------------------------------------------------------
@@ -409,12 +433,12 @@ async fn run_agent(
             .model
             .clone()
             .or_else(|| Some(client.model().to_string())),
-        raw_path: Some(
-            gremlin
-                .state
-                .artifact_dir()
-                .join(format!("stream-{}.jsonl", prepared.name)),
-        ),
+        raw_path: Some(agent_raw_stream_path(gremlin, &prepared.name).map_err(|e| {
+            RunError::StageFailed {
+                stage: prepared.name.clone(),
+                message: e.to_string(),
+            }
+        })?),
         capture_events: false,
         on_timeout_prompt: None,
         max_retries: 3,
@@ -699,7 +723,6 @@ async fn run_exec(
 
     prepared.cwd = gremlin.cwd();
     prepared.artifact_dir = artifact_dir;
-    prepared.state_dir = gremlin.state.state_dir().to_path_buf();
     prepared.env = gremlin.env.clone();
     prepared.base_env = gremlin.runtime_config.base_process_env.clone();
     prepared.log_tx = gremlin.runtime_config.log_tx.clone();
