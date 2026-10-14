@@ -604,18 +604,38 @@ fn render_prompt(prompt: &str, rule_width: u16) -> Vec<Line<'static>> {
     let margin_style = Style::default()
         .fg(DEFAULT_THEME.prompt_margin)
         .bg(DEFAULT_THEME.prompt_bg);
-    let lines = markdown::render(prompt, text_style, rule_width);
-    let mut out = Vec::with_capacity(lines.len());
-    for (i, line) in lines.into_iter().enumerate() {
-        let mut spans = Vec::with_capacity(line.spans.len() + 2);
-        spans.push(Span::styled(if i == 0 { "▍" } else { " " }, margin_style));
-        if i == 0 {
-            spans.push(Span::styled("» ", marker_style));
-        } else {
-            spans.push(Span::styled("  ", marker_style));
+    // Render each physical line independently so a user-entered `\n` is
+    // preserved as a hard break. The markdown renderer would otherwise
+    // collapse a bare newline into a `SoftBreak` (a space), silently
+    // flattening multi-line prompts. Inline markdown still applies per line.
+    let mut out = Vec::new();
+    let mut first = true;
+    for raw_line in prompt.split('\n') {
+        let lines = markdown::render(raw_line, text_style, rule_width);
+        if lines.is_empty() {
+            // Preserve blank lines as empty lines, but keep first-line
+            // prompt styling when the prompt starts with a newline.
+            let margin = if first { "▍" } else { " " };
+            let marker = if first { "» " } else { "  " };
+            out.push(Line::from(vec![
+                Span::styled(margin, margin_style),
+                Span::styled(marker, marker_style),
+            ]));
+            first = false;
+            continue;
         }
-        spans.extend(line.spans);
-        out.push(Line::from(spans));
+        for line in lines {
+            let mut spans = Vec::with_capacity(line.spans.len() + 2);
+            spans.push(Span::styled(if first { "▍" } else { " " }, margin_style));
+            if first {
+                spans.push(Span::styled("» ", marker_style));
+            } else {
+                spans.push(Span::styled("  ", marker_style));
+            }
+            spans.extend(line.spans);
+            out.push(Line::from(spans));
+            first = false;
+        }
     }
     out
 }
@@ -702,62 +722,6 @@ fn split_overflow(
     (dropped, overflow_lines)
 }
 
-/// Recompute a live tail's visible wrapped-row count at the current width.
-///
-/// The widget stores the number of wrapped rows that survived the previous
-/// trim. That count is width-independent, so a resize keeps the same number of
-/// rows visible and clamps only when the new width can no longer produce that
-/// many rows. Storing the visible count directly — instead of deriving it from
-/// the current total — means rows appended after the previous trim do not
-/// inflate the preserved window.
-fn live_tail_visible_rows(
-    lines: &[Line<'static>],
-    visible_rows: Option<usize>,
-    width: u16,
-) -> usize {
-    if lines.is_empty() || width == 0 {
-        return 0;
-    }
-
-    match visible_rows {
-        Some(rows) => rows.min(wrapped_height(lines, width)),
-        None => wrapped_height(lines, width),
-    }
-}
-
-/// Trim a live-tail slice to `available_rows`, wrapping-aware.
-///
-/// Returns `(drop_count, visible_rows)`: the number of leading logical lines
-/// to drop and the number of wrapped rows now kept visible. A logical line is
-/// dropped only after every one of its wrapped rows has been consumed, so a
-/// single over-tall line scrolls off one wrapped row at a time.
-fn live_tail_trim(lines: &[Line<'static>], available_rows: u16, width: u16) -> (usize, usize) {
-    if lines.is_empty() || width == 0 {
-        return (0, 0);
-    }
-
-    let total = wrapped_height(lines, width);
-    let visible_rows = (available_rows as usize).min(total);
-    let scrolled_rows = total - visible_rows;
-
-    let mut drop_count = 0usize;
-    let mut remaining = scrolled_rows;
-    while drop_count < lines.len() {
-        let line_rows = line_wrapped_height(&lines[drop_count], width);
-        if remaining < line_rows {
-            break;
-        }
-        remaining -= line_rows;
-        drop_count += 1;
-    }
-
-    if drop_count == lines.len() {
-        (drop_count, 0)
-    } else {
-        (drop_count, visible_rows)
-    }
-}
-
 /// Paint only the maintained wrapped tail of `lines` into `area`.
 ///
 /// `visible_rows` is the tail window maintained by the widget, recomputed for
@@ -820,9 +784,14 @@ pub struct ReasoningWidget {
     /// Number of completed lines pushed, used to alternate the telemetry
     /// diamond glyph for free streaming motion.
     line_count: usize,
-    /// Wrapped rows kept visible after the last trim; `None` until the first
-    /// trim, when the desired height is the full wrapped content height.
-    visible_rows: Option<usize>,
+    /// Wrapped rows scrolled off the top of the current remaining live tail.
+    /// This is measured against `last_width`, and only ever moves forward
+    /// within a turn (allocation or width changes never reduce the hidden
+    /// head window).
+    scrolled: Cell<usize>,
+    /// Width `scrolled` is expressed in. A width change re-anchors the
+    /// visible tail at the same number of visible rows before updating this.
+    last_width: Cell<u16>,
 }
 
 impl ReasoningWidget {
@@ -831,7 +800,8 @@ impl ReasoningWidget {
             lines: LineBuffer::new(),
             partial: String::new(),
             line_count: 0,
-            visible_rows: None,
+            scrolled: Cell::new(0),
+            last_width: Cell::new(0),
         }
     }
 
@@ -865,22 +835,156 @@ impl ReasoningWidget {
         self.lines.clear();
         self.partial.clear();
         self.line_count = 0;
-        self.visible_rows = None;
+        self.scrolled.set(0);
+        self.last_width.set(0);
     }
 
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty() && self.partial.is_empty()
     }
 
-    /// Desired height: only the wrapped rows still visible below the scrolled
-    /// head offset (uncapped).
+    /// Re-anchor `scrolled` when the wrap width changes.
+    ///
+    /// `scrolled` is a partial wrapped-row offset into the head line, so the
+    /// same number cannot be reused at a different width. The hidden prefix
+    /// is converted back to a character boundary and re-wrapped at the new
+    /// width, keeping the tail anchored without resurrecting rows that
+    /// scrolled off at the old width or hiding rows that only wrap after the
+    /// resize.
+    fn normalize_scroll(&self, width: u16) {
+        if width == 0 {
+            return;
+        }
+        let last = self.last_width.get();
+        if last == 0 {
+            self.last_width.set(width);
+            return;
+        }
+        if last == width {
+            return;
+        }
+
+        let scrolled = self.scrolled.get();
+        if scrolled == 0 {
+            self.last_width.set(width);
+            return;
+        }
+
+        // Re-anchor the already-hidden prefix of the head line at the new
+        // width. `scrolled` is a partial wrapped-row offset into the head
+        // line at `last_width`; converting that offset back into a character
+        // prefix and re-wrapping it preserves monotonicity. The old
+        // visible-row-count approach could resurrect hidden characters on a
+        // wider wrap or permanently hide newly wrapped rows on a narrower
+        // one.
+        let rendered = self.rendered_lines();
+        let Some(head) = rendered.first() else {
+            self.scrolled.set(0);
+            self.last_width.set(width);
+            return;
+        };
+        self.scrolled
+            .set(Self::reanchor_scrolled(head, scrolled, last, width));
+        self.last_width.set(width);
+    }
+
+    /// Re-anchor a partial wrapped-row offset across a width change.
+    ///
+    /// `scrolled` counts wrapped rows hidden above the visible window within
+    /// `line` at `old_width`. To preserve monotonicity, convert that row
+    /// boundary back to the character prefix ending at the start of the
+    /// first visible wrapped row, then return how many wrapped rows that
+    /// prefix occupies at `new_width`.
+    fn reanchor_scrolled(
+        line: &Line<'static>,
+        scrolled: usize,
+        old_width: u16,
+        new_width: u16,
+    ) -> usize {
+        if scrolled == 0 || old_width == 0 || new_width == 0 {
+            return 0;
+        }
+        let content = line.to_string();
+        if content.is_empty() {
+            return 0;
+        }
+
+        let mut boundary = 0usize;
+        for (idx, _) in content.char_indices() {
+            if idx == 0 {
+                continue;
+            }
+            let prefix = &content[..idx];
+            let prefix_rows =
+                line_wrapped_height(&Line::from(Span::raw(prefix.to_string())), old_width);
+            if prefix_rows == scrolled {
+                boundary = idx;
+            } else if prefix_rows > scrolled {
+                break;
+            }
+        }
+
+        if boundary == 0 {
+            return 0;
+        }
+        let prefix = &content[..boundary];
+        line_wrapped_height(&Line::from(Span::raw(prefix.to_string())), new_width)
+    }
+
+    /// Advance the scrolled offset and drop leading logical lines that have
+    /// been completely consumed.
+    ///
+    /// `hidden` is the total number of wrapped rows to hide at the top of
+    /// `rendered`. The final logical line is never dropped: a single
+    /// over-tall line scrolls off one wrapped row at a time instead of
+    /// vanishing. Returns the scrolled offset remaining on the new head line.
+    fn consume_head(&mut self, rendered: &[Line<'static>], mut hidden: usize, width: u16) -> usize {
+        if rendered.is_empty() {
+            return 0;
+        }
+
+        let mut drop_count = 0usize;
+        while drop_count + 1 < rendered.len() {
+            let line_rows = line_wrapped_height(&rendered[drop_count], width);
+            if hidden < line_rows {
+                break;
+            }
+            hidden -= line_rows;
+            drop_count += 1;
+        }
+
+        // Never consume the final line entirely: at least its last wrapped
+        // row must stay visible. This clamp is only valid when the head
+        // remaining after the loop *is* the final line; applying it to an
+        // earlier head line would force the offset back to zero and
+        // resurrect rows that had already scrolled off.
+        if drop_count + 1 >= rendered.len() {
+            if let Some(last) = rendered.last() {
+                let rows = line_wrapped_height(last, width);
+                hidden = hidden.min(rows.saturating_sub(1));
+            }
+        }
+
+        let drop_from_buffer = drop_count.min(self.lines.len());
+        self.lines.drain_head(drop_from_buffer);
+        if drop_count > drop_from_buffer {
+            self.partial.clear();
+        }
+        hidden
+    }
+
+    /// Desired height: the full wrapped height of the remaining live tail
+    /// minus the wrapped rows that have already scrolled off the top.
     fn desired_rows(&self, width: u16) -> u16 {
         if self.is_empty() || width == 0 {
             return 0;
         }
+        self.normalize_scroll(width);
         let rendered = self.rendered_lines();
-        let visible_rows = live_tail_visible_rows(&rendered, self.visible_rows, width);
-        visible_rows.min(u16::MAX as usize) as u16
+        let total = wrapped_height(&rendered, width);
+        total
+            .saturating_sub(self.scrolled.get())
+            .min(u16::MAX as usize) as u16
     }
 
     fn rendered_lines(&self) -> Vec<Line<'static>> {
@@ -929,31 +1033,39 @@ impl LiveAreaWidget for ReasoningWidget {
 
     fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
         // Keep the visible tail; the head is discarded, never committed to
-        // terminal scrollback. A zero-width viewport is transient, so defer
-        // trimming rather than dropping every logical line.
-        if width == 0 {
+        // terminal scrollback. Zero-area viewports are transient, so defer
+        // trimming rather than dropping content that had no chance to paint.
+        if width == 0 || available_rows == 0 {
             return Vec::new();
         }
 
+        self.normalize_scroll(width);
         let rendered = self.rendered_lines();
-        let (drop_count, visible_rows) = live_tail_trim(&rendered, available_rows, width);
-
-        if drop_count > 0 {
-            // Partial lines are always at the tail, so only buffer lines are
-            // dropped until the drop window reaches past the buffer.
-            let drop_from_buffer = drop_count.min(self.lines.len());
-            self.lines.drain_head(drop_from_buffer);
-            if drop_count > drop_from_buffer {
-                self.partial.clear();
-            }
+        let total = wrapped_height(&rendered, width);
+        let visible = total.saturating_sub(self.scrolled.get());
+        let excess = visible.saturating_sub(available_rows as usize);
+        if excess == 0 {
+            return Vec::new();
         }
-        self.visible_rows = Some(visible_rows);
+
+        // Advance the scrolled offset by exactly the overflow amount. The
+        // helper drains any leading logical lines whose wrapped rows have
+        // now been fully consumed, including treating the trailing partial
+        // as a final line that is never dropped outright.
+        let next_scrolled = self.consume_head(&rendered, self.scrolled.get() + excess, width);
+        self.scrolled.set(next_scrolled);
+        self.last_width.set(width);
         Vec::new()
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        if area.width == 0 {
+            return;
+        }
+        self.normalize_scroll(area.width);
         let lines = self.rendered_lines();
-        let visible_rows = live_tail_visible_rows(&lines, self.visible_rows, area.width);
+        let total = wrapped_height(&lines, area.width);
+        let visible_rows = total.saturating_sub(self.scrolled.get());
         render_wrapped_tail(&lines, area, buf, visible_rows);
     }
 }
@@ -1111,45 +1223,59 @@ impl InputBarWidget {
     /// The wrapped rows of the input text (prompt + text + optional preview)
     /// at `width`, uncapped.
     pub fn wrapped_rows(&self, width: u16, input: &str, preview: Option<&str>) -> u16 {
-        let text = Self::preview_line(Self::full_line(input, width), preview, width);
-        (wrapped_height(&[text], width).max(1).min(u16::MAX as usize)) as u16
+        let lines = Self::preview_lines(Self::full_lines(input), preview);
+        (wrapped_height(&lines, width).max(1).min(u16::MAX as usize)) as u16
     }
 
-    /// Build the full styled line: prompt + input text, or just the prompt
-    /// when the input is empty.
-    fn full_line(input: &str, _width: u16) -> Line<'static> {
+    /// Build the styled logical lines: the prompt chevron on the first line,
+    /// with each `'\n'` in the input producing a hard line break and
+    /// continuation lines indented two cells to align past the chevron.
+    fn full_lines(input: &str) -> Vec<Line<'static>> {
         if input.is_empty() {
-            return Line::from(vec![Span::styled(
+            return vec![Line::from(vec![Span::styled(
                 format!("{} ", glyph::CHEVRON),
                 Style::default().fg(DEFAULT_THEME.accent_primary),
-            )]);
+            )])];
         }
-        Line::from(vec![
-            Span::styled(
-                format!("{} ", glyph::CHEVRON),
-                Style::default().fg(DEFAULT_THEME.accent_primary),
-            ),
-            Span::raw(input.to_string()),
-        ])
+        input
+            .split('\n')
+            .enumerate()
+            .map(|(i, part)| {
+                if i == 0 {
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{} ", glyph::CHEVRON),
+                            Style::default().fg(DEFAULT_THEME.accent_primary),
+                        ),
+                        Span::raw(part.to_string()),
+                    ])
+                } else {
+                    Line::from(vec![Span::raw("  "), Span::raw(part.to_string())])
+                }
+            })
+            .collect()
     }
 
-    /// Extend the real input line with a dimmed inline preview suffix.
+    /// Extend the final logical line with a dimmed inline preview suffix.
     ///
     /// The preview is paint-only: it never changes the buffer, cursor, or
     /// wrapping measurements beyond what the full candidate path would
-    /// occupy.
-    fn preview_line(base: Line<'static>, preview: Option<&str>, _width: u16) -> Line<'static> {
+    /// occupy. It stays on the last logical line and is never split or
+    /// duplicated across lines.
+    fn preview_lines(mut lines: Vec<Line<'static>>, preview: Option<&str>) -> Vec<Line<'static>> {
         let Some(preview) = preview.filter(|p| !p.is_empty()) else {
-            return base;
+            return lines;
         };
-        let mut spans = base.spans;
-        spans.push(Span::styled(
+        let last = lines
+            .last_mut()
+            .expect("full_lines always yields at least one line");
+        last.spans.push(Span::styled(
             preview.to_string(),
             Style::default()
                 .fg(DEFAULT_THEME.subtle)
                 .add_modifier(Modifier::DIM),
         ));
-        Line::from(spans)
+        lines
     }
 
     /// Compute the cursor's (row, column) within the wrapped view.
@@ -1179,17 +1305,14 @@ impl InputBarWidget {
             .chars()
             .next()
             .expect("cursor < input.len()");
-        let len = ch.len_utf8();
-
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Self::prompt_span());
-        if cursor > 0 {
-            spans.push(Span::raw(input[..cursor].to_string()));
+        // A cursor parked on a `'\n'` has no visible cell of its own: it sits
+        // at the end of the logical line that the newline terminates.
+        if ch == '\n' {
+            return Self::end_of_text_position(&input[..cursor], width);
         }
-        spans.push(Span::styled(ch.to_string(), Self::marker_style()));
-        spans.push(Span::raw(input[cursor + len..].to_string()));
 
-        if let Some(pos) = Self::locate_marker(Line::from(spans), width) {
+        let lines = Self::lines_with_marker(input, cursor);
+        if let Some(pos) = Self::locate_marker(&lines, width) {
             return pos;
         }
 
@@ -1198,18 +1321,51 @@ impl InputBarWidget {
         Self::end_of_text_position(&input[..cursor], width)
     }
 
+    /// Build the logical lines of `input`, styling the grapheme at byte offset
+    /// `marker_at` with the marker style. The offset must lie strictly inside
+    /// a logical line (never on a `'\n'` or past the end).
+    fn lines_with_marker(input: &str, marker_at: usize) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let mut offset = 0usize;
+        for (i, part) in input.split('\n').enumerate() {
+            let line_start = offset;
+            let line_end = offset + part.len();
+            let mut spans = Vec::new();
+            if i == 0 {
+                spans.push(Self::prompt_span());
+            } else {
+                spans.push(Span::raw("  "));
+            }
+            if marker_at >= line_start && marker_at < line_end {
+                let local = marker_at - line_start;
+                let ch = part[local..].chars().next().expect("marker within line");
+                let len = ch.len_utf8();
+                if local > 0 {
+                    spans.push(Span::raw(part[..local].to_string()));
+                }
+                spans.push(Span::styled(ch.to_string(), Self::marker_style()));
+                spans.push(Span::raw(part[local + len..].to_string()));
+            } else {
+                spans.push(Span::raw(part.to_string()));
+            }
+            lines.push(Line::from(spans));
+            offset = line_end + 1;
+        }
+        lines
+    }
+
     /// Cursor position at the very end of `input` (just past the last char).
     fn end_of_text_position(input: &str, width: u16) -> (u16, u16) {
-        let full_rows = wrapped_height(&[Self::full_line(input, width)], width).max(1) as u16;
+        let mut lines = Self::full_lines(input);
+        let full_rows = wrapped_height(&lines, width).max(1) as u16;
 
-        let spans: Vec<Span<'static>> = vec![
-            Self::prompt_span(),
-            Span::raw(input.to_string()),
-            Span::styled("\u{E000}", Self::marker_style()),
-        ];
+        lines
+            .last_mut()
+            .expect("full_lines always yields at least one line")
+            .spans
+            .push(Span::styled("\u{E000}", Self::marker_style()));
 
-        let marker =
-            Self::locate_marker(Line::from(spans), width).unwrap_or((full_rows - 1, width - 1));
+        let marker = Self::locate_marker(&lines, width).unwrap_or((full_rows - 1, width - 1));
 
         // Park at the end of the last row if the sentinel wrapped past the
         // wrapped content (the cursor would otherwise address a row that does
@@ -1234,13 +1390,13 @@ impl InputBarWidget {
         Style::default().fg(DEFAULT_THEME.prompt_marker)
     }
 
-    /// Render `line` at `width` and return the (row, col) of the marker-style
+    /// Render `lines` at `width` and return the (row, col) of the marker-style
     /// cell, if present.
-    fn locate_marker(line: Line<'static>, width: u16) -> Option<(u16, u16)> {
-        let rows = wrapped_height(std::slice::from_ref(&line), width).max(1) as u16;
+    fn locate_marker(lines: &[Line<'static>], width: u16) -> Option<(u16, u16)> {
+        let rows = wrapped_height(lines, width).max(1) as u16;
         let area = Rect::new(0, 0, width, rows);
         let mut buf = Buffer::empty(area);
-        Paragraph::new(line)
+        Paragraph::new(lines.to_vec())
             .wrap(Wrap { trim: false })
             .render(area, &mut buf);
 
@@ -1320,16 +1476,12 @@ impl LiveAreaWidget for InputBarWidget {
             return;
         }
 
-        // Build the full styled line, adding the paint-only preview suffix
-        // immediately after the real input. Measurement now includes the
-        // preview so the extended line is allocated enough rows; cursor
-        // position is still computed from `ctx.input` alone.
-        let preview_line = Self::preview_line(
-            Self::full_line(ctx.input, width),
-            ctx.completion_preview,
-            width,
-        );
-        let paragraph = Paragraph::new(preview_line).wrap(Wrap { trim: false });
+        // Build the styled logical lines, adding the paint-only preview suffix
+        // immediately after the real input on the final line. Measurement now
+        // includes the preview so the extended line is allocated enough rows;
+        // cursor position is still computed from `ctx.input` alone.
+        let lines = Self::preview_lines(Self::full_lines(ctx.input), ctx.completion_preview);
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
 
         // Render into a full-width buffer at the paragraph's natural height,
         // then copy the visible window into `area`.
@@ -1880,6 +2032,33 @@ mod tests {
     }
 
     #[test]
+    fn submit_prompt_preserves_hard_line_breaks() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("one\ntwo".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["▍» one", "   two"]);
+    }
+
+    #[test]
+    fn submit_prompt_preserves_blank_lines() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("one\n\ntwo".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["▍» one", "   ", "   two"]);
+    }
+
+    #[test]
+    fn submit_prompt_leading_newline_keeps_first_line_marker() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("\none".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text, vec!["▍» ", "   one"]);
+    }
+
+    #[test]
     fn clear_current_turn_truncates_to_turn_start() {
         let mut transcript = TranscriptWidget::new();
         transcript.push_transcript_line("prior".to_string());
@@ -2391,7 +2570,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_widget_take_overflow_trims_wrapped_lines_to_cap() {
+    fn reasoning_widget_take_overflow_keeps_wrapped_tail() {
         let mut reasoning = ReasoningWidget::new();
         reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.flush_reasoning();
@@ -2404,6 +2583,101 @@ mod tests {
         // a time instead of dropping the whole logical line.
         assert_eq!(reasoning.rendered_lines().len(), 1);
         assert_eq!(reasoning.desired_rows(10), 2);
+    }
+
+    #[test]
+    fn reasoning_widget_scrolled_tail_grows_with_streaming_chunks() {
+        let mut reasoning = ReasoningWidget::new();
+        for i in 0..5 {
+            reasoning.push_reasoning_text(&format!("reasoning line {i}\n"));
+        }
+        assert_eq!(reasoning.desired_rows(80), 5);
+
+        reasoning.take_overflow(2, 80);
+        assert_eq!(reasoning.desired_rows(80), 2);
+
+        // Chunks that arrive after the trim grow the visible tail instead of
+        // being hidden behind a stale retained-visible-rows window.
+        reasoning.push_reasoning_text("reasoning line 5\n");
+        reasoning.push_reasoning_text("reasoning line 6\n");
+        assert_eq!(reasoning.desired_rows(80), 4);
+    }
+
+    #[test]
+    fn reasoning_widget_taller_allocation_does_not_resurrect_scrolled_rows() {
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
+        reasoning.flush_reasoning();
+
+        reasoning.take_overflow(2, 10);
+        assert_eq!(reasoning.desired_rows(10), 2);
+
+        // A later taller allocation must not bring back the wrapped rows
+        // that already scrolled off the head of this live tail.
+        let overflow = reasoning.take_overflow(4, 10);
+        assert!(overflow.is_empty());
+        assert_eq!(reasoning.desired_rows(10), 2);
+    }
+
+    #[test]
+    fn reasoning_widget_short_trailing_line_does_not_unscroll_head() {
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
+        reasoning.push_reasoning_text("tail\n");
+
+        // The prefixed head line wraps to 4 rows at width 10; the short
+        // trailing line is 1 row. With a 2-row allocation the scrolled
+        // offset must stay 3 (three rows of the head line hidden), not be
+        // clamped against the short tail line back to zero.
+        reasoning.take_overflow(2, 10);
+        assert_eq!(reasoning.desired_rows(10), 2);
+        assert_eq!(reasoning.scrolled.get(), 3);
+    }
+
+    #[test]
+    fn reasoning_widget_wider_viewport_does_not_resurrect_scrolled_head() {
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
+        reasoning.flush_reasoning();
+
+        reasoning.take_overflow(2, 10);
+        assert_eq!(reasoning.desired_rows(10), 2);
+        assert_eq!(reasoning.scrolled.get(), 2);
+
+        // At width 80 the whole line fits on a single row. The two rows
+        // hidden at width 10 correspond to a prefix that still occupies that
+        // one row, so the previously hidden characters must not reappear;
+        // the tail asks for no visible rows until new content arrives.
+        assert_eq!(reasoning.desired_rows(80), 0);
+        assert_eq!(reasoning.scrolled.get(), 1);
+    }
+
+    #[test]
+    fn reasoning_widget_narrower_viewport_does_not_hide_new_wraps() {
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("abcdefghijklmnopqrstuvwxyz\n");
+        reasoning.flush_reasoning();
+
+        assert_eq!(reasoning.desired_rows(10), 4);
+        // Nothing has scrolled off yet, so narrowing to width 5 must ask for
+        // all seven newly wrapped rows rather than clamping to the previous
+        // four visible rows.
+        assert_eq!(reasoning.desired_rows(5), 7);
+    }
+
+    #[test]
+    fn reasoning_widget_clear_resets_scrolled_tail() {
+        let mut reasoning = ReasoningWidget::new();
+        reasoning.push_reasoning_text("first\nsecond\nthird\n");
+        reasoning.take_overflow(1, 80);
+        assert_eq!(reasoning.desired_rows(80), 1);
+
+        reasoning.clear();
+        assert!(reasoning.is_empty());
+        assert_eq!(reasoning.desired_rows(80), 0);
+
+        reasoning.push_reasoning_text("fresh\n");
+        assert_eq!(reasoning.desired_rows(80), 1);
     }
 
     #[test]
@@ -2576,6 +2850,93 @@ mod tests {
         let mut bar = InputBarWidget::new();
         bar.ensure_cursor_visible(0, "", 0, 5);
         bar.ensure_cursor_visible(3, "abc", 0, 5);
+    }
+
+    // ── multi-line input bar ────────────────────────────────────
+
+    #[test]
+    fn full_lines_splits_on_newline_with_chevron_on_first_line_only() {
+        let lines = InputBarWidget::full_lines("one\ntwo\nthree");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].to_string(), "» one");
+        assert_eq!(lines[1].to_string(), "  two");
+        assert_eq!(lines[2].to_string(), "  three");
+    }
+
+    #[test]
+    fn full_lines_empty_input_yields_chevron_only() {
+        let lines = InputBarWidget::full_lines("");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].to_string(), "» ");
+    }
+
+    #[test]
+    fn full_lines_trailing_newline_produces_empty_continuation() {
+        let lines = InputBarWidget::full_lines("a\n");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].to_string(), "» a");
+        assert_eq!(lines[1].to_string(), "  ");
+    }
+
+    #[test]
+    fn wrapped_rows_counts_hard_breaks() {
+        let bar = InputBarWidget::new();
+        // Two logical lines at a wide width → 2 rows.
+        assert_eq!(bar.wrapped_rows(80, "one\ntwo", None), 2);
+        // Three logical lines → 3 rows.
+        assert_eq!(bar.wrapped_rows(80, "one\ntwo\nthree", None), 3);
+    }
+
+    #[test]
+    fn cursor_position_on_second_logical_line() {
+        // "ab\ncd" at width 10: line 0 = "» ab" (4 cells), line 1 = "  cd"
+        // (4 cells). Cursor at end of input (byte 5) → end of line 1.
+        assert_eq!(InputBarWidget::cursor_position(5, "ab\ncd", 10), (1, 4));
+        // Cursor before 'c' (byte 3) → line 1, col 2 (after the 2-cell indent).
+        assert_eq!(InputBarWidget::cursor_position(3, "ab\ncd", 10), (1, 2));
+    }
+
+    #[test]
+    fn cursor_position_on_newline_parks_at_end_of_prior_line() {
+        // Cursor on the '\n' (byte 2 in "ab\ncd") sits at the end of line 0.
+        assert_eq!(InputBarWidget::cursor_position(2, "ab\ncd", 10), (0, 4));
+    }
+
+    #[test]
+    fn cursor_position_word_wraps_within_a_logical_line() {
+        // "hello world\nnext" at width 7. Line 0 wraps: "» hello" / "world".
+        // Line 1 = "  next". Cursor at end of input lands after "next".
+        let input = "hello world\nnext";
+        let end = input.len();
+        // "  next" is 6 cells, so end of line 1 is col 6, on row 2.
+        assert_eq!(InputBarWidget::cursor_position(end, input, 7), (2, 6));
+    }
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_to_later_logical_line() {
+        let mut bar = InputBarWidget::new();
+        // 10 logical lines at width 80 → 10 rows. Cursor at end (row 9) must
+        // scroll within a 5-row window: v_scroll = 9 - 4 = 5.
+        let input = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj";
+        bar.ensure_cursor_visible(input.len(), input, 80, 5);
+        assert_eq!(bar.v_scroll, 5);
+    }
+
+    #[test]
+    fn render_multi_line_chevron_only_on_first_row() {
+        let mut bar = InputBarWidget::new();
+        let area = Rect::new(0, 0, 10, 3);
+        let mut buf = Buffer::empty(area);
+        let ctx = input_ctx("one\ntwo", 7);
+        bar.render(area, &mut buf, &ctx);
+
+        // Row 0 starts with the chevron glyph; row 1 starts with two spaces.
+        let row0: String = (0..area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        let row1: String = (0..area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(row0.starts_with('»'), "row0 = {row0:?}");
+        assert!(row1.starts_with("  "), "row1 = {row1:?}");
+        assert!(row0.contains("one"), "row0 = {row0:?}");
+        assert!(row1.contains("two"), "row1 = {row1:?}");
     }
 
     #[test]
