@@ -171,6 +171,11 @@ pub struct TranscriptWidget {
     turn_start: Option<usize>,
     /// FIFO index where the response region starts.
     response_start: Option<usize>,
+    /// FIFO index where the rendered prompt ends (one past the last prompt
+    /// line). When the response boundary has been clamped by overflow this
+    /// stays behind as a lower bound so tool lines can never be inserted
+    /// into the prompt region.
+    prompt_end: usize,
     /// FIFO index of the turn separator rule (regenerated at `finalize`
     /// width so the glint rule spans the full content width).
     separator_index: Option<usize>,
@@ -195,6 +200,7 @@ impl TranscriptWidget {
             response_accumulator: String::new(),
             turn_start: None,
             response_start: None,
+            prompt_end: 0,
             separator_index: None,
             last_width: 40,
             response_dirty: false,
@@ -245,6 +251,7 @@ impl TranscriptWidget {
                     inserted += 1;
                 }
                 self.turn_start = Some(t + inserted);
+                self.prompt_end += inserted;
                 if let Some(r) = &mut self.response_start {
                     *r += inserted;
                 }
@@ -264,7 +271,8 @@ impl TranscriptWidget {
     /// Insert a tool-call line into the active turn, directly above the
     /// streaming response region. Tool lines stack contiguously (no blank-line
     /// padding) and must survive response rebuilds and reconciliations, so
-    /// they are inserted at the response-boundary marker and that marker is
+    /// they are inserted at the response-boundary marker, clamped to be no
+    /// earlier than the end of the rendered prompt, and that marker is
     /// advanced past the inserted line.
     ///
     /// Outside a turn (degenerate — tool calls only arrive during a turn) the
@@ -274,7 +282,10 @@ impl TranscriptWidget {
         self.invalidate_desired_cache();
         match self.turn_start {
             Some(_) => {
-                let idx = self.response_start.unwrap_or(self.scrollable.len());
+                let idx = self
+                    .response_start
+                    .unwrap_or(self.scrollable.len())
+                    .max(self.prompt_end);
                 self.scrollable.insert(idx, line);
                 // Advance the response-boundary marker past the inserted line
                 // so the response region keeps opening (or re-opening) below
@@ -322,6 +333,7 @@ impl TranscriptWidget {
             self.scrollable.push(line);
         }
         self.turn_start = Some(start);
+        self.prompt_end = self.scrollable.len();
         self.separator_index = sep_index;
         self.response_start = None;
         self.response_accumulator.clear();
@@ -418,6 +430,7 @@ impl TranscriptWidget {
         self.invalidate_desired_cache();
         self.turn_start = None;
         self.response_start = None;
+        self.prompt_end = 0;
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
@@ -443,6 +456,7 @@ impl TranscriptWidget {
         }
         self.turn_start = None;
         self.response_start = None;
+        self.prompt_end = 0;
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
@@ -455,6 +469,7 @@ impl TranscriptWidget {
         self.scrollable.clear();
         self.turn_start = None;
         self.response_start = None;
+        self.prompt_end = 0;
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
@@ -537,6 +552,7 @@ impl TranscriptWidget {
         if let Some(r) = &mut self.response_start {
             *r = r.saturating_sub(drained);
         }
+        self.prompt_end = self.prompt_end.saturating_sub(drained);
         if let Some(s) = &mut self.separator_index {
             if *s < drained {
                 // The separator was drained; drop the index so a later
@@ -1906,6 +1922,77 @@ mod tests {
         // Ordering: prompt, tool line, response.
         assert_eq!(transcript_text[0], "▍» hi");
         assert_eq!(transcript_text[1], "◆ grep");
+    }
+
+    #[test]
+    fn tool_line_never_inserts_before_pinned_prompt_after_overflow() {
+        let mut transcript = TranscriptWidget::new();
+        // Completed history above the in-progress turn.
+        transcript.push_transcript_line("prior".to_string());
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("resp");
+        LiveAreaWidget::finalize(&mut transcript, 80);
+
+        // A one-row viewport forces the history and the pinned prompt into
+        // terminal scrollback; both markers clamp to the FIFO head.
+        let overflow: Vec<String> = transcript
+            .take_overflow(1, 80)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(overflow.contains(&"▍» hi".to_string()), "{overflow:?}");
+
+        // A tool call arriving after the overflow must land after the
+        // prompt in terminal scrollback order and before the response line
+        // left in the FIFO.
+        transcript.push_tool_line("grep");
+
+        let mut order = overflow;
+        order.extend(
+            transcript
+                .scrollable
+                .visible_lines()
+                .iter()
+                .map(|l| l.to_string()),
+        );
+        let prompt = order.iter().position(|l| l == "▍» hi").unwrap();
+        let tool = order.iter().position(|l| l == "◆ grep").unwrap();
+        let response = order.iter().position(|l| l == "resp").unwrap();
+        assert!(
+            tool > prompt,
+            "tool line landed before the prompt: {order:?}"
+        );
+        assert!(
+            tool < response,
+            "tool line must sit above the streaming response: {order:?}"
+        );
+    }
+
+    #[test]
+    fn tool_line_stays_below_prompt_when_response_marker_clamps_to_turn_start() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+
+        // Simulate the degenerate post-overflow marker state while the
+        // prompt is still the FIFO head. The prompt end is tracked
+        // separately, so a tool line must be inserted after the prompt even
+        // when both the turn and response markers point at index 0.
+        transcript.turn_start = Some(0);
+        transcript.response_start = Some(0);
+
+        transcript.push_tool_line("grep");
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text,
+            vec!["▍» hi".to_string(), "◆ grep".to_string()],
+            "tool line must not be inserted before a prompt still in the FIFO"
+        );
     }
 
     #[test]
