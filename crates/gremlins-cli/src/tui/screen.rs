@@ -1115,7 +1115,8 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.push_transcript_line(
-            "gremlins tui — type /help for commands, Ctrl+C to exit".to_string(),
+            "gremlins tui — type /help for commands — Ctrl+C clears/cancels (repeat within 1s to exit)"
+                .to_string(),
         );
         live_area.submit_prompt("hi".to_string());
         live_area.push_reasoning_text("thinking...");
@@ -1151,7 +1152,8 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.push_transcript_line(
-            "gremlins tui — type /help for commands, Ctrl+C to exit".to_string(),
+            "gremlins tui — type /help for commands — Ctrl+C clears/cancels (repeat within 1s to exit)"
+                .to_string(),
         );
 
         live_area.submit_prompt("hi".to_string());

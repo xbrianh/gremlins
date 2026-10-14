@@ -273,7 +273,7 @@ fn help_text() -> Vec<String> {
         "  /quit            — exit".to_string(),
         "".to_string(),
         "keybindings:".to_string(),
-        "  Ctrl+C           — exit".to_string(),
+        "  Ctrl+C           — clear / cancel; repeat within 1s to exit".to_string(),
         "  Ctrl+D (empty)   — exit".to_string(),
         "  Ctrl+L           — redraw screen".to_string(),
         "  Esc              — clear input / cancel in-flight chat".to_string(),
