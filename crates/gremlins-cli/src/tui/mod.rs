@@ -47,9 +47,9 @@ const CONTEXT_TIMEOUT: Duration = Duration::from_secs(5);
 /// than the daemon's own working directory.
 ///
 /// `context` is the repository-context snapshot gathered off the UI thread by
-/// the caller (see [`send_chat_input`]); it is prepended to the operator's
-/// message here. The daemon passes the fully assembled prompt through without
-/// further wrapping.
+/// the caller (see [`send_chat_input`]). It is carried as a separate request
+/// field so the daemon can append it to the chat system prompt as low-trust
+/// metadata rather than folding it into the operator's message.
 fn build_chat_request(
     text: &str,
     turn: &str,
@@ -58,18 +58,16 @@ fn build_chat_request(
     context: &str,
     env: &HashMap<String, String>,
 ) -> serde_json::Value {
-    let user_text = if context.is_empty() {
-        text.to_string()
-    } else {
-        format!("{context}\n\n{text}")
-    };
     let mut request = serde_json::json!({
         "op": "chat",
-        "text": user_text,
+        "text": text,
         "turn": turn,
         "project_root": project_root,
         "env": env,
     });
+    if !context.is_empty() {
+        request["context"] = serde_json::Value::String(context.to_string());
+    }
     if let Some(id) = chat_id {
         request["id"] = serde_json::Value::String(id.to_string());
     }
@@ -1844,9 +1842,18 @@ mod tests {
     }
 
     #[test]
-    fn chat_request_prepends_context() {
+    fn chat_request_keeps_context_separate_from_text() {
         let env = HashMap::new();
         let req = build_chat_request("hello", "1", None, "/p", "Current branch: main", &env);
-        assert_eq!(req["text"], "Current branch: main\n\nhello");
+        assert_eq!(req["text"], "hello");
+        assert_eq!(req["context"], "Current branch: main");
+    }
+
+    #[test]
+    fn chat_request_omits_empty_context() {
+        let env = HashMap::new();
+        let req = build_chat_request("hello", "1", None, "/p", "", &env);
+        assert!(req.get("context").is_none());
+        assert_eq!(req["text"], "hello");
     }
 }
