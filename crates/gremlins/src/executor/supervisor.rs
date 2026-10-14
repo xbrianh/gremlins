@@ -1391,16 +1391,22 @@ async fn handle_artifact(request: &Value) -> Value {
     }
 
     // Resolve the store: run map first for live gremlins (including ephemeral
-    // ones whose state lives in a TempDir), otherwise open the persisted state.
-    let store: Arc<dyn state::StateStore + Send + Sync> = {
+    // ones whose state lives in a TempDir), otherwise open the persisted
+    // state. The open happens after dropping the run-map lock so a disk
+    // lookup never blocks other run-map users.
+    let live_store = {
         let map = get_run_map().lock().unwrap();
-        if let Some(handle) = map.get(id) {
-            handle.store.clone()
-        } else {
-            match state::StateData::open(id) {
-                Ok(sd) => sd.store_handle(),
-                Err(_) => return error_response(&format!("unknown gremlin {id:?}")),
+        map.get(id).map(|handle| handle.store.clone())
+    };
+    let store: Arc<dyn state::StateStore + Send + Sync> = if let Some(store) = live_store {
+        store
+    } else {
+        match state::StateData::open(id) {
+            Ok(sd) => sd.store_handle(),
+            Err(state::StateError::Other(msg)) if msg.starts_with("no state directory:") => {
+                return error_response(&format!("unknown gremlin {id:?}"))
             }
+            Err(e) => return error_response(&format!("gremlin {id}: {e}")),
         }
     };
 
@@ -3050,7 +3056,7 @@ fn validate_launch_inputs(
 
 #[cfg(test)]
 mod tests {
-    use super::{create_chat_gremlin, resolve_chat_env};
+    use super::{create_chat_gremlin, handle_artifact, resolve_chat_env};
     use crate::builders::{AgentBuilder, DefinitionBuilder};
     use crate::executor::socket;
     use crate::test_support::Sandbox;
@@ -3133,6 +3139,101 @@ mod tests {
         let resolved = resolve_chat_env(&request, &base);
 
         assert_eq!(resolved, base);
+    }
+
+    #[tokio::test]
+    async fn handle_artifact_returns_error_for_missing_id() {
+        let resp = handle_artifact(&serde_json::json!({"op": "artifact"})).await;
+        assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
+        assert!(resp
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|e| e.contains("missing 'id' field")));
+    }
+
+    #[tokio::test]
+    async fn handle_artifact_returns_error_for_invalid_id() {
+        let resp = handle_artifact(&serde_json::json!({"op": "artifact", "id": "../etc"})).await;
+        assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
+        assert!(resp
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|e| e.contains("invalid gremlin id")));
+    }
+
+    #[tokio::test]
+    async fn handle_artifact_returns_unknown_gremlin_for_missing_state() {
+        let _sandbox = Sandbox::new();
+        let resp = handle_artifact(
+            &serde_json::json!({"op": "artifact", "id": "gr-missing", "list": true}),
+        )
+        .await;
+        assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
+        assert!(resp
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|e| e.contains("unknown gremlin")));
+    }
+
+    #[tokio::test]
+    async fn handle_artifact_lists_keys_and_reads_content_from_persisted_state() {
+        let _sandbox = Sandbox::new();
+        let store = crate::executor::state::FileSystemStateStore::create(
+            "gr-1",
+            &serde_json::Map::new(),
+            false,
+        )
+        .unwrap();
+        store
+            .write_into_registry(
+                &crate::artifacts::uri::Uri::parse("artifact://out").unwrap(),
+                "hello from artifact",
+            )
+            .await
+            .unwrap();
+
+        let list_resp =
+            handle_artifact(&serde_json::json!({"op": "artifact", "id": "gr-1", "list": true}))
+                .await;
+        assert_eq!(list_resp.get("type").and_then(Value::as_str), Some("ok"));
+        assert_eq!(
+            list_resp
+                .get("keys")
+                .and_then(Value::as_array)
+                .map(|keys| { keys.iter().filter_map(Value::as_str).collect::<Vec<_>>() }),
+            Some(vec!["artifact://out"])
+        );
+
+        let content_resp = handle_artifact(
+            &serde_json::json!({"op": "artifact", "id": "gr-1", "artifact": "artifact://out"}),
+        )
+        .await;
+        assert_eq!(content_resp.get("type").and_then(Value::as_str), Some("ok"));
+        assert_eq!(
+            content_resp.get("content").and_then(Value::as_str),
+            Some("hello from artifact")
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_artifact_returns_error_for_unbound_artifact() {
+        let _sandbox = Sandbox::new();
+        let _store = crate::executor::state::FileSystemStateStore::create(
+            "gr-2",
+            &serde_json::Map::new(),
+            false,
+        )
+        .unwrap();
+
+        let resp = handle_artifact(
+            &serde_json::json!({"op": "artifact", "id": "gr-2", "artifact": "artifact://missing"}),
+        )
+        .await;
+        assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
+        assert!(resp
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|e| e.contains("artifact not bound")));
     }
 
     #[tokio::test]

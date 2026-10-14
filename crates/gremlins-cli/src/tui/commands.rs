@@ -317,4 +317,89 @@ mod tests {
         assert!(text.contains("Ctrl+G") && text.contains("external editor"));
         assert!(!text.contains("(stub)"));
     }
+
+    fn artifact_socket_op(input: &str) -> Option<(String, serde_json::Value)> {
+        match dispatch(input) {
+            Some(CommandResult::SocketOp { op, payload }) => Some((op, payload)),
+            _ => None,
+        }
+    }
+
+    fn artifact_usage_lines(input: &str) -> Vec<String> {
+        match dispatch(input) {
+            Some(CommandResult::Lines(lines)) => lines,
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn artifact_requires_an_id() {
+        let lines = artifact_usage_lines("/artifact");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> --list")));
+    }
+
+    #[test]
+    fn artifact_list_rejects_trailing_arguments() {
+        let lines = artifact_usage_lines("/artifact gr-1 --list extra");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> --list")));
+        assert!(artifact_socket_op("/artifact gr-1 --list extra").is_none());
+    }
+
+    #[test]
+    fn artifact_list_builds_list_payload() {
+        let (op, payload) = artifact_socket_op("/artifact gr-1 --list").expect("socket op");
+        assert_eq!(op, "artifact");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "op": "artifact", "id": "gr-1", "list": true })
+        );
+    }
+
+    #[test]
+    fn artifact_requires_a_uri() {
+        let lines = artifact_usage_lines("/artifact gr-1");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> <artifact://uri>")));
+    }
+
+    #[test]
+    fn artifact_content_builds_payload() {
+        let (op, payload) = artifact_socket_op("/artifact gr-1 artifact://out").expect("socket op");
+        assert_eq!(op, "artifact");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "op": "artifact", "id": "gr-1", "artifact": "artifact://out" })
+        );
+    }
+
+    #[test]
+    fn artifact_content_accepts_json_path() {
+        let (_, payload) =
+            artifact_socket_op("/artifact gr-1 artifact://out --json-path a.b").expect("socket op");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "op": "artifact", "id": "gr-1", "artifact": "artifact://out", "json_path": "a.b" })
+        );
+    }
+
+    #[test]
+    fn artifact_json_path_requires_a_value() {
+        let lines = artifact_usage_lines("/artifact gr-1 artifact://out --json-path");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> <artifact://uri> [--json-path <path>]")));
+    }
+
+    #[test]
+    fn artifact_rejects_unknown_tail_flags() {
+        let lines = artifact_usage_lines("/artifact gr-1 artifact://out --bogus");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("usage: /artifact <id> <artifact://uri> [--json-path <path>]")));
+    }
 }
