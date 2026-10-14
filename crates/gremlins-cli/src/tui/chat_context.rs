@@ -81,6 +81,7 @@ type SectionProvider = fn(&ContextInputs<'_>) -> Vec<ChatSection>;
 const PROVIDERS: &[SectionProvider] = &[
     environment_section,
     toolchain_hints_section,
+    gremlin_definitions_section,
     git_sections,
     listing_section,
 ];
@@ -328,6 +329,28 @@ fn toolchain_hints_section(inputs: &ContextInputs<'_>) -> Vec<ChatSection> {
     }
 }
 
+/// Launchable gremlin definition names, in discovery-layer order.
+///
+/// Loading the global config first ensures `paths.overlay-dir` from
+/// `settings.yaml` is visible to the discovery layer. The load is allowed to
+/// fail: a missing or malformed settings file falls back to the default
+/// `.gremlins/` resolution rather than failing the section.
+fn gremlin_definitions_section(inputs: &ContextInputs<'_>) -> Vec<ChatSection> {
+    let _ = gremlins::config::global_config();
+
+    let definitions = gremlins::core::discovery::list_definitions(inputs.cwd.into());
+    if definitions.is_empty() {
+        return Vec::new();
+    }
+
+    let body = definitions
+        .into_iter()
+        .map(|(name, _path)| name)
+        .collect::<Vec<_>>()
+        .join("\n");
+    vec![ChatSection::new("Gremlin definitions", body)]
+}
+
 /// The multi-section git block: branch, remotes, status, recent commits, and
 /// diff stat. Gated behind a single `rev-parse --is-inside-work-tree` check.
 fn git_sections(inputs: &ContextInputs<'_>) -> Vec<ChatSection> {
@@ -439,6 +462,61 @@ fn top_level_listing(cwd: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Test-only isolation for the process-global config and the environment
+    /// variables its path resolvers read. The production provider loads the
+    /// global config lazily, so tests that exercise the settings.yaml overlay
+    /// override must never observe the operator's real `settings.yaml`.
+    struct ConfigEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        undo: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl ConfigEnvGuard {
+        fn lock() -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let mut guard = Self {
+                _lock: LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+                undo: Vec::new(),
+            };
+            guard.remove("GREMLINS_SANDBOX_ROOT");
+            guard.remove("GREMLINS_OVERLAY_DIR");
+            gremlins::config::clear_global();
+            guard
+        }
+
+        fn set(&mut self, key: &'static str, value: impl AsRef<std::ffi::OsStr>) {
+            self.remember(key);
+            std::env::set_var(key, value);
+        }
+
+        fn remove(&mut self, key: &'static str) {
+            self.remember(key);
+            std::env::remove_var(key);
+        }
+
+        fn set_sandbox(&mut self, root: &std::path::Path) {
+            self.set("GREMLINS_SANDBOX_ROOT", root);
+        }
+
+        fn remember(&mut self, key: &'static str) {
+            if !self.undo.iter().any(|(seen, _)| *seen == key) {
+                self.undo.push((key, std::env::var_os(key)));
+            }
+        }
+    }
+
+    impl Drop for ConfigEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.undo.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            gremlins::config::clear_global();
+        }
+    }
+
     /// Run `git` in `dir`, returning an error on failure (e.g. git missing).
     /// `git_exe` overrides the executable so tests can inject a stub without
     /// mutating the process-global `PATH`.
@@ -457,6 +535,7 @@ mod tests {
 
     #[test]
     fn chat_context_in_git_repo_includes_git_sections_and_listing() {
+        let _guard = ConfigEnvGuard::lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -502,6 +581,7 @@ mod tests {
 
     #[test]
     fn chat_context_outside_git_repo_omits_git_sections() {
+        let _guard = ConfigEnvGuard::lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("plain");
         std::fs::create_dir_all(&dir).unwrap();
@@ -529,6 +609,7 @@ mod tests {
 
     #[test]
     fn chat_context_nonexistent_dir_has_only_environment() {
+        let _guard = ConfigEnvGuard::lock();
         let ctx = build_chat_context("/nonexistent/gremlins/chat/root");
 
         // The environment provider is static and always attempted, but every
@@ -594,6 +675,7 @@ mod tests {
 
     #[test]
     fn environment_section_tracks_shell_env_var() {
+        let _guard = ConfigEnvGuard::lock();
         // The provider reads `SHELL` (or `COMSPEC` on Windows) directly, so
         // assert the assembled context reflects the process environment
         // without mutating it. On CI `SHELL` is normally set; when it is, the
@@ -633,6 +715,7 @@ mod tests {
 
     #[test]
     fn toolchain_hints_list_present_manifests_and_omits_when_none() {
+        let _guard = ConfigEnvGuard::lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("project");
         std::fs::create_dir_all(&dir).unwrap();
@@ -655,6 +738,7 @@ mod tests {
 
     #[test]
     fn toolchain_hints_absent_when_no_allowlisted_manifests() {
+        let _guard = ConfigEnvGuard::lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("empty-project");
         std::fs::create_dir_all(&dir).unwrap();
@@ -667,7 +751,64 @@ mod tests {
     }
 
     #[test]
+    fn gremlin_definitions_list_bare_names_in_order_and_excludes_stages() {
+        let _guard = ConfigEnvGuard::lock();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let overlay = tmp.path().join(".gremlins");
+        std::fs::create_dir_all(overlay.join("stages")).unwrap();
+        std::fs::write(overlay.join("a.yaml"), "stages: []\n").unwrap();
+        std::fs::write(overlay.join("b.yaml"), "stages: []\n").unwrap();
+        std::fs::write(overlay.join("stages/c.yaml"), "stages: []\n").unwrap();
+
+        let cwd = tmp.path().to_string_lossy().into_owned();
+        let ctx = build_chat_context(&cwd);
+
+        assert!(ctx.contains("Gremlin definitions:\na\nb"), "ctx: {ctx}");
+        assert!(!ctx.contains(".yaml"), "ctx: {ctx}");
+        assert!(!ctx.contains("c.yaml"), "ctx: {ctx}");
+        assert!(!ctx.contains("stages/"), "ctx: {ctx}");
+        assert!(!ctx.contains("Gremlin definitions:\na\nb\nc"), "ctx: {ctx}");
+    }
+
+    #[test]
+    fn gremlin_definitions_absent_without_launchable_definitions() {
+        let _guard = ConfigEnvGuard::lock();
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".gremlins")).unwrap();
+        std::fs::write(tmp.path().join("note.md"), "n\n").unwrap();
+
+        let cwd = tmp.path().to_string_lossy().into_owned();
+        let ctx = build_chat_context(&cwd);
+
+        assert!(!ctx.contains("Gremlin definitions:"), "ctx: {ctx}");
+        assert!(ctx.contains("Environment:\n"), "ctx: {ctx}");
+        assert!(ctx.contains("Top-level directory listing:"), "ctx: {ctx}");
+    }
+
+    #[test]
+    fn gremlin_definitions_honor_settings_overlay_dir_override() {
+        let mut guard = ConfigEnvGuard::lock();
+        let sandbox = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        let custom = tempfile::TempDir::new().unwrap();
+        std::fs::write(custom.path().join("custom.yaml"), "stages: []\n").unwrap();
+
+        let config_dir = sandbox.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings = format!("paths:\n  overlay-dir: {}\n", custom.path().display());
+        std::fs::write(config_dir.join("settings.yaml"), settings).unwrap();
+        guard.set_sandbox(sandbox.path());
+
+        let cwd = project.path().to_string_lossy().into_owned();
+        let ctx = build_chat_context(&cwd);
+
+        assert!(ctx.contains("Gremlin definitions:\ncustom"), "ctx: {ctx}");
+        assert!(!ctx.contains("custom.yaml"), "ctx: {ctx}");
+    }
+
+    #[test]
     fn assembled_context_never_enumerates_commands_or_dumps_path() {
+        let _guard = ConfigEnvGuard::lock();
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
 
