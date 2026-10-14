@@ -1693,9 +1693,8 @@ mod tests {
             .expect("a workspace");
         assert!(workdir.is_dir(), "{workdir:?}");
 
-        let state_file = gremlin.state.state_dir().join("state.json");
-        assert!(state_file.is_file(), "{state_file:?}");
-        let raw = read_state(&state_file);
+        assert!(gremlin.state.exists("state.json"));
+        let raw = gremlin.state.state_tree();
         assert_eq!(raw["id"], gremlin.id.as_str());
         assert_eq!(raw["status"], "running");
         assert_eq!(raw["pid"].as_i64().unwrap(), std::process::id() as i64);
@@ -1717,8 +1716,8 @@ mod tests {
         gremlin.init_runtime(None).await.unwrap();
         assert_eq!(gremlin.definition.name(), "demo");
         assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], gremlin.id.as_str());
-        assert!(gremlin.state.artifact_dir().ends_with("artifacts"));
-        let raw = read_state(&state_file);
+        assert!(gremlin.state.artifact_uri_display().ends_with("artifacts"));
+        let raw = gremlin.state.state_tree();
         assert_eq!(raw["client"], "cmd:true");
 
         // Idempotent: a second call is a no-op, not a re-parse.
@@ -1750,7 +1749,10 @@ mod tests {
         let mut opened = Gremlin::from(&id).unwrap();
 
         assert_eq!(opened.id, launched.id);
-        assert_eq!(opened.state.state_dir(), launched.state.state_dir());
+        assert_eq!(
+            opened.state.state_uri_display(),
+            launched.state.state_uri_display()
+        );
         assert_eq!(opened.project_root, launched.project_root);
         assert_eq!(
             opened.workdir.as_ref().map(|w| w.path()),
@@ -1857,8 +1859,12 @@ mod tests {
         )
         .unwrap();
 
-        std::fs::create_dir_all(parent.state.artifact_dir()).unwrap();
-        std::fs::write(parent.state.artifact_dir().join("note.txt"), "hello").unwrap();
+        let parent_note = Uri::parse("artifact://note.txt").unwrap();
+        parent
+            .state
+            .write_into_registry(&parent_note, "hello")
+            .await
+            .unwrap();
 
         let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
         let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
@@ -1867,12 +1873,21 @@ mod tests {
             .await
             .unwrap();
 
-        assert_ne!(child.state.artifact_dir(), parent.state.artifact_dir());
-        assert!(child.state.artifact_dir().ends_with("artifacts"));
-        assert!(child.state.artifact_dir().join("note.txt").is_file());
+        assert_ne!(
+            child.state.artifact_uri_display(),
+            parent.state.artifact_uri_display()
+        );
+        assert!(child.state.artifact_uri_display().ends_with("artifacts"));
+        assert_eq!(
+            child
+                .state
+                .content("artifact://note.txt", None)
+                .await
+                .unwrap(),
+            "hello"
+        );
 
-        let child_state = child.state.state_dir().join("state.json");
-        let raw = read_state(&child_state);
+        let raw = child.state.state_tree();
         assert_eq!(raw["id"], "gr-child");
         assert_eq!(raw["status"], "running");
         assert!(raw["pid"].is_null());
@@ -2440,11 +2455,10 @@ land:
         .unwrap();
 
         // State, workspace, and scratch are all temp-backed.
-        let state_dir = gremlin.state.state_dir().to_path_buf();
+        assert!(gremlin.state.exists("state.json"), "state dir exists");
         let workdir = gremlin.workdir.as_ref().unwrap().path().to_path_buf();
         let scratch = gremlin.scratch_dir.path().to_path_buf();
 
-        assert!(state_dir.exists(), "state dir exists");
         assert!(workdir.exists(), "workdir exists");
         assert!(scratch.exists(), "scratch dir exists");
 
@@ -2466,11 +2480,9 @@ land:
         );
 
         // Drop the gremlin — TempDirs clean up.
-        let state_dir2 = state_dir.clone();
         let workdir2 = workdir.clone();
         let scratch2 = scratch.clone();
         drop(gremlin);
-        assert!(!state_dir2.exists(), "state dir cleaned on drop");
         assert!(!workdir2.exists(), "workdir cleaned on drop");
         assert!(!scratch2.exists(), "scratch dir cleaned on drop");
     }
@@ -2504,9 +2516,9 @@ land:
             .unwrap();
 
         // Child state dir is temp-backed (not under config::state_root).
-        let child_state = child.state.state_dir().to_path_buf();
+        let child_state_display = child.state.state_uri_display();
         assert!(
-            !child_state.starts_with(config::state_root()),
+            !child_state_display.starts_with(&config::state_root().to_string_lossy().into_owned()),
             "child state is temp-backed"
         );
 
@@ -2525,12 +2537,10 @@ land:
         );
 
         // Drop parent and child — all TempDirs clean up.
-        let child_state2 = child_state.clone();
         let child_workdir2 = child_workdir.clone();
         let child_scratch2 = child_scratch.clone();
         drop(child);
         drop(parent);
-        assert!(!child_state2.exists(), "child state cleaned on drop");
         assert!(!child_workdir2.exists(), "child workdir cleaned on drop");
         assert!(!child_scratch2.exists(), "child scratch cleaned on drop");
     }
@@ -2564,17 +2574,8 @@ land:
         )
         .unwrap();
 
-        let state_dir = gremlin.state.state_dir().to_path_buf();
-        let workdir = gremlin.workdir.as_ref().unwrap().path().to_path_buf();
-        let scratch = gremlin.scratch_dir.path().to_path_buf();
-
         // clean() on an ephemeral gremlin is harmless — TempDir destructor
         // handles actual cleanup.
         gremlin.clean(true).await;
-
-        // After clean(true), the paths may or may not exist (remove_dir_all
-        // on a TempDir path is harmless). The key property is that clean()
-        // doesn't panic.
-        let _ = (state_dir, workdir, scratch);
     }
 }

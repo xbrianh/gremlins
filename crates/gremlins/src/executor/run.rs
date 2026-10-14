@@ -2006,13 +2006,8 @@ mod tests {
         )
         .unwrap();
         let code = gremlin.run(None).await.unwrap();
-        // Read back through the handle's own state dir. The sandbox
-        // override is shared process state, and the pre-existing
-        // config tests clear it for their own duration; the path the
-        // launch actually resolved is the honest one to assert on.
-        let state_file = gremlin.state.state_dir().join("state.json");
-        let raw: Value =
-            serde_json::from_str(&std::fs::read_to_string(&state_file).unwrap()).unwrap();
+        // Read back through the handle's own state surface.
+        let raw = gremlin.state.state_tree();
         assert_eq!(code, 0);
         assert_eq!(raw["status"], "done");
         assert_eq!(raw["exit_code"], 0);

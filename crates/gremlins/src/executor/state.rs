@@ -254,16 +254,16 @@ pub trait StateStore: Send + Sync + Debug {
 
     // --- locality ---
 
-    /// The state directory.
-    #[deprecated]
-    fn state_dir(&self) -> &Path {
-        Path::new("")
+    /// Opaque, human-readable description of the store's state location.
+    /// Not a path — callers must not parse this into a path and perform I/O.
+    fn state_uri_display(&self) -> String {
+        String::new()
     }
 
-    /// The artifact storage directory.
-    #[deprecated]
-    fn artifact_dir(&self) -> PathBuf {
-        PathBuf::new()
+    /// Opaque, human-readable description of the store's artifact location.
+    /// Not a path — callers must not parse this into a path and perform I/O.
+    fn artifact_uri_display(&self) -> String {
+        String::new()
     }
 }
 
@@ -1248,14 +1248,12 @@ impl StateStore for FileSystemStateStore {
         }
     }
 
-    #[allow(deprecated)]
-    fn state_dir(&self) -> &Path {
-        self.root.path()
+    fn state_uri_display(&self) -> String {
+        self.root.path().display().to_string()
     }
 
-    #[allow(deprecated)]
-    fn artifact_dir(&self) -> PathBuf {
-        self.artifact_dir()
+    fn artifact_uri_display(&self) -> String {
+        self.artifact_dir().display().to_string()
     }
 }
 
@@ -1426,14 +1424,12 @@ impl StateStore for ScopedFileSystemStateStore {
         self.inner.clean()
     }
 
-    #[allow(deprecated)]
-    fn state_dir(&self) -> &Path {
-        self.inner.state_dir()
+    fn state_uri_display(&self) -> String {
+        self.inner.state_uri_display()
     }
 
-    #[allow(deprecated)]
-    fn artifact_dir(&self) -> PathBuf {
-        self.inner.artifact_dir()
+    fn artifact_uri_display(&self) -> String {
+        self.inner.artifact_uri_display()
     }
 }
 
@@ -1558,14 +1554,14 @@ impl StateData {
 
     // --- locality ---
 
-    #[allow(deprecated)]
-    pub fn state_dir(&self) -> &Path {
-        self.store.state_dir()
+    /// Opaque, human-readable description of the store's state location.
+    pub fn state_uri_display(&self) -> String {
+        self.store.state_uri_display()
     }
 
-    #[allow(deprecated)]
-    pub fn artifact_dir(&self) -> PathBuf {
-        self.store.artifact_dir()
+    /// Opaque, human-readable description of the store's artifact location.
+    pub fn artifact_uri_display(&self) -> String {
+        self.store.artifact_uri_display()
     }
 
     /// Remove the store's private state directory. Best-effort — delegates to
@@ -2354,8 +2350,8 @@ mod tests {
             let raw = d.state_tree();
             assert_eq!(raw.get("id").unwrap(), "child");
             assert_eq!(raw.get("definition_path").unwrap(), "/p.yaml");
-            assert!(d.state_dir().join("state.json").exists());
-            assert!(d.state_dir().join("artifacts").is_dir());
+            assert!(d.exists("state.json"));
+            assert!(d.exists("artifacts"));
             let _ = sandbox;
         });
     }
@@ -2372,7 +2368,7 @@ mod tests {
             .unwrap();
             let d = StateData::open("existing").unwrap();
             assert_eq!(d.read_str("stage"), "done");
-            assert_eq!(d.state_dir(), state_dir.as_path());
+            assert_eq!(d.state_uri_display(), state_dir.display().to_string());
             let _ = sandbox;
         });
     }

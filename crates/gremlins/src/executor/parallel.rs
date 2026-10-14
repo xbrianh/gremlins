@@ -213,8 +213,8 @@ pub(crate) async fn run_parallel(
 
         log::debug!(
             "parallel group {group_name}: child {child_name} forked (state_dir={}, artifact_dir={})",
-            child_gremlin.state.state_dir().display(),
-            child_gremlin.state.artifact_dir().display()
+            child_gremlin.state.state_uri_display(),
+            child_gremlin.state.artifact_uri_display()
         );
 
         // Launch the child via the supervisor — it becomes a first-class
@@ -1191,7 +1191,12 @@ mod tests {
         // Failed children keep their state for forensics; their own log file
         // must stay unprefixed and timestamped.
         let child_state = StateData::open("gr-test-bad").unwrap();
-        let child_log = std::fs::read_to_string(child_state.state_dir().join("log")).unwrap();
+        let mut child_log = String::new();
+        child_state
+            .open_blob("log", state::BlobMode::Read)
+            .unwrap()
+            .read_to_string(&mut child_log)
+            .unwrap();
         assert!(
             child_log.contains("streaming output started"),
             "child log should contain its own log lines: {child_log}"
