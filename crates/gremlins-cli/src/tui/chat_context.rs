@@ -211,9 +211,9 @@ fn cap_section(text: &str, max_lines: usize, max_bytes: usize) -> String {
 
 /// A bounded, read-only snapshot of the project context for a chat turn.
 ///
-/// Providers run in a fixed order: environment, toolchain hints, git block,
-/// then the top-level listing. Only the git block is gated on
-/// `rev-parse --is-inside-work-tree`; every other provider is attempted for
+/// Providers run in a fixed order: environment, toolchain hints, Gremlin
+/// definitions, git block, then the top-level listing. Only the git block is
+/// gated on `rev-parse --is-inside-work-tree`; every other provider is attempted for
 /// any readable directory. Any provider returning no section simply leaves
 /// that section out, so the assembled context can never fail the chat turn.
 pub(crate) fn build_chat_context(cwd: &str) -> String {
