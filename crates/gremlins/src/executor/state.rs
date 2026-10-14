@@ -70,6 +70,8 @@ impl<T: std::io::Read + std::io::Write + std::io::Seek + Send> StateBlob for T {
 /// How to open a named blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobMode {
+    /// Open an existing file for reading only. Fails if absent.
+    Read,
     /// Open an existing file for reading and writing. Fails if absent.
     #[allow(dead_code)]
     ReadWrite,
@@ -241,18 +243,27 @@ pub trait StateStore: Send + Sync + Debug {
         None
     }
 
-    // --- locality ---
-
-    /// The state directory.
-    #[deprecated]
-    fn state_dir(&self) -> &Path {
-        Path::new("")
+    /// Remove the store's private state directory. Best-effort: a failed
+    /// removal logs a warning and never aborts teardown.
+    ///
+    /// Defaults to a no-op so backends without a removable directory (or
+    /// whose directory is owned elsewhere) are unaffected.
+    fn clean(&self) {
+        // Default no-op.
     }
 
-    /// The artifact storage directory.
-    #[deprecated]
-    fn artifact_dir(&self) -> PathBuf {
-        PathBuf::new()
+    // --- locality ---
+
+    /// Opaque, human-readable description of the store's state location.
+    /// Not a path — callers must not parse this into a path and perform I/O.
+    fn state_uri_display(&self) -> String {
+        String::new()
+    }
+
+    /// Opaque, human-readable description of the store's artifact location.
+    /// Not a path — callers must not parse this into a path and perform I/O.
+    fn artifact_uri_display(&self) -> String {
+        String::new()
     }
 }
 
@@ -466,6 +477,15 @@ impl FileSystemStateStore {
         FileSystemStateStore {
             root: StateRoot::Path(state_dir),
         }
+    }
+
+    /// The store's root (state) directory.
+    ///
+    /// Persistent stores live under `config::state_root()`; ephemeral stores
+    /// live in a temp directory. This is the concrete accessor used by
+    /// display-only paths — it is not part of the `StateStore` trait.
+    pub fn root_dir(&self) -> &Path {
+        self.root.path()
     }
 
     // --- registry helpers ---
@@ -863,10 +883,17 @@ impl StateStore for FileSystemStateStore {
         }
         let path = self.root.path().join(name);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            // Only create parent directories for write-capable modes.
+            // Read mode must not mutate the store.
+            if !matches!(mode, BlobMode::Read) {
+                std::fs::create_dir_all(parent)?;
+            }
         }
         let mut opts = std::fs::OpenOptions::new();
         match mode {
+            BlobMode::Read => {
+                opts.read(true);
+            }
             BlobMode::ReadWrite => {
                 opts.read(true).write(true).create(false);
             }
@@ -1216,14 +1243,21 @@ impl StateStore for FileSystemStateStore {
         Some(self)
     }
 
-    #[allow(deprecated)]
-    fn state_dir(&self) -> &Path {
-        self.root.path()
+    fn clean(&self) {
+        if let Err(error) = std::fs::remove_dir_all(self.root.path()) {
+            log::warn!(
+                "clean: could not remove state dir {}: {error}",
+                self.root.path().display()
+            );
+        }
     }
 
-    #[allow(deprecated)]
-    fn artifact_dir(&self) -> PathBuf {
-        self.artifact_dir()
+    fn state_uri_display(&self) -> String {
+        self.root.path().display().to_string()
+    }
+
+    fn artifact_uri_display(&self) -> String {
+        self.artifact_dir().display().to_string()
     }
 }
 
@@ -1390,14 +1424,16 @@ impl StateStore for ScopedFileSystemStateStore {
         self.inner.checkout_registry(keys).await
     }
 
-    #[allow(deprecated)]
-    fn state_dir(&self) -> &Path {
-        self.inner.state_dir()
+    fn clean(&self) {
+        self.inner.clean()
     }
 
-    #[allow(deprecated)]
-    fn artifact_dir(&self) -> PathBuf {
-        self.inner.artifact_dir()
+    fn state_uri_display(&self) -> String {
+        self.inner.state_uri_display()
+    }
+
+    fn artifact_uri_display(&self) -> String {
+        self.inner.artifact_uri_display()
     }
 }
 
@@ -1522,12 +1558,20 @@ impl StateData {
 
     // --- locality ---
 
-    pub fn state_dir(&self) -> &Path {
-        self.store.state_dir()
+    /// Opaque, human-readable description of the store's state location.
+    pub fn state_uri_display(&self) -> String {
+        self.store.state_uri_display()
     }
 
-    pub fn artifact_dir(&self) -> PathBuf {
-        self.store.artifact_dir()
+    /// Opaque, human-readable description of the store's artifact location.
+    pub fn artifact_uri_display(&self) -> String {
+        self.store.artifact_uri_display()
+    }
+
+    /// Remove the store's private state directory. Best-effort — delegates to
+    /// the underlying store's `clean`.
+    pub fn clean(&self) {
+        self.store.clean();
     }
 
     // --- artifact delegating methods ---
@@ -2310,8 +2354,8 @@ mod tests {
             let raw = d.state_tree();
             assert_eq!(raw.get("id").unwrap(), "child");
             assert_eq!(raw.get("definition_path").unwrap(), "/p.yaml");
-            assert!(d.state_dir().join("state.json").exists());
-            assert!(d.state_dir().join("artifacts").is_dir());
+            assert!(d.exists("state.json"));
+            assert!(d.exists("artifacts"));
             let _ = sandbox;
         });
     }
@@ -2328,7 +2372,7 @@ mod tests {
             .unwrap();
             let d = StateData::open("existing").unwrap();
             assert_eq!(d.read_str("stage"), "done");
-            assert_eq!(d.state_dir(), state_dir.as_path());
+            assert_eq!(d.state_uri_display(), state_dir.display().to_string());
             let _ = sandbox;
         });
     }

@@ -13,7 +13,7 @@ use gremlins::executor::exec_runner::prepare_exec;
 use gremlins::executor::gremlin::{system_env, validate_gremlin_id, Gremlin};
 use gremlins::executor::socket::{self, GremlinsDaemonLock};
 use gremlins::executor::state::FileSystemStateStore;
-use gremlins::executor::state::{self, StateData};
+use gremlins::executor::state::{self, BlobMode, StateData, StateStore};
 use gremlins::executor::supervisor;
 use gremlins::schemas::bootstrap;
 use serde_json::Value;
@@ -576,8 +576,11 @@ fn status_direct(id: &str) -> Result<(), String> {
             .map(|w| w.path().display().to_string())
             .unwrap_or_default()
     );
-    println!("state_dir:     {}", gremlin.state.state_dir().display());
-    println!("artifact_dir:  {}", gremlin.state.artifact_dir().display());
+    println!("state_dir:     {}", config::state_root().join(id).display());
+    println!(
+        "artifact_dir:  {}",
+        config::state_root().join(id).join("artifacts").display()
+    );
     println!(
         "started_at:    {}",
         field_display(&gremlin.state, "started_at")
@@ -657,10 +660,10 @@ fn info_direct(id: &str) -> Result<(), String> {
         "definition": definition_display_name(&gremlin.state),
         "project_root": gremlin.project_root.display().to_string(),
         "workdir": workdir,
-        "state_dir": gremlin.state.state_dir().display().to_string(),
-        "artifact_dir": gremlin.state.artifact_dir().display().to_string(),
+        "state_dir": config::state_root().join(id).display().to_string(),
+        "artifact_dir": config::state_root().join(id).join("artifacts").display().to_string(),
         "scratch_dir": config::scratch_root(Some(id)).display().to_string(),
-        "log_file": gremlin.state.state_dir().join("log").display().to_string(),
+        "log_file": config::state_root().join(id).join("log").display().to_string(),
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
@@ -1314,19 +1317,23 @@ async fn land(id: &str) -> Result<(), String> {
         ));
     }
 
-    let definition_path = state_dir.join("definition.yaml");
-    if !definition_path.is_file() {
-        return Err(format!(
-            "gremlin {id}: definition snapshot not found at {}",
-            definition_path.display()
-        ));
-    }
     let default_client = config::global_config()
         .ok()
         .and_then(|c| c.default_client().map(String::from));
-    let definition =
-        StaticDefinition::from_yaml_file(&definition_path, None, default_client.as_deref())
-            .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?;
+    let store = FileSystemStateStore::from_path(state_dir.to_path_buf());
+
+    // Load the hermetic definition through the store blob.
+    let definition = {
+        let mut blob = store
+            .open("definition.yaml", BlobMode::Read)
+            .map_err(|e| format!("gremlin {id}: definition snapshot not found: {e}"))?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        blob.read_to_end(&mut bytes)
+            .map_err(|e| format!("gremlin {id}: failed to read definition snapshot: {e}"))?;
+        StaticDefinition::from_expanded_bytes(&bytes, None, default_client.as_deref())
+            .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?
+    };
 
     let exec = match definition.land() {
         Some(ExecutorStage::Exec { stage, .. }) => stage,
@@ -1367,8 +1374,6 @@ async fn land(id: &str) -> Result<(), String> {
     };
     let workdir = raw.get("workdir").and_then(Value::as_str).unwrap_or("");
     let worktree = (!workdir.is_empty()).then(|| PathBuf::from(workdir));
-
-    let store = FileSystemStateStore::from_path(state_dir.to_path_buf());
 
     let prepared = prepare_exec(&exec, &store, &store, "", &HashMap::new())
         .await
