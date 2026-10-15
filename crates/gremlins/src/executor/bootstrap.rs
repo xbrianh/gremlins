@@ -282,10 +282,13 @@ async fn run_dsl_command(
 
 /// Resolve a bootstrap source value and bind it as the artifact at `uri_str`.
 ///
-/// A value that names an existing file — relative to the process, or to the
-/// project root — is copied into the registry; anything else is inline text and
-/// written. An absent or empty source is an optional source with nothing to
-/// bind, so it is a no-op rather than an error.
+/// A value that is an already-existing absolute path — or, when relative,
+/// one that exists under `project_root` — is copied into the registry;
+/// anything else is inline text and written. Relative values are deliberately
+/// never checked against the process cwd: a daemon might have a same-named
+/// file in its own working directory, and that must not steal a mixed
+/// `filepath`/`string` inline value. An absent or empty source is an optional
+/// source with nothing to bind, so it is a no-op rather than an error.
 async fn bind_artifact(
     source_key: &str,
     uri_str: &str,
@@ -306,7 +309,7 @@ async fn bind_artifact(
         .then(|| gremlin.project_root.join(&value))
         .filter(|path| path.is_file());
 
-    let bound = if direct.is_file() {
+    let bound = if direct.is_absolute() && direct.is_file() {
         gremlin.state.copy_into_registry(&uri, direct).await
     } else if let Some(path) = from_project {
         gremlin.state.copy_into_registry(&uri, &path).await
@@ -750,6 +753,38 @@ mod tests {
                 .await
                 .unwrap(),
             "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_dsl_does_not_bind_relative_inline_text_from_process_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let cwd_file = tempfile::NamedTempFile::new_in(&cwd).unwrap();
+        std::fs::write(cwd_file.path(), "same-named file in process cwd").unwrap();
+        let file_name = cwd_file
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_string();
+
+        let bootstrap = Bootstrap {
+            launch_cmds: vec![r#"gremlins:bind_artifact("artifact://note.txt", note)"#.to_string()],
+            ..Default::default()
+        };
+        let inputs = HashMap::from([("note".to_string(), file_name.clone())]);
+        let (_sandbox, mut gremlin) = test_gremlin(bootstrap, inputs);
+
+        run_definition_bootstrap(&mut gremlin, false).await.unwrap();
+
+        assert_eq!(
+            gremlin
+                .state
+                .content("artifact://note.txt", None)
+                .await
+                .unwrap(),
+            file_name,
+            "relative inline text must stay verbatim even when the process cwd has a same-named file"
         );
     }
 

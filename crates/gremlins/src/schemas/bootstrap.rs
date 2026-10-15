@@ -255,9 +255,33 @@ fn string_list(raw: Option<&serde_yaml::Value>, label: &str) -> Result<Vec<Strin
 }
 
 /// Validate CLI/source values. filepath-only requires an existing file.
+///
+/// This is the process-cwd form; use [`validate_source_values_under`] to
+/// validate against an explicit project root.
 pub fn validate_source_values(
     source: &InputSources,
     values: &HashMap<String, String>,
+) -> Result<(), SchemaError> {
+    validate_source_values_in(source, values, None)
+}
+
+/// Validate CLI/source values against an explicit project root.
+///
+/// Relative `filepath`-only values are checked as `project_root.join(value)`
+/// rather than against the process cwd, so a daemon never consults its own
+/// working directory. The error still reports the caller's original value.
+pub fn validate_source_values_under(
+    source: &InputSources,
+    values: &HashMap<String, String>,
+    project_root: &Path,
+) -> Result<(), SchemaError> {
+    validate_source_values_in(source, values, Some(project_root))
+}
+
+fn validate_source_values_in(
+    source: &InputSources,
+    values: &HashMap<String, String>,
+    project_root: Option<&Path>,
 ) -> Result<(), SchemaError> {
     for (key, src) in &source.sources {
         let value = values.get(key);
@@ -277,13 +301,16 @@ pub fn validate_source_values(
                 }
             }
             Some(v) => {
-                if src.types.len() == 1
-                    && src.types[0] == "filepath"
-                    && !std::path::Path::new(v).is_file()
-                {
-                    return Err(SchemaError::Generic(format!(
-                        "bootstrap.source {key:?}: expected an existing file, got {v:?}"
-                    )));
+                if src.types.len() == 1 && src.types[0] == "filepath" {
+                    let exists = match project_root {
+                        Some(root) if !Path::new(v).is_absolute() => root.join(v).is_file(),
+                        _ => Path::new(v).is_file(),
+                    };
+                    if !exists {
+                        return Err(SchemaError::Generic(format!(
+                            "bootstrap.source {key:?}: expected an existing file, got {v:?}"
+                        )));
+                    }
                 }
             }
         }
@@ -385,6 +412,40 @@ mod tests {
         let values = HashMap::new();
         let err = validate_source_values(&src, &values).unwrap_err();
         assert!(err.to_string().contains("required bootstrap.source"));
+    }
+
+    #[test]
+    fn test_validate_source_values_under_ignores_process_cwd_for_relative_filepaths() {
+        let cwd = std::env::current_dir().unwrap();
+        let cwd_file = tempfile::NamedTempFile::new_in(&cwd).unwrap();
+        std::fs::write(cwd_file.path(), "same-named file in process cwd").unwrap();
+        let file_name = cwd_file
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap();
+
+        let project_root = tempfile::TempDir::new().unwrap();
+        let src = InputSources::new(
+            vec![(
+                "plan".to_string(),
+                InputSource::new("plan".to_string(), vec!["filepath".to_string()], true).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let values = HashMap::from([("plan".to_string(), file_name.to_string())]);
+
+        // The process-cwd validator still accepts it (the file exists there)...
+        validate_source_values(&src, &values).unwrap();
+
+        // ...but the project-root validator must not be satisfied by it.
+        let err = validate_source_values_under(&src, &values, project_root.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("expected an existing file, got {file_name:?}")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
