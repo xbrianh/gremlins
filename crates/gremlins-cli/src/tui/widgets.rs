@@ -1549,7 +1549,7 @@ impl LiveAreaWidget for TranscriptWidget {
 
         y = inner.y + head_band + reasoning_rows;
         if tail_band > 0 && !tail.is_empty() {
-            if tail_rows <= tail_band as usize {
+            if tail_rows <= tail_band as usize && reasoning_rows > 0 {
                 // Bottom-anchor the short response inside its allocated band
                 // so the blank rows sit between reasoning and response.
                 let tail_area = Rect::new(
@@ -1562,6 +1562,8 @@ impl LiveAreaWidget for TranscriptWidget {
                     .wrap(Wrap { trim: false })
                     .render(tail_area, buf);
             } else {
+                // Without reasoning the short response streams directly below
+                // the head with no blank gap; a tall response keeps its tail.
                 let tail_area = Rect::new(inner.x, y, width, tail_band);
                 render_wrapped_tail(tail, tail_area, buf, tail_band as usize);
             }
