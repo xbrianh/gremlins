@@ -55,11 +55,12 @@ pub struct RenderContext<'a> {
 
 /// A single LiveArea rendering region.
 ///
-/// Widgets are laid out top-to-bottom in the order they appear in the
-/// widget vec. Each reports its minimum height via
-/// [`min_height`](Self::min_height), whether it may absorb leftover rows via
-/// [`flexible`](Self::flexible), and paints itself into the region it is
-/// assigned by [`render`](Self::render).
+/// Widgets may be nested. A container's
+/// [`min_height`](Self::min_height), [`desired_height`](Self::desired_height),
+/// and [`max_height`](Self::max_height) are the sums of its children's
+/// answers; width travels down as the already-reduced inner width, while
+/// height travels up. Layout is driven by a shared recursive engine over a
+/// slice of `&mut dyn LiveAreaWidget`.
 pub trait LiveAreaWidget {
     /// The fewest rows this widget can tolerate at the given width and render
     /// context. This is the floor the priority system shrinks down to.
@@ -73,8 +74,8 @@ pub trait LiveAreaWidget {
 
     /// Bring this widget's buffer into its final state for the frame. This
     /// is the single place content is mutated before measurement: the
-    /// transcript rebuilds a dirty response region into its FIFO and trims
-    /// its embedded reasoning slot to the capped band. Defaults to a no-op.
+    /// transcript rebuilds a dirty response region into its FIFO and
+    /// finalizes its embedded streaming children. Defaults to a no-op.
     fn finalize(&mut self, _width: u16) {}
 
     /// Render this widget into `area`. This is paint-only: overflow is
@@ -83,15 +84,14 @@ pub trait LiveAreaWidget {
 
     /// Drain and return any lines that do not fit in `available_rows` at
     /// the given width. The widget decides what happens to its head.
-    fn take_overflow(&mut self, _available_rows: u16, _width: u16) -> Vec<Line<'static>> {
+    fn take_overflow(
+        &mut self,
+        _available_rows: u16,
+        _width: u16,
+        _ctx: &RenderContext,
+    ) -> Vec<Line<'static>> {
         Vec::new()
     }
-
-    /// Downcast helper for locating a concrete widget in the stack.
-    fn as_any(&self) -> &dyn std::any::Any;
-
-    /// Mutable downcast helper.
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
     /// Short, stable label for telemetry. Concrete widgets that benefit
     /// from a stable name override this; the fallback is the full type
@@ -120,50 +120,40 @@ pub trait LiveAreaWidget {
 
     /// Ordering for committing overflow to scrollback. **Lower value is
     /// committed first.** Only the transcript produces overflow today, but
-    /// the integer gives `compose` a deterministic ordering if more than
-    /// one widget ever does.
+    /// the integer gives the shared engine a deterministic ordering if more
+    /// than one widget ever does.
     fn overflow_priority(&self) -> i32 {
         0
     }
 
     /// The maximum height this widget may be allocated, as a first-class
     /// layout constraint. Defaults to `u16::MAX` (uncapped). The input bar
-    /// caps at 5 rows and the watch table caps at half the content region.
-    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+    /// caps at 5 rows, and a streaming widget caps at its title rows plus
+    /// the stream row cap.
+    fn max_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
         u16::MAX
     }
 }
 
-/// Emit the `as_any`/`as_any_mut` trait method bodies for a widget impl.
-/// Place inside an `impl LiveAreaWidget for X { ... }` block.
-macro_rules! as_any_methods {
-    () => {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            self
-        }
-    };
-}
-
 /// The transcript: a single styled FIFO plus the current turn's draft state.
 ///
-/// This is the only widget that can overflow. Its
-/// [`take_overflow`](TranscriptWidget::take_overflow) splits the FIFO head
-/// off into overflow lines whenever the combined content exceeds the
-/// region's height. The transcript is a plain FIFO: it drains its head and
-/// renders its tail regardless of whether a turn is in progress.
+/// The FIFO is the only overflow producer in the widget model. The
+/// ephemeral reasoning and live-tool bands are nested [`StreamingWidget`]
+/// children: the transcript re-runs the shared recursive layout engine over
+/// those children inside the height the outer engine allocated to the
+/// transcript, stitches the resulting band between the FIFO head (prompt +
+/// tool-call lines) and the streaming-response tail, and drains its FIFO
+/// head into terminal scrollback when the combined content exceeds the
+/// region's height.
 pub struct TranscriptWidget {
     /// The single styled FIFO — the only transcript content that overflows.
     scrollable: LineBuffer,
     /// The current turn's ephemeral reasoning slot, rendered between the
     /// pre-response transcript head and the streaming response tail.
-    reasoning: ReasoningWidget,
+    reasoning: StreamingWidget,
     /// The current turn's ephemeral live tool-output slot, rendered between
     /// reasoning and the streaming response tail.
-    tool: ToolOutputSlot,
+    tool: StreamingWidget,
     /// Raw response accumulator (for reconciliation).
     response_accumulator: String,
     /// FIFO index where the current turn starts (the pinned boundary).
@@ -199,8 +189,8 @@ impl TranscriptWidget {
     pub fn new() -> Self {
         Self {
             scrollable: LineBuffer::new(),
-            reasoning: ReasoningWidget::new(),
-            tool: ToolOutputSlot::new(),
+            reasoning: StreamingWidget::reasoning(Self::REASONING_MAX_ROWS),
+            tool: StreamingWidget::tool(Self::REASONING_MAX_ROWS),
             response_accumulator: String::new(),
             turn_start: None,
             response_start: None,
@@ -561,41 +551,51 @@ impl TranscriptWidget {
         h
     }
 
-    /// Wrapped height of the composite transcript: the FIFO plus the
-    /// ephemeral reasoning band, capped at [`Self::REASONING_MAX_ROWS`].
-    fn desired_height(&self, width: u16) -> u16 {
-        let width = width.saturating_sub(1);
-        let fifo = self.fifo_desired_height(width);
-        let reasoning = self
-            .reasoning
-            .desired_rows(width)
-            .min(Self::REASONING_MAX_ROWS);
-        let tool = self.tool.desired_rows(width).min(Self::REASONING_MAX_ROWS);
-        fifo.saturating_add(reasoning).saturating_add(tool)
+    /// Wrapped height of the composite transcript: the FIFO plus the two
+    /// streaming children's desired heights (each child caps itself at its
+    /// row cap).
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        let inner = width.saturating_sub(1);
+        let fifo = self.fifo_desired_height(inner);
+        fifo.saturating_add(self.reasoning.desired_height(inner, ctx))
+            .saturating_add(self.tool.desired_height(inner, ctx))
+    }
+
+    /// Re-run the recursive layout engine over the transcript's two
+    /// ephemeral children, constrained to the outer allocation minus the
+    /// FIFO's one-row floor. Returns the allocated heights in child order.
+    fn ephemeral_heights(
+        &mut self,
+        available_rows: u16,
+        width: u16,
+        ctx: &RenderContext,
+    ) -> (u16, u16) {
+        let child_budget = available_rows.saturating_sub(1);
+        let mut children: [&mut dyn LiveAreaWidget; 2] = [&mut self.reasoning, &mut self.tool];
+        let layout = layout_widgets(&mut children, width, child_budget, ctx);
+        (layout.heights[0], layout.heights[1])
     }
 
     /// Drain the head of the transcript FIFO that does not fit in
-    /// `available_rows`. The embedded reasoning band reserves its rows first,
-    /// and the FIFO is drained unconditionally: an in-progress turn overflows
-    /// into terminal scrollback exactly like completed history. Reasoning is
-    /// never returned as overflow.
-    pub fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
+    /// `available_rows`. The embedded streaming bands are allocated first by
+    /// the recursive layout engine, and the FIFO is drained unconditionally:
+    /// an in-progress turn overflows into terminal scrollback exactly like
+    /// completed history. Reasoning and tool output are never returned as
+    /// overflow.
+    pub fn take_overflow(
+        &mut self,
+        available_rows: u16,
+        width: u16,
+        ctx: &RenderContext,
+    ) -> Vec<Line<'static>> {
         self.invalidate_desired_cache();
-        let width = width.saturating_sub(1);
-        let reasoning_rows = self
-            .reasoning
-            .desired_rows(width)
-            .min(Self::REASONING_MAX_ROWS);
-        let tool_rows = self.tool.desired_rows(width).min(Self::REASONING_MAX_ROWS);
-        // The FIFO keeps a one-row floor; the ephemeral slots yield their
-        // rows before the FIFO shrinks below that floor, reasoning first.
-        let reasoning_reserved = reasoning_rows.min(available_rows.saturating_sub(1));
-        let tool_reserved = tool_rows.min(available_rows.saturating_sub(reasoning_reserved + 1));
+        let inner = width.saturating_sub(1);
+        let (reasoning_rows, tool_rows) = self.ephemeral_heights(available_rows, inner, ctx);
         let fifo_rows = available_rows
-            .saturating_sub(reasoning_reserved)
-            .saturating_sub(tool_reserved);
+            .saturating_sub(reasoning_rows)
+            .saturating_sub(tool_rows);
         let (_overflow_rows, overflow_lines): (_, Vec<_>) =
-            split_overflow(&self.scrollable, fifo_rows, width);
+            split_overflow(&self.scrollable, fifo_rows, inner);
         if overflow_lines.is_empty() {
             return Vec::new();
         }
@@ -746,6 +746,17 @@ fn tool_output_line(text: &str) -> Line<'static> {
                 .add_modifier(Modifier::ITALIC),
         ),
     ])
+}
+
+/// Streaming styler: reasoning diamonds alternate with the running line
+/// index so streaming motion comes free from the stream itself.
+fn reasoning_stream_line(text: &str, index: usize) -> Line<'static> {
+    reasoning_line(text, index % 2 == 1)
+}
+
+/// Streaming styler: live tool output is ANSI-stripped before it is painted.
+fn tool_stream_line(text: &str, _index: usize) -> Line<'static> {
+    tool_output_line(&strip_ansi(text))
 }
 
 /// Strip common ANSI control sequences from live tool output.
@@ -917,13 +928,158 @@ pub(crate) fn render_wrapped_tail(
         }
     }
 }
-/// Live tail for reasoning text. Accumulates partial chunks into complete
-/// lines and renders them unstyled, growing freely with its content.
-pub struct ReasoningWidget {
+/// Result of a recursive layout pass: allocated heights (in child order) and
+/// priority-ordered overflow lines.
+pub(crate) struct WidgetLayout {
+    pub(crate) heights: Vec<u16>,
+    pub(crate) overflow: Vec<(i32, Line<'static>)>,
+}
+
+/// The shared recursive layout engine.
+///
+/// This performs the measurement/allocate/drain portion of the frame over an
+/// ordered slice of `&mut dyn LiveAreaWidget`:
+///
+/// 1. finalize every child at `width`,
+/// 2. measure min/desired/max from finalized content,
+/// 3. allocate viewport rows with priority-aware shrink/expand,
+/// 4. drain each child's overflow, ordered by `overflow_priority`.
+///
+/// Painting is deliberately left to the caller only because containers such
+/// as [`TranscriptWidget`] paint their children between bands that are not
+/// themselves widgets. The returned `overflow` is sorted low-priority first.
+pub(crate) fn layout_widgets(
+    widgets: &mut [&mut dyn LiveAreaWidget],
+    width: u16,
+    viewport_rows: u16,
+    ctx: &RenderContext,
+) -> WidgetLayout {
+    for w in widgets.iter_mut() {
+        w.finalize(width);
+    }
+
+    let n = widgets.len();
+    let mut min_heights = vec![0u16; n];
+    let mut desired_heights = vec![0u16; n];
+    let mut max_heights = vec![0u16; n];
+
+    for (i, w) in widgets.iter().enumerate() {
+        let h = w.min_height(width, ctx);
+        let max = w.max_height(width, ctx);
+        // Force the minimum into [0, max] so a widget whose minimum exceeds
+        // its cap cannot drive below-minimum shrinking.
+        min_heights[i] = h.min(max);
+        max_heights[i] = max;
+        // Clamp desired height to [min, max] so allocation honors both
+        // bounds uniformly.
+        desired_heights[i] = w.desired_height(width, ctx).max(h).min(max);
+    }
+
+    // Shrink pass: when the sum of desired heights exceeds the viewport,
+    // shrink in ascending size_priority order (lowest first) from desired
+    // down to minimum, then below minimum if still over budget. The total is
+    // tracked in `u32` so uncapped desired heights cannot overflow a `u16`
+    // sum before being clamped to the viewport.
+    let mut heights = desired_heights.clone();
+    let mut total: u32 = heights.iter().map(|&h| h as u32).sum();
+    let rows = viewport_rows as u32;
+    if total > rows {
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| widgets[i].size_priority());
+        for &i in &order {
+            if total <= rows {
+                break;
+            }
+            let excess = total - rows;
+            let shrinkable = heights[i].saturating_sub(min_heights[i]) as u32;
+            let shrink = shrinkable.min(excess);
+            heights[i] -= shrink as u16;
+            total -= shrink;
+        }
+        for &i in &order {
+            if total <= rows {
+                break;
+            }
+            let excess = total - rows;
+            let shrink = (heights[i] as u32).min(excess);
+            heights[i] -= shrink as u16;
+            total -= shrink;
+        }
+    }
+
+    // Expand pass: give remaining rows to the highest-priority flexible
+    // widget.
+    if total < rows {
+        let remaining = (rows - total) as u16;
+        let mut best: Option<usize> = None;
+        let mut best_prio = i32::MIN;
+        for (i, widget) in widgets.iter().enumerate() {
+            if widget.flexible(ctx) && widget.size_priority() > best_prio {
+                best_prio = widget.size_priority();
+                best = Some(i);
+            }
+        }
+        if let Some(i) = best {
+            heights[i] += remaining;
+        }
+    }
+
+    // Cap every allocated height at its widget's max so the expand pass
+    // cannot exceed a first-class cap (e.g. the input bar's 5-row limit or a
+    // streaming widget's row cap).
+    for (i, height) in heights.iter_mut().enumerate() {
+        *height = (*height).min(max_heights[i]);
+    }
+
+    #[cfg(feature = "telemetry")]
+    {
+        let segments: Vec<String> = widgets
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                format!(
+                    "{} min={} desired={} max={} allocated={} flexible={} priority={}",
+                    w.name(),
+                    min_heights[i],
+                    desired_heights[i],
+                    max_heights[i],
+                    heights[i],
+                    w.flexible(ctx),
+                    w.size_priority()
+                )
+            })
+            .collect();
+        log::info!("WIDGET_LAYOUT {}", segments.join("; "));
+    }
+
+    let mut overflow: Vec<(i32, Line<'static>)> = Vec::new();
+    for (i, w) in widgets.iter_mut().enumerate() {
+        let h = heights[i];
+        let prio = w.overflow_priority();
+        for line in w.take_overflow(h, width, ctx) {
+            overflow.push((prio, line));
+        }
+    }
+    overflow.sort_by_key(|(prio, _)| *prio);
+
+    WidgetLayout { heights, overflow }
+}
+
+/// The shared streaming primitive for live tails.
+///
+/// A `StreamingWidget` owns a [`LineBuffer`] of completed styled lines plus a
+/// trailing partial string, tail-anchors the visible portion with a
+/// `scrolled` offset measured against `last_width`, and styles each logical
+/// line with a caller-supplied styler (raw text + running line index →
+/// styled [`Line`]). An optional title row may be supplied as a function of
+/// [`RenderContext`]. The stream trims its own head to the configured row cap
+/// (lossy tail), collapses to zero when no stream content is present, and
+/// never reports overflow.
+pub struct StreamingWidget {
     lines: LineBuffer,
     partial: String,
-    /// Number of completed lines pushed, used to alternate the telemetry
-    /// diamond glyph for free streaming motion.
+    /// Number of completed lines pushed; passed to the styler as the running
+    /// line index so a styler can alternate glyphs for free streaming motion.
     line_count: usize,
     /// Wrapped rows scrolled off the top of the current remaining live tail.
     /// This is measured against `last_width`, and only ever moves forward
@@ -933,40 +1089,73 @@ pub struct ReasoningWidget {
     /// Width `scrolled` is expressed in. A width change re-anchors the
     /// visible tail at the same number of visible rows before updating this.
     last_width: Cell<u16>,
+    styler: fn(&str, usize) -> Line<'static>,
+    title: Option<fn(&RenderContext) -> Line<'static>>,
+    row_cap: u16,
+    size_priority: i32,
 }
 
-impl ReasoningWidget {
-    pub fn new() -> Self {
+impl StreamingWidget {
+    pub fn new(styler: fn(&str, usize) -> Line<'static>, row_cap: u16, size_priority: i32) -> Self {
         Self {
             lines: LineBuffer::new(),
             partial: String::new(),
             line_count: 0,
             scrolled: Cell::new(0),
             last_width: Cell::new(0),
+            styler,
+            title: None,
+            row_cap,
+            size_priority,
         }
     }
 
-    /// Append reasoning text (may be a partial chunk). Completed lines are
-    /// pushed into the buffer; the trailing partial is kept as a live line.
-    /// Each line is prefixed with a brass telemetry diamond.
+    /// Build a titled streaming widget, e.g. a top-level sibling with a
+    /// live header row.
+    #[allow(dead_code)]
+    pub fn with_title(
+        title: fn(&RenderContext) -> Line<'static>,
+        styler: fn(&str, usize) -> Line<'static>,
+        row_cap: u16,
+        size_priority: i32,
+    ) -> Self {
+        Self {
+            title: Some(title),
+            ..Self::new(styler, row_cap, size_priority)
+        }
+    }
+
+    /// The configured reasoning stream: alternating brass telemetry diamond
+    /// glyphs + nickel italic text.
+    pub fn reasoning(row_cap: u16) -> Self {
+        Self::new(reasoning_stream_line, row_cap, 20)
+    }
+
+    /// The configured live tool-output stream: brass tool bullet + nickel
+    /// italic text, ANSI-stripped.
+    pub fn tool(row_cap: u16) -> Self {
+        Self::new(tool_stream_line, row_cap, 10)
+    }
+
+    /// Append text (may be a partial chunk). Completed lines are pushed into
+    /// the buffer; the trailing partial is kept as a live line.
     pub fn push_text(&mut self, text: &str) {
         self.partial.push_str(text);
         while let Some(newline_pos) = self.partial.find('\n') {
-            let line: String = self.partial[..newline_pos].into();
-            self.partial = self.partial[newline_pos + 1..].into();
-            let hollow = self.line_count % 2 == 1;
-            self.lines.push(reasoning_line(&line, hollow));
+            let line: String = self.partial[..newline_pos].to_string();
+            self.partial = self.partial[newline_pos + 1..].to_string();
+            let idx = self.line_count;
+            self.lines.push((self.styler)(&line, idx));
             self.line_count += 1;
         }
     }
 
     /// Flush the trailing partial (if any) into a completed line.
-    #[allow(dead_code)]
     pub fn flush(&mut self) {
         if !self.partial.is_empty() {
             let line = std::mem::take(&mut self.partial);
-            let hollow = self.line_count % 2 == 1;
-            self.lines.push(reasoning_line(&line, hollow));
+            let idx = self.line_count;
+            self.lines.push((self.styler)(&line, idx));
             self.line_count += 1;
         }
     }
@@ -985,13 +1174,6 @@ impl ReasoningWidget {
     }
 
     /// Re-anchor `scrolled` when the wrap width changes.
-    ///
-    /// `scrolled` is a partial wrapped-row offset into the head line, so the
-    /// same number cannot be reused at a different width. The hidden prefix
-    /// is converted back to a character boundary and re-wrapped at the new
-    /// width, keeping the tail anchored without resurrecting rows that
-    /// scrolled off at the old width or hiding rows that only wrap after the
-    /// resize.
     fn normalize_scroll(&self, width: u16) {
         if width == 0 {
             return;
@@ -1014,10 +1196,7 @@ impl ReasoningWidget {
         // Re-anchor the already-hidden prefix of the head line at the new
         // width. `scrolled` is a partial wrapped-row offset into the head
         // line at `last_width`; converting that offset back into a character
-        // prefix and re-wrapping it preserves monotonicity. The old
-        // visible-row-count approach could resurrect hidden characters on a
-        // wider wrap or permanently hide newly wrapped rows on a narrower
-        // one.
+        // prefix and re-wrapping it preserves monotonicity.
         let rendered = self.rendered_lines();
         let Some(head) = rendered.first() else {
             self.scrolled.set(0);
@@ -1030,12 +1209,6 @@ impl ReasoningWidget {
     }
 
     /// Re-anchor a partial wrapped-row offset across a width change.
-    ///
-    /// `scrolled` counts wrapped rows hidden above the visible window within
-    /// `line` at `old_width`. To preserve monotonicity, convert that row
-    /// boundary back to the character prefix ending at the start of the
-    /// first visible wrapped row, then return how many wrapped rows that
-    /// prefix occupies at `new_width`.
     fn reanchor_scrolled(
         line: &Line<'static>,
         scrolled: usize,
@@ -1073,12 +1246,8 @@ impl ReasoningWidget {
     }
 
     /// Advance the scrolled offset and drop leading logical lines that have
-    /// been completely consumed.
-    ///
-    /// `hidden` is the total number of wrapped rows to hide at the top of
-    /// `rendered`. The final logical line is never dropped: a single
-    /// over-tall line scrolls off one wrapped row at a time instead of
-    /// vanishing. Returns the scrolled offset remaining on the new head line.
+    /// been completely consumed. Returns the scrolled offset remaining on the
+    /// new head line.
     fn consume_head(&mut self, rendered: &[Line<'static>], mut hidden: usize, width: u16) -> usize {
         if rendered.is_empty() {
             return 0;
@@ -1095,10 +1264,7 @@ impl ReasoningWidget {
         }
 
         // Never consume the final line entirely: at least its last wrapped
-        // row must stay visible. This clamp is only valid when the head
-        // remaining after the loop *is* the final line; applying it to an
-        // earlier head line would force the offset back to zero and
-        // resurrect rows that had already scrolled off.
+        // row must stay visible.
         if drop_count + 1 >= rendered.len() {
             if let Some(last) = rendered.last() {
                 let rows = line_wrapped_height(last, width);
@@ -1114,8 +1280,8 @@ impl ReasoningWidget {
         hidden
     }
 
-    /// Desired height: the full wrapped height of the remaining live tail
-    /// minus the wrapped rows that have already scrolled off the top.
+    /// Desired stream height, uncapped: the full wrapped height of the
+    /// remaining live tail minus the wrapped rows already scrolled off.
     pub fn desired_rows(&self, width: u16) -> u16 {
         if self.is_empty() || width == 0 {
             return 0;
@@ -1128,234 +1294,19 @@ impl ReasoningWidget {
             .min(u16::MAX as usize) as u16
     }
 
-    fn rendered_lines(&self) -> Vec<Line<'static>> {
+    /// Completed lines plus the trailing partial, in render order.
+    pub fn rendered_lines(&self) -> Vec<Line<'static>> {
         let mut out = self.lines.visible_lines().to_vec();
         if !self.partial.is_empty() {
-            let hollow = self.line_count % 2 == 1;
-            out.push(reasoning_line(&self.partial, hollow));
-        }
-        out
-    }
-}
-
-impl Default for ReasoningWidget {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ReasoningWidget {
-    /// Keep only the visible tail of the reasoning stream; the head is
-    /// discarded, never committed to terminal scrollback. Zero-area
-    /// viewports are transient, so defer trimming rather than dropping
-    /// content that had no chance to paint.
-    pub fn trim_to(&mut self, available_rows: u16, width: u16) {
-        if width == 0 || available_rows == 0 {
-            return;
-        }
-
-        self.normalize_scroll(width);
-        let rendered = self.rendered_lines();
-        let total = wrapped_height(&rendered, width);
-        let visible = total.saturating_sub(self.scrolled.get());
-        let excess = visible.saturating_sub(available_rows as usize);
-        if excess == 0 {
-            return;
-        }
-
-        // Advance the scrolled offset by exactly the overflow amount. The
-        // helper drains any leading logical lines whose wrapped rows have
-        // now been fully consumed, including treating the trailing partial
-        // as a final line that is never dropped outright.
-        let next_scrolled = self.consume_head(&rendered, self.scrolled.get() + excess, width);
-        self.scrolled.set(next_scrolled);
-        self.last_width.set(width);
-    }
-
-    /// Paint the maintained wrapped tail of the reasoning stream into `area`.
-    pub fn render_band(&mut self, area: Rect, buf: &mut Buffer) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        self.normalize_scroll(area.width);
-        let lines = self.rendered_lines();
-        let total = wrapped_height(&lines, area.width);
-        let visible_rows = total.saturating_sub(self.scrolled.get());
-        render_wrapped_tail(&lines, area, buf, visible_rows);
-    }
-}
-
-/// Ephemeral, embedded live tail for running tool output.
-///
-/// This is the `Bash`/`WebSearch` live slot inside [`TranscriptWidget`]. It
-/// buffers completed lines plus a trailing partial (mirroring
-/// [`ReasoningWidget`]), trims its head to its allocated height, collapses to
-/// zero when idle, and never reports overflow. Lines are ANSI-stripped and
-/// rendered with a brass [`glyph::TOOL`] prefix plus italic subtle text.
-pub struct ToolOutputSlot {
-    lines: LineBuffer,
-    partial: String,
-    /// Wrapped rows scrolled off the top of the current remaining live tail.
-    /// This behaves exactly like [`ReasoningWidget`]'s scrolling field.
-    scrolled: Cell<usize>,
-    last_width: Cell<u16>,
-}
-
-impl ToolOutputSlot {
-    pub fn new() -> Self {
-        Self {
-            lines: LineBuffer::new(),
-            partial: String::new(),
-            scrolled: Cell::new(0),
-            last_width: Cell::new(0),
-        }
-    }
-
-    /// Append tool output text. Completed lines are pushed into the buffer
-    /// with ANSI escapes stripped; the trailing partial is kept as a live
-    /// line.
-    pub fn push_text(&mut self, text: &str) {
-        self.partial.push_str(text);
-        while let Some(newline_pos) = self.partial.find('\n') {
-            let raw_line: String = self.partial[..newline_pos].into();
-            self.partial = self.partial[newline_pos + 1..].into();
-            self.lines.push(tool_output_line(&strip_ansi(&raw_line)));
-        }
-    }
-
-    /// Reset the live region for a new turn.
-    pub fn clear(&mut self) {
-        self.lines.clear();
-        self.partial.clear();
-        self.scrolled.set(0);
-        self.last_width.set(0);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty() && self.partial.is_empty()
-    }
-
-    /// Re-anchor `scrolled` when the wrap width changes.
-    fn normalize_scroll(&self, width: u16) {
-        if width == 0 {
-            return;
-        }
-        let last = self.last_width.get();
-        if last == 0 {
-            self.last_width.set(width);
-            return;
-        }
-        if last == width {
-            return;
-        }
-
-        let scrolled = self.scrolled.get();
-        if scrolled == 0 {
-            self.last_width.set(width);
-            return;
-        }
-
-        let rendered = self.rendered_lines();
-        let Some(head) = rendered.first() else {
-            self.scrolled.set(0);
-            self.last_width.set(width);
-            return;
-        };
-        self.scrolled
-            .set(Self::reanchor_scrolled(head, scrolled, last, width));
-        self.last_width.set(width);
-    }
-
-    fn reanchor_scrolled(
-        line: &Line<'static>,
-        scrolled: usize,
-        old_width: u16,
-        new_width: u16,
-    ) -> usize {
-        if scrolled == 0 || old_width == 0 || new_width == 0 {
-            return 0;
-        }
-        let content = line.to_string();
-        if content.is_empty() {
-            return 0;
-        }
-
-        let mut boundary = 0usize;
-        for (idx, _) in content.char_indices() {
-            if idx == 0 {
-                continue;
-            }
-            let prefix = &content[..idx];
-            let prefix_rows =
-                line_wrapped_height(&Line::from(Span::raw(prefix.to_string())), old_width);
-            if prefix_rows == scrolled {
-                boundary = idx;
-            } else if prefix_rows > scrolled {
-                break;
-            }
-        }
-
-        if boundary == 0 {
-            return 0;
-        }
-        let prefix = &content[..boundary];
-        line_wrapped_height(&Line::from(Span::raw(prefix.to_string())), new_width)
-    }
-
-    fn consume_head(&mut self, rendered: &[Line<'static>], mut hidden: usize, width: u16) -> usize {
-        if rendered.is_empty() {
-            return 0;
-        }
-
-        let mut drop_count = 0usize;
-        while drop_count + 1 < rendered.len() {
-            let line_rows = line_wrapped_height(&rendered[drop_count], width);
-            if hidden < line_rows {
-                break;
-            }
-            hidden -= line_rows;
-            drop_count += 1;
-        }
-
-        if drop_count + 1 >= rendered.len() {
-            if let Some(last) = rendered.last() {
-                let rows = line_wrapped_height(last, width);
-                hidden = hidden.min(rows.saturating_sub(1));
-            }
-        }
-
-        let drop_from_buffer = drop_count.min(self.lines.len());
-        self.lines.drain_head(drop_from_buffer);
-        if drop_count > drop_from_buffer {
-            self.partial.clear();
-        }
-        hidden
-    }
-
-    /// Desired height: the full wrapped height of the remaining live tail
-    /// minus the wrapped rows that have already scrolled off the top.
-    pub fn desired_rows(&self, width: u16) -> u16 {
-        if self.is_empty() || width == 0 {
-            return 0;
-        }
-        self.normalize_scroll(width);
-        let rendered = self.rendered_lines();
-        let total = wrapped_height(&rendered, width);
-        total
-            .saturating_sub(self.scrolled.get())
-            .min(u16::MAX as usize) as u16
-    }
-
-    fn rendered_lines(&self) -> Vec<Line<'static>> {
-        let mut out = self.lines.visible_lines().to_vec();
-        if !self.partial.is_empty() {
-            out.push(tool_output_line(&strip_ansi(&self.partial)));
+            out.push((self.styler)(&self.partial, self.line_count));
         }
         out
     }
 
     /// Keep only the visible tail of the live stream; the head is discarded,
-    /// never committed to terminal scrollback.
+    /// never committed to terminal scrollback. Zero-area viewports are
+    /// transient, so defer trimming rather than dropping content that had no
+    /// chance to paint.
     pub fn trim_to(&mut self, available_rows: u16, width: u16) {
         if width == 0 || available_rows == 0 {
             return;
@@ -1375,74 +1326,174 @@ impl ToolOutputSlot {
         self.last_width.set(width);
     }
 
-    /// Paint the maintained wrapped tail of the live stream into `area`.
-    pub fn render_band(&mut self, area: Rect, buf: &mut Buffer) {
-        if area.width == 0 || area.height == 0 {
-            return;
+    fn title_line(&self, ctx: &RenderContext) -> Option<Line<'static>> {
+        self.title.map(|f| f(ctx))
+    }
+
+    /// Wrapped title rows. Idle streams collapse to zero even when a title
+    /// is configured, so the title never allocates screen space on its own.
+    fn title_rows(&self, width: u16, ctx: &RenderContext) -> u16 {
+        if self.is_empty() || width == 0 {
+            return 0;
         }
-        self.normalize_scroll(area.width);
-        let lines = self.rendered_lines();
-        let total = wrapped_height(&lines, area.width);
-        let visible_rows = total.saturating_sub(self.scrolled.get());
-        render_wrapped_tail(&lines, area, buf, visible_rows);
+        match self.title_line(ctx) {
+            None => 0,
+            Some(line) => (wrapped_height(&[line], width).min(u16::MAX as usize)) as u16,
+        }
     }
 }
 
-impl Default for ToolOutputSlot {
+impl Default for StreamingWidget {
     fn default() -> Self {
-        Self::new()
+        Self::new(
+            |text, _| Line::from(Span::raw(text.to_string())),
+            u16::MAX,
+            10,
+        )
+    }
+}
+
+impl LiveAreaWidget for StreamingWidget {
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "streaming"
+    }
+
+    fn size_priority(&self) -> i32 {
+        self.size_priority
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        false
+    }
+
+    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        self.title_rows(width, ctx)
+    }
+
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        let title_rows = self.title_rows(width, ctx);
+        let stream_rows = if self.is_empty() || width == 0 {
+            0
+        } else {
+            self.desired_rows(width).min(self.row_cap)
+        };
+        title_rows.saturating_add(stream_rows)
+    }
+
+    fn max_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        if self.is_empty() {
+            0
+        } else {
+            self.title_rows(width, ctx).saturating_add(self.row_cap)
+        }
+    }
+
+    fn finalize(&mut self, width: u16) {
+        if self.row_cap < u16::MAX {
+            self.trim_to(self.row_cap, width);
+        }
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
+        // Clear the region first so a shorter frame cannot leave stale cells
+        // from a previous, taller live tail.
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let mut y = area.y;
+        if let Some(line) = self.title_line(ctx) {
+            let title_rows = self.title_rows(area.width, ctx).min(area.height);
+            if title_rows > 0 {
+                let title_area = Rect::new(area.x, y, area.width, title_rows);
+                render_wrapped_tail(&[line], title_area, buf, title_rows as usize);
+                y += title_rows;
+            }
+        }
+
+        let stream_height = area.height.saturating_sub(y.saturating_sub(area.y));
+        if stream_height == 0 || self.is_empty() {
+            return;
+        }
+        let stream_area = Rect::new(area.x, y, area.width, stream_height);
+        self.trim_to(stream_area.height, stream_area.width);
+        let lines = self.rendered_lines();
+        let total = wrapped_height(&lines, stream_area.width);
+        let visible_rows = total.saturating_sub(self.scrolled.get());
+        render_wrapped_tail(&lines, stream_area, buf, visible_rows);
+    }
+
+    fn take_overflow(
+        &mut self,
+        _available_rows: u16,
+        _width: u16,
+        _ctx: &RenderContext,
+    ) -> Vec<Line<'static>> {
+        Vec::new()
     }
 }
 
 impl LiveAreaWidget for TranscriptWidget {
-    as_any_methods!();
-
     #[cfg(feature = "telemetry")]
     fn name(&self) -> &'static str {
         "transcript"
     }
 
     fn size_priority(&self) -> i32 {
-        10
+        self.reasoning
+            .size_priority()
+            .min(self.tool.size_priority())
     }
 
     fn overflow_priority(&self) -> i32 {
-        0
+        self.reasoning
+            .overflow_priority()
+            .min(self.tool.overflow_priority())
     }
 
-    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
-        // The transcript is a plain FIFO with a one-row floor: it always
-        // reserves a single row so a streaming response stays visible even
-        // when ephemeral slots contest the space. Content that does not fit
-        // is drained to scrollback.
-        1
+    fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        let inner = width.saturating_sub(1);
+        1u16.saturating_add(self.reasoning.min_height(inner, ctx))
+            .saturating_add(self.tool.min_height(inner, ctx))
     }
 
     fn flexible(&self, _ctx: &RenderContext) -> bool {
         true
     }
 
-    fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
-        self.desired_height(width)
+    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        self.desired_height(width, ctx)
+    }
+
+    fn max_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
+        u16::MAX
     }
 
     fn finalize(&mut self, width: u16) {
         self.last_width = width;
         self.rebuild_separator(width);
         self.rebuild_response();
-        // Trim both ephemeral slots to their capped bands before measurement
-        // so layout never sees a taller ephemeral child than render will paint.
-        self.reasoning
-            .trim_to(Self::REASONING_MAX_ROWS, width.saturating_sub(1));
-        self.tool
-            .trim_to(Self::REASONING_MAX_ROWS, width.saturating_sub(1));
+        let inner = width.saturating_sub(1);
+        self.reasoning.finalize(inner);
+        self.tool.finalize(inner);
     }
 
-    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
-        self.take_overflow(available_rows, width)
+    fn take_overflow(
+        &mut self,
+        available_rows: u16,
+        width: u16,
+        ctx: &RenderContext,
+    ) -> Vec<Line<'static>> {
+        self.take_overflow(available_rows, width, ctx)
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
         // Clear the region first so a shorter frame cannot leave stale cells
         // from a previous, taller transcript.
         for y in 0..area.height {
@@ -1454,8 +1505,8 @@ impl LiveAreaWidget for TranscriptWidget {
             return;
         }
 
-        // One-cell left margin: all three bands paint inside the same inner
-        // rect so reasoning aligns with prompt and response.
+        // One-cell left margin: all bands paint inside the same inner rect so
+        // reasoning/tool align with prompt and response.
         let inner = Rect::new(
             area.x + 1,
             area.y,
@@ -1466,6 +1517,13 @@ impl LiveAreaWidget for TranscriptWidget {
         if width == 0 {
             return;
         }
+
+        // Allocate the ephemeral band before borrowing the FIFO lines.
+        let (reasoning_rows, tool_rows) = self.ephemeral_heights(area.height, width, ctx);
+        let fifo_rows = area
+            .height
+            .saturating_sub(reasoning_rows)
+            .saturating_sub(tool_rows);
 
         let lines = self.scrollable.visible_lines();
         if lines.is_empty() {
@@ -1478,21 +1536,6 @@ impl LiveAreaWidget for TranscriptWidget {
         let response_start = self.response_start.unwrap_or(lines.len()).min(lines.len());
         let head = &lines[..response_start];
         let tail = &lines[response_start..];
-
-        let reasoning_rows = self
-            .reasoning
-            .desired_rows(width)
-            .min(Self::REASONING_MAX_ROWS)
-            .min(area.height.saturating_sub(1));
-        let tool_rows = self
-            .tool
-            .desired_rows(width)
-            .min(Self::REASONING_MAX_ROWS)
-            .min(area.height.saturating_sub(reasoning_rows + 1));
-        let fifo_rows = area
-            .height
-            .saturating_sub(reasoning_rows)
-            .saturating_sub(tool_rows);
 
         let head_rows = wrapped_height(head, width);
         let tail_rows = wrapped_height(tail, width);
@@ -1517,21 +1560,15 @@ impl LiveAreaWidget for TranscriptWidget {
         }
 
         y = inner.y + head_band;
-        if reasoning_rows > 0 && !self.reasoning.is_empty() {
-            // The allocation pipeline trims to the 5-row cap in `finalize`,
-            // but this frame may paint a shorter band on a short viewport.
-            // Re-trim here so the maintained tail matches what is actually
-            // painted, and a later taller frame cannot resurrect rows.
-            self.reasoning.trim_to(reasoning_rows, width);
+        if reasoning_rows > 0 {
             let reasoning_area = Rect::new(inner.x, y, width, reasoning_rows);
-            self.reasoning.render_band(reasoning_area, buf);
+            LiveAreaWidget::render(&mut self.reasoning, reasoning_area, buf, ctx);
         }
 
         y = inner.y + head_band + reasoning_rows;
-        if tool_rows > 0 && !self.tool.is_empty() {
-            self.tool.trim_to(tool_rows, width);
+        if tool_rows > 0 {
             let tool_area = Rect::new(inner.x, y, width, tool_rows);
-            self.tool.render_band(tool_area, buf);
+            LiveAreaWidget::render(&mut self.tool, tool_area, buf, ctx);
         }
 
         y = inner.y + head_band + reasoning_rows + tool_rows;
@@ -1559,7 +1596,6 @@ impl LiveAreaWidget for TranscriptWidget {
         }
     }
 }
-
 /// The input bar. Wraps its text at the current width and grows up to 5
 /// rows. Owns the vertical scroll offset so the cursor stays visible within
 /// the wrapped view. Text is wrapped at the terminal width (the only mode
@@ -1799,8 +1835,6 @@ impl Default for InputBarWidget {
 }
 
 impl LiveAreaWidget for InputBarWidget {
-    as_any_methods!();
-
     #[cfg(feature = "telemetry")]
     fn name(&self) -> &'static str {
         "input"
@@ -1821,7 +1855,7 @@ impl LiveAreaWidget for InputBarWidget {
         self.wrapped_rows(width, ctx.input, ctx.completion_preview)
     }
 
-    fn max_height(&self, _ctx: &RenderContext) -> u16 {
+    fn max_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
         5
     }
 
@@ -1882,8 +1916,6 @@ impl LiveAreaWidget for InputBarWidget {
 pub struct InfoBarWidget;
 
 impl LiveAreaWidget for InfoBarWidget {
-    as_any_methods!();
-
     #[cfg(feature = "telemetry")]
     fn name(&self) -> &'static str {
         "info"
@@ -2031,8 +2063,6 @@ impl DebugWidget {
 }
 
 impl LiveAreaWidget for DebugWidget {
-    as_any_methods!();
-
     #[cfg(feature = "telemetry")]
     fn name(&self) -> &'static str {
         "debug"
@@ -2249,7 +2279,7 @@ mod tests {
     #[test]
     fn finish_turn_keeps_tool_lines_in_transcript_between_prompt_and_response() {
         let mut transcript = TranscriptWidget::new();
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
 
         transcript.submit_prompt("hi".to_string());
         reasoning.push_text("thinking\n");
@@ -2323,7 +2353,7 @@ mod tests {
         // A one-row viewport forces the history and the pinned prompt into
         // terminal scrollback; both markers clamp to the FIFO head.
         let overflow: Vec<String> = transcript
-            .take_overflow(1, 80)
+            .take_overflow(1, 80, &input_ctx("", 0))
             .iter()
             .map(|l| l.to_string())
             .collect();
@@ -2523,7 +2553,7 @@ mod tests {
         // Only 1 row available. The FIFO drains its head unconditionally,
         // so the prompt is now scrollback and the tail "resp" stays on
         // screen.
-        let overflow = transcript.take_overflow(1, 80);
+        let overflow = transcript.take_overflow(1, 80, &input_ctx("", 0));
         let overflow_text: Vec<String> = overflow.iter().map(|l| l.to_string()).collect();
         let text: Vec<String> = transcript
             .scrollable
@@ -2555,7 +2585,7 @@ mod tests {
         // the wrapped-aware overflow drain rolls through the head (long
         // prior, separator, prompt) until only one wrapped row remains: the
         // response tail.
-        let overflow = transcript.take_overflow(1, 10);
+        let overflow = transcript.take_overflow(1, 10, &input_ctx("", 0));
         let overflow_text: Vec<String> = overflow.iter().map(|l| l.to_string()).collect();
         let text: Vec<String> = transcript
             .scrollable
@@ -2592,7 +2622,7 @@ mod tests {
 
         // Drain the head far enough that the turn start index shifts but the
         // pre-turn completed content stays in the FIFO.
-        let overflow = transcript.take_overflow(5, 80);
+        let overflow = transcript.take_overflow(5, 80, &input_ctx("", 0));
         assert!(!overflow.is_empty());
 
         transcript.clear_current_turn();
@@ -2646,7 +2676,7 @@ mod tests {
         transcript.push_response("- one\n- two\n- three\n- four");
         LiveAreaWidget::finalize(&mut transcript, 80);
         let first: Vec<String> = transcript
-            .take_overflow(1, 80)
+            .take_overflow(1, 80, &input_ctx("", 0))
             .iter()
             .map(|l| l.to_string())
             .collect();
@@ -2657,7 +2687,7 @@ mod tests {
         transcript.push_response("\n- five");
         LiveAreaWidget::finalize(&mut transcript, 80);
         let second: Vec<String> = transcript
-            .take_overflow(1, 80)
+            .take_overflow(1, 80, &input_ctx("", 0))
             .iter()
             .map(|l| l.to_string())
             .collect();
@@ -2692,7 +2722,7 @@ mod tests {
         // Finalize rebuilds the dirty response into the FIFO before
         // measurement/overflow.
         LiveAreaWidget::finalize(&mut transcript, 10);
-        let _ = transcript.take_overflow(2, 10);
+        let _ = transcript.take_overflow(2, 10, &input_ctx("", 0));
         let text: Vec<String> = transcript
             .scrollable
             .visible_lines()
@@ -2717,7 +2747,7 @@ mod tests {
 
     #[test]
     fn reasoning_partial_is_visible_in_reasoning_widget() {
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("thinking");
         // The partial reasoning line must be visible before any newline.
         let text: Vec<String> = reasoning
@@ -2730,7 +2760,7 @@ mod tests {
 
     #[test]
     fn reasoning_trim_keeps_wrapped_tail() {
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.flush();
 
@@ -2745,7 +2775,7 @@ mod tests {
 
     #[test]
     fn reasoning_scrolled_tail_grows_with_streaming_chunks() {
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         for i in 0..5 {
             reasoning.push_text(&format!("reasoning line {i}\n"));
         }
@@ -2763,7 +2793,7 @@ mod tests {
 
     #[test]
     fn reasoning_taller_allocation_does_not_resurrect_scrolled_rows() {
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.flush();
 
@@ -2778,7 +2808,7 @@ mod tests {
 
     #[test]
     fn reasoning_short_trailing_line_does_not_unscroll_head() {
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.push_text("tail\n");
 
@@ -2793,7 +2823,7 @@ mod tests {
 
     #[test]
     fn reasoning_wider_viewport_does_not_resurrect_scrolled_head() {
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.flush();
 
@@ -2811,7 +2841,7 @@ mod tests {
 
     #[test]
     fn reasoning_narrower_viewport_does_not_hide_new_wraps() {
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.flush();
 
@@ -2824,7 +2854,7 @@ mod tests {
 
     #[test]
     fn reasoning_clear_resets_scrolled_tail() {
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("first\nsecond\nthird\n");
         reasoning.trim_to(1, 80);
         assert_eq!(reasoning.desired_rows(80), 1);
@@ -2839,14 +2869,14 @@ mod tests {
 
     #[test]
     fn reasoning_is_empty_when_never_fed() {
-        let reasoning = ReasoningWidget::new();
+        let reasoning = StreamingWidget::reasoning(5);
         assert!(reasoning.is_empty());
         assert_eq!(reasoning.desired_rows(80), 0);
     }
 
     #[test]
     fn reasoning_reports_uncapped_desired_height() {
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         for i in 0..10 {
             reasoning.push_text(&format!("reasoning line {i}\n"));
         }
@@ -2860,22 +2890,137 @@ mod tests {
         // A single long line with a `◈ ` prefix: the prefix occupies row 1
         // and the long word wraps onto the following rows, so a 26-char word
         // reports 4 rows (prefix row + 3 word rows).
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("abcdefghijklmnopqrstuvwxyz");
         assert_eq!(reasoning.desired_rows(10), 4);
 
         // A long line wrapping past the transcript's 5-row band still
         // reports its natural wrapped height at the component level.
-        let mut reasoning = ReasoningWidget::new();
+        let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
         assert_eq!(reasoning.desired_rows(10), 7);
+    }
+
+    #[test]
+    fn streaming_widget_with_title_renders_title_line() {
+        fn title(_ctx: &RenderContext) -> Line<'static> {
+            Line::from(Span::styled(
+                "LIVE TITLE".to_string(),
+                Style::default()
+                    .fg(DEFAULT_THEME.heading_primary)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        }
+
+        let ctx = input_ctx("", 0);
+        let mut widget = StreamingWidget::with_title(title, reasoning_stream_line, 5, 10);
+        for i in 0..8 {
+            widget.push_text(&format!("line {i}\n"));
+        }
+
+        assert_eq!(widget.desired_height(20, &ctx), 6);
+        assert!(widget.take_overflow(1, 20, &ctx).is_empty());
+
+        let area = Rect::new(0, 0, 20, 5);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf, &ctx);
+
+        let rows = rendered_rows(&buf, 20, 5);
+        assert!(rows[0].contains("LIVE TITLE"), "{rows:?}");
+        assert!(rows.iter().any(|r| r.contains("line 7")), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("line 0")), "{rows:?}");
+    }
+
+    #[test]
+    fn streaming_widget_title_collapses_when_idle() {
+        fn title(_ctx: &RenderContext) -> Line<'static> {
+            Line::from(Span::raw("LIVE".to_string()))
+        }
+
+        let ctx = input_ctx("", 0);
+        let widget = StreamingWidget::with_title(title, reasoning_stream_line, 5, 10);
+
+        assert!(widget.is_empty());
+        assert_eq!(widget.min_height(20, &ctx), 0);
+        assert_eq!(widget.desired_height(20, &ctx), 0);
+        assert_eq!(widget.max_height(20, &ctx), 0);
+    }
+
+    #[test]
+    fn streaming_widget_wrapping_title_paints_stream_after_measured_title_rows() {
+        fn title(_ctx: &RenderContext) -> Line<'static> {
+            Line::from(Span::styled(
+                "THIS TITLE WRAPS".to_string(),
+                Style::default()
+                    .fg(DEFAULT_THEME.heading_primary)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        }
+
+        let ctx = input_ctx("", 0);
+        let mut widget = StreamingWidget::with_title(title, reasoning_stream_line, 5, 10);
+        widget.push_text("one\ntwo\nthree\n");
+
+        let width = 6;
+        let title_rows = widget.title_rows(width, &ctx) as usize;
+        assert!(
+            title_rows > 1,
+            "expected wrapping title, got {title_rows} row"
+        );
+
+        let area = Rect::new(0, 0, width, (title_rows + 3) as u16);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf, &ctx);
+
+        let rows = rendered_rows(&buf, width, (title_rows + 3) as u16);
+        assert!(
+            rows[..title_rows].iter().any(|r| r.contains("TITLE")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows[..title_rows].iter().any(|r| r.contains("one")),
+            "{rows:?}"
+        );
+        assert!(
+            rows[title_rows..].iter().any(|r| r.contains("one")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn transcript_ephemeral_layout_shrinks_tool_before_reasoning_and_preserves_fifo_floor() {
+        let ctx = input_ctx("", 0);
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        for i in 0..5 {
+            transcript.push_reasoning_text(&format!("reasoning {i}\n"));
+            transcript.push_tool_output_chunk(&format!("tool {i}\n"));
+        }
+
+        let cols = 40;
+        LiveAreaWidget::finalize(&mut transcript, cols);
+
+        // The transcript re-runs the shared engine on its children with the
+        // parent's already-reduced inner width. Both streams want 5 rows;
+        // with only 5 ephemeral rows available the tool stream (priority 10)
+        // shrinks before reasoning (priority 20), leaving the FIFO its
+        // one-row floor.
+        let (reasoning_rows, tool_rows) = transcript.ephemeral_heights(6, cols - 1, &ctx);
+        assert_eq!(reasoning_rows, 5);
+        assert_eq!(tool_rows, 0);
+
+        // With only 3 ephemeral rows available, reasoning also yields.
+        let (reasoning_rows, tool_rows) = transcript.ephemeral_heights(4, cols - 1, &ctx);
+        assert_eq!(reasoning_rows, 3);
+        assert_eq!(tool_rows, 0);
     }
 
     // ── embedded live tool slot ─────────────────────────────────
 
     #[test]
     fn tool_slot_buffers_completed_lines_and_trailing_partial() {
-        let mut live = ToolOutputSlot::new();
+        let mut live = StreamingWidget::tool(5);
         live.push_text("first\nsecond");
         let lines: Vec<String> = live
             .rendered_lines()
@@ -2887,7 +3032,7 @@ mod tests {
 
     #[test]
     fn tool_slot_trims_head_to_visible_height() {
-        let mut live = ToolOutputSlot::new();
+        let mut live = StreamingWidget::tool(5);
         for i in 0..8 {
             live.push_text(&format!("line {i}\n"));
         }
@@ -2912,7 +3057,7 @@ mod tests {
 
     #[test]
     fn tool_slot_clear_resets_tail() {
-        let mut live = ToolOutputSlot::new();
+        let mut live = StreamingWidget::tool(5);
         live.push_text("one\ntwo\nthree\n");
         live.trim_to(1, 80);
         assert_eq!(live.desired_rows(80), 1);
@@ -2927,7 +3072,7 @@ mod tests {
 
     #[test]
     fn tool_slot_strips_ansi_escape_sequences() {
-        let mut live = ToolOutputSlot::new();
+        let mut live = StreamingWidget::tool(5);
         live.push_text("\u{1b}[31mred\u{1b}[0m normal\n");
         let lines: Vec<String> = live
             .rendered_lines()

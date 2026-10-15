@@ -35,14 +35,45 @@ use crate::tui::buffer::wrapped_height;
 use crate::tui::motif;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{
-    render_wrapped_tail, DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, RenderContext,
-    TranscriptWidget,
+    layout_widgets, render_wrapped_tail, DebugWidget, InfoBarWidget, InputBarWidget,
+    LiveAreaWidget, RenderContext, TranscriptWidget,
 };
 
 /// Approximate number of rows reserved at the bottom of the screen for the
 /// input and info bars before the first layout pass runs. The real value is
 /// tracked each frame from the live widget stack.
 const INITIAL_RESERVED_ROWS: u16 = 2;
+
+/// The typed widget owner.
+///
+/// Chat widgets live in concrete fields, and full-screen bodies live behind
+/// [`ScreenView`]. [`LiveArea::compose`] takes the scene out temporarily,
+/// erases each field to `&mut dyn LiveAreaWidget` for the recursive layout
+/// engine, then puts it back. The renderer only calls trait methods.
+struct Scene {
+    transcript: TranscriptWidget,
+    input_bar: InputBarWidget,
+    info_bar: InfoBarWidget,
+    screen_view: Option<ScreenView>,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            transcript: TranscriptWidget::new(),
+            input_bar: InputBarWidget::new(),
+            info_bar: InfoBarWidget,
+            screen_view: None,
+        }
+    }
+}
+
+/// Full-screen view bodies, typed by the screen they belong to.
+enum ScreenView {
+    Runs(RunsView),
+    Log(LogView),
+    Debug(DebugWidget),
+}
 
 /// Owns the main terminal screen with diff-driven double buffering.
 pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
@@ -57,11 +88,10 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     scrollback_log: Vec<String>,
     /// Whether [`Drop`] should restore the terminal (raw mode, cursor).
     needs_terminal_cleanup: bool,
-    /// Ordered chat widget stack, top-to-bottom: transcript, input bar, info
-    /// bar. Active only while [`crate::tui::app::Screen::Chat`] is showing.
-    chat_widgets: Vec<Box<dyn LiveAreaWidget>>,
-    /// The full-screen view body, if a non-chat screen is active.
-    screen_view: Option<Box<dyn LiveAreaWidget>>,
+    /// Typed widget owner; taken out per frame so chat widgets or the active
+    /// full-screen body can be erased into an ordered slice of
+    /// `&mut dyn LiveAreaWidget` for the shared recursive layout engine.
+    scene: Scene,
     /// Whether the previous composed screen was chat. Used to clear the
     /// visible frame exactly once when leaving a full-screen view.
     last_screen_was_chat: bool,
@@ -85,12 +115,7 @@ impl<B: Backend> LiveArea<B> {
             rows,
             scrollback_log: Vec::new(),
             needs_terminal_cleanup: false,
-            chat_widgets: vec![
-                Box::new(TranscriptWidget::new()),
-                Box::new(InputBarWidget::new()),
-                Box::new(InfoBarWidget),
-            ],
-            screen_view: None,
+            scene: Scene::default(),
             last_screen_was_chat: true,
             reserved_rows: INITIAL_RESERVED_ROWS,
         }
@@ -264,26 +289,6 @@ impl<B: Backend> LiveArea<B> {
         self.rows.saturating_sub(self.reserved_rows)
     }
 
-    /// Compose and paint a full frame.
-    ///
-    /// Lays all widgets out top-to-bottom in a single ordered pipeline:
-    ///
-    /// 1. **Finalize.** Every widget brings its buffer into its final state
-    ///    for the frame (the transcript rebuilds a dirty response region and
-    ///    trims its embedded reasoning slot to the capped band).
-    /// 2. **Measure.** Each widget reports its desired height from finalized
-    ///    content, clamped to `[min, max]`.
-    /// 3. **Allocate.** Priority-aware shrink/expand passes fit the heights
-    ///    to the viewport, honoring each widget's `max_height`.
-    /// 4. **Set.** The allocated heights are recorded (including the bottom
-    ///    bars' reserved rows).
-    /// 5. **Flush & paint.** Overflow is drained and committed to scrollback,
-    ///    then each widget paints into its region.
-    ///
-    /// Only the chat transcript may return overflow; full-screen views and
-    /// fixed bars always return an empty overflow `Vec`. Collapsed
-    /// (zero-height) chunks are skipped so a short viewport never commits
-    /// transcript overflow.
     /// Compose and paint the active screen.
     ///
     /// Chat composes the three chat widgets (transcript, input, info) with
@@ -301,193 +306,94 @@ impl<B: Backend> LiveArea<B> {
         }
         self.last_screen_was_chat = chat;
 
-        let mut widgets = if chat {
-            std::mem::take(&mut self.chat_widgets)
+        // Take the typed scene out temporarily so the concrete fields can be
+        // erased into `&mut dyn LiveAreaWidget` without borrowing through
+        // `self`, then put it back once the frame is finished.
+        let mut scene = std::mem::take(&mut self.scene);
+        let result = if chat {
+            self.compose_chat(&mut scene, app)
         } else {
-            vec![self
-                .screen_view
-                .take()
-                .expect("a full-screen view must be shown before compose")]
+            self.compose_screen_view(&mut scene, app)
         };
-
-        let result = self.compose_widgets(&mut widgets, app, chat);
-
-        if chat {
-            self.chat_widgets = widgets;
-        } else {
-            self.screen_view = widgets.pop();
-        }
+        self.scene = scene;
         result
     }
 
-    /// Lay out, paint, and (for chat) commit overflow for an ordered widget
-    /// slice. This is the shared five-step pipeline described above.
-    fn compose_widgets(
-        &mut self,
-        widgets: &mut [Box<dyn LiveAreaWidget>],
-        app: &App,
-        chat_layout: bool,
-    ) -> io::Result<()> {
-        let gremlin_count = app.gremlin_count_str();
-        let ctx = RenderContext {
+    fn render_context<'a>(&self, app: &'a App, gremlin_count: &'a str) -> RenderContext<'a> {
+        RenderContext {
             input: &app.input,
             cursor: app.input_cursor,
             following_log: app.following_log.as_deref(),
-            gremlin_count: &gremlin_count,
+            gremlin_count,
             project_name: app.project_name_str(),
             active_runs: &app.active_runs,
             completion_preview: app.completion_preview_suffix(),
+        }
+    }
+
+    /// Compose the ordered chat stack: transcript, input bar, info bar.
+    fn compose_chat(&mut self, scene: &mut Scene, app: &App) -> io::Result<()> {
+        let gremlin_count = app.gremlin_count_str();
+        let ctx = self.render_context(app, &gremlin_count);
+        let width = self.cols;
+        let mut widgets: Vec<&mut dyn LiveAreaWidget> = vec![
+            &mut scene.transcript,
+            &mut scene.input_bar,
+            &mut scene.info_bar,
+        ];
+        let layout = layout_widgets(widgets.as_mut_slice(), width, self.rows, &ctx);
+        self.reserved_rows = layout
+            .heights
+            .get(1)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(layout.heights.get(2).copied().unwrap_or(0));
+        self.finish_compose(
+            widgets.as_mut_slice(),
+            &layout.heights,
+            layout.overflow,
+            &ctx,
+            true,
+        )
+    }
+
+    /// Compose the active full-screen view body. The chat scene is occluded
+    /// and no overflow is committed.
+    fn compose_screen_view(&mut self, scene: &mut Scene, app: &App) -> io::Result<()> {
+        let gremlin_count = app.gremlin_count_str();
+        let ctx = self.render_context(app, &gremlin_count);
+        let width = self.cols;
+        let mut widget: &mut dyn LiveAreaWidget = match scene
+            .screen_view
+            .as_mut()
+            .expect("a full-screen view must be shown before compose")
+        {
+            ScreenView::Runs(w) => w,
+            ScreenView::Log(w) => w,
+            ScreenView::Debug(w) => w,
         };
+        let widgets = std::slice::from_mut(&mut widget);
+        let layout = layout_widgets(&mut *widgets, width, self.rows, &ctx);
+        self.reserved_rows = 0;
+        self.finish_compose(&mut *widgets, &layout.heights, layout.overflow, &ctx, false)
+    }
+
+    /// Paint the widgets whose layout has already been resolved and commit
+    /// terminal scrollback overflow when `chat_layout` is true.
+    fn finish_compose(
+        &mut self,
+        widgets: &mut [&mut dyn LiveAreaWidget],
+        heights: &[u16],
+        overflow: Vec<(i32, Line<'static>)>,
+        ctx: &RenderContext,
+        chat_layout: bool,
+    ) -> io::Result<()> {
+        if chat_layout && !overflow.is_empty() {
+            let lines: Vec<Line<'static>> = overflow.into_iter().map(|(_, line)| line).collect();
+            self.commit_scrollback(&lines, self.cols)?;
+        }
 
         let width = self.cols;
-
-        // ── Five-step layout pipeline ────────────────────────────
-        //
-        // 1. Finalize every widget's buffer (single mutation point before
-        //    measurement).
-        // 2. Measure desired height from finalized content.
-        // 3. Allocate heights via priority-aware shrink/expand, honoring
-        //    each widget's `max_height`.
-        // 4. Set the allocated heights.
-        // 5. Drain overflow and commit scrollback, then paint.
-        for w in widgets.iter_mut() {
-            w.finalize(width);
-        }
-
-        let n = widgets.len();
-        let mut min_heights = vec![0u16; n];
-        let mut desired_heights = vec![0u16; n];
-        let mut max_heights = vec![0u16; n];
-
-        for (i, w) in widgets.iter().enumerate() {
-            let h = w.min_height(width, &ctx);
-            // Force the minimum into [0, max] so a widget whose minimum
-            // exceeds its cap cannot drive below-minimum shrinking.
-            min_heights[i] = h.min(w.max_height(&ctx));
-            max_heights[i] = w.max_height(&ctx);
-            // Clamp desired height to [min, max] so allocation honors both
-            // bounds uniformly.
-            desired_heights[i] = w.desired_height(width, &ctx).max(h).min(max_heights[i]);
-        }
-
-        // Shrink pass: when the sum of desired heights exceeds the viewport,
-        // shrink in ascending size_priority order (lowest first) from desired
-        // down to minimum, then below minimum if still over budget. The total
-        // is tracked in `u32` so uncapped desired heights cannot overflow a
-        // `u16` sum before being clamped to the viewport.
-        let mut heights = desired_heights.clone();
-        let mut total: u32 = heights.iter().map(|&h| h as u32).sum();
-        let rows = self.rows as u32;
-        if total > rows {
-            let mut order: Vec<usize> = (0..n).collect();
-            order.sort_by_key(|&i| widgets[i].size_priority());
-            // First shrink down to minimums.
-            for &i in &order {
-                if total <= rows {
-                    break;
-                }
-                let excess = total - rows;
-                let shrinkable = heights[i].saturating_sub(min_heights[i]) as u32;
-                let shrink = shrinkable.min(excess);
-                heights[i] -= shrink as u16;
-                total -= shrink;
-            }
-            // If still over budget, shrink below minimums in the same order.
-            for &i in &order {
-                if total <= rows {
-                    break;
-                }
-                let excess = total - rows;
-                let shrink = (heights[i] as u32).min(excess);
-                heights[i] -= shrink as u16;
-                total -= shrink;
-            }
-        }
-
-        // Expand pass: when the sum of desired heights is below the viewport,
-        // give the remaining rows to the highest-priority flexible widget.
-        if total < rows {
-            let remaining = (rows - total) as u16;
-            let mut best: Option<usize> = None;
-            let mut best_prio = i32::MIN;
-            for (i, widget) in widgets.iter().enumerate().take(n) {
-                if widget.flexible(&ctx) && widget.size_priority() > best_prio {
-                    best_prio = widget.size_priority();
-                    best = Some(i);
-                }
-            }
-            if let Some(i) = best {
-                heights[i] += remaining;
-            }
-        }
-
-        // Cap every allocated height at its widget's `max_height` so the
-        // expand pass cannot exceed a first-class cap (e.g. the input bar's
-        // 5-row limit).
-        for (i, height) in heights.iter_mut().enumerate().take(n) {
-            *height = (*height).min(max_heights[i]);
-        }
-
-        #[cfg(feature = "telemetry")]
-        {
-            let segments: Vec<String> = widgets
-                .iter()
-                .enumerate()
-                .map(|(i, w)| {
-                    format!(
-                        "{} min={} desired={} max={} allocated={} flexible={} priority={}",
-                        w.name(),
-                        min_heights[i],
-                        desired_heights[i],
-                        max_heights[i],
-                        heights[i],
-                        w.flexible(&ctx),
-                        w.size_priority()
-                    )
-                })
-                .collect();
-            log::info!("WIDGET_LAYOUT {}", segments.join("; "));
-        }
-
-        if chat_layout {
-            // The input and info bars are pinned to the bottom and excluded
-            // from the terminal scroll region.
-            self.reserved_rows = widgets
-                .iter()
-                .enumerate()
-                .filter(|(_, w)| {
-                    w.as_any().is::<InputBarWidget>() || w.as_any().is::<InfoBarWidget>()
-                })
-                .map(|(i, _)| heights[i])
-                .sum();
-        } else {
-            self.reserved_rows = 0;
-        }
-
-        // ── Drain overflow, then paint each widget ──────────────
-        //
-        // `take_overflow` is the single place where a widget decides what
-        // to do when its content exceeds its allocated rows. The transcript
-        // returns head lines to commit to scrollback; live-tail slots trim
-        // themselves and return nothing. Full-screen views never commit to
-        // chat scrollback.
-        if chat_layout {
-            let mut overflow: Vec<(i32, Line<'static>)> = Vec::new();
-            for (i, widget) in widgets.iter_mut().enumerate() {
-                let h = heights[i];
-                let prio = widget.overflow_priority();
-                for line in widget.take_overflow(h, width) {
-                    overflow.push((prio, line));
-                }
-            }
-
-            if !overflow.is_empty() {
-                overflow.sort_by_key(|(prio, _)| *prio);
-                let lines: Vec<Line<'static>> = overflow.into_iter().map(|(_, l)| l).collect();
-                self.commit_scrollback(&lines, self.cols)?;
-            }
-        }
-
         let mut y = 0u16;
         for (i, widget) in widgets.iter_mut().enumerate() {
             let h = heights[i];
@@ -496,7 +402,7 @@ impl<B: Backend> LiveArea<B> {
             }
             let chunk = Rect::new(0, y, width, h);
             y += h;
-            widget.render(chunk, &mut self.curr, &ctx);
+            widget.render(chunk, &mut self.curr, ctx);
         }
 
         self.draw(|_| {})
@@ -506,50 +412,46 @@ impl<B: Backend> LiveArea<B> {
 
     /// Show the full-screen runs table.
     pub fn show_runs(&mut self) {
-        self.screen_view = Some(Box::new(RunsView::new()));
+        self.scene.screen_view = Some(ScreenView::Runs(RunsView::new()));
     }
 
     /// Show the full-screen single-gremlin log view.
     pub fn show_log(&mut self, id: String) {
-        self.screen_view = Some(Box::new(LogView::new(id)));
+        self.scene.screen_view = Some(ScreenView::Log(LogView::new(id)));
     }
 
     /// Show the full-screen interactive debug session.
     pub fn show_debug(&mut self, id: String) {
-        self.screen_view = Some(Box::new(DebugWidget::new(id)));
+        self.scene.screen_view = Some(ScreenView::Debug(DebugWidget::new(id)));
     }
 
     /// Drop the active full-screen view and return the renderer to chat.
     pub fn exit_screen_view(&mut self) {
-        self.screen_view = None;
+        self.scene.screen_view = None;
     }
 
     // ── Widget accessors ─────────────────────────────────────────
 
     fn transcript_mut(&mut self) -> &mut TranscriptWidget {
-        self.chat_widgets
-            .iter_mut()
-            .find_map(|w| w.as_any_mut().downcast_mut::<TranscriptWidget>())
-            .expect("transcript widget present")
+        &mut self.scene.transcript
     }
 
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
-        self.chat_widgets
-            .iter_mut()
-            .find_map(|w| w.as_any_mut().downcast_mut::<InputBarWidget>())
-            .expect("input bar widget present")
+        &mut self.scene.input_bar
     }
 
     fn log_view_mut(&mut self) -> Option<&mut LogView> {
-        self.screen_view
-            .as_mut()
-            .and_then(|w| w.as_any_mut().downcast_mut::<LogView>())
+        match self.scene.screen_view.as_mut() {
+            Some(ScreenView::Log(w)) => Some(w),
+            _ => None,
+        }
     }
 
     fn debug_mut(&mut self) -> Option<&mut DebugWidget> {
-        self.screen_view
-            .as_mut()
-            .and_then(|w| w.as_any_mut().downcast_mut::<DebugWidget>())
+        match self.scene.screen_view.as_mut() {
+            Some(ScreenView::Debug(w)) => Some(w),
+            _ => None,
+        }
     }
 
     // ── Widget mutation (moved from `App`) ───────────────────────
@@ -628,30 +530,18 @@ impl<B: Backend> LiveArea<B> {
 
     /// Whether the current turn has any content.
     pub fn has_current_turn(&self) -> bool {
-        self.chat_widgets
-            .iter()
-            .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
-            .expect("transcript widget present")
-            .has_current_turn()
+        self.scene.transcript.has_current_turn()
     }
 
     /// Whether the current turn's streaming response is empty.
     pub fn response_is_empty(&self) -> bool {
-        self.chat_widgets
-            .iter()
-            .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
-            .expect("transcript widget present")
-            .response_is_empty()
+        self.scene.transcript.response_is_empty()
     }
 
     /// Borrow the current turn's streaming response text.
     #[cfg(test)]
     pub fn response_text(&self) -> &str {
-        self.chat_widgets
-            .iter()
-            .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
-            .expect("transcript widget present")
-            .response_accumulator()
+        self.scene.transcript.response_accumulator()
     }
 
     /// Finish the current turn's response at `Done` time.
@@ -730,18 +620,18 @@ impl<B: Backend> LiveArea<B> {
 
     /// Whether the debug view is still connecting.
     pub fn debug_connecting(&self) -> bool {
-        self.screen_view
-            .as_ref()
-            .and_then(|w| w.as_any().downcast_ref::<DebugWidget>())
-            .is_some_and(|w| w.connecting())
+        match self.scene.screen_view.as_ref() {
+            Some(ScreenView::Debug(w)) => w.connecting(),
+            _ => false,
+        }
     }
 
     /// Whether the debug view is still connected.
     pub fn debug_connected(&self) -> bool {
-        self.screen_view
-            .as_ref()
-            .and_then(|w| w.as_any().downcast_ref::<DebugWidget>())
-            .is_some_and(|w| w.connected())
+        match self.scene.screen_view.as_ref() {
+            Some(ScreenView::Debug(w)) => w.connected(),
+            _ => false,
+        }
     }
 
     /// Set the connected flag on the debug view.
@@ -863,14 +753,6 @@ impl Default for RunsView {
 }
 
 impl LiveAreaWidget for RunsView {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
     #[cfg(feature = "telemetry")]
     fn name(&self) -> &'static str {
         "runs_view"
@@ -986,14 +868,6 @@ impl LogView {
 }
 
 impl LiveAreaWidget for LogView {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
     #[cfg(feature = "telemetry")]
     fn name(&self) -> &'static str {
         "log_view"

@@ -666,246 +666,86 @@ resumable, and cheap to reason about, in roughly that order.
 
 ## 8. TUI
 
-The TUI is a single fullscreen viewport (main screen, no alternate screen) composed from a
-**vertical stack of widgets**. Each widget owns its own rendering buffers,
-reports its desired height, and paints itself into the region the layout pass
-assigns it. The screen is not a monolithic render function; it is a
-`LiveArea` that owns an ordered widget vec and a diff engine.
+The TUI is a single fullscreen viewport (main screen, no alternate screen)
+composed from **nested widgets**. Each widget owns its render state, reports
+min/desired/max heights, and paints itself into the region assigned by a
+shared recursive layout engine. `LiveArea` owns a typed `Scene` and a
+diff-driven double-buffer engine; it no longer stores widgets in a
+long-lived boxed-widget vec and never reifies concrete types.
 
 ### 8.1 The widget trait
 
-Every region of the screen is a widget behind a single trait. A widget
-declares how tall it wants to be and how to paint itself:
+Every region is a widget behind [`LiveAreaWidget`]. Width travels down as
+arguments, height travels up:
 
-- **`height_constraint`** — the layout constraint for the widget's region at a
-given width. Fixed widgets return `Length(N)`; elastic widgets return
-`Min(0)`; empty widgets return `Length(0)` and consume no space.
-- **`render`** — paints the widget into its assigned region, returning any
-overflow lines that must be committed to terminal scrollback. Only the
-transcript widget returns non-empty overflow; every other widget returns
-nothing.
+- `min_height(width, ctx)` — the floor height.
+- `desired_height(width, ctx)` — preferred height; defaults to `min_height`.
+- `max_height(width, ctx)` — allocation cap (default `u16::MAX`).
+- `flexible(ctx)` — whether the widget may absorb leftover rows.
+- `finalize(width)` — mutate the buffer into its final frame state before
+  measurement.
+- `take_overflow(available_rows, width, ctx)` — drain head lines for
+  terminal scrollback; the transcript FIFO is the only non-empty producer.
+- `render(area, buf, ctx)` — paint only.
 
-Widgets receive a shared read-only `RenderContext` (input text, gremlin count,
-project name, active overlay mode, the daemon-derived run table, and the
-content-region height). Stateless widgets read their content from the context;
-stateful widgets own their own buffers.
+Widgets receive a shared read-only `RenderContext` (input text and cursor,
+gremlin count, project name, followed log id, active-run table, completion
+preview). `RenderContext` is width-free; parents pass their already-reduced
+inner width to children in every width-taking method.
 
-### 8.2 The widget stack
+### 8.2 The widget scene
 
-`LiveArea` owns `widgets: Vec<Box<dyn LiveAreaWidget>>`, ordered top-to-bottom.
-The initial stack is:
+`LiveArea` owns a concrete `Scene` with typed fields:
 
-| Widget | Constraint | Overflow? | Notes |
-|---|---|---|---|
-| `TranscriptWidget` | `Min(0)` | Yes | Owns the `ScrollableBuffer`. The only widget that produces overflow. Prompt, response, tool-call, and system lines all live here. |
-| `ReasoningWidget` | `Length(h)` | No | Owns a `BoundedBuffer` (5 visible rows); `h` is 0 when empty. |
-| `InputBarWidget` | `Length(1)` | No | Stateless — reads `input` from the render context. |
-| `InfoBarWidget` | `Length(1)` | No | Stateless — reads gremlin count, project name, etc. |
+- `transcript: TranscriptWidget`
+- `input_bar: InputBarWidget`
+- `info_bar: InfoBarWidget`
+- `screen_view: Option<ScreenView>` — a typed enum of full-screen bodies:
+  `Runs`, `Log`, `Debug`.
 
-The input and info bars are the last two widgets and are always pinned to the
-bottom two rows. Everything above them is the **content region** — the
-scrollable transcript area.
+On each frame `compose` takes the scene out temporarily, builds an ordered
+`Vec<&mut dyn LiveAreaWidget>` by borrowing the concrete fields (chat =
+transcript, input, info; otherwise the single active `ScreenView` body), runs
+the shared recursive layout engine, paints, and puts the scene back. The
+renderer only calls trait methods.
 
-#### 8.2.1 Transcript widget
+The input and info bars are the last two chat widgets and are excluded from
+the terminal scroll region. Everything above them is the content region.
 
-The transcript is the scrollable region holding completed turns, the current
-prompt, and the streaming response. It is the only widget that can overflow:
-when its content exceeds its region height, its `render` splits the FIFO head
-off into overflow lines, which `LiveArea` commits to terminal scrollback.
+**Nested transcript.** `TranscriptWidget` is a composite: one styled FIFO
+(the only overflow producer) plus two embedded `StreamingWidget` children
+(reasoning and live tool output). Its own min/desired/max heights sum the
+FIFO and its children; after the parent allocates `H` rows, the transcript
+re-runs the same allocate pass on its child slice and stitches the allocated
+ephemeral band between the FIFO head and the streaming-response tail
+(prompt → reasoning → tool → response).
 
-A single widget type handles both the in-flight (streaming) turn and the
-finished turn. Layout, top-to-bottom, with one blank line between every
-element:
-
-```
-  > add rate limiting                                     ← prompt (bold magenta/white)
-    ◆ run_tests                                           ← tool line (chrome ◆ +
-    ◆ grep_files                                            nickel italic name, in
-                                                            transcript, above response)
-  Here's the rate limiting implementation:               ← response (normal weight)
-  We'll add a token bucket in the middleware layer...
-                                                          ← blank line (finished only)
-  5 tools · 2.1K tokens · 78% cache                       ← stats (finished only)
-```
-
-| Section | Content | Style |
-|---------|---------|-------|
-| Prompt line | `> {user input}` | Bold magenta/white |
-| Tool lines | Each non-read/edit tool call, one line each | Chrome `◆` + nickel italic name |
-| Response | Model output text | Normal weight |
-| Stats line | Tool count, token count, cache percentage | Normal weight |
-
-**Reasoning window.** Reasoning lives in its own widget (not shown in the
-transcript above). While streaming, new reasoning chunks push old lines out
-of a 2–3 *visible* line window (a long line that wraps counts as multiple
-lines). On finish, the window freezes at its last 2–3 lines. If no reasoning
-arrived, the section is absent (no blank-line gap).
-
-**Tool list.** Each tool call that is not a read or edit variant (`read`,
-`edit`, and obvious aliases) appears in the transcript between the prompt and
-the response, styled with the deco manifest marker (chrome `◆` diamond +
-nickel italic tool name). Tool-call lines are inserted as the call completes
-(TurnComplete enrichment) directly above the streaming response region; they
-survive response rebuilds and reconciliations and become permanent
-scrollback-committed history. Read/edit tools are filtered from display but
-still count toward the stats tool count. If no tools ran, the section is
-absent.
-
-**Sizing.** The widget uses its natural height — it is never greedy and never
-expandable. As content streams in, its height grows and the layout pass
-re-allocates; there is no jarring space-absorption jump when a prompt is
-submitted. Every line reaches the terminal so tmux captures it.
-
-**Lifecycle.** Created on user submission with `finished: false`. On
-`Done`/`Ended`/`Error`/`Esc`, `finish()` sets `finished = true` and flushes
-partials; the widget stays in place and gains a stats footer. It does not
-vanish.
-
-#### 8.2.2 Reasoning widget
-
-The current turn's reasoning is a separate widget owning a `BoundedBuffer`
-capped at 5 visible rows. It sits between the transcript and the input bar
-and grows only while a turn is streaming. When empty it reports `Length(0)`
-and consumes no space. Reasoning stays in this widget for the life of the
-turn; it is not flattened into the transcript, and the buffer is reset when
-the next prompt is submitted. (Tool-call lines, in contrast, are folded
-straight into the transcript FIFO — see § 8.2.1.)
-
-#### 8.2.3 System content
-
-Non-chat transcript content — the startup banner, daemon events, command
-output (`/ls`, `/info`, etc.), and errors — is pushed into the transcript
-widget as ordinary lines:
-
-```
-  gremlins tui — type /help for commands, Ctrl+C to exit
-```
-
-#### 8.2.4 Overlay widgets
-
-Overlays are widgets pushed onto the top of the stack, occluding the content
-widgets beneath them. They are ephemeral — toggled by commands or keybindings,
-dismissed with `Esc`. Dismissing an overlay pops it from the stack and returns
-to the transcript view underneath.
-
-A **blocking** overlay (single-gremlin watch, debug) collapses the content
-widgets to zero height so it occupies the whole content region; the input and
-info bars remain visible. A **non-blocking** overlay (gremlins watch) occupies
-only the upper portion and leaves the transcript flowing below it.
-
-##### 8.2.4.1 Gremlins watch (partial overlay)
-
-```
-  ┌─ gremlins watch ───────────────────────────────────────┐
-  │ ID          STATUS   STAGE        PROJECT               │
-  │ abc123      running  implement    gremlins              │
-  │ def456      running  review-code  gremlins              │
-  │ ghi789      done     —            other-project         │
-  │ jkl012      failed   verify       gremlins              │
-  │                                                        │
-  │ 2 running · 1 done · 1 failed                           │
-  └────────────────────────────────────────────────────────┘
-                                                          │
-  > plan implement review                                 │  transcript
-    3 tools · 1.2K tokens · 85% cache                     │  still visible
-                                                          │  below
-  > ▌                                                     │
-  gremlins tui · 4 gremlins · project: gremlins          │
-```
-
-A dynamically updated table of all gremlins known to the daemon. Occupies the
-upper portion of the screen (roughly 40–50%). The transcript remains visible
-below it. Updated in real time as daemon events arrive.
-
-Toggled via `/watch`. Dismissed with `Esc`.
-
-##### 8.2.4.2 Single gremlin watch (full overlay)
-
-```
-  ┌─ gremlin abc123 — implement ──────── [Esc to dismiss] ─┐
-  │                                                        │
-  │  [plan] reading src/auth.rs...                         │
-  │  [plan] wrote plan.md (12 lines)                       │
-  │  [implement] editing src/auth.rs:42                    │
-  │  [implement] running cargo test...                     │
-  │  [implement] test failed: assertion error              │
-  │  [implement] fixing test...                            │
-  │                                                        │
-  └────────────────────────────────────────────────────────┘
-                                                          │
-                                                          │  transcript
-                                                          │  fully occluded
-  > ▌                                                     │
-  gremlins tui · 3 gremlins · project: gremlins          │
-```
-
-A streaming log view for a single gremlin. Takes the full transcript area (input
-and info bars remain visible). Follows the gremlin's log in real time — each new
-log line appears at the bottom. Stage transitions are shown as section headers.
-
-Opened via `/watch <id>` or by selecting a gremlin from the watch table.
-Dismissed with `Esc`.
-
-##### 8.2.4.3 Debug widget (full overlay)
-
-```
-  ┌─ debug gremlin abc123 ──────────────── [Ctrl+D to exit] ┐
-  │                                                        │
-  │  $ status                                              │
-  │  stage: implement · status: running · uptime: 4m 12s   │
-  │                                                        │
-  │  $ inspect plan.md                                     │
-  │  # Plan: Add rate limiting                             │
-  │  ...                                                   │
-  │                                                        │
-  │  $ ▌                                                   │  debug prompt
-  │                                                        │
-  └────────────────────────────────────────────────────────┘
-                                                          │
-  > ▌                                                     │
-  gremlins tui · 3 gremlins · project: gremlins          │
-```
-
-An interactive debug session with a running gremlin. Takes the full transcript
-area. The user types debug commands into a secondary prompt (inside the overlay,
-not the main input bar). Commands are sent to the daemon's debug interface;
-responses appear inline.
-
-Opened via `/debug <id>`. Exited with `Ctrl+D` or `/exit`.
-
-#### 8.2.5 Future widget possibilities
-
-The overlay model generalizes to any transient UI:
-
-- **Help widget** — `/help` renders the full help text in an overlay instead of
-  dumping it to the transcript.
-- **Config widget** — settings toggles as a settings-list overlay.
-- **Diff widget** — side-by-side or unified diff of a gremlin's working tree
-  changes.
-- **Session log widget** — full scrollable log of the current chat session.
+**Streaming widgets.** `StreamingWidget` owns a `LineBuffer` of completed
+styled lines plus a trailing partial, an optional title row supplied as a
+function of `RenderContext`, a scroll anchor (`scrolled`/`last_width`), a
+per-line styler, and a row cap. It tail-anchors, trims its own head, collapses
+to zero when idle, and never returns overflow. The reasoning instance uses
+alternating `◈`/`◉` nickel italic styling; the tool instance uses `▸` nickel
+italic styling with ANSI-stripped text.
 
 ### 8.3 Layout and rendering model
 
-On each frame, `LiveArea::compose`:
+Each frame runs the same recursive engine over an ordered slice of `&mut dyn
+LiveAreaWidget`:
 
-1. Reserves the bottom two rows for the input and info bars, so their
-   `Length(1)` constraints can never be compressed by the variable-height
-   content widgets above them.
-2. Collects a `height_constraint` from every content widget and splits the
-   remaining region vertically with a single ratatui layout pass.
-3. Walks the widgets in order, calling `render()` for each in its allocated
-   region. Collapsed (zero-height) chunks are skipped.
-4. Collects overflow from the transcript widget and calls `commit_scrollback`
-   to push it into terminal scrollback.
-5. Runs a diff-driven paint: only cells that changed from the previous frame
-   are sent to the terminal.
+1. **Finalize** every widget at the parent-supplied width.
+2. **Measure** min/desired/max from finalized content.
+3. **Allocate** with priority-aware shrink/expand, honoring each max.
+4. **Drain overflow** and order it by `overflow_priority`.
+5. **Paint** each widget into its allocated region; chat commits the
+   transcript's overflow to terminal scrollback first.
 
-The bottom two rows are kept out of the scrolling region (`RESERVED_ROWS`), so
-the pinned bars never scroll. Everything above them participates in scrollback.
-
-Widgets can be added or removed at runtime by pushing/popping the widget vec.
-A widget whose `height_constraint` returns 0 (because it is empty) consumes no
-screen space, and the layout adjusts.
+A container's `size_priority` and `overflow_priority` are the minimum of its
+children. After allocation, the container re-runs the allocate pass on its
+children constrained to `H` rows, feeding them the already-reduced inner
+width. Only the transcript FIFO may overflow to terminal scrollback;
+`StreamingWidget` returns no overflow and self-trims. Full-screen views never
+commit scrollback.
 
 ### 8.4 Visual states
 
