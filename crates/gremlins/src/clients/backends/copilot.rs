@@ -6,6 +6,8 @@ use async_trait::async_trait;
 use rig_core::providers::copilot::{Copilot, CopilotConfig, CopilotIntent};
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
+use serde::Deserialize;
+use std::time::Duration;
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
@@ -19,11 +21,29 @@ use crate::clients::protocol::CompletedRun;
 const PROVIDER_NAME: &str = "copilot";
 const DEFAULT_MODEL: &str = "gpt-4o";
 
+const GITHUB_COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
+const GITHUB_COPILOT_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+const COPILOT_EDITOR_VERSION: &str = "vscode/1.107.0";
+const COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
+const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
+
+#[derive(Debug, Deserialize)]
+struct CopilotTokenResponse {
+    token: Option<String>,
+    endpoints: Option<CopilotTokenEndpoints>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CopilotTokenEndpoints {
+    api: Option<String>,
+}
+
 /// Resolve credentials and build a Copilot client.
 /// OAuth device-code flow is disabled — gremlins run unattended.
 ///
 /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
-/// `providers.yaml` `"copilot"` entry (`api-key`).
+/// `providers.yaml` `"copilot"` entry (`api-key`) → `GITHUB_TOKEN` →
+/// `GH_TOKEN` → `gh auth token`.
 fn resolve_auth() -> Result<Copilot, String> {
     if let Some(key) = crate::config::copilot_api_key() {
         return Ok(CopilotConfig::new(key).client());
@@ -31,14 +51,104 @@ fn resolve_auth() -> Result<Copilot, String> {
     if let Some(key) = crate::clients::config::api_key("", PROVIDER_NAME) {
         return Ok(CopilotConfig::new(key).client());
     }
+    if let Some(access_token) = github_access_token() {
+        return exchange_github_token(&access_token);
+    }
     Err(format!(
-        "no API key for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
-         COPILOT_API_KEY, or add an entry with \"api-key\" in {}. \
-         (PAT and GitHub-token auth are not yet supported in this rig version.)",
+        "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
+         COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; add an entry with \"api-key\" in {}; \
+         or authenticate the gh CLI (`gh auth login` / `gh auth token`).",
         crate::config::user_config_root()
             .join("providers.yaml")
             .display(),
     ))
+}
+
+/// Read a nonblank GitHub access token from the environment.
+fn github_access_token_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Read `gh auth token`, returning `None` when the CLI or login is absent.
+fn gh_auth_token() -> Option<String> {
+    let output = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+/// Resolve a GitHub access token: `GITHUB_TOKEN` → `GH_TOKEN` → `gh auth token`.
+fn github_access_token() -> Option<String> {
+    github_access_token_env("GITHUB_TOKEN")
+        .or_else(|| github_access_token_env("GH_TOKEN"))
+        .or_else(gh_auth_token)
+}
+
+/// Exchange a GitHub access token for a Copilot session token.
+///
+/// This mirrors rig's synchronous-free GitHub-token auth request shape: a `GET`
+/// to GitHub Copilot's token endpoint with the Copilot editor identity headers
+/// and the GitHub token in `Authorization: token ...`.
+fn exchange_github_token(access_token: &str) -> Result<Copilot, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(GITHUB_COPILOT_TOKEN_TIMEOUT)
+        .build()
+        .map_err(|err| format!("failed to build GitHub Copilot token exchange client: {err}"))?;
+
+    let response = client
+        .get(GITHUB_COPILOT_TOKEN_URL)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header("editor-version", COPILOT_EDITOR_VERSION)
+        .header("editor-plugin-version", COPILOT_EDITOR_PLUGIN_VERSION)
+        .header("user-agent", COPILOT_USER_AGENT)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("token {access_token}"),
+        )
+        .send()
+        .map_err(|err| format!("GitHub Copilot token exchange failed: {err}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub Copilot token exchange failed with HTTP {}",
+            response.status()
+        ));
+    }
+
+    let record: CopilotTokenResponse = response
+        .json()
+        .map_err(|err| format!("GitHub Copilot token exchange response was invalid: {err}"))?;
+    let CopilotTokenResponse { token, endpoints } = record;
+    let api_base = endpoints
+        .and_then(|endpoints| endpoints.api)
+        .map(|api| api.trim().to_string())
+        .filter(|api| !api.is_empty());
+    let session_token = token
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            "GitHub Copilot token exchange response did not include a session token".to_string()
+        })?;
+
+    Ok(copilot_client(session_token, api_base))
+}
+
+fn copilot_client(session_token: String, api_base: Option<String>) -> Copilot {
+    let config = CopilotConfig::new(session_token);
+    match api_base {
+        Some(api_base) => config.with_base_url(api_base).client(),
+        None => config.client(),
+    }
 }
 
 // ── CopilotRunState ──────────────────────────────────────────────────────
@@ -118,7 +228,8 @@ impl CopilotBackend {
     /// Build a Copilot backend.
     ///
     /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
-    /// `providers.yaml` `"copilot"` entry → error.
+    /// `providers.yaml` `"copilot"` entry → `GITHUB_TOKEN` → `GH_TOKEN` →
+    /// `gh auth token` → error.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
@@ -313,16 +424,21 @@ mod tests {
     fn scrub_copilot_env(guard: &mut EnvGuard) {
         guard.remove("GITHUB_COPILOT_API_KEY");
         guard.remove("COPILOT_API_KEY");
+        guard.remove("GITHUB_TOKEN");
+        guard.remove("GH_TOKEN");
         guard.remove("XDG_CONFIG_HOME");
     }
 
-    /// Set up an isolated sandbox with no providers.yaml and return the guard.
+    /// Set up an isolated sandbox with no providers.yaml, no `gh` on `PATH`,
+    /// and no GitHub credentials in the environment. Returns the guard.
     fn isolated_env() -> EnvGuard {
         let mut guard = EnvGuard::lock();
         scrub_copilot_env(&mut guard);
         let tmp = tempfile::tempdir().unwrap();
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
         guard.set("HOME", tmp.path());
+        // Keep any real `gh` binary away from `resolve_auth`.
+        guard.set("PATH", tmp.path());
         guard
     }
 
@@ -443,6 +559,60 @@ mod tests {
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
         assert!(resolve_auth().is_ok());
     }
+
+    #[test]
+    fn auth_session_token_beats_github_token() {
+        let mut guard = isolated_env();
+        guard.set("GITHUB_COPILOT_API_KEY", FAKE_API_KEY);
+        guard.set("GITHUB_TOKEN", "should-not-be-exchanged");
+        assert!(resolve_auth().is_ok());
+    }
+
+    #[test]
+    fn auth_providers_yaml_beats_github_token() {
+        let mut guard = isolated_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("providers.yaml"),
+            format!(r#"{{"copilot": {{"api-key": "{FAKE_API_KEY}"}}}}"#),
+        )
+        .unwrap();
+        guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
+        guard.set("GITHUB_TOKEN", "should-not-be-exchanged");
+        assert!(resolve_auth().is_ok());
+    }
+
+    #[test]
+    fn auth_github_token_env_precedence() {
+        let mut guard = isolated_env();
+        guard.set("GH_TOKEN", "from-gh-token");
+        guard.set("GITHUB_TOKEN", "from-github-token");
+        assert_eq!(github_access_token().as_deref(), Some("from-github-token"));
+    }
+
+    #[test]
+    fn auth_gh_token_env_fallback() {
+        let mut guard = isolated_env();
+        guard.set("GH_TOKEN", "from-gh-token");
+        assert_eq!(github_access_token().as_deref(), Some("from-gh-token"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_gh_cli_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut guard = isolated_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = tmp.path().join("gh");
+        std::fs::write(&gh, "#!/bin/sh\necho from-gh-cli\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        guard.set("PATH", tmp.path());
+        assert_eq!(github_access_token().as_deref(), Some("from-gh-cli"));
+    }
+
 
     // ── parse_extra_params tests ─────────────────────────────────────
 
