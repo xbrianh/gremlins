@@ -3812,10 +3812,11 @@ fn check_shutdown(shutdown_tx: &watch::Sender<bool>) {
 /// against `project_root`.
 ///
 /// Already-absolute values pass through unchanged. A relative value is
-/// replaced with `project_root.join(value)` only when that path names an
-/// existing file; a relative value with no match is left untouched so
-/// [`validate_source_values`] still reports the original "expected an
-/// existing file" error. `string` sources are never rewritten.
+/// always replaced with `project_root.join(value)` so validation and binding
+/// never consult the daemon's cwd: a value that names an existing file under
+/// `project_root` binds to that absolute path, while a value that does not
+/// still fails [`validate_source_values`] with the absolute path in the
+/// "expected an existing file" error. `string` sources are never rewritten.
 fn resolve_filepath_source_values(
     source: &crate::schemas::bootstrap::InputSources,
     stage_inputs: &HashMap<String, String>,
@@ -3832,10 +3833,10 @@ fn resolve_filepath_source_values(
         if value.is_empty() || Path::new(value).is_absolute() {
             continue;
         }
-        let from_project = project_root.join(value);
-        if from_project.is_file() {
-            resolved.insert(key.clone(), from_project.to_string_lossy().into_owned());
-        }
+        resolved.insert(
+            key.clone(),
+            project_root.join(value).to_string_lossy().into_owned(),
+        );
     }
     resolved
 }
@@ -3872,7 +3873,8 @@ fn validate_launch_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_chat_gremlin, handle_artifact, resolve_chat_env, resolve_filepath_source_values,
+        create_chat_gremlin, handle_artifact, handle_launch, resolve_chat_env,
+        resolve_filepath_source_values,
     };
     use crate::builders::{AgentBuilder, DefinitionBuilder};
     use crate::executor::socket;
@@ -3997,7 +3999,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_filepath_source_values_passes_absolute_and_missing_values_through() {
+    fn resolve_filepath_source_values_passes_absolute_values_through() {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
@@ -4016,10 +4018,84 @@ mod tests {
             resolved.get("plan").map(String::as_str),
             Some(absolute.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn resolve_filepath_source_values_anchors_missing_relative_to_project_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let source = InputSources::new(HashMap::from([(
+            "plan".to_string(),
+            InputSource::new("plan".to_string(), vec!["filepath".to_string()], true).unwrap(),
+        )]));
 
         let with_missing = HashMap::from([("plan".to_string(), "missing.md".to_string())]);
         let resolved = resolve_filepath_source_values(&source, &with_missing, &project_root);
-        assert_eq!(resolved.get("plan").map(String::as_str), Some("missing.md"));
+
+        // The relative value must be anchored to `project_root` even when the
+        // file does not exist there, so validation can never accept a
+        // same-named file that happens to live in the daemon's cwd.
+        assert_eq!(
+            resolved.get("plan").map(String::as_str),
+            Some(project_root.join("missing.md").to_string_lossy().as_ref())
+        );
+        assert!(crate::schemas::bootstrap::validate_source_values(&source, &resolved).is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_launch_resolves_relative_filepath_against_project_root() {
+        let sandbox = Sandbox::with_config(Some(r#"{"default-client": "cmd:echo"}"#));
+        let project_root = sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::write(project_root.join("plan.md"), "plan").unwrap();
+
+        let definition_path = project_root.join(".gremlins").join("demo.yaml");
+        std::fs::create_dir_all(definition_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &definition_path,
+            r#"default_client: 'cmd:echo'
+bootstrap:
+  source:
+    plan:
+      type: filepath
+      optional: true
+stages: []
+"#,
+        )
+        .unwrap();
+
+        let (shutdown_tx, _) = watch::channel(false);
+        let request = |plan: &str| {
+            serde_json::json!({
+                "op": "launch",
+                "definition": definition_path.to_string_lossy(),
+                "args": ["--plan", plan],
+                "project_root": project_root.to_string_lossy(),
+            })
+        };
+
+        // A relative `filepath` value that exists under `project_root` (but not
+        // the daemon cwd) must validate and launch successfully.
+        let resp = handle_launch(&request("plan.md"), sandbox.path(), &shutdown_tx).await;
+        assert_eq!(
+            resp.get("type").and_then(Value::as_str),
+            Some("ok"),
+            "relative filepath under project_root must launch: {resp}"
+        );
+        let id = resp["id"].as_str().unwrap().to_string();
+        super::get_run_map().lock().unwrap().remove(&id);
+
+        // A relative `filepath` value that exists nowhere under `project_root`
+        // must fail validation with the existing error; the daemon cwd is not
+        // allowed to satisfy it.
+        let resp = handle_launch(&request("missing.md"), sandbox.path(), &shutdown_tx).await;
+        assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
+        assert!(resp
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.contains("expected an existing file")));
     }
 
     #[tokio::test]
