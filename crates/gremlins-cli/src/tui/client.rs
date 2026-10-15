@@ -55,6 +55,9 @@ struct WriteState {
     write_half: OwnedWriteHalf,
     /// `Some` for the session connection; `None` for the control socket.
     session_id: Option<String>,
+    /// Monotonic generation of the installed session. Incremented each time
+    /// [`Connection::restart`] swaps in a replacement session socket.
+    generation: u64,
 }
 
 impl Connection {
@@ -93,6 +96,7 @@ impl Connection {
             write: Mutex::new(WriteState {
                 write_half,
                 session_id,
+                generation: 0,
             }),
             responses,
             read_handle: Mutex::new(Some(read_handle)),
@@ -105,22 +109,46 @@ impl Connection {
     /// Serialises waiter registration and the socket write under the same
     /// lock so that request order on the wire matches response order.
     async fn send(&self, request: Value) -> Result<Value, String> {
-        self.send_with(request, false).await
+        self.send_with(request, false, None).await
     }
 
     /// Send a request on the session connection, stamping the session id
     /// that is atomically paired with the current session write half.
     async fn send_on_session(&self, request: Value) -> Result<Value, String> {
-        self.send_with(request, true).await
+        self.send_with(request, true, None).await
     }
 
-    async fn send_with(&self, mut request: Value, session_scoped: bool) -> Result<Value, String> {
+    /// Send a session request only if the connection still belongs to the
+    /// session generation observed at submission time.
+    async fn send_on_session_for_generation(
+        &self,
+        request: Value,
+        expected_generation: u64,
+    ) -> Result<Value, String> {
+        self.send_with(request, true, Some(expected_generation))
+            .await
+    }
+
+    async fn send_with(
+        &self,
+        mut request: Value,
+        session_scoped: bool,
+        expected_generation: Option<u64>,
+    ) -> Result<Value, String> {
         let (tx, rx) = oneshot::channel();
 
         // Hold the write lock across stamping, enqueue, and write so
         // concurrent callers cannot interleave and a session restart cannot
         // publish a new write half while a request is being stamped.
         let mut write = self.write.lock().await;
+        if let Some(expected) = expected_generation {
+            if write.generation != expected {
+                return Err(format!(
+                    "session was recreated (expected generation {expected}, current {})",
+                    write.generation
+                ));
+            }
+        }
         if session_scoped {
             let session_id = write
                 .session_id
@@ -172,6 +200,7 @@ impl Connection {
         let mut write = self.write.lock().await;
         write.write_half = write_half;
         write.session_id = Some(new_session_id);
+        write.generation += 1;
         self.responses.lock().await.clear();
 
         let read_out = Arc::clone(&self.out);
@@ -193,6 +222,11 @@ impl Connection {
             .unwrap_or_default()
     }
 
+    /// The generation of the session installed in the current write half.
+    async fn current_generation(&self) -> u64 {
+        self.write.lock().await.generation
+    }
+
     /// Abort the background read loop, closing the socket read half.
     async fn shutdown(&self) {
         if let Some(handle) = self.read_handle.lock().await.take() {
@@ -212,6 +246,9 @@ pub struct DaemonClient {
     control: Connection,
     session: Connection,
     out: Arc<OutState>,
+    /// Serializes session recreation so a `/clear` can never race another
+    /// session operation's restart and drop un-acked waiters.
+    session_recreate: Mutex<()>,
 }
 
 impl DaemonClient {
@@ -219,6 +256,15 @@ impl DaemonClient {
     /// [`Connection::write`].
     pub async fn session_id(&self) -> String {
         self.session.current_session_id().await
+    }
+
+    /// The generation of the current session socket. Callers capture this
+    /// at submission time and pass it to
+    /// [`send_session_request_for_generation`](Self::send_session_request_for_generation)
+    /// so a request that lost a `/clear` race can never execute in the
+    /// replacement session.
+    pub async fn session_generation(&self) -> u64 {
+        self.session.current_generation().await
     }
 
     /// Send a request on the control socket.
@@ -232,6 +278,28 @@ impl DaemonClient {
     /// bearing the old id to the new socket.
     pub async fn send_session_request(&self, request: Value) -> Result<Value, String> {
         self.session.send_on_session(request).await
+    }
+
+    /// Send a session request only if the connection still belongs to
+    /// `expected_generation`.
+    ///
+    /// The generation check and session-id stamp happen atomically under the
+    /// connection's write lock, so a request submitted before a `/clear`
+    /// cannot be stamped with the replacement session's id even when its
+    /// send is delayed (for example by repository-context collection).
+    pub async fn send_session_request_for_generation(
+        &self,
+        request: Value,
+        expected_generation: u64,
+    ) -> Result<Value, String> {
+        // Queue behind any in-progress `/clear` recreation. Once the new
+        // session is installed, the generation check below rejects a request
+        // that was submitted against a retired session instead of writing it
+        // to the old (already-closed) socket or stamping it with the new id.
+        let _recreate_guard = self.session_recreate.lock().await;
+        self.session
+            .send_on_session_for_generation(request, expected_generation)
+            .await
     }
 
     /// Open an auxiliary connection on the session socket.
@@ -277,6 +345,8 @@ impl DaemonClient {
     /// dance. The old session socket is closed by the daemon after its
     /// `close_session` ack.
     pub async fn recreate_session(&self) -> Result<(), String> {
+        let _recreate_guard = self.session_recreate.lock().await;
+
         let close_request = serde_json::json!({"op": "close_session"});
         let _ = self.session.send_on_session(close_request).await?;
 
@@ -386,6 +456,7 @@ pub async fn connect() -> Result<
             control,
             session,
             out,
+            session_recreate: Mutex::new(()),
         },
         event_rx,
         chat_rx,

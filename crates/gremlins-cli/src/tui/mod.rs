@@ -162,7 +162,8 @@ fn build_chat_request(
 ///
 /// This is the shared tail of the Enter and `Ctrl+G`-editor paths. Caller
 /// is responsible for taking the input, recording history, and stopping any
-/// log follow first. The caller must have already checked `active_request`.
+/// log follow first. The caller must have already checked `active_request`
+/// and `session_recreating`.
 fn send_chat_input(
     live_area: &mut LiveArea,
     app: &mut App,
@@ -170,6 +171,7 @@ fn send_chat_input(
     input: String,
     turn_gen: &mut u64,
     active_turn: &mut Option<String>,
+    session_generation: u64,
 ) -> io::Result<()> {
     if app.active_request {
         let msg = "a request is already in progress — wait for the response";
@@ -222,7 +224,10 @@ fn send_chat_input(
             &context,
             &env,
         );
-        match client_for_chat.send_session_request(request).await {
+        match client_for_chat
+            .send_session_request_for_generation(request, session_generation)
+            .await
+        {
             Ok(resp) => {
                 // A chat ack is `{"type":"ok",...}`; an error response is
                 // `{"type":"error",...}`. Surface a setup failure as a chat
@@ -670,6 +675,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     // ── Channel for socket-op results ─────────────────────────────
     let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Vec<String>>();
 
+    // ── Channel for session-recreation completion ─────────────────
+    let (reset_tx, mut reset_rx) = mpsc::unbounded_channel::<Result<(), String>>();
+
     // ── Channel for run-snapshot refreshes (after event_lagged) ───
     let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel::<HashMap<String, ActiveRun>>();
 
@@ -1070,6 +1078,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         live_area.push_transcript_block(block);
                                     }
                                     CommandResult::RestartChat => {
+                                        if app.session_recreating {
+                                            live_area.push_transcript_line(
+                                                "session reset already in progress".to_string(),
+                                            );
+                                            continue;
+                                        }
                                         // Clear current turn.
                                         live_area.clear_current_turn();
                                         // Clear the transcript/scrollback so the
@@ -1101,12 +1115,17 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         debug_cmd_tx = None;
                                         debug_evt_rx = None;
                                         live_area.set_debug_connected(false);
+                                        // Block new chat submissions and further
+                                        // `/clear` requests until the replacement
+                                        // session socket is installed. Recreate
+                                        // requests are also serialized inside
+                                        // `DaemonClient::recreate_session`.
+                                        app.session_recreating = true;
                                         let c = Arc::clone(&client);
-                                        let tx = result_tx.clone();
+                                        let tx = reset_tx.clone();
                                         tokio::spawn(async move {
-                                            if let Err(e) = c.recreate_session().await {
-                                                let _ = tx.send(vec![format!("error: {e}")]);
-                                            }
+                                            let result = c.recreate_session().await;
+                                            let _ = tx.send(result);
                                         });
                                         app.input.clear();
                                         app.input_cursor = 0;
@@ -1164,12 +1183,25 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 }
                             } else {
                                 // Plain text — send to chat agent.
+                                if app.session_recreating {
+                                    live_area.push_transcript_line(
+                                        "session reset is in progress — wait before sending"
+                                            .to_string(),
+                                    );
+                                    continue;
+                                }
                                 if app.active_request {
                                     let msg = "a request is already in progress — wait for the response";
                                     live_area.push_transcript_line(msg.to_string());
                                     continue;
                                 }
 
+                                // Capture the session generation at submission
+                                // time. If `/clear` recreates the session while
+                                // repository context is still being gathered,
+                                // the request is discarded atomically before it
+                                // can execute in the new conversation.
+                                let session_generation = client.session_generation().await;
                                 send_chat_input(
                                     live_area,
                                     &mut app,
@@ -1177,6 +1209,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     input,
                                     &mut turn_gen,
                                     &mut active_turn,
+                                    session_generation,
                                 )?;
                             }
                         }
@@ -1466,6 +1499,17 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
                     }
                     _ => {}
+                }
+            }
+
+            // ── Session recreation completion ─────────────
+            Some(result) = reset_rx.recv() => {
+                app.session_recreating = false;
+                match result {
+                    Ok(()) => {}
+                    Err(e) => {
+                        live_area.push_transcript_line(format!("error: {e}"));
+                    }
                 }
             }
 

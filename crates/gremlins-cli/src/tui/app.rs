@@ -23,6 +23,10 @@ pub struct App {
     pub following_log: Option<String>,
     /// Whether a chat request is currently in-flight (guards against concurrent submissions).
     pub active_request: bool,
+    /// Whether `/clear` is currently recreating the session. Guards against
+    /// submitting a prompt (or starting a second reset) before the
+    /// replacement session socket is installed.
+    pub session_recreating: bool,
     /// Active ephemeral overlay, if any.
     pub overlay: Option<Overlay>,
     /// Submitted inputs in chronological order (in-memory only).
@@ -102,6 +106,7 @@ impl App {
             project_name,
             following_log: None,
             active_request: false,
+            session_recreating: false,
             overlay: None,
             input_history: Vec::new(),
             history_cursor: None,

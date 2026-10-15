@@ -56,6 +56,38 @@ impl Clone for SharedWriter {
     }
 }
 
+/// RAII guard that makes aborting a debug connection safe.
+///
+/// `handle_debug` pauses a pipeline gremlin for the lifetime of the debug
+/// socket. If the supervisor aborts the aux task (session teardown), the
+/// future is dropped and the normal disconnect path never runs. Dropping
+/// this guard restores the pause token and sends `Quit` synchronously via
+/// `try_send`, so a paused agent is not left waiting forever.
+struct DebugDetachGuard {
+    interactive: Option<InteractiveHandle>,
+}
+
+impl DebugDetachGuard {
+    fn new(interactive: InteractiveHandle) -> Self {
+        Self {
+            interactive: Some(interactive),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.interactive = None;
+    }
+}
+
+impl Drop for DebugDetachGuard {
+    fn drop(&mut self) {
+        if let Some(interactive) = &self.interactive {
+            let _ = interactive.cmd_tx.try_send(InteractiveCommand::Quit);
+            interactive.pause.reset();
+        }
+    }
+}
+
 /// The in-flight chat turn for a connection, if any.
 struct CurrentTurn {
     id: String,
@@ -95,9 +127,14 @@ struct ClientSession {
     /// Auxiliary socket tasks (log follow, debug) opened on the session
     /// socket. Aborted when the session dies.
     aux_sockets: Vec<tokio::task::JoinHandle<()>>,
-    /// Set when teardown starts; used to reject newly-arriving aux
-    /// connections while the session is closing.
+    /// Set when the main socket reaches EOF/error; stops the dispatcher and
+    /// rejects newly-arriving aux connections. Distinct from `torn_down`:
+    /// teardown still runs after request-side closure so session resources
+    /// are drained exactly once on the EOF path.
     closed: bool,
+    /// Set when teardown has begun. Teardown is idempotent under this flag,
+    /// but the flag is *not* set by request-side closure (`closed`).
+    torn_down: bool,
 }
 
 impl ClientSession {
@@ -110,6 +147,7 @@ impl ClientSession {
             current_turn: None,
             aux_sockets: Vec::new(),
             closed: false,
+            torn_down: false,
         }
     }
 }
@@ -613,14 +651,14 @@ async fn handle_session_main(
     let (request_tx, request_rx) = mpsc::channel::<Value>(64);
 
     let reader_session = Arc::clone(&session);
-    let reader_handle = tokio::spawn(async move {
+    let mut reader_handle = tokio::spawn(async move {
         run_session_main_reader(main_read, request_tx, reader_session).await;
     });
 
     let dispatcher_session = Arc::clone(&session);
     let dispatcher_writer = writer.clone();
     let dispatcher_state_root = state_root.to_path_buf();
-    let dispatcher_handle = tokio::spawn(async move {
+    let mut dispatcher_handle = tokio::spawn(async move {
         run_session_dispatcher(
             request_rx,
             dispatcher_writer,
@@ -630,11 +668,23 @@ async fn handle_session_main(
         .await;
     });
 
-    // Wait for the socket to die, then for the in-flight op (if any) to
-    // observe the session-closed flag and return. Teardown is idempotent and
-    // is also called by `close_session`; this call is the EOF/error path.
-    let _ = reader_handle.await;
-    let _ = dispatcher_handle.await;
+    // Wait for either the socket to die or the dispatcher to finish. When
+    // the reader exits first, let the dispatcher observe the session-closed
+    // flag and drain queued requests before teardown. When the dispatcher
+    // exits first (the graceful `close_session` path), stop the reader
+    // immediately so the main writer and connection-count guard are released
+    // without waiting for the client to close its write half.
+    tokio::select! {
+        result = &mut reader_handle => {
+            let _ = result;
+            let _ = dispatcher_handle.await;
+        }
+        result = &mut dispatcher_handle => {
+            let _ = result;
+            reader_handle.abort();
+            let _ = reader_handle.await;
+        }
+    }
     teardown_session(&session, state_root).await;
 }
 
@@ -844,9 +894,10 @@ async fn teardown_session_from_listener(session: &SessionHandle, state_root: &Pa
 async fn teardown_session_impl(session: &SessionHandle, state_root: &Path, abort_listener: bool) {
     let (chat_ids, chat_gremlins, aux_sockets, listener_task, session_id, turn_done) = {
         let mut s = session.lock().await;
-        if s.closed {
+        if s.torn_down {
             return;
         }
+        s.torn_down = true;
         s.closed = true;
 
         let turn_done = if let Some(cur) = &s.current_turn {
@@ -2321,6 +2372,10 @@ async fn handle_debug(
 
     // Signal the agent loop to pause at its next yield point.
     log::debug!("handle_debug: calling pause() for {id}");
+    // Arm the abort guard before pausing: from here until normal disconnect,
+    // dropping this future (task abort on session teardown) must send `Quit`
+    // and clear the pause token.
+    let mut detach_guard = DebugDetachGuard::new(interactive_handle.clone());
     interactive_handle.pause.pause();
     log::debug!("handle_debug: pause() called, waiting for Ready from agent…");
     send_debug_status(writer, "sent_pause_signal").await;
@@ -2386,6 +2441,7 @@ async fn handle_debug(
     if !ready {
         log::debug!("handle_debug: agent did not become ready for {id}, resetting pause");
         interactive_handle.pause.reset();
+        detach_guard.disarm();
         return;
     }
 
@@ -2402,6 +2458,7 @@ async fn handle_debug(
             .send(InteractiveCommand::Quit)
             .await;
         interactive_handle.pause.reset();
+        detach_guard.disarm();
         return;
     }
     log::debug!("handle_debug: ready sent, entering command loop for {id}");
@@ -2512,6 +2569,7 @@ async fn handle_debug(
     }
 
     // Clear the pause signal so the agent loop resumes normal operation.
+    detach_guard.disarm();
     interactive_handle.pause.reset();
 }
 
@@ -4395,6 +4453,84 @@ mod tests {
         assert_eq!(
             gremlin.env, env,
             "gremlin.env must be seeded from the resolved environment map"
+        );
+    }
+
+    /// Dropping the debug abort guard must send `Quit` and reset the pause
+    /// token so an aborted debug connection never leaves a pipeline gremlin
+    /// paused indefinitely.
+    #[tokio::test]
+    async fn debug_abort_guard_sends_quit_and_resets_pause() {
+        let channels = super::InteractiveChannels::new();
+        let (handle, mut session) = channels.split();
+        handle.pause.pause();
+
+        let guard = super::DebugDetachGuard::new(handle.clone());
+        drop(guard);
+
+        assert!(!handle.pause.is_paused(), "guard drop must reset pause");
+        let cmd = tokio::time::timeout(Duration::from_secs(1), session.cmd_rx.recv())
+            .await
+            .expect("guard drop should send Quit promptly")
+            .expect("cmd channel closed before Quit arrived");
+        assert!(matches!(cmd, super::InteractiveCommand::Quit));
+    }
+
+    /// EOF on the actual main session socket must still drain session
+    /// resources. Regression test for teardown being skipped after the
+    /// reader marked the session closed.
+    #[tokio::test]
+    async fn main_socket_eof_still_tears_down_session() {
+        let sandbox = Sandbox::new();
+        let state_root = sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let session_id = "sess-eof-test".to_string();
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new(session_id.clone()),
+        ));
+        super::session_map()
+            .lock()
+            .unwrap()
+            .insert(session_id.clone(), Arc::clone(&session));
+
+        let listener = socket::bind_session_socket(&state_root, &session_id).unwrap();
+        let client = socket::connect_session_socket(&state_root, &session_id)
+            .await
+            .unwrap();
+        let (server, _addr) = listener.accept().await.unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+
+        let session_for_task = Arc::clone(&session);
+        let state_root_for_task = state_root.clone();
+        let handle = tokio::spawn(async move {
+            super::handle_session_main(server_read, writer, session_for_task, &state_root_for_task)
+                .await;
+        });
+
+        drop(client);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !super::session_map()
+                    .lock()
+                    .unwrap()
+                    .contains_key(&session_id)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("session was not torn down after main socket EOF"));
+
+        handle.await.unwrap();
+
+        assert!(
+            !socket::session_socket_path(&state_root, &session_id).exists(),
+            "session socket file must be unlinked on main socket EOF"
         );
     }
 }
