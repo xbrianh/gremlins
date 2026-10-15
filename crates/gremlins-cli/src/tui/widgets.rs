@@ -141,18 +141,18 @@ pub trait LiveAreaWidget {
 /// ephemeral reasoning and live-tool bands are nested [`StreamingWidget`]
 /// children: the transcript re-runs the shared recursive layout engine over
 /// those children inside the height the outer engine allocated to the
-/// transcript, stitches the resulting band between the FIFO head (prompt +
-/// tool-call lines) and the streaming-response tail, and drains its FIFO
-/// head into terminal scrollback when the combined content exceeds the
-/// region's height.
+/// transcript, and paints top-to-bottom pre-reasoning FIFO head, reasoning,
+/// FIFO tool-call events, live tool output, then the streaming-response
+/// tail. The FIFO head drains into terminal scrollback when the combined
+/// content exceeds the region's height.
 pub struct TranscriptWidget {
     /// The single styled FIFO — the only transcript content that overflows.
     scrollable: LineBuffer,
     /// The current turn's ephemeral reasoning slot, rendered between the
-    /// pre-response transcript head and the streaming response tail.
+    /// pre-reasoning transcript head and the FIFO tool-call-event band.
     reasoning: StreamingWidget,
     /// The current turn's ephemeral live tool-output slot, rendered between
-    /// reasoning and the streaming response tail.
+    /// the FIFO tool-call-event band and the streaming response tail.
     tool: StreamingWidget,
     /// Raw response accumulator (for reconciliation).
     response_accumulator: String,
@@ -1575,48 +1575,76 @@ impl LiveAreaWidget for TranscriptWidget {
             return;
         }
 
-        // Split at the response boundary: everything before the boundary is
-        // the top-anchored head (prompt + tool-call lines), everything after
-        // is the bottom-anchored streaming response.
-        let response_start = self.response_start.unwrap_or(lines.len()).min(lines.len());
-        let head = &lines[..response_start];
+        // Three-slice split around the two pinned boundaries. Everything
+        // before `prompt_end` is the top-anchored pre-reasoning head (prior
+        // history + current prompt); the middle slice is the permanent
+        // tool-call-event band; everything from `response_start` onward is
+        // the streaming response.
+        let prompt_end = self.prompt_end.min(lines.len());
+        let response_start = self
+            .response_start
+            .unwrap_or(lines.len())
+            .min(lines.len())
+            .max(prompt_end);
+        let pre = &lines[..prompt_end];
+        let events = &lines[prompt_end..response_start];
         let tail = &lines[response_start..];
 
-        let head_rows = wrapped_height(head, width);
+        let pre_rows = wrapped_height(pre, width);
+        let event_rows = wrapped_height(events, width);
         let tail_rows = wrapped_height(tail, width);
 
-        let (head_band, tail_band) = if tail.is_empty() {
-            (head_rows.min(fifo_rows as usize) as u16, 0)
+        let (pre_band, event_band, tail_band) = if tail.is_empty() {
+            // No response yet: paint the pre-reasoning head and then the
+            // tool-call-event band, both top-anchored.
+            let pre_band = (pre_rows as u16).min(fifo_rows);
+            let event_band = (event_rows as u16).min(fifo_rows.saturating_sub(pre_band));
+            (pre_band, event_band, 0)
         } else {
             // The response keeps at least one FIFO row after the ephemeral
-            // bands. Only a single over-tall head line can still exceed this
-            // after overflow; it is clipped top-anchored.
+            // bands. After overflow the only line that can still exceed the
+            // remaining FIFO rows is the final over-tall response line; the
+            // head slices are painted top-anchored and the tail renderer
+            // keeps the response's wrapped tail.
             let tail_floor = fifo_rows.min(1);
-            let head_band = (head_rows as u16).min(fifo_rows.saturating_sub(tail_floor));
-            (head_band, fifo_rows.saturating_sub(head_band))
+            let head_budget = fifo_rows.saturating_sub(tail_floor);
+            let pre_band = (pre_rows as u16).min(head_budget);
+            let event_band = (event_rows as u16).min(head_budget.saturating_sub(pre_band));
+            let tail_band = fifo_rows
+                .saturating_sub(pre_band)
+                .saturating_sub(event_band);
+            (pre_band, event_band, tail_band)
         };
 
         let mut y = inner.y;
-        if head_band > 0 && !head.is_empty() {
-            let head_area = Rect::new(inner.x, y, width, head_band);
-            Paragraph::new(head.to_vec())
+        if pre_band > 0 && !pre.is_empty() {
+            let pre_area = Rect::new(inner.x, y, width, pre_band);
+            Paragraph::new(pre.to_vec())
                 .wrap(Wrap { trim: false })
-                .render(head_area, buf);
+                .render(pre_area, buf);
         }
 
-        y = inner.y + head_band;
+        y = inner.y + pre_band;
         if reasoning_rows > 0 {
             let reasoning_area = Rect::new(inner.x, y, width, reasoning_rows);
             LiveAreaWidget::render(&mut self.reasoning, reasoning_area, buf, ctx);
         }
 
-        y = inner.y + head_band + reasoning_rows;
+        y = inner.y + pre_band + reasoning_rows;
+        if event_band > 0 && !events.is_empty() {
+            let event_area = Rect::new(inner.x, y, width, event_band);
+            Paragraph::new(events.to_vec())
+                .wrap(Wrap { trim: false })
+                .render(event_area, buf);
+        }
+
+        y = inner.y + pre_band + reasoning_rows + event_band;
         if tool_rows > 0 {
             let tool_area = Rect::new(inner.x, y, width, tool_rows);
             LiveAreaWidget::render(&mut self.tool, tool_area, buf, ctx);
         }
 
-        y = inner.y + head_band + reasoning_rows + tool_rows;
+        y = inner.y + pre_band + reasoning_rows + event_band + tool_rows;
         if tail_band > 0 && !tail.is_empty() {
             if tail_rows <= tail_band as usize && (reasoning_rows > 0 || tool_rows > 0) {
                 // Bottom-anchor the short response inside its allocated band
@@ -1632,9 +1660,9 @@ impl LiveAreaWidget for TranscriptWidget {
                     .wrap(Wrap { trim: false })
                     .render(tail_area, buf);
             } else {
-                // Without ephemeral output the short response streams directly
-                // below the head with no blank gap; a tall response keeps its
-                // tail.
+                // Without ephemeral output the short response streams
+                // directly below the tool-call-event band with no blank gap;
+                // a tall response keeps its tail.
                 let tail_area = Rect::new(inner.x, y, width, tail_band);
                 render_wrapped_tail(tail, tail_area, buf, tail_band as usize);
             }
@@ -3042,6 +3070,52 @@ mod tests {
         let (reasoning_rows, tool_rows) = transcript.ephemeral_heights(4, cols - 1, &ctx);
         assert_eq!(reasoning_rows, 3);
         assert_eq!(tool_rows, 0);
+    }
+
+    #[test]
+    fn transcript_render_orders_prompt_reasoning_tool_events_tool_output_response() {
+        let ctx = input_ctx("", 0);
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_reasoning_text("thinking\n");
+        transcript.push_tool_line("grep");
+        transcript.set_tool_title("bash");
+        transcript.push_tool_output_chunk("stdout line\n");
+        transcript.push_response("answer");
+
+        let cols = 40;
+        LiveAreaWidget::finalize(&mut transcript, cols);
+
+        // Six rows are exactly enough for prompt + reasoning + tool-call
+        // event + live tool title + live tool body + response. The short
+        // response bottom-anchors below the live tool slot.
+        let area = Rect::new(0, 0, cols, 6);
+        let mut buf = Buffer::empty(area);
+        LiveAreaWidget::render(&mut transcript, area, &mut buf, &ctx);
+        let rows = rendered_rows(&buf, cols, area.height);
+
+        let prompt_row = rows.iter().position(|r| r.contains("▍» hi")).unwrap();
+        let reasoning_row = rows.iter().position(|r| r.contains("thinking")).unwrap();
+        let tool_event_row = rows.iter().position(|r| r.contains("◆ grep")).unwrap();
+        let tool_output_row = rows.iter().position(|r| r.contains("stdout line")).unwrap();
+        let response_row = rows.iter().position(|r| r.contains("answer")).unwrap();
+
+        assert!(
+            prompt_row < reasoning_row,
+            "prompt must render above reasoning: {rows:?}"
+        );
+        assert!(
+            reasoning_row < tool_event_row,
+            "reasoning must render above tool-call events: {rows:?}"
+        );
+        assert!(
+            tool_event_row < tool_output_row,
+            "tool-call events must render above live tool output: {rows:?}"
+        );
+        assert!(
+            tool_output_row < response_row,
+            "live tool output must render above the response: {rows:?}"
+        );
     }
 
     // ── embedded live tool slot ─────────────────────────────────

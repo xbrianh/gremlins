@@ -527,8 +527,8 @@ impl<B: Backend> LiveArea<B> {
     /// Unpin the current turn and clear its draft state. Tool-call lines are
     /// already part of the transcript FIFO (inserted above the response), so
     /// they survive the turn as ordinary scrollback. The embedded reasoning
-    /// and tool slots are cleared so finished history reads prompt → answer
-    /// with no ephemeral output in between.
+    /// and tool slots are cleared so finished history reads prompt → tool →
+    /// answer with no ephemeral output in between.
     pub fn finish_turn(&mut self) {
         self.transcript_mut().finish_turn();
     }

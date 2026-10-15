@@ -716,9 +716,10 @@ the terminal scroll region. Everything above them is the content region.
 (the only overflow producer) plus two embedded `StreamingWidget` children
 (reasoning and live tool output). Its own min/desired/max heights sum the
 FIFO and its children; after the parent allocates `H` rows, the transcript
-re-runs the same allocate pass on its child slice and stitches the allocated
-ephemeral band between the FIFO head and the streaming-response tail
-(prompt → reasoning → tool → response).
+re-runs the same allocate pass on its child slice and paints top-to-bottom
+pre-reasoning FIFO head, reasoning, FIFO tool-call events, live tool output,
+then streaming response (prompt → reasoning → tool-call events → live tool
+output → response).
 
 **Streaming widgets.** `StreamingWidget` owns a `LineBuffer` of completed
 styled lines plus a trailing partial, an optional title row supplied as a
