@@ -16,7 +16,7 @@
 //! responsibility.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ratatui::{
     buffer::Buffer,
@@ -157,9 +157,25 @@ pub struct TranscriptWidget {
     /// The current turn's ephemeral reasoning slot, rendered between the
     /// pre-reasoning transcript head and the FIFO tool-call-event band.
     reasoning: StreamingWidget,
-    /// The current turn's ephemeral live tool-output slot, rendered between
-    /// the FIFO tool-call-event band and the streaming response tail.
-    tool: StreamingWidget,
+    /// The current turn's ephemeral live tool-output streams, keyed by
+    /// tool-call id. A stream is created lazily on its first output chunk and
+    /// removed when its tool commits.
+    tools: BTreeMap<String, StreamingWidget>,
+    /// Formatted tool call (`format_tool_call` output) for each live stream.
+    tool_calls_by_id: HashMap<String, String>,
+    /// Tool-call ids already committed to the FIFO, guaranteeing exactly-once
+    /// representation even if a duplicate completion event arrives.
+    committed_tool_ids: HashSet<String>,
+    /// Formatted tool calls from `TurnComplete` still awaiting their result.
+    /// ToolResult events remove entries as they commit; anything left when
+    /// the turn finishes is reconciled so a dropped completion event cannot
+    /// silently lose a tool's permanent entry.
+    pending_tool_calls: Vec<String>,
+    /// Committed formatted tool calls that have not yet been matched against
+    /// a `TurnComplete` entry. Counts make duplicate identical calls safe:
+    /// when a later `TurnComplete` arrives it consumes these before adding a
+    /// new pending entry.
+    committed_unmatched: HashMap<String, usize>,
     /// Raw response accumulator (for reconciliation).
     response_accumulator: String,
     /// FIFO index where the current turn starts (the pinned boundary).
@@ -196,7 +212,11 @@ impl TranscriptWidget {
         Self {
             scrollable: LineBuffer::new(),
             reasoning: StreamingWidget::reasoning(Self::REASONING_MAX_ROWS),
-            tool: StreamingWidget::tool(Self::REASONING_MAX_ROWS),
+            tools: BTreeMap::new(),
+            tool_calls_by_id: HashMap::new(),
+            committed_tool_ids: HashSet::new(),
+            pending_tool_calls: Vec::new(),
+            committed_unmatched: HashMap::new(),
             response_accumulator: String::new(),
             turn_start: None,
             response_start: None,
@@ -226,20 +246,169 @@ impl TranscriptWidget {
         self.reasoning.flush();
     }
 
-    /// Append live tool output (may be a partial chunk) to the current
-    /// turn's ephemeral tool slot.
-    pub fn push_tool_output_chunk(&mut self, text: &str) {
-        self.tool.push_text(text);
+    /// Append live tool output (may be a partial chunk) to the stream for
+    /// the given tool-call id, creating the stream lazily on first use.
+    pub fn push_tool_output_chunk(&mut self, id: &str, call: &str, text: &str) {
+        if id.is_empty() && call.is_empty() {
+            return;
+        }
+        let stream = self
+            .tools
+            .entry(id.to_string())
+            .or_insert_with(|| StreamingWidget::tool(Self::REASONING_MAX_ROWS).retain_tail());
+        if !call.is_empty() {
+            stream.set_title(call);
+        }
+        stream.push_text(text);
+        self.tool_calls_by_id
+            .insert(id.to_string(), call.to_string());
     }
 
-    /// Set the live tool slot's title row. An empty title clears it.
-    pub fn set_tool_title(&mut self, title: &str) {
-        self.tool.set_title(title);
+    /// Commit a finished tool call into the transcript's permanent tool
+    /// segment. Streaming tools with a live slot commit their title plus the
+    /// retained 5-row tail; every other tool commits a single `◆` event line.
+    /// Each tool commits at most once, even if a completion event is repeated.
+    pub fn commit_tool_result(&mut self, id: &str, call: &str) {
+        if self.turn_start.is_none() || (id.is_empty() && call.is_empty()) {
+            return;
+        }
+        if self.committed_tool_ids.contains(id) {
+            return;
+        }
+        if !id.is_empty() {
+            self.committed_tool_ids.insert(id.to_string());
+        }
+        self.note_committed_call(call);
+
+        if let Some(stream) = self.tools.remove(id) {
+            self.tool_calls_by_id.remove(id);
+            self.commit_stream_block(call, stream);
+        } else if !call.is_empty() {
+            self.insert_tool_lines(vec![tool_line(call)]);
+        }
     }
 
-    /// Clear the ephemeral tool slot at a turn boundary.
+    /// Seed the current turn's tool-call list for end-of-turn reconciliation.
+    /// Read/Edit calls stay filtered exactly as they were before. Later
+    /// `TurnComplete` events merge into the existing list, consuming any
+    /// already-committed result first so exactly-once holds regardless of
+    /// whether the result or the completion event arrived first.
+    pub fn reconcile_tool_calls(&mut self, calls: &[String]) {
+        if self.turn_start.is_none() {
+            return;
+        }
+        for call in calls {
+            if call.starts_with("Read") || call.starts_with("Edit") {
+                continue;
+            }
+            if let Some(count) = self.committed_unmatched.get_mut(call) {
+                if *count > 0 {
+                    *count -= 1;
+                    continue;
+                }
+            }
+            self.pending_tool_calls.push(call.clone());
+        }
+        self.committed_unmatched.retain(|_, count| *count > 0);
+    }
+
+    /// Clear every live tool stream at a turn boundary.
     pub fn clear_tool_output(&mut self) {
-        self.tool.clear();
+        self.clear_live_tools();
+    }
+
+    fn clear_live_tools(&mut self) {
+        for stream in self.tools.values_mut() {
+            stream.clear();
+        }
+        self.tools.clear();
+        self.tool_calls_by_id.clear();
+    }
+
+    fn clear_tool_state(&mut self) {
+        self.clear_live_tools();
+        self.committed_tool_ids.clear();
+        self.pending_tool_calls.clear();
+        self.committed_unmatched.clear();
+    }
+
+    /// Account for a committed tool result in the reconciliation multiset.
+    ///
+    /// If a `TurnComplete` already seeded this formatted call, consume that
+    /// pending entry. Otherwise remember it so a later `TurnComplete` does
+    /// not re-add an already-committed tool as pending.
+    fn note_committed_call(&mut self, call: &str) {
+        if let Some(pos) = self.pending_tool_calls.iter().position(|c| c == call) {
+            self.pending_tool_calls.remove(pos);
+        } else if !call.is_empty() {
+            *self
+                .committed_unmatched
+                .entry(call.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Commit any tool calls still pending when the turn finishes. ToolResult
+    /// events normally commit each call as it completes; this safety net keeps
+    /// a bounded-event-channel drop from silently losing a permanent entry.
+    fn reconcile_pending_tools(&mut self) {
+        if self.turn_start.is_none() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_tool_calls);
+        for call in pending {
+            let stream_id = self.tools.iter().find_map(|(stream_id, _)| {
+                self.tool_calls_by_id
+                    .get(stream_id)
+                    .is_some_and(|stream_call| stream_call == &call)
+                    .then_some(stream_id.clone())
+            });
+            if let Some(stream_id) = stream_id {
+                let stream = self.tools.remove(&stream_id).unwrap();
+                self.committed_tool_ids.insert(stream_id.clone());
+                self.tool_calls_by_id.remove(&stream_id);
+                self.commit_stream_block(&call, stream);
+            } else if !call.is_empty() {
+                self.insert_tool_lines(vec![tool_line(&call)]);
+            }
+        }
+    }
+
+    /// Build and insert a committed tool block: the title row followed by the
+    /// retained 5-row body tail. Body lines keep the live stream's
+    /// ANSI-stripped, indented, nickel-italic styling.
+    fn commit_stream_block(&mut self, call: &str, mut stream: StreamingWidget) {
+        stream.flush();
+        let mut block: Vec<Line<'static>> = Vec::new();
+        if !call.is_empty() {
+            block.push(tool_line(call));
+        }
+        let width = self.last_width.saturating_sub(1);
+        let rendered = stream.commit_lines();
+        if !rendered.is_empty() {
+            let window = tail_window(&rendered, width, Self::REASONING_MAX_ROWS as usize);
+            block.extend_from_slice(&rendered[window.start..]);
+        }
+        self.insert_tool_lines(block);
+    }
+
+    /// Insert a contiguous run of styled lines into the active turn directly
+    /// above the streaming response region, advancing the response boundary.
+    fn insert_tool_lines(&mut self, lines: Vec<Line<'static>>) {
+        if lines.is_empty() || self.turn_start.is_none() {
+            return;
+        }
+        self.invalidate_desired_cache();
+        let idx = self
+            .response_start
+            .unwrap_or(self.scrollable.len())
+            .max(self.prompt_end);
+        let mut inserted = 0usize;
+        for line in lines {
+            self.scrollable.insert(idx + inserted, line);
+            inserted += 1;
+        }
+        self.response_start = Some(idx + inserted);
     }
 
     /// Append a system message. When a turn is active, the message is
@@ -305,22 +474,13 @@ impl TranscriptWidget {
     ///
     /// Outside a turn (degenerate — tool calls only arrive during a turn) the
     /// line is appended as ordinary styled scrollback content.
+    /// Insert a single bare tool-call line into the active turn.
+    #[cfg(test)]
     pub fn push_tool_line(&mut self, name: &str) {
         let line = tool_line(name);
         self.invalidate_desired_cache();
         match self.turn_start {
-            Some(_) => {
-                let idx = self
-                    .response_start
-                    .unwrap_or(self.scrollable.len())
-                    .max(self.prompt_end);
-                self.scrollable.insert(idx, line);
-                // Advance the response-boundary marker past the inserted line
-                // so the response region keeps opening (or re-opening) below
-                // the tool lines it precedes, even when no response text has
-                // streamed yet.
-                self.response_start = Some(idx + 1);
-            }
+            Some(_) => self.insert_tool_lines(vec![line]),
             None => {
                 self.push_styled_line(line);
             }
@@ -343,7 +503,7 @@ impl TranscriptWidget {
     pub fn submit_prompt(&mut self, prompt: String) {
         self.invalidate_desired_cache();
         self.reasoning.clear();
-        self.tool.clear();
+        self.clear_tool_state();
         let mut sep_index = None;
         if !self.scrollable.is_empty() {
             // Placeholder width; regenerated at `finalize` with the real
@@ -457,10 +617,11 @@ impl TranscriptWidget {
     /// Unpin the current turn and clear its draft state. The content is
     /// already in the FIFO.
     pub fn finish_turn(&mut self) {
+        self.reconcile_pending_tools();
         self.rebuild_response();
         self.invalidate_desired_cache();
         self.reasoning.clear();
-        self.tool.clear();
+        self.clear_tool_state();
         self.turn_start = None;
         self.response_start = None;
         self.prompt_end = 0;
@@ -475,7 +636,7 @@ impl TranscriptWidget {
     pub fn clear_current_turn(&mut self) {
         self.invalidate_desired_cache();
         self.reasoning.clear();
-        self.tool.clear();
+        self.clear_tool_state();
         if let Some(t) = self.turn_start {
             self.scrollable.truncate(t);
             // The separator rule before the turn (pushed by `submit_prompt`)
@@ -502,7 +663,7 @@ impl TranscriptWidget {
     pub fn clear_scrollable(&mut self) {
         self.invalidate_desired_cache();
         self.reasoning.clear();
-        self.tool.clear();
+        self.clear_tool_state();
         self.scrollable.clear();
         self.turn_start = None;
         self.response_start = None;
@@ -562,29 +723,46 @@ impl TranscriptWidget {
         h
     }
 
-    /// Wrapped height of the composite transcript: the FIFO plus the two
-    /// streaming children's desired heights (each child caps itself at its
-    /// row cap).
+    /// Wrapped height of the composite transcript: the FIFO plus the
+    /// reasoning stream plus every live tool stream's desired height (each
+    /// child caps itself at its row cap).
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         let inner = width.saturating_sub(1);
         let fifo = self.fifo_desired_height(inner);
         fifo.saturating_add(self.reasoning.desired_height(inner, ctx))
-            .saturating_add(self.tool.desired_height(inner, ctx))
+            .saturating_add(self.tools_desired_height(inner, ctx))
     }
 
-    /// Re-run the recursive layout engine over the transcript's two
-    /// ephemeral children, constrained to the outer allocation minus the
-    /// FIFO's one-row floor. Returns the allocated heights in child order.
+    fn tools_desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        self.tools.values().fold(0u16, |acc, stream| {
+            acc.saturating_add(stream.desired_height(width, ctx))
+        })
+    }
+
+    fn tools_min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        self.tools.values().fold(0u16, |acc, stream| {
+            acc.saturating_add(stream.min_height(width, ctx))
+        })
+    }
+
+    /// Re-run the recursive layout engine over the transcript's ephemeral
+    /// children, constrained to the outer allocation minus the FIFO's one-row
+    /// floor. Returns the reasoning height followed by each live tool height
+    /// in sorted-id order.
     fn ephemeral_heights(
         &mut self,
         available_rows: u16,
         width: u16,
         ctx: &RenderContext,
-    ) -> (u16, u16) {
+    ) -> (u16, Vec<u16>) {
         let child_budget = available_rows.saturating_sub(1);
-        let mut children: [&mut dyn LiveAreaWidget; 2] = [&mut self.reasoning, &mut self.tool];
+        let mut children: Vec<&mut dyn LiveAreaWidget> = Vec::with_capacity(1 + self.tools.len());
+        children.push(&mut self.reasoning);
+        for stream in self.tools.values_mut() {
+            children.push(stream);
+        }
         let layout = layout_widgets(&mut children, width, child_budget, ctx);
-        (layout.heights[0], layout.heights[1])
+        (layout.heights[0], layout.heights[1..].to_vec())
     }
 
     /// Drain the head of the transcript FIFO that does not fit in
@@ -602,6 +780,9 @@ impl TranscriptWidget {
         self.invalidate_desired_cache();
         let inner = width.saturating_sub(1);
         let (reasoning_rows, tool_rows) = self.ephemeral_heights(available_rows, inner, ctx);
+        let tool_rows = tool_rows
+            .into_iter()
+            .fold(0u16, |acc, h| acc.saturating_add(h));
         let fifo_rows = available_rows
             .saturating_sub(reasoning_rows)
             .saturating_sub(tool_rows);
@@ -1110,6 +1291,14 @@ pub struct StreamingWidget {
     line_prefix: String,
     row_cap: u16,
     size_priority: i32,
+    /// When true, the widget keeps a sliding tail of completed lines (capped
+    /// at `row_cap` logical lines) for a later permanent commit. The live
+    /// viewport may still trim its own head independently, so a transiently
+    /// short allocation never shrinks the commit tail.
+    retain_tail: bool,
+    /// Completed lines reserved for a later commit, independent of the live
+    /// viewport's head drain.
+    retained_tail: LineBuffer,
 }
 
 impl StreamingWidget {
@@ -1126,7 +1315,16 @@ impl StreamingWidget {
             line_prefix: String::new(),
             row_cap,
             size_priority,
+            retain_tail: false,
+            retained_tail: LineBuffer::new(),
         }
+    }
+
+    /// Configure this stream to retain a sliding commit tail, independent of
+    /// the live viewport allocation.
+    pub fn retain_tail(mut self) -> Self {
+        self.retain_tail = true;
+        self
     }
 
     /// Configure the prefix rendered before the title row.
@@ -1191,7 +1389,12 @@ impl StreamingWidget {
             let line: String = self.partial[..newline_pos].to_string();
             self.partial = self.partial[newline_pos + 1..].to_string();
             let idx = self.line_count;
-            self.lines.push(self.style_line(&line, idx));
+            let styled = self.style_line(&line, idx);
+            if self.retain_tail {
+                self.retained_tail.push(styled.clone());
+                self.trim_retained_tail();
+            }
+            self.lines.push(styled);
             self.line_count += 1;
         }
     }
@@ -1201,8 +1404,24 @@ impl StreamingWidget {
         if !self.partial.is_empty() {
             let line = std::mem::take(&mut self.partial);
             let idx = self.line_count;
-            self.lines.push(self.style_line(&line, idx));
+            let styled = self.style_line(&line, idx);
+            if self.retain_tail {
+                self.retained_tail.push(styled.clone());
+                self.trim_retained_tail();
+            }
+            self.lines.push(styled);
             self.line_count += 1;
+        }
+    }
+
+    /// Keep only the most recent `row_cap` logical lines in the commit tail.
+    /// A line wraps to at least one row, so the last `row_cap` logical lines
+    /// always contain the last `row_cap` wrapped rows.
+    fn trim_retained_tail(&mut self) {
+        let cap = self.row_cap as usize;
+        if self.retained_tail.len() > cap {
+            self.retained_tail
+                .drain_head(self.retained_tail.len() - cap);
         }
     }
 
@@ -1210,6 +1429,7 @@ impl StreamingWidget {
     pub fn clear(&mut self) {
         self.lines.clear();
         self.partial.clear();
+        self.retained_tail.clear();
         self.line_count = 0;
         self.scrolled.set(0);
         self.last_width.set(0);
@@ -1348,6 +1568,16 @@ impl StreamingWidget {
             out.push(self.style_line(&self.partial, self.line_count));
         }
         out
+    }
+
+    /// Lines available for a permanent commit tail. Tool streams return the
+    /// sliding retained tail; other streams fall back to the live viewport.
+    pub fn commit_lines(&self) -> Vec<Line<'static>> {
+        if self.retain_tail {
+            self.retained_tail.visible_lines().to_vec()
+        } else {
+            self.rendered_lines()
+        }
     }
 
     /// Keep only the visible tail of the live stream; the head is discarded,
@@ -1497,21 +1727,23 @@ impl LiveAreaWidget for TranscriptWidget {
     }
 
     fn size_priority(&self) -> i32 {
-        self.reasoning
-            .size_priority()
-            .min(self.tool.size_priority())
+        self.tools
+            .values()
+            .map(|stream| stream.size_priority())
+            .fold(self.reasoning.size_priority(), |acc, p| acc.min(p))
     }
 
     fn overflow_priority(&self) -> i32 {
-        self.reasoning
-            .overflow_priority()
-            .min(self.tool.overflow_priority())
+        self.tools
+            .values()
+            .map(|stream| stream.overflow_priority())
+            .fold(self.reasoning.overflow_priority(), |acc, p| acc.min(p))
     }
 
     fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         let inner = width.saturating_sub(1);
         1u16.saturating_add(self.reasoning.min_height(inner, ctx))
-            .saturating_add(self.tool.min_height(inner, ctx))
+            .saturating_add(self.tools_min_height(inner, ctx))
     }
 
     fn flexible(&self, _ctx: &RenderContext) -> bool {
@@ -1532,7 +1764,9 @@ impl LiveAreaWidget for TranscriptWidget {
         self.rebuild_response();
         let inner = width.saturating_sub(1);
         self.reasoning.finalize(inner);
-        self.tool.finalize(inner);
+        for stream in self.tools.values_mut() {
+            stream.finalize(inner);
+        }
     }
 
     fn take_overflow(
@@ -1571,10 +1805,11 @@ impl LiveAreaWidget for TranscriptWidget {
 
         // Allocate the ephemeral band before borrowing the FIFO lines.
         let (reasoning_rows, tool_rows) = self.ephemeral_heights(area.height, width, ctx);
+        let tool_rows_total = tool_rows.iter().fold(0u16, |acc, h| acc.saturating_add(*h));
         let fifo_rows = area
             .height
             .saturating_sub(reasoning_rows)
-            .saturating_sub(tool_rows);
+            .saturating_sub(tool_rows_total);
 
         let lines = self.scrollable.visible_lines();
         if lines.is_empty() {
@@ -1645,14 +1880,17 @@ impl LiveAreaWidget for TranscriptWidget {
         }
 
         y = inner.y + pre_band + reasoning_rows + event_band;
-        if tool_rows > 0 {
-            let tool_area = Rect::new(inner.x, y, width, tool_rows);
-            LiveAreaWidget::render(&mut self.tool, tool_area, buf, ctx);
+        for (stream, stream_rows) in self.tools.values_mut().zip(tool_rows) {
+            if stream_rows == 0 {
+                continue;
+            }
+            let tool_area = Rect::new(inner.x, y, width, stream_rows);
+            LiveAreaWidget::render(stream, tool_area, buf, ctx);
+            y += stream_rows;
         }
 
-        y = inner.y + pre_band + reasoning_rows + event_band + tool_rows;
         if tail_band > 0 && !tail.is_empty() {
-            if tail_rows <= tail_band as usize && (reasoning_rows > 0 || tool_rows > 0) {
+            if tail_rows <= tail_band as usize && (reasoning_rows > 0 || tool_rows_total > 0) {
                 // Bottom-anchor the short response inside its allocated band
                 // so the blank rows sit between the ephemeral slots and
                 // response.
@@ -3057,7 +3295,7 @@ mod tests {
         transcript.push_response("answer");
         for i in 0..5 {
             transcript.push_reasoning_text(&format!("reasoning {i}\n"));
-            transcript.push_tool_output_chunk(&format!("tool {i}\n"));
+            transcript.push_tool_output_chunk("b1", "", &format!("tool {i}\n"));
         }
 
         let cols = 40;
@@ -3070,12 +3308,12 @@ mod tests {
         // one-row floor.
         let (reasoning_rows, tool_rows) = transcript.ephemeral_heights(6, cols - 1, &ctx);
         assert_eq!(reasoning_rows, 5);
-        assert_eq!(tool_rows, 0);
+        assert_eq!(tool_rows, vec![0]);
 
         // With only 3 ephemeral rows available, reasoning also yields.
         let (reasoning_rows, tool_rows) = transcript.ephemeral_heights(4, cols - 1, &ctx);
         assert_eq!(reasoning_rows, 3);
-        assert_eq!(tool_rows, 0);
+        assert_eq!(tool_rows, vec![0]);
     }
 
     #[test]
@@ -3085,8 +3323,7 @@ mod tests {
         transcript.submit_prompt("hi".to_string());
         transcript.push_reasoning_text("thinking\n");
         transcript.push_tool_line("grep");
-        transcript.set_tool_title("bash");
-        transcript.push_tool_output_chunk("stdout line\n");
+        transcript.push_tool_output_chunk("b1", "bash", "stdout line\n");
         transcript.push_response("answer");
 
         let cols = 40;
@@ -3191,6 +3428,304 @@ mod tests {
             .map(|l| l.to_string())
             .collect();
         assert_eq!(lines, vec!["    red normal".to_string()]);
+    }
+
+    #[test]
+    fn committed_stream_tool_uses_title_plus_five_row_tail_exactly_once() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        let calls = vec!["Bash(command=\"run\")".to_string()];
+        transcript.reconcile_tool_calls(&calls);
+        for i in 0..8 {
+            transcript.push_tool_output_chunk(
+                "c1",
+                "Bash(command=\"run\")",
+                &format!("line {i}\n"),
+            );
+        }
+
+        // A repeated completion for the same call must be ignored.
+        transcript.commit_tool_result("c1", "Bash(command=\"run\")");
+        transcript.commit_tool_result("c1", "Bash(command=\"run\")");
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text.iter()
+                .filter(|l| *l == "◆ Bash(command=\"run\")")
+                .count(),
+            1,
+            "streaming tool must commit exactly one title row: {text:?}"
+        );
+        let title = text
+            .iter()
+            .position(|l| l == "◆ Bash(command=\"run\")")
+            .unwrap();
+        let answer = text.iter().position(|l| l == "answer").unwrap();
+        assert_eq!(text[0], "▍» hi");
+        assert!(
+            title < answer,
+            "tool block must precede the response: {text:?}"
+        );
+        assert_eq!(text[title + 1], "    line 3");
+        assert!(text.contains(&"    line 7".to_string()), "{text:?}");
+        assert!(!text.contains(&"    line 0".to_string()), "{text:?}");
+    }
+
+    #[test]
+    fn dropped_tool_result_is_reconciled_at_finish_turn() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        let calls = vec!["Bash(command=\"run\")".to_string()];
+        transcript.reconcile_tool_calls(&calls);
+        for i in 0..8 {
+            transcript.push_tool_output_chunk(
+                "c1",
+                "Bash(command=\"run\")",
+                &format!("line {i}\n"),
+            );
+        }
+
+        // No ToolResult event: the safety net in `finish_turn` must commit
+        // the stream rather than silently dropping the call.
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text.iter()
+                .filter(|l| *l == "◆ Bash(command=\"run\")")
+                .count(),
+            1,
+            "{text:?}"
+        );
+        let title = text
+            .iter()
+            .position(|l| l == "◆ Bash(command=\"run\")")
+            .unwrap();
+        assert_eq!(text[title + 1], "    line 3");
+        assert!(text.contains(&"    line 7".to_string()), "{text:?}");
+        assert!(!text.contains(&"    line 0".to_string()), "{text:?}");
+    }
+
+    #[test]
+    fn turn_complete_after_commit_does_not_duplicate_tool() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+
+        // ToolResult arrives before the TurnComplete that seeds the list.
+        transcript.commit_tool_result("g1", "Grep(pattern=\"fn main\")");
+        let calls = vec!["Grep(pattern=\"fn main\")".to_string()];
+        transcript.reconcile_tool_calls(&calls);
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text.iter()
+                .filter(|l| *l == "◆ Grep(pattern=\"fn main\")")
+                .count(),
+            1,
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn later_turn_complete_merges_pending_calls() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+
+        let first = vec![
+            "Grep(pattern=\"fn main\")".to_string(),
+            "Bash(command=\"one\")".to_string(),
+        ];
+        transcript.reconcile_tool_calls(&first);
+        transcript.commit_tool_result("g1", "Grep(pattern=\"fn main\")");
+
+        // A later agent-loop iteration must not wipe the still-uncommitted
+        // Bash call from the first iteration.
+        let second = vec!["Glob(pattern=\"*.rs\")".to_string()];
+        transcript.reconcile_tool_calls(&second);
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text.iter()
+                .filter(|l| *l == "◆ Grep(pattern=\"fn main\")")
+                .count(),
+            1,
+            "{text:?}"
+        );
+        assert_eq!(
+            text.iter()
+                .filter(|l| *l == "◆ Bash(command=\"one\")")
+                .count(),
+            1,
+            "{text:?}"
+        );
+        assert_eq!(
+            text.iter()
+                .filter(|l| *l == "◆ Glob(pattern=\"*.rs\")")
+                .count(),
+            1,
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn reasoning_never_enters_the_permanent_transcript() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_reasoning_text("thinking\n");
+        transcript.flush_reasoning();
+        transcript.push_response("answer");
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text.contains(&"▍» hi".to_string()), "{text:?}");
+        assert!(text.contains(&"answer".to_string()), "{text:?}");
+        assert!(
+            !text.iter().any(|l| l.contains("thinking")),
+            "reasoning must stay out of the FIFO: {text:?}"
+        );
+    }
+
+    #[test]
+    fn non_streaming_tool_commit_uses_diamond_line_and_filters_read_edit() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        let calls = vec![
+            "Grep(pattern=\"fn main\")".to_string(),
+            "Read(file_path=\"x\")".to_string(),
+        ];
+        transcript.reconcile_tool_calls(&calls);
+        transcript.commit_tool_result("g1", "Grep(pattern=\"fn main\")");
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text.iter()
+                .filter(|l| *l == "◆ Grep(pattern=\"fn main\")")
+                .count(),
+            1,
+            "{text:?}"
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("Read")),
+            "Read/Edit must stay filtered: {text:?}"
+        );
+    }
+
+    #[test]
+    fn stream_commit_uses_retained_five_row_tail_after_short_display() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        let calls = vec!["Bash(command=\"run\")".to_string()];
+        transcript.reconcile_tool_calls(&calls);
+        for i in 0..8 {
+            transcript.push_tool_output_chunk(
+                "c1",
+                "Bash(command=\"run\")",
+                &format!("line {i}\n"),
+            );
+        }
+
+        // Simulate a contested frame where the stream is transiently painted
+        // into a title row plus a two-row body band.
+        let ctx = input_ctx("", 0);
+        {
+            let stream = transcript.tools.get_mut("c1").unwrap();
+            let area = Rect::new(0, 0, 40, 3);
+            let mut buf = Buffer::empty(area);
+            LiveAreaWidget::render(stream, area, &mut buf, &ctx);
+        }
+
+        transcript.commit_tool_result("c1", "Bash(command=\"run\")");
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text.contains(&"    line 7".to_string()), "{text:?}");
+        assert!(text.contains(&"    line 3".to_string()), "{text:?}");
+        assert!(!text.contains(&"    line 2".to_string()), "{text:?}");
+        assert!(!text.contains(&"    line 0".to_string()), "{text:?}");
+    }
+
+    #[test]
+    fn concurrent_stream_commits_are_separate_blocks_in_result_order() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        let calls = vec![
+            "Bash(command=\"one\")".to_string(),
+            "Bash(command=\"two\")".to_string(),
+        ];
+        transcript.reconcile_tool_calls(&calls);
+
+        transcript.push_tool_output_chunk("c2", "Bash(command=\"two\")", "two-body\n");
+        transcript.commit_tool_result("c2", "Bash(command=\"two\")");
+        transcript.push_tool_output_chunk("c1", "Bash(command=\"one\")", "one-body\n");
+        transcript.commit_tool_result("c1", "Bash(command=\"one\")");
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let two = text
+            .iter()
+            .position(|l| l == "◆ Bash(command=\"two\")")
+            .unwrap();
+        let one = text
+            .iter()
+            .position(|l| l == "◆ Bash(command=\"one\")")
+            .unwrap();
+        assert!(
+            two < one,
+            "commit order follows tool-result order: {text:?}"
+        );
+        assert_eq!(text[two + 1], "    two-body");
+        assert_eq!(text[one + 1], "    one-body");
     }
 
     #[test]

@@ -77,9 +77,9 @@ run()
 4. Set `app.active_request = true`, store `app.pending_user_message`
 5. Spawn a task that sends `{"op": "chat", "text", "id"}` via the persistent `DaemonClient` (Esc sends `{"op": "cancel_chat"}`)
 6. `ChatEvent::ReasoningChunk` → `live_area.push_reasoning_text()` (delegates to the transcript's embedded reasoning slot; partials are flushed on newline)
-7. `ChatEvent::ToolResult` → matched and logged only (no rendering); `ChatEvent::TurnComplete` is the sole source of rich tool-event lines, which are inserted into the transcript above the streaming response (Read/Edit calls filtered)
+7. `ChatEvent::ToolOutputChunk` → `live_area.push_tool_output_chunk(id, call, text)` creates or updates the live stream keyed by call id; `ChatEvent::ToolResult` → `live_area.commit_tool_result(id, call)` commits that stream's title plus retained 5-row tail (or a `◆` event line when there is no live stream) into the transcript above the streaming response. `ChatEvent::TurnComplete` seeds the turn's tool-call list for end-of-turn reconciliation; Read/Edit calls are filtered
 8. `ChatEvent::StreamChunk` → `live_area.push_response()` (accumulates raw response, marks the response region dirty)
-9. `ChatEvent::Done` → reconcile the raw response accumulator with `Done.text` (use summary only if nothing streamed), then `live_area.finish_turn()` unpins the turn and clears its draft state and embedded reasoning/tool slots (tool-call lines stay in the transcript FIFO forever)
+9. `ChatEvent::Done` → reconcile the raw response accumulator with `Done.text` (use summary only if nothing streamed), then `live_area.finish_turn()` flushes any uncommitted tool-call list entries, unpins the turn, and clears its draft state and embedded reasoning/tool slots (committed tool blocks stay in the transcript FIFO forever)
 10. `Esc` during active request → abort chat task, send `cancel_chat`, `live_area.clear_current_turn()` truncates the FIFO back to the turn start
 
 ### Daemon events
@@ -108,15 +108,16 @@ scroll region; the reserved rows are derived from their allocated heights.
 
 The transcript fills the remaining content area and is itself a container.
 After the outer allocate pass gives it `H` rows, it re-runs the same engine
-on its two `StreamingWidget` children constrained to the ephemeral band, then
-paints bands top-to-bottom — pre-reasoning FIFO head (prior history and the
-current prompt, top-anchored), the embedded reasoning stream, the FIFO
-tool-call-event band (top-anchored), the embedded live-tool stream (both
-streaming children capped at 5 rows, tail-anchored and lossy), and the
-streaming-response FIFO tail — all within the transcript's one-cell inner
-margin. Only the transcript FIFO drains overflow lines for
-`LiveArea::commit_scrollback()`; each `StreamingWidget` self-trims and returns
-no overflow.
+on its ephemeral children — the reasoning stream plus one `StreamingWidget`
+per in-flight tool-call id — constrained to the ephemeral band, then paints
+bands top-to-bottom — pre-reasoning FIFO head (prior history and the current
+prompt, top-anchored), the embedded reasoning stream, the FIFO tool-call-event
+band (committed tool blocks, top-anchored), the embedded live-tool streams
+(streaming children capped at 5 rows, tail-anchored and display-lossy while
+retaining a 5-row commit tail), and the streaming-response FIFO tail — all
+within the transcript's one-cell inner margin. Only the transcript FIFO
+drains overflow lines for `LiveArea::commit_scrollback()`; each
+`StreamingWidget` self-trims and returns no overflow.
 
 When a non-chat screen is active, `LiveArea` composes only that screen's
 typed `ScreenView` body across the whole terminal; the chat scene

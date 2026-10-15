@@ -223,7 +223,8 @@ pub(crate) async fn run_agent_loop(
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
-    let (tool_output_tx, _) = tokio::sync::broadcast::channel::<(String, String, String)>(1024);
+    let (tool_output_tx, _) =
+        tokio::sync::broadcast::channel::<(String, String, String, String)>(1024);
     let mut tool_ctx = ToolContext {
         cwd: cwd.clone(),
         extra_env,
@@ -555,6 +556,7 @@ async fn run_agent_loop_core(
         id: String,
         name: String,
         args: String,
+        call: String,
         key: String,
         over_cap: bool,
     }
@@ -1373,6 +1375,7 @@ async fn run_agent_loop_core(
                 id: tc.id.to_string(),
                 name: tc.function.name.to_string(),
                 args: args_json,
+                call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
                 key: ledger_key_arg(&tc.function.arguments),
                 over_cap: tc.function.name == "Task" && {
                     task_count += 1;
@@ -1396,10 +1399,15 @@ async fn run_agent_loop_core(
             if let Some(rx) = live_rx.as_mut() {
                 loop {
                     match rx.recv().await {
-                        Ok((name, call, text)) => {
+                        Ok((id, name, call, text)) => {
                             if let Some(se) = &stream_events {
                                 if se.wants_events() {
-                                    se.send(InteractiveEvent::ToolOutputChunk { name, call, text });
+                                    se.send(InteractiveEvent::ToolOutputChunk {
+                                        id,
+                                        name,
+                                        call,
+                                        text,
+                                    });
                                 }
                             }
                         }
@@ -1421,7 +1429,7 @@ async fn run_agent_loop_core(
                         tools::TASK_MAX_PER_TURN
                     )
                 } else {
-                    tools::invoke(&j.name, ctx, &j.args).await
+                    tools::invoke(&j.id, &j.name, ctx, &j.args).await
                 }
             }
         }));
@@ -1512,10 +1520,15 @@ async fn run_agent_loop_core(
         if let Some(rx) = live_rx.as_mut() {
             loop {
                 match rx.try_recv() {
-                    Ok((name, call, text)) => {
+                    Ok((id, name, call, text)) => {
                         if let Some(se) = &stream_events {
                             if se.wants_events() {
-                                se.send(InteractiveEvent::ToolOutputChunk { name, call, text });
+                                se.send(InteractiveEvent::ToolOutputChunk {
+                                    id,
+                                    name,
+                                    call,
+                                    text,
+                                });
                             }
                         }
                     }
@@ -1549,7 +1562,9 @@ async fn run_agent_loop_core(
                         trunc(&output, 200)
                     };
                     se.send(InteractiveEvent::ToolResult {
+                        id: job.id.clone(),
                         name: job.name.clone(),
+                        call: job.call.clone(),
                         output: display,
                     });
                 }

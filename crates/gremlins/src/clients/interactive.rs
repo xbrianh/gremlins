@@ -128,6 +128,8 @@ pub enum InteractiveEvent {
     /// A line-buffered tool-output chunk streamed while a tool runs. This is
     /// display-only and never reaches the model or the permanent transcript.
     ToolOutputChunk {
+        /// Tool-call id this chunk belongs to.
+        id: String,
         name: String,
         /// Formatted tool call (`format_tool_call` output), used by the TUI
         /// as the live tool-slot title row.
@@ -135,7 +137,15 @@ pub enum InteractiveEvent {
         text: String,
     },
     /// A tool result produced after execution.
-    ToolResult { name: String, output: String },
+    ToolResult {
+        /// Tool-call id this result belongs to.
+        id: String,
+        name: String,
+        /// Formatted tool call (`format_tool_call` output), used by the TUI
+        /// as the committed tool-block title row.
+        call: String,
+        output: String,
+    },
     /// Interactive session ended.
     Ended {
         /// How the session ended: "resumed", "bailed", or "disconnect".

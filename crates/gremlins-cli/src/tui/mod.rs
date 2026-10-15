@@ -458,11 +458,15 @@ enum DebugEvent {
         text: String,
     },
     ToolOutputChunk {
+        id: String,
         name: String,
+        call: String,
         output: String,
     },
     ToolResult {
+        id: String,
         name: String,
+        call: String,
         output: String,
     },
     Error(String),
@@ -524,8 +528,18 @@ fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
                 .to_string(),
         },
         Some("tool_output_chunk") => DebugEvent::ToolOutputChunk {
+            id: value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             name: value
                 .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            call: value
+                .get("call")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
@@ -536,8 +550,18 @@ fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
                 .to_string(),
         },
         Some("tool_result") => DebugEvent::ToolResult {
+            id: value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             name: value
                 .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            call: value
+                .get("call")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
@@ -1695,21 +1719,26 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         log::debug!("ReasoningChunk len={}", text.len());
                         live_area.push_reasoning_text(&text);
                     }
-                    ChatEvent::ToolOutputChunk { name, call, text, .. } => {
+                    ChatEvent::ToolOutputChunk { id, name, call, text, .. } => {
                         log::debug!(
-                            "ToolOutputChunk name={name} call={call} len={}",
+                            "ToolOutputChunk id={id} name={name} call={call} len={}",
                             text.len()
                         );
-                        live_area.set_tool_title(&call);
-                        live_area.push_tool_output_chunk(&text);
+                        live_area.push_tool_output_chunk(&id, &call, &text);
                     }
-                    ChatEvent::ToolResult { name, output, .. } => {
-                        // The bare tool result is intentionally not rendered;
-                        // `ChatEvent::TurnComplete` is the sole source of
-                        // tool-event lines, enriched with call arguments.
-                        // The event is still matched (and logged) because
-                        // other consumers rely on its payload.
-                        log::debug!("ToolResult name={name} output_len={}", output.len());
+                    ChatEvent::ToolResult { id, name, call, output, .. } => {
+                        log::debug!(
+                            "ToolResult id={id} name={name} output_len={}",
+                            output.len()
+                        );
+                        // Read/Edit are filtered exactly as in the TurnComplete
+                        // reconciliation list: noisy file-access tools whose
+                        // output belongs in the model history, not the live
+                        // tool segment.
+                        if name == "Read" || name == "Edit" {
+                            continue;
+                        }
+                        live_area.commit_tool_result(&id, &call);
                     }
                     ChatEvent::TurnComplete { text, tool_calls, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
@@ -1721,16 +1750,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // channel lag. `response_text` accumulates across the agent
                         // loop, so only the current turn's trailing slice is repaired.
                         live_area.reconcile_response(&text);
-                        // Record tool calls so they appear in the transcript rather
-                        // than being silently lost. Read/Edit calls are filtered per
-                        // DESIGN.md § 8.2.1: they're noisy file-access tools whose
-                        // output belongs in the transcript, not the live tool tail.
-                        for tc in &tool_calls {
-                            if tc.starts_with("Read") || tc.starts_with("Edit") {
-                                continue;
-                            }
-                            live_area.push_tool(tc);
-                        }
+                        // Seed the current turn's tool-call list. ToolResult events
+                        // commit each call as it finishes (streaming tools as
+                        // title+tail, non-streaming tools as a `◆` event line); this
+                        // list is the safety net that reconciles anything still
+                        // uncommitted when the turn finishes.
+                        live_area.reconcile_tool_calls(&tool_calls);
                     }
                     ChatEvent::Done { text, summary, usage, .. } => {
                         log::debug!("Done text_len={} summary_len={} has_current_turn={}",
@@ -1841,6 +1866,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             live_area.push_debug_output(text);
                         }
                         live_area.push_debug_output("debug: agent called Done".to_string());
+                        live_area.clear_tool_output();
                         live_area.set_debug_connected(false);
                         debug_task = None;
                         debug_cmd_tx = None;
@@ -1848,6 +1874,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     DebugEvent::Ended { reason } => {
                         live_area.push_debug_output(format!("debug: session ended ({reason})"));
+                        live_area.clear_tool_output();
                         live_area.set_debug_connected(false);
                         debug_task = None;
                         debug_cmd_tx = None;
@@ -1859,14 +1886,15 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     DebugEvent::ReasoningChunk { text } => {
                         live_area.push_debug_output(text);
                     }
-                    DebugEvent::ToolOutputChunk { name, output } => {
+                    DebugEvent::ToolOutputChunk { id, name, call, output } => {
                         log::debug!(
-                            "debug ToolOutputChunk name={name} len={}",
+                            "debug ToolOutputChunk id={id} name={name} len={}",
                             output.len()
                         );
-                        live_area.push_tool_output_chunk(&output);
+                        live_area.push_tool_output_chunk(&id, &call, &output);
                     }
-                    DebugEvent::ToolResult { name, output } => {
+                    DebugEvent::ToolResult { id, name, call, output } => {
+                        live_area.commit_tool_result(&id, &call);
                         live_area.push_debug_output(format!("[tool: {name}] {output}"));
                     }
                     DebugEvent::Error(msg) => {
@@ -1874,6 +1902,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     DebugEvent::Disconnected => {
                         live_area.push_debug_output("debug: disconnected".to_string());
+                        live_area.clear_tool_output();
                         live_area.set_debug_connected(false);
                         debug_task = None;
                         debug_cmd_tx = None;

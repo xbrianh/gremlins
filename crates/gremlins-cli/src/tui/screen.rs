@@ -485,22 +485,33 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().push_reasoning_text(text);
     }
 
-    /// Append a live tool-output chunk to the transcript's embedded tool slot.
-    pub fn push_tool_output_chunk(&mut self, text: &str) {
-        self.transcript_mut().push_tool_output_chunk(text);
+    /// Append a live tool-output chunk to the transcript's tool stream keyed
+    /// by tool-call id.
+    pub fn push_tool_output_chunk(&mut self, id: &str, call: &str, text: &str) {
+        self.transcript_mut().push_tool_output_chunk(id, call, text);
     }
 
-    /// Set the live tool slot's title row. An empty title clears it.
-    pub fn set_tool_title(&mut self, title: &str) {
-        self.transcript_mut().set_tool_title(title);
+    /// Commit the finished tool stream (or a single `◆` event line for a
+    /// non-streaming tool) into the transcript's permanent tool segment.
+    pub fn commit_tool_result(&mut self, id: &str, call: &str) {
+        self.transcript_mut().commit_tool_result(id, call);
     }
 
-    /// Clear the embedded tool slot at a turn boundary.
+    /// Seed the current turn's tool-call list for exactly-once completion
+    /// reconciliation.
+    pub fn reconcile_tool_calls(&mut self, calls: &[String]) {
+        self.transcript_mut().reconcile_tool_calls(calls);
+    }
+
+    /// Clear the embedded tool streams at a turn boundary.
     pub fn clear_tool_output(&mut self) {
         self.transcript_mut().clear_tool_output();
     }
 
-    /// Record a tool call.
+    /// Record a tool call with a bare `◆` name line. Production routing
+    /// uses `commit_tool_result`; this direct insertion path exists for
+    /// tests and future non-streaming callers.
+    #[cfg(test)]
     pub fn push_tool(&mut self, name: &str) {
         self.transcript_mut().push_tool_line(name);
     }
@@ -1320,7 +1331,11 @@ mod tests {
             live.push_transcript_line(format!("transcript line {i}"));
         }
         for i in 0..20 {
-            live.push_tool_output_chunk(&format!("tool live {i}\n"));
+            live.push_tool_output_chunk(
+                "t1",
+                "Bash(command=\"live\")",
+                &format!("tool live {i}\n"),
+            );
         }
 
         live.compose(&app).unwrap();
@@ -1582,7 +1597,7 @@ mod tests {
         live_area.submit_prompt("hi".to_string());
         live_area.push_reasoning_text("thinking\n");
         live_area.flush_reasoning();
-        live_area.push_tool_output_chunk("running a tool\n");
+        live_area.push_tool_output_chunk("t1", "Bash(command=\"run\")", "running a tool\n");
         live_area.replace_response("answer");
 
         live_area.compose(&app).unwrap();
