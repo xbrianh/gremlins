@@ -53,8 +53,8 @@ this section — do not try to run them yourself.
 | `/stop <id>` | stop a gremlin |
 | `/resume <id>` | resume a gremlin |
 | `/log <id>` | show gremlin log |
-| `/watch` / `/watch <id>` | toggle the gremlins watch table / open a single-gremlin log viewer |
-| `/debug <id>` | open an interactive debug session |
+| `/watch` / `/watch <id>` | show the gremlins table full-screen / open a full-screen single-gremlin log view |
+| `/debug <id>` | open a full-screen interactive debug session |
 | `/model` | show default client |
 | `/chat` | chat is always active (type directly) |
 | `/clear` / `/new` | restart chat |
@@ -63,10 +63,10 @@ this section — do not try to run them yourself.
 
 ### Keybindings
 
-- `Ctrl+C` — first press acts like `Esc` (dismisses an overlay, or clears input/cancels chat); press again within one second to exit the TUI.
+- `Ctrl+C` — first press acts like `Esc` (returns a full-screen view to chat, or clears input/cancels chat); press again within one second to exit the TUI.
 - `Ctrl+D` on an empty input — exit the TUI.
 - `Ctrl+L` — redraw the screen.
-- `Esc` — clear the input bar and cancel an in-flight chat turn.
+- `Esc` — return a full-screen view to chat, or clear the input bar and cancel an in-flight chat turn.
 - `Ctrl+G` — open the external editor to compose multi-line input.
 
 ### Interaction model

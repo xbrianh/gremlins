@@ -7,11 +7,11 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 | File | Role |
 |------|------|
 | `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, debug-session plumbing (`DebugEvent`, `start_debug_session`), `format_socket_response()`. |
-| `app.rs` | Pure state (`App`). Active runs, chat id, overlay mode marker, input history, cursor state. No I/O, no widget ownership. |
+| `app.rs` | Pure state (`App`). Active runs, chat id, full-screen marker (`Screen`), input history, cursor state. No I/O, no widget ownership. |
 | `buffer.rs` | Display buffer: `LineBuffer` (styled FIFO, with drain-head and wrapping helpers). Plus `wrapped_height` and `line_wrapped_height` utilities. |
 | `markdown.rs` | Markdown-to-ratatui renderer. Turns a markdown string into `Vec<Line<'static>>` of styled spans via `pulldown-cmark` (tables, strikethrough, task lists). |
-| `screen.rs` | `LiveArea` — owns the main terminal screen, the dynamic widget stack (`Vec<Box<dyn LiveAreaWidget>>`), diff-driven double buffering, `commit_scrollback()` (renders overflow + `scroll_region_up`), raw-mode/cursor lifecycle. |
-| `widgets.rs` | `LiveAreaWidget` trait + concrete widgets: composite transcript (the single styled FIFO + current-turn draft state + embedded reasoning slot), input bar, info bar, and the three overlay widgets (watch table, watch single, debug). |
+| `screen.rs` | `LiveArea` — owns the main terminal screen, the chat widget stack plus the active full-screen view, diff-driven double buffering, `commit_scrollback()` (renders overflow + `scroll_region_up`), raw-mode/cursor lifecycle. Also defines the full-screen `RunsView` / `LogView` bodies. |
+| `widgets.rs` | `LiveAreaWidget` trait + concrete widgets: composite transcript (the single styled FIFO + current-turn draft state + embedded reasoning and live-tool slots), input bar, info bar, and the full-screen `DebugWidget`. |
 | `chat.rs` | Per-message chat client. Sends `{"op":"chat"}` over a fresh socket, parses streaming `ChatEvent` variants. |
 | `client.rs` | Persistent `DaemonClient`. Long-lived socket for request/response + unsolicited `DaemonEvent` broadcast. Also `follow_log()` on a dedicated connection. |
 | `commands.rs` | Slash-command dispatch. Returns `CommandResult` — the event loop handles each variant. |
@@ -46,10 +46,11 @@ run()
 
 - **Main screen, not alternate screen.** `LiveArea` owns the primary terminal screen. On exit nothing is restored from an alternate buffer — content stays in terminal scrollback, matching normal CLI behavior.
 - **Diff-driven double buffering.** `LiveArea` keeps `curr`/`prev` screen-sized `Buffer`s and flushes only changed cells each frame (`prev.diff_iter(&curr)`). `invalidate()` forces a full repaint.
-- **Terminal scrollback promotion.** When the `ScrollableBuffer` FIFO exceeds available rows, `overflow_split()` reports the head prefix; the caller drains it and `commit_scrollback()` renders it and calls `scroll_region_up` to push it into terminal scrollback. The pin-to-screen rows (input + info bars, plus the live tool pane while it is active) are excluded from the scroll region. A pinned boundary (the current turn's start) ensures an in-progress turn never reaches terminal scrollback — only completed turns and the separator before a new turn may overflow.
+- **Terminal scrollback promotion.** When the `ScrollableBuffer` FIFO exceeds available rows, `overflow_split()` reports the head prefix; the caller drains it and `commit_scrollback()` renders it and calls `scroll_region_up` to push it into terminal scrollback. The pin-to-screen rows (input + info bars) are excluded from the scroll region; the embedded reasoning and tool slots are display-only and never reach scrollback. A pinned boundary (the current turn's start) ensures an in-progress turn never reaches terminal scrollback — only completed turns and the separator before a new turn may overflow.
 - **Single styled FIFO.** The transcript is one `ScrollableBuffer` of styled lines and is the only render source for the transcript region. Prompt, response, tool-call, and system lines are pushed into it as styled lines as they arrive. Prompt and response text are markdown-rendered; tool-call lines are rendered with the deco manifest marker (chrome `◆` prefix + nickel italic tool name) and are inserted above the streaming response region. Reasoning is **not** part of the transcript FIFO: it lives in an embedded `ReasoningWidget` child (brass diamond + nickel italic styling). During a turn the transcript renders three bands top-to-bottom — the FIFO head (prompt and tool-call lines), the reasoning band, and the FIFO tail (streaming response) — by splitting the FIFO at the response boundary. Reasoning never enters the FIFO or terminal scrollback, and it is cleared when a turn finishes, when it is cancelled, or when the transcript is cleared, so finished history reads prompt → answer with no thinking in between.
-- **Dynamic widget stack.** `LiveArea` owns an ordered `Vec<Box<dyn LiveAreaWidget>>`. The initial stack (top-to-bottom) is transcript → live tool pane → input bar → info bar. Overlays are pushed/popped at the top of the stack via `push_overlay`/`pop_overlay`. `compose()` lays every widget out top-to-bottom using each widget's `min_height(width, ctx)` floor and `flexible()` flag. The live tool pane is ephemeral (`Bash`/`WebSearch` output), collapses to zero when idle, trims its head instead of overflowing, and is excluded from terminal scrollback while active.
-- **Overlay widgets.** Three overlay widgets implement `LiveAreaWidget`: `WatchTableWidget` (non-blocking, reads the run table from the render context), `WatchSingleWidget` (blocking log viewer owning its log buffer), and `DebugWidget` (blocking debug session owning prompt/history/connection state). Blocking overlays collapse the transcript to zero height so they occupy the whole content region while the fixed input/info bars stay visible. Overlay-local state is cleared when the widget is popped.
+- **Screen switch, not overlays.** `App` owns a `Screen` enum (`Chat`, `Runs`, `Log { id }`, `Debug { id }`). `LiveArea::compose()` composes the chat stack for `Screen::Chat`, or a single full-screen view body for any other screen. Full-screen views never commit their content to chat scrollback, and `Esc` (or the first `Ctrl+C` press) exits back to chat.
+- **Full-screen views.** The runs table and single-gremlin log viewer are rendered by `RunsView` / `LogView` (owned by the screen module), and `DebugWidget` renders the interactive debug screen while owning its prompt/history/connection state. Each full-screen view is flexible and fills the whole terminal.
+- **Embedded live tool slot.** `Bash`/`WebSearch` live output lives inside `TranscriptWidget` as a sibling of the reasoning slot, ordered prompt → reasoning → tool → response. It is capped at `REASONING_MAX_ROWS`, tail-anchored, lossy head-trimmed, ANSI-stripped, collapses to zero when idle, and never enters the transcript FIFO or terminal scrollback.
 - **Chat uses a fresh socket per message.** The daemon processes chat as an ephemeral stage. The persistent `DaemonClient` stays free for commands during chat.
 - **Log follow uses a dedicated socket.** The `log` op with `follow:true` monopolizes its connection, so it gets its own (`client::follow_log`).
 - **Debug sessions use a dedicated socket.** `/debug <id>` opens a fresh socket with its own reader task and command channel (`talk`/`quit`/`bail`/`continue`).
@@ -64,8 +65,9 @@ run()
 - `RestartChat` → clear current turn, abort chat task, clear history + input
 - `Quit` → break loop
 - `ShowHistory` / `TruncateHistory` → operate on `app.conversation_history`
-- `ToggleWatch` / `WatchSingle(id)` → open/close watch overlays (single-watch spawns a dedicated log follow)
-- `Debug(id)` → open debug overlay + `start_debug_session()`
+- `ShowRuns` → enter `Screen::Runs`
+- `ShowLog(id)` → enter `Screen::Log { id }` and spawn a dedicated log follow
+- `Debug(id)` → enter `Screen::Debug { id }` + `start_debug_session()`
 
 ### Chat flow
 1. User types plain text → Enter
@@ -76,14 +78,14 @@ run()
 6. `ChatEvent::ReasoningChunk` → `live_area.push_reasoning_text()` (delegates to the transcript's embedded reasoning slot; partials are flushed on newline)
 7. `ChatEvent::ToolResult` → matched and logged only (no rendering); `ChatEvent::TurnComplete` is the sole source of rich tool-event lines, which are inserted into the transcript above the streaming response (Read/Edit calls filtered)
 8. `ChatEvent::StreamChunk` → `live_area.push_response()` (accumulates raw response, marks the response region dirty)
-9. `ChatEvent::Done` → reconcile the raw response accumulator with `Done.text` (use summary only if nothing streamed), then `live_area.finish_turn()` unpins the turn and clears its draft state and embedded reasoning slot (tool-call lines stay in the transcript FIFO forever)
+9. `ChatEvent::Done` → reconcile the raw response accumulator with `Done.text` (use summary only if nothing streamed), then `live_area.finish_turn()` unpins the turn and clears its draft state and embedded reasoning/tool slots (tool-call lines stay in the transcript FIFO forever)
 10. `Esc` during active request → abort chat task, send `cancel_chat`, `live_area.clear_current_turn()` truncates the FIFO back to the turn start
 
 ### Daemon events
 `DaemonEvent` variants arrive on `event_rx`:
 - `RunStarted/Completed/Failed/Stopped` → update `app.active_runs`
 - `StageTransition` → update run stage
-- `LogLine` → push to transcript if `app.following_log` matches, or to overlay if `overlay_log_following` matches
+- `LogLine` → push to transcript if `app.following_log` matches, or to the full-screen log view if `log_view_following` matches
 - `Bail` → log only
 
 ### Debug sessions
@@ -100,13 +102,11 @@ region:
 1. `Length(1)` — input bar: `> ` prompt + input text + block cursor (inverted space)
 2. `Length(1)` — info bar: gremlin count, project name, log-follow indicator, key hints
 
-The transcript fills the content area (`Min(0)`). Its `render` splits the finalized FIFO at the response boundary and paints three bands top-to-bottom — pre-response FIFO head (prompt and tool-call lines, top-anchored), the embedded reasoning band (capped at 5 rows), and the streaming-response FIFO tail (bottom-anchored) — all within the transcript's one-cell inner margin. Overflow is computed via `ScrollableBuffer::overflow_split()` after reserving the reasoning band's rows (which yield to the FIFO before it shrinks below its one-row floor), drained, and returned as lines for `LiveArea::commit_scrollback()`. Only the transcript may return overflow; overlay widgets always return an empty `Vec`.
+The transcript fills the content area (`Min(0)`). Its `render` splits the finalized FIFO at the response boundary and paints bands top-to-bottom — pre-response FIFO head (prompt and tool-call lines, top-anchored), the embedded reasoning band, the embedded live-tool band (both capped at 5 rows), and the streaming-response FIFO tail (bottom-anchored) — all within the transcript's one-cell inner margin. Overflow is computed via `ScrollableBuffer::overflow_split()` after reserving the ephemeral bands' rows (which yield to the FIFO before it shrinks below its one-row floor), drained, and returned as lines for `LiveArea::commit_scrollback()`. Only the chat transcript may return overflow; full-screen views always return an empty `Vec`.
 
-When a blocking overlay is active, the transcript collapses to zero height
-(its `min_height` returns `0` when `ctx.blocking_overlay()`),
-so the overlay fills the whole content region while the input/info bars
-remain visible. The non-blocking watch table reserves an upper portion and
-leaves the transcript below it visible.
+When a non-chat screen is active, `LiveArea` composes only that screen's
+view body across the whole terminal; the chat stack (transcript, input, info
+bars) is occluded and no overflow is committed.
 
 ## Adding a New Slash Command
 

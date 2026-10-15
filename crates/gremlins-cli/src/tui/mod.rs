@@ -21,16 +21,15 @@ use crossterm::event::{Event, KeyCode, KeyEventKind};
 use tokio::io::BufReader;
 use tokio::sync::mpsc;
 
-use app::{ActiveRun, App, Overlay};
+use app::{ActiveRun, App, Screen};
 use chat::ChatEvent;
 use commands::{dispatch, CommandResult};
 use editor::{open_editor, ReaderChannels, SuspendHandle};
 use gremlins::executor::socket;
 use screen::LiveArea;
-use widgets::{DebugWidget, WatchSingleWidget, WatchTableWidget};
 
-/// Abort the dedicated log-follow task for the single-gremlin overlay.
-fn abort_overlay_log_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
+/// Abort the dedicated log-follow task for the full-screen log view.
+fn abort_log_view_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
     if let Some(handle) = handle.take() {
         handle.abort();
     }
@@ -55,21 +54,59 @@ fn ctrl_c_should_quit(pending_quit: &mut Option<Instant>, now: Instant) -> bool 
     quit
 }
 
+/// Exit any non-chat screen and tear down its session-owned aux sockets.
+///
+/// Returns `true` when a full-screen view was active and is now dropped.
+#[allow(clippy::too_many_arguments)]
+fn exit_current_screen(
+    app: &mut App,
+    live_area: &mut LiveArea,
+    log_view_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    log_view_following: &mut Option<String>,
+    debug_task: &mut Option<tokio::task::JoinHandle<()>>,
+    debug_cmd_tx: &mut Option<mpsc::UnboundedSender<serde_json::Value>>,
+    debug_evt_rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>,
+) -> bool {
+    let screen = app.screen.clone();
+    if !app.exit_screen() {
+        return false;
+    }
+
+    live_area.exit_screen_view();
+
+    match screen {
+        Screen::Log { .. } => {
+            abort_log_view_follow(log_view_handle);
+            *log_view_following = None;
+        }
+        Screen::Debug { .. } => {
+            // Drop the debug socket so the daemon sees EOF.
+            if let Some(handle) = debug_task.take() {
+                handle.abort();
+            }
+            *debug_cmd_tx = None;
+            *debug_evt_rx = None;
+        }
+        Screen::Runs | Screen::Chat => {}
+    }
+
+    true
+}
+
 /// Run the shared Esc / first-Ctrl+C reset path.
 ///
-/// Ordering is deliberate: a blocking overlay is dismissed first, then the
-/// watch table, then the main input bar is cleared and any in-flight chat
-/// turn is cancelled.
+/// Ordering is deliberate: a full-screen view returns to chat first, then
+/// the main input bar is cleared and any in-flight chat turn is cancelled.
 ///
-/// Returns `true` when an overlay was dismissed, in which case the caller
-/// should `continue` the event loop immediately; the clear/cancel path
-/// returns `false` and falls through, exactly as the original Esc arm did.
+/// Returns `true` when a screen was exited, in which case the caller should
+/// `continue` the event loop immediately; the clear/cancel path returns
+/// `false` and falls through, exactly as the original Esc arm did.
 #[allow(clippy::too_many_arguments)]
 fn handle_esc_reset(
     app: &mut App,
     live_area: &mut LiveArea,
-    overlay_log_handle: &mut Option<tokio::task::JoinHandle<()>>,
-    overlay_log_following: &mut Option<String>,
+    log_view_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    log_view_following: &mut Option<String>,
     debug_task: &mut Option<tokio::task::JoinHandle<()>>,
     debug_cmd_tx: &mut Option<mpsc::UnboundedSender<serde_json::Value>>,
     debug_evt_rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>,
@@ -77,26 +114,19 @@ fn handle_esc_reset(
     active_turn: &mut Option<String>,
     client: &Arc<client::DaemonClient>,
 ) -> bool {
-    // Esc is a turn boundary for the ephemeral live tool pane regardless of
-    // whether it dismisses an overlay or resets the main input/chat state.
+    // Esc is a turn boundary for the ephemeral tool slot regardless of
+    // whether it exits a full-screen view or resets the chat state.
     live_area.clear_tool_output();
 
-    // Blocking overlays (single-watch, debug) dismiss first.
-    if app.dismiss_blocking_overlay() {
-        live_area.pop_overlay();
-        abort_overlay_log_follow(overlay_log_handle);
-        *overlay_log_following = None;
-        // Drop the debug socket so the daemon sees EOF.
-        if let Some(handle) = debug_task.take() {
-            handle.abort();
-        }
-        *debug_cmd_tx = None;
-        *debug_evt_rx = None;
-        return true;
-    }
-    // Then the non-blocking watch table.
-    if app.dismiss_watch_overlay() {
-        live_area.pop_overlay();
+    if exit_current_screen(
+        app,
+        live_area,
+        log_view_handle,
+        log_view_following,
+        debug_task,
+        debug_cmd_tx,
+        debug_evt_rx,
+    ) {
         return true;
     }
 
@@ -261,12 +291,12 @@ fn send_chat_input(
     Ok(())
 }
 
-/// Route a submitted line from the debug overlay prompt.
+/// Route a submitted line from the full-screen debug view prompt.
 ///
 /// The debug socket is opened when `/debug <id>` is dispatched; this
 /// function only forwards subsequent prompt submissions to the daemon
 /// over the already-established session.
-fn handle_overlay_prompt_submit(
+fn handle_debug_prompt_submit(
     live_area: &mut LiveArea,
     cmd_tx: &mpsc::UnboundedSender<serde_json::Value>,
 ) {
@@ -279,7 +309,7 @@ fn handle_overlay_prompt_submit(
         return;
     }
 
-    // Echo the command in the overlay scrollback.
+    // Echo the command in the debug view scrollback.
     live_area.push_debug_output(format!("debug> {trimmed}"));
 
     // Reject submissions while the socket is still coming up.
@@ -704,9 +734,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
-    // Dedicated follow for the single-gremlin log overlay.
-    let mut overlay_log_handle: Option<tokio::task::JoinHandle<()>> = None;
-    let mut overlay_log_following: Option<String> = None;
+    // Dedicated follow for the full-screen single-gremlin log view.
+    let mut log_view_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut log_view_following: Option<String> = None;
     // ── Chat turn state ────────────────────────────────────────
     // (the chat request is sent from a detached task; we no longer need to
     // abort it, so no JoinHandle is kept)
@@ -769,8 +799,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if handle_esc_reset(
                                 &mut app,
                                 live_area,
-                                &mut overlay_log_handle,
-                                &mut overlay_log_following,
+                                &mut log_view_handle,
+                                &mut log_view_following,
                                 &mut debug_task,
                                 &mut debug_cmd_tx,
                                 &mut debug_evt_rx,
@@ -784,15 +814,20 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Char('d')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
-                            if app.overlay.as_ref().is_some_and(Overlay::has_prompt) {
-                                app.overlay = None;
-                                live_area.pop_overlay();
-                                // Drop the debug socket so the daemon sees EOF.
-                                if let Some(handle) = debug_task.take() {
-                                    handle.abort();
-                                }
-                                debug_cmd_tx = None;
-                                debug_evt_rx = None;
+                            // Ctrl+D only dismisses the debug view's prompt;
+                            // Runs/Log fall through to the empty-input quit
+                            // path below, preserving the documented quit key.
+                            if app.screen.has_prompt()
+                                && exit_current_screen(
+                                    &mut app,
+                                    live_area,
+                                    &mut log_view_handle,
+                                    &mut log_view_following,
+                                    &mut debug_task,
+                                    &mut debug_cmd_tx,
+                                    &mut debug_evt_rx,
+                                )
+                            {
                                 continue;
                             }
                             if app.input.is_empty() {
@@ -807,6 +842,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Char('g')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
+                            if !app.screen.is_chat() {
+                                continue;
+                            }
                             // Never suspend the TUI while a chat turn is
                             // in flight; the editor can't even be given a
                             // meaningful prompt to submit yet.
@@ -880,8 +918,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if handle_esc_reset(
                                 &mut app,
                                 live_area,
-                                &mut overlay_log_handle,
-                                &mut overlay_log_following,
+                                &mut log_view_handle,
+                                &mut log_view_following,
                                 &mut debug_task,
                                 &mut debug_cmd_tx,
                                 &mut debug_evt_rx,
@@ -893,9 +931,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Tab => {
-                            // Debug overlay owns a prompt; completion is for the
+                            // Debug view owns a prompt; completion is for the
                             // main input bar only.
-                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                            if app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
 
@@ -943,7 +981,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::BackTab => {
-                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                            if app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             let Some(state) = app.completion.as_ref() else {
@@ -969,11 +1007,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::Enter => {
-                            // Debug overlay owns a prompt: submit into its
+                            // Debug view owns a prompt: submit into its
                             // scrollback instead of the main input bar.
-                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                            if app.screen.has_prompt() {
                                 if let Some(cmd_tx) = &debug_cmd_tx {
-                                    handle_overlay_prompt_submit(live_area, cmd_tx);
+                                    handle_debug_prompt_submit(live_area, cmd_tx);
                                 } else {
                                     // Consume the prompt so it doesn't linger.
                                     let _ = live_area.take_debug_prompt();
@@ -984,19 +1022,17 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
+                            // Any other non-chat screen has no input bar; ignore
+                            // Enter until the operator returns to chat.
+                            if !app.screen.is_chat() {
+                                continue;
+                            }
+
                             let input = std::mem::take(&mut app.input);
                             app.input_cursor = 0;
                             app.clear_completion();
                             live_area.reset_input_scroll();
                             if input.is_empty() {
-                                continue;
-                            }
-
-                            // A blocking single-watch overlay only accepts
-                            // slash commands; plain chat text is ignored.
-                            if app.overlay.as_ref().is_some_and(Overlay::is_blocking)
-                                && !input.trim_start().starts_with('/')
-                            {
                                 continue;
                             }
 
@@ -1013,30 +1049,16 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
                             if let Some(result) = dispatch(&input) {
                                 match result {
-                                    CommandResult::ToggleWatch => {
-                                        if app.overlay.as_ref().is_some_and(|o| !matches!(o, Overlay::Watch)) {
-                                            abort_overlay_log_follow(&mut overlay_log_handle);
-                                            overlay_log_following = None;
-                                        }
-                                        match app.overlay {
-                                            Some(Overlay::Watch) => {
-                                                app.overlay = None;
-                                                live_area.pop_overlay();
-                                            }
-                                            _ => {
-                                                app.overlay = Some(Overlay::Watch);
-                                                live_area.pop_overlay();
-                                                live_area.push_overlay(Box::new(WatchTableWidget::new()));
-                                            }
-                                        }
+                                    CommandResult::ShowRuns => {
+                                        app.show_runs();
+                                        live_area.show_runs();
                                     }
-                                    CommandResult::WatchSingle(id) => {
-                                        // Close any existing overlay log follow first.
-                                        abort_overlay_log_follow(&mut overlay_log_handle);
-                                        overlay_log_following = Some(id.clone());
-                                        app.open_watch_single();
-                                        live_area.pop_overlay();
-                                        live_area.push_overlay(Box::new(WatchSingleWidget::new(id.clone())));
+                                    CommandResult::ShowLog(id) => {
+                                        // Close any existing full-screen log follow first.
+                                        abort_log_view_follow(&mut log_view_handle);
+                                        log_view_following = Some(id.clone());
+                                        app.show_log(id.clone());
+                                        live_area.show_log(id.clone());
                                         let log_tx = log_tx.clone();
                                         let follow_id = id.clone();
                                         let client = Arc::clone(&client);
@@ -1052,7 +1074,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                                             continue;
                                                         };
                                                         let tagged = serde_json::json!({
-                                                            "type": "overlay_log",
+                                                            "type": "view_log",
                                                             "id": follow_id,
                                                             "line": line,
                                                         });
@@ -1064,7 +1086,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                                 Err(e) => {
                                                     let _ = log_tx.send(
                                                         serde_json::json!({
-                                                            "type": "overlay_error",
+                                                            "type": "view_error",
                                                             "id": follow_id,
                                                             "message": e,
                                                         }),
@@ -1072,14 +1094,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                                 }
                                             }
                                         });
-                                        overlay_log_handle = Some(follow_task);
+                                        log_view_handle = Some(follow_task);
                                     }
                                     CommandResult::Debug(id) => {
-                                        abort_overlay_log_follow(&mut overlay_log_handle);
-                                        overlay_log_following = None;
-                                        app.open_debug();
-                                        live_area.pop_overlay();
-                                        live_area.push_overlay(Box::new(DebugWidget::new(id.clone())));
+                                        abort_log_view_follow(&mut log_view_handle);
+                                        log_view_following = None;
+                                        app.show_debug(id.clone());
+                                        live_area.show_debug(id.clone());
                                         // Open a fresh socket and spawn the reader.
                                         match start_debug_session(&client, id.clone()).await {
                                             Ok((cmd_tx, evt_rx, handle)) => {
@@ -1111,7 +1132,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // UI no longer shows the old conversation
                                         // after the daemon has discarded it. The
                                         // transcript also clears its embedded
-                                        // reasoning slot.
+                                        // reasoning and tool slots.
                                         live_area.clear_transcript();
                                         live_area.push_styled_line(motif::marble_line());
                                         // `/clear` closes the current session and
@@ -1128,8 +1149,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             handle.abort();
                                         }
                                         app.following_log = None;
-                                        abort_overlay_log_follow(&mut overlay_log_handle);
-                                        overlay_log_following = None;
+                                        abort_log_view_follow(&mut log_view_handle);
+                                        log_view_following = None;
                                         if let Some(handle) = debug_task.take() {
                                             handle.abort();
                                         }
@@ -1235,7 +1256,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Left => {
-                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                            if app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             app.cursor_left();
@@ -1247,7 +1268,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::Right => {
-                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                            if app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             app.cursor_right();
@@ -1259,7 +1280,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::Home => {
-                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                            if app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             app.cursor_home();
@@ -1271,7 +1292,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::End => {
-                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                            if app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             app.cursor_end();
@@ -1285,7 +1306,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Backspace => {
                             if let Some(prompt) = live_area.debug_prompt_mut() {
                                 prompt.pop();
-                            } else {
+                            } else if app.screen.is_chat() {
                                 app.delete_before_cursor();
                                 app.clear_completion();
                                 live_area.ensure_input_cursor_visible(
@@ -1296,7 +1317,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Delete => {
-                            if app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                            if app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             app.delete_at_cursor();
@@ -1310,7 +1331,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Char(ch) => {
                             if let Some(prompt) = live_area.debug_prompt_mut() {
                                 prompt.push(ch);
-                            } else {
+                            } else if app.screen.is_chat() {
                                 app.insert_char(ch);
                                 app.clear_completion();
                                 // Typing a fresh character resets history navigation.
@@ -1323,8 +1344,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Up => {
-                            // History navigation only applies to the main input bar.
-                            if !app.overlay.as_ref().is_some_and(|o| o.has_prompt()) {
+                            // History navigation only applies to the chat input bar.
+                            if app.screen.is_chat() {
                                 if let Some(entry) = app.history_up().map(|s| s.to_string()) {
                                     app.input = entry;
                                     app.reset_cursor_to_end();
@@ -1337,7 +1358,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 }
                             }
                         }
-                        KeyCode::Down if !app.overlay.as_ref().is_some_and(|o| o.has_prompt())
+                        KeyCode::Down if app.screen.is_chat()
                             // Only replace the buffer when navigating; when the
                             // cursor is already `None` (fresh line), leave it.
                             && app.history_cursor.is_some() => {
@@ -1391,8 +1412,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         if app.following_log.as_deref() == Some(&id) {
                             live_area.push_transcript_line(line.clone());
                         }
-                        if overlay_log_following.as_deref() == Some(&id) {
-                            live_area.push_watch_single_line(line);
+                        if log_view_following.as_deref() == Some(&id) {
+                            live_area.push_log_view_line(line);
                         }
                     }
                     gremlins::executor::DaemonEvent::Bail { id, reason } => {
@@ -1484,7 +1505,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                     }
-                    Some("overlay_log") => {
+                    Some("view_log") => {
                         // Scope the line to the currently followed gremlin so
                         // queued messages from an aborted follow can't leak
                         // into a newly opened viewer for another id.
@@ -1492,19 +1513,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             raw.get("id").and_then(|v| v.as_str()),
                             raw.get("line").and_then(|v| v.as_str()),
                         ) {
-                            if overlay_log_following.as_deref() == Some(id) {
-                                live_area.push_watch_single_line(line.to_string());
+                            if log_view_following.as_deref() == Some(id) {
+                                live_area.push_log_view_line(line.to_string());
                             }
                         }
                     }
-                    Some("overlay_error") => {
+                    Some("view_error") => {
                         if let (Some(id), Some(message)) = (
                             raw.get("id").and_then(|v| v.as_str()),
                             raw.get("message").and_then(|v| v.as_str()),
                         ) {
-                            if overlay_log_following.as_deref() == Some(id) {
-                                live_area.push_watch_single_line(format!("error: {message}"));
-                                overlay_log_following = None;
+                            if log_view_following.as_deref() == Some(id) {
+                                live_area.push_log_view_line(format!("error: {message}"));
+                                log_view_following = None;
                             }
                         }
                     }
@@ -1769,6 +1790,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
     // Abort any lingering log follow on exit.
     if let Some(handle) = log_follow_handle.take() {
+        handle.abort();
+    }
+
+    // Abort any lingering full-screen log follow on exit.
+    if let Some(handle) = log_view_handle.take() {
         handle.abort();
     }
 

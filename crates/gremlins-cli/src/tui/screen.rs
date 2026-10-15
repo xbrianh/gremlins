@@ -25,13 +25,18 @@ use ratatui::{
     backend::{Backend, ClearType, CrosstermBackend},
     buffer::{Buffer, Cell},
     layout::Rect,
-    text::Line,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Paragraph, Widget, Wrap},
 };
 
 use crate::tui::app::App;
+use crate::tui::buffer::wrapped_height;
+use crate::tui::motif;
+use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{
-    DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, LiveToolWidget, RenderContext,
-    TranscriptWidget, WatchSingleWidget,
+    render_wrapped_tail, DebugWidget, InfoBarWidget, InputBarWidget, LiveAreaWidget, RenderContext,
+    TranscriptWidget,
 };
 
 /// Approximate number of rows reserved at the bottom of the screen for the
@@ -52,10 +57,14 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     scrollback_log: Vec<String>,
     /// Whether [`Drop`] should restore the terminal (raw mode, cursor).
     needs_terminal_cleanup: bool,
-    /// Ordered widget stack, top-to-bottom. The initial stack is transcript,
-    /// input bar, info bar. Overlays are pushed/popped at the top of the
-    /// stack.
-    widgets: Vec<Box<dyn LiveAreaWidget>>,
+    /// Ordered chat widget stack, top-to-bottom: transcript, input bar, info
+    /// bar. Active only while [`crate::tui::app::Screen::Chat`] is showing.
+    chat_widgets: Vec<Box<dyn LiveAreaWidget>>,
+    /// The full-screen view body, if a non-chat screen is active.
+    screen_view: Option<Box<dyn LiveAreaWidget>>,
+    /// Whether the previous composed screen was chat. Used to clear the
+    /// visible frame exactly once when leaving a full-screen view.
+    last_screen_was_chat: bool,
     /// Rows occupied by the bottom bars (input + info) in the most recent
     /// frame. These rows are excluded from the scrollback region.
     reserved_rows: u16,
@@ -76,12 +85,13 @@ impl<B: Backend> LiveArea<B> {
             rows,
             scrollback_log: Vec::new(),
             needs_terminal_cleanup: false,
-            widgets: vec![
+            chat_widgets: vec![
                 Box::new(TranscriptWidget::new()),
-                Box::new(LiveToolWidget::new()),
                 Box::new(InputBarWidget::new()),
                 Box::new(InfoBarWidget),
             ],
+            screen_view: None,
+            last_screen_was_chat: true,
             reserved_rows: INITIAL_RESERVED_ROWS,
         }
     }
@@ -225,6 +235,16 @@ impl<B: Backend> LiveArea<B> {
         self.prev.reset();
     }
 
+    /// Clear the visible terminal frame immediately.
+    ///
+    /// Used when leaving a full-screen view: chat widgets paint only their
+    /// own sub-rects, so the old full-screen cells in the gaps must be wiped
+    /// before the next chat frame is composed.
+    fn clear_visible(&mut self) -> io::Result<()> {
+        self.curr.reset();
+        self.draw(|_| {})
+    }
+
     /// Lines committed to terminal scrollback since creation.
     #[cfg(test)]
     pub fn scrollback(&self) -> &[String] {
@@ -260,11 +280,54 @@ impl<B: Backend> LiveArea<B> {
     /// 5. **Flush & paint.** Overflow is drained and committed to scrollback,
     ///    then each widget paints into its region.
     ///
-    /// Only the transcript widget may return overflow; overlay widgets
-    /// always return an empty overflow `Vec`. Collapsed (zero-height) chunks
-    /// are skipped so a blocking overlay or a short viewport never commits
+    /// Only the chat transcript may return overflow; full-screen views and
+    /// fixed bars always return an empty overflow `Vec`. Collapsed
+    /// (zero-height) chunks are skipped so a short viewport never commits
     /// transcript overflow.
+    /// Compose and paint the active screen.
+    ///
+    /// Chat composes the three chat widgets (transcript, input, info) with
+    /// terminal-scrollback overflow. Any other [`Screen`] composes just the
+    /// full-screen view body; chat widgets are occluded and no overflow is
+    /// committed.
     pub fn compose(&mut self, app: &App) -> io::Result<()> {
+        let chat = app.screen.is_chat();
+
+        // When returning from a full-screen view, clear the visible frame
+        // first. Chat widgets paint only their own sub-rects, so any gaps
+        // left unpainted would otherwise retain runs/log/debug text.
+        if chat && !self.last_screen_was_chat {
+            self.clear_visible()?;
+        }
+        self.last_screen_was_chat = chat;
+
+        let mut widgets = if chat {
+            std::mem::take(&mut self.chat_widgets)
+        } else {
+            vec![self
+                .screen_view
+                .take()
+                .expect("a full-screen view must be shown before compose")]
+        };
+
+        let result = self.compose_widgets(&mut widgets, app, chat);
+
+        if chat {
+            self.chat_widgets = widgets;
+        } else {
+            self.screen_view = widgets.pop();
+        }
+        result
+    }
+
+    /// Lay out, paint, and (for chat) commit overflow for an ordered widget
+    /// slice. This is the shared five-step pipeline described above.
+    fn compose_widgets(
+        &mut self,
+        widgets: &mut [Box<dyn LiveAreaWidget>],
+        app: &App,
+        chat_layout: bool,
+    ) -> io::Result<()> {
         let gremlin_count = app.gremlin_count_str();
         let ctx = RenderContext {
             input: &app.input,
@@ -272,9 +335,7 @@ impl<B: Backend> LiveArea<B> {
             following_log: app.following_log.as_deref(),
             gremlin_count: &gremlin_count,
             project_name: app.project_name_str(),
-            overlay: app.overlay.as_ref(),
             active_runs: &app.active_runs,
-            content_height: self.scrollable_rows(),
             completion_preview: app.completion_preview_suffix(),
         };
 
@@ -289,16 +350,16 @@ impl<B: Backend> LiveArea<B> {
         //    each widget's `max_height`.
         // 4. Set the allocated heights.
         // 5. Drain overflow and commit scrollback, then paint.
-        for w in self.widgets.iter_mut() {
+        for w in widgets.iter_mut() {
             w.finalize(width);
         }
 
-        let n = self.widgets.len();
+        let n = widgets.len();
         let mut min_heights = vec![0u16; n];
         let mut desired_heights = vec![0u16; n];
         let mut max_heights = vec![0u16; n];
 
-        for (i, w) in self.widgets.iter().enumerate() {
+        for (i, w) in widgets.iter().enumerate() {
             let h = w.min_height(width, &ctx);
             // Force the minimum into [0, max] so a widget whose minimum
             // exceeds its cap cannot drive below-minimum shrinking.
@@ -319,7 +380,7 @@ impl<B: Backend> LiveArea<B> {
         let rows = self.rows as u32;
         if total > rows {
             let mut order: Vec<usize> = (0..n).collect();
-            order.sort_by_key(|&i| self.widgets[i].size_priority());
+            order.sort_by_key(|&i| widgets[i].size_priority());
             // First shrink down to minimums.
             for &i in &order {
                 if total <= rows {
@@ -347,14 +408,11 @@ impl<B: Backend> LiveArea<B> {
         // give the remaining rows to the highest-priority flexible widget.
         if total < rows {
             let remaining = (rows - total) as u16;
-            // Highest priority (largest `size_priority`) flexible widget.
-            // The transcript reports inflexible when a blocking overlay is
-            // active, so it is naturally excluded here.
             let mut best: Option<usize> = None;
             let mut best_prio = i32::MIN;
-            for i in 0..n {
-                if self.widgets[i].flexible(&ctx) && self.widgets[i].size_priority() > best_prio {
-                    best_prio = self.widgets[i].size_priority();
+            for (i, widget) in widgets.iter().enumerate().take(n) {
+                if widget.flexible(&ctx) && widget.size_priority() > best_prio {
+                    best_prio = widget.size_priority();
                     best = Some(i);
                 }
             }
@@ -365,15 +423,14 @@ impl<B: Backend> LiveArea<B> {
 
         // Cap every allocated height at its widget's `max_height` so the
         // expand pass cannot exceed a first-class cap (e.g. the input bar's
-        // 5-row limit or the watch table's half-region limit).
-        for i in 0..n {
-            heights[i] = heights[i].min(max_heights[i]);
+        // 5-row limit).
+        for (i, height) in heights.iter_mut().enumerate().take(n) {
+            *height = (*height).min(max_heights[i]);
         }
 
         #[cfg(feature = "telemetry")]
         {
-            let segments: Vec<String> = self
-                .widgets
+            let segments: Vec<String> = widgets
                 .iter()
                 .enumerate()
                 .map(|(i, w)| {
@@ -392,45 +449,47 @@ impl<B: Backend> LiveArea<B> {
             log::info!("WIDGET_LAYOUT {}", segments.join("; "));
         }
 
-        // Derive reserved rows from the allocated heights of the actual
-        // pin-to-screen widgets, not positionally. The live tool pane is
-        // ephemeral but sticky while active: it is kept out of the terminal
-        // scroll region so its display-only output never reaches scrollback.
-        self.reserved_rows = self
-            .widgets
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| {
-                w.as_any().is::<LiveToolWidget>()
-                    || w.as_any().is::<InputBarWidget>()
-                    || w.as_any().is::<InfoBarWidget>()
-            })
-            .map(|(i, _)| heights[i])
-            .sum();
+        if chat_layout {
+            // The input and info bars are pinned to the bottom and excluded
+            // from the terminal scroll region.
+            self.reserved_rows = widgets
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| {
+                    w.as_any().is::<InputBarWidget>() || w.as_any().is::<InfoBarWidget>()
+                })
+                .map(|(i, _)| heights[i])
+                .sum();
+        } else {
+            self.reserved_rows = 0;
+        }
 
         // ── Drain overflow, then paint each widget ──────────────
         //
         // `take_overflow` is the single place where a widget decides what
         // to do when its content exceeds its allocated rows. The transcript
-        // returns head lines to commit to scrollback; live-tail widgets trim
-        // themselves and return nothing. Every other widget returns nothing.
-        let mut overflow: Vec<(i32, Line<'static>)> = Vec::new();
-        for (i, widget) in self.widgets.iter_mut().enumerate() {
-            let h = heights[i];
-            let prio = widget.overflow_priority();
-            for line in widget.take_overflow(h, width) {
-                overflow.push((prio, line));
+        // returns head lines to commit to scrollback; live-tail slots trim
+        // themselves and return nothing. Full-screen views never commit to
+        // chat scrollback.
+        if chat_layout {
+            let mut overflow: Vec<(i32, Line<'static>)> = Vec::new();
+            for (i, widget) in widgets.iter_mut().enumerate() {
+                let h = heights[i];
+                let prio = widget.overflow_priority();
+                for line in widget.take_overflow(h, width) {
+                    overflow.push((prio, line));
+                }
+            }
+
+            if !overflow.is_empty() {
+                overflow.sort_by_key(|(prio, _)| *prio);
+                let lines: Vec<Line<'static>> = overflow.into_iter().map(|(_, l)| l).collect();
+                self.commit_scrollback(&lines, self.cols)?;
             }
         }
 
-        if !overflow.is_empty() {
-            overflow.sort_by_key(|(prio, _)| *prio);
-            let lines: Vec<Line<'static>> = overflow.into_iter().map(|(_, l)| l).collect();
-            self.commit_scrollback(&lines, self.cols)?;
-        }
-
         let mut y = 0u16;
-        for (i, widget) in self.widgets.iter_mut().enumerate() {
+        for (i, widget) in widgets.iter_mut().enumerate() {
             let h = heights[i];
             if h == 0 {
                 continue;
@@ -443,66 +502,61 @@ impl<B: Backend> LiveArea<B> {
         self.draw(|_| {})
     }
 
-    // ── Overlay push/pop ─────────────────────────────────────────
+    // ── Full-screen view switch ──────────────────────────────
 
-    /// Push an overlay widget at the top of the stack (above the content
-    /// widgets, below nothing — it becomes the first widget).
-    pub fn push_overlay(&mut self, widget: Box<dyn LiveAreaWidget>) {
-        self.widgets.insert(0, widget);
+    /// Show the full-screen runs table.
+    pub fn show_runs(&mut self) {
+        self.screen_view = Some(Box::new(RunsView::new()));
     }
 
-    /// Remove the most recently added overlay widget, if any. The initial
-    /// content widgets are never popped.
-    pub fn pop_overlay(&mut self) -> Option<Box<dyn LiveAreaWidget>> {
-        // The first four widgets are the fixed content stack; only pop
-        // widgets pushed on top of them.
-        if self.widgets.len() > 4 {
-            Some(self.widgets.remove(0))
-        } else {
-            None
-        }
+    /// Show the full-screen single-gremlin log view.
+    pub fn show_log(&mut self, id: String) {
+        self.screen_view = Some(Box::new(LogView::new(id)));
+    }
+
+    /// Show the full-screen interactive debug session.
+    pub fn show_debug(&mut self, id: String) {
+        self.screen_view = Some(Box::new(DebugWidget::new(id)));
+    }
+
+    /// Drop the active full-screen view and return the renderer to chat.
+    pub fn exit_screen_view(&mut self) {
+        self.screen_view = None;
     }
 
     // ── Widget accessors ─────────────────────────────────────────
 
     fn transcript_mut(&mut self) -> &mut TranscriptWidget {
-        self.widgets
+        self.chat_widgets
             .iter_mut()
             .find_map(|w| w.as_any_mut().downcast_mut::<TranscriptWidget>())
             .expect("transcript widget present")
     }
 
-    fn live_tool_mut(&mut self) -> &mut LiveToolWidget {
-        self.widgets
-            .iter_mut()
-            .find_map(|w| w.as_any_mut().downcast_mut::<LiveToolWidget>())
-            .expect("live tool widget present")
-    }
-
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
-        self.widgets
+        self.chat_widgets
             .iter_mut()
             .find_map(|w| w.as_any_mut().downcast_mut::<InputBarWidget>())
             .expect("input bar widget present")
     }
 
-    fn watch_single_mut(&mut self) -> Option<&mut WatchSingleWidget> {
-        self.widgets
-            .iter_mut()
-            .find_map(|w| w.as_any_mut().downcast_mut::<WatchSingleWidget>())
+    fn log_view_mut(&mut self) -> Option<&mut LogView> {
+        self.screen_view
+            .as_mut()
+            .and_then(|w| w.as_any_mut().downcast_mut::<LogView>())
     }
 
     fn debug_mut(&mut self) -> Option<&mut DebugWidget> {
-        self.widgets
-            .iter_mut()
-            .find_map(|w| w.as_any_mut().downcast_mut::<DebugWidget>())
+        self.screen_view
+            .as_mut()
+            .and_then(|w| w.as_any_mut().downcast_mut::<DebugWidget>())
     }
 
     // ── Widget mutation (moved from `App`) ───────────────────────
 
     /// Start a new turn with the given prompt: push a separator and the
     /// markdown-rendered prompt, then pin the turn start. The transcript
-    /// clears its embedded reasoning slot with the new prompt.
+    /// clears its embedded reasoning and tool slots with the new prompt.
     pub fn submit_prompt(&mut self, prompt: String) {
         self.transcript_mut().submit_prompt(prompt);
     }
@@ -532,14 +586,14 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().push_reasoning_text(text);
     }
 
-    /// Append a live tool-output chunk to the ephemeral tool pane.
+    /// Append a live tool-output chunk to the transcript's embedded tool slot.
     pub fn push_tool_output_chunk(&mut self, text: &str) {
-        self.live_tool_mut().push_text(text);
+        self.transcript_mut().push_tool_output_chunk(text);
     }
 
-    /// Clear the ephemeral tool pane at a turn boundary.
+    /// Clear the embedded tool slot at a turn boundary.
     pub fn clear_tool_output(&mut self) {
-        self.live_tool_mut().clear();
+        self.transcript_mut().clear_tool_output();
     }
 
     /// Record a tool call.
@@ -566,15 +620,15 @@ impl<B: Backend> LiveArea<B> {
     /// Unpin the current turn and clear its draft state. Tool-call lines are
     /// already part of the transcript FIFO (inserted above the response), so
     /// they survive the turn as ordinary scrollback. The embedded reasoning
-    /// slot is cleared so finished history reads prompt → answer with no
-    /// thinking in between.
+    /// and tool slots are cleared so finished history reads prompt → answer
+    /// with no ephemeral output in between.
     pub fn finish_turn(&mut self) {
         self.transcript_mut().finish_turn();
     }
 
     /// Whether the current turn has any content.
     pub fn has_current_turn(&self) -> bool {
-        self.widgets
+        self.chat_widgets
             .iter()
             .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
             .expect("transcript widget present")
@@ -583,7 +637,7 @@ impl<B: Backend> LiveArea<B> {
 
     /// Whether the current turn's streaming response is empty.
     pub fn response_is_empty(&self) -> bool {
-        self.widgets
+        self.chat_widgets
             .iter()
             .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
             .expect("transcript widget present")
@@ -593,7 +647,7 @@ impl<B: Backend> LiveArea<B> {
     /// Borrow the current turn's streaming response text.
     #[cfg(test)]
     pub fn response_text(&self) -> &str {
-        self.widgets
+        self.chat_widgets
             .iter()
             .find_map(|w| w.as_any().downcast_ref::<TranscriptWidget>())
             .expect("transcript widget present")
@@ -625,8 +679,8 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().clear_current_turn();
     }
 
-    /// Clear the transcript/scrollback, including the embedded reasoning
-    /// slot.
+    /// Clear the transcript/scrollback, including the embedded reasoning and
+    /// tool slots.
     pub fn clear_transcript(&mut self) {
         self.transcript_mut().clear_scrollable();
     }
@@ -648,56 +702,56 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().push_styled_line(line);
     }
 
-    // ── Overlay mutation ─────────────────────────────────────────
+    // ── Full-screen view mutation ───────────────────────────────
 
-    /// Push a log line into the watch-single widget, if present.
-    pub fn push_watch_single_line(&mut self, line: String) {
-        if let Some(w) = self.watch_single_mut() {
+    /// Push a log line into the full-screen log view, if present.
+    pub fn push_log_view_line(&mut self, line: String) {
+        if let Some(w) = self.log_view_mut() {
             w.push_line(line);
         }
     }
 
-    /// Append output to the debug widget, if present.
+    /// Append output to the full-screen debug view, if present.
     pub fn push_debug_output(&mut self, line: String) {
         if let Some(w) = self.debug_mut() {
             w.push_output(line);
         }
     }
 
-    /// Borrow the debug prompt, if the debug widget is present.
+    /// Borrow the debug prompt, if the debug view is present.
     pub fn debug_prompt_mut(&mut self) -> Option<&mut String> {
         self.debug_mut().map(|w| w.prompt_mut())
     }
 
-    /// Take the debug prompt for submission, if the debug widget is present.
+    /// Take the debug prompt for submission, if the debug view is present.
     pub fn take_debug_prompt(&mut self) -> Option<String> {
         self.debug_mut().map(|w| w.take_prompt())
     }
 
-    /// Whether the debug widget is still connecting.
+    /// Whether the debug view is still connecting.
     pub fn debug_connecting(&self) -> bool {
-        self.widgets
-            .iter()
-            .find_map(|w| w.as_any().downcast_ref::<DebugWidget>())
+        self.screen_view
+            .as_ref()
+            .and_then(|w| w.as_any().downcast_ref::<DebugWidget>())
             .is_some_and(|w| w.connecting())
     }
 
-    /// Whether the debug widget is still connected.
+    /// Whether the debug view is still connected.
     pub fn debug_connected(&self) -> bool {
-        self.widgets
-            .iter()
-            .find_map(|w| w.as_any().downcast_ref::<DebugWidget>())
+        self.screen_view
+            .as_ref()
+            .and_then(|w| w.as_any().downcast_ref::<DebugWidget>())
             .is_some_and(|w| w.connected())
     }
 
-    /// Set the connected flag on the debug widget.
+    /// Set the connected flag on the debug view.
     pub fn set_debug_connected(&mut self, connected: bool) {
         if let Some(w) = self.debug_mut() {
             w.set_connected(connected);
         }
     }
 
-    /// Mark the debug widget as connected.
+    /// Mark the debug view as connected.
     pub fn mark_debug_ready(&mut self) {
         if let Some(w) = self.debug_mut() {
             w.mark_ready();
@@ -790,10 +844,255 @@ impl<B: Backend> Drop for LiveArea<B> {
     }
 }
 
+/// Full-screen gremlins watch table.
+///
+/// Reads the run table straight from the render context: no persistent
+/// buffer, no height cap, no overflow.
+pub struct RunsView;
+
+impl RunsView {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for RunsView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveAreaWidget for RunsView {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "runs_view"
+    }
+
+    fn size_priority(&self) -> i32 {
+        50
+    }
+
+    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
+        0
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        let header_style = Style::default()
+            .fg(DEFAULT_THEME.heading_primary)
+            .add_modifier(Modifier::BOLD);
+        lines.push(Line::from(Span::styled("  g r e m l i n s", header_style)));
+        lines.push(motif::streamline_rule_brass(area.width));
+
+        let mut runs: Vec<(&String, &crate::tui::app::ActiveRun)> =
+            ctx.active_runs.iter().collect();
+        runs.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (id, run) in runs {
+            let (status_glyph, status_style) = match run.status.as_str() {
+                "running" => (
+                    motif::glyph::RUNNING,
+                    Style::default().fg(DEFAULT_THEME.success),
+                ),
+                "failed" => (
+                    motif::glyph::FAILED,
+                    Style::default().fg(DEFAULT_THEME.danger),
+                ),
+                "stopped" => (
+                    motif::glyph::STOPPED,
+                    Style::default().fg(DEFAULT_THEME.subtle),
+                ),
+                _ => (
+                    motif::glyph::DONE,
+                    Style::default().fg(DEFAULT_THEME.chrome),
+                ),
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(id.clone(), Style::default().fg(DEFAULT_THEME.text)),
+                Span::raw("  "),
+                Span::styled(format!("{status_glyph} "), status_style),
+                Span::styled(run.status.clone(), status_style),
+                Span::raw("  "),
+                Span::styled(run.stage.clone(), Style::default().fg(DEFAULT_THEME.subtle)),
+                Span::raw("  "),
+                Span::styled(
+                    run.definition.clone(),
+                    Style::default().fg(DEFAULT_THEME.subtle),
+                ),
+            ]));
+        }
+
+        let running = ctx
+            .active_runs
+            .values()
+            .filter(|r| r.status == "running")
+            .count();
+        let total = ctx.active_runs.len();
+        lines.push(Line::from(Span::styled(
+            format!("  {running} running · {total} total"),
+            Style::default()
+                .fg(DEFAULT_THEME.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        if !lines.is_empty() {
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            paragraph.render(area, buf);
+        }
+    }
+}
+
+/// Full-screen single-gremlin log viewer.
+///
+/// Owns its target id and log-line buffer. The header reflects the live
+/// status/stage from the render context; the body is a tail-anchored log.
+pub struct LogView {
+    id: String,
+    log_lines: Vec<String>,
+}
+
+impl LogView {
+    pub fn new(id: String) -> Self {
+        Self {
+            id,
+            log_lines: Vec::new(),
+        }
+    }
+
+    /// Append a log line.
+    pub fn push_line(&mut self, line: String) {
+        self.log_lines.push(line);
+    }
+}
+
+impl LiveAreaWidget for LogView {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn name(&self) -> &'static str {
+        "log_view"
+    }
+
+    fn size_priority(&self) -> i32 {
+        50
+    }
+
+    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
+        0
+    }
+
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+
+        let header = Line::from(vec![
+            Span::styled(
+                "◆ following: ",
+                Style::default()
+                    .fg(DEFAULT_THEME.heading_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                self.id.clone(),
+                Style::default()
+                    .fg(DEFAULT_THEME.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ◆",
+                Style::default()
+                    .fg(DEFAULT_THEME.heading_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+
+        let status = ctx
+            .active_runs
+            .get(&self.id)
+            .map(|run| (run.status.clone(), run.stage.clone()))
+            .unwrap_or_else(|| ("unknown".to_string(), String::new()));
+        let status_text = status.0;
+        let status_line = Line::from(vec![
+            Span::styled("  status: ", Style::default().fg(DEFAULT_THEME.subtle)),
+            Span::styled(
+                status_text.clone(),
+                match status_text.as_str() {
+                    "running" => Style::default().fg(DEFAULT_THEME.success),
+                    "failed" => Style::default().fg(DEFAULT_THEME.danger),
+                    _ => Style::default().fg(DEFAULT_THEME.text),
+                },
+            ),
+            Span::styled("  stage: ", Style::default().fg(DEFAULT_THEME.subtle)),
+            Span::styled(status.1, Style::default().fg(DEFAULT_THEME.subtle)),
+        ]);
+
+        let header_lines = vec![header, status_line, Line::from("")];
+        let header_rows = (wrapped_height(&header_lines, area.width) as u16).min(area.height);
+        Paragraph::new(header_lines)
+            .wrap(Wrap { trim: false })
+            .render(Rect::new(area.x, area.y, area.width, header_rows), buf);
+
+        let body_area = Rect::new(
+            area.x,
+            area.y.saturating_add(header_rows),
+            area.width,
+            area.height.saturating_sub(header_rows),
+        );
+        let body_rows = body_area.height as usize;
+        let log_lines: Vec<Line<'static>> = self
+            .log_lines
+            .iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(DEFAULT_THEME.text),
+                ))
+            })
+            .collect();
+
+        // Tail-anchored by wrapped terminal rows, so a long wrapping entry
+        // never pushes the newest output below the visible body.
+        render_wrapped_tail(&log_lines, body_area, buf, body_rows);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::{ActiveRun, App, Overlay};
+    use crate::tui::app::{ActiveRun, App, Screen};
     use crate::tui::theme::DEFAULT_THEME;
     use ratatui::{backend::TestBackend, buffer::Buffer, style::Style, text::Line as TuiLine};
 
@@ -1239,6 +1538,44 @@ mod tests {
     }
 
     #[test]
+    fn compose_renders_prompt_reasoning_tool_response_in_order() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+        live_area.push_tool_output_chunk("running a tool\n");
+        live_area.replace_response("answer");
+
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        let lines: Vec<&str> = visible.lines().collect();
+        let prompt = lines.iter().position(|l| l.contains("▍» hi"));
+        let reasoning = lines.iter().position(|l| l.contains("thinking"));
+        let tool = lines.iter().position(|l| l.contains("▸ running a tool"));
+        let response = lines.iter().position(|l| l.contains("answer"));
+        assert!(
+            prompt.is_some() && reasoning.is_some() && tool.is_some() && response.is_some(),
+            "prompt, reasoning, tool, and response should all be visible.\nBuffer:\n{visible}"
+        );
+        let (Some(prompt), Some(reasoning), Some(tool), Some(response)) =
+            (prompt, reasoning, tool, response)
+        else {
+            unreachable!("checked above");
+        };
+        assert!(
+            prompt < reasoning && reasoning < tool && tool < response,
+            "a turn must render prompt → reasoning → tool → response.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
     fn compose_renders_prompt_reasoning_response_in_order() {
         let cols: u16 = 80;
         let rows: u16 = 12;
@@ -1501,92 +1838,10 @@ mod tests {
         );
     }
 
-    // ── Dynamic widget stack / overlay tests ────────────────────
+    // ── Full-screen view switch tests ────────────────────────────
 
     #[test]
-    fn push_and_pop_overlay_widgets() {
-        use crate::tui::widgets::{DebugWidget, WatchTableWidget};
-
-        let mut live = new_live(80, 24);
-        assert_eq!(live.widgets.len(), 4);
-
-        // Popping with no overlay is a no-op.
-        assert!(live.pop_overlay().is_none());
-
-        live.push_overlay(Box::new(WatchTableWidget::new()));
-        assert_eq!(live.widgets.len(), 5);
-
-        live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
-        assert_eq!(live.widgets.len(), 6);
-
-        // Pop removes the most recently added (debug) first.
-        let popped = live.pop_overlay().unwrap();
-        assert!(popped.as_any().downcast_ref::<DebugWidget>().is_some());
-        assert_eq!(live.widgets.len(), 5);
-
-        let popped = live.pop_overlay().unwrap();
-        assert!(popped.as_any().downcast_ref::<WatchTableWidget>().is_some());
-        assert_eq!(live.widgets.len(), 4);
-
-        // Cannot pop the fixed content stack.
-        assert!(live.pop_overlay().is_none());
-        assert_eq!(live.widgets.len(), 4);
-    }
-
-    #[test]
-    fn blocking_overlay_occludes_content_but_keeps_bars() {
-        use crate::tui::widgets::DebugWidget;
-
-        let mut live = new_live(80, 24);
-        let mut app = App::new();
-        app.project_name = "gremlins".to_string();
-
-        live.push_transcript_line("some transcript line".to_string());
-        live.submit_prompt("hi".to_string());
-        live.replace_response("a response");
-
-        // Push a blocking debug overlay.
-        app.overlay = Some(Overlay::Debug);
-        live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
-
-        live.compose(&app).unwrap();
-
-        let visible = dump_buffer(live.backend().buffer());
-        // The debug header is visible.
-        assert!(
-            visible.contains("debug: g1"),
-            "Debug header should be visible.\nBuffer:\n{visible}"
-        );
-        // The transcript content is occluded.
-        assert!(
-            !visible.contains("a response"),
-            "Transcript response should be occluded.\nBuffer:\n{visible}"
-        );
-        // The fixed bars remain visible.
-        assert!(
-            visible.contains("GREMLINS"),
-            "Info bar should remain visible.\nBuffer:\n{visible}"
-        );
-        assert!(
-            visible.contains("»"),
-            "Input bar should remain visible.\nBuffer:\n{visible}"
-        );
-
-        // Popping restores the transcript.
-        app.overlay = None;
-        live.pop_overlay();
-        live.compose(&app).unwrap();
-        let visible = dump_buffer(live.backend().buffer());
-        assert!(
-            visible.contains("a response"),
-            "Transcript should be restored after pop.\nBuffer:\n{visible}"
-        );
-    }
-
-    #[test]
-    fn watch_table_is_non_blocking_and_leaves_content_visible() {
-        use crate::tui::widgets::WatchTableWidget;
-
+    fn runs_screen_occludes_chat_and_switches_back() {
         let mut live = new_live(80, 24);
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
@@ -1605,41 +1860,187 @@ mod tests {
         live.submit_prompt("hi".to_string());
         live.replace_response("a response");
 
-        app.overlay = Some(Overlay::Watch);
-        live.push_overlay(Box::new(WatchTableWidget::new()));
-
+        app.screen = Screen::Runs;
+        live.show_runs();
         live.compose(&app).unwrap();
 
         let visible = dump_buffer(live.backend().buffer());
-        // Watch table shows the run.
         assert!(
-            visible.contains("g1"),
-            "Watch table should show the run id.\nBuffer:\n{visible}"
+            visible.contains("g1") && visible.contains("running"),
+            "Runs view should show the run table.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("running"),
-            "Watch table should show the status.\nBuffer:\n{visible}"
+            !visible.contains("a response"),
+            "Chat transcript must be occluded by the runs screen.\nBuffer:\n{visible}"
         );
-        // Transcript content stays visible below.
+
+        // Esc returns to chat.
+        assert!(app.exit_screen());
+        live.exit_screen_view();
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
         assert!(
             visible.contains("a response"),
-            "Transcript should stay visible under the watch table.\nBuffer:\n{visible}"
+            "Transcript should be restored after switching back to chat.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("g r e m l i n s") && !visible.contains("g1"),
+            "Runs view text must not survive the switch back to chat.\nBuffer:\n{visible}"
         );
     }
 
     #[test]
-    fn overlay_mutation_methods_feed_widgets() {
-        use crate::tui::widgets::{DebugWidget, WatchSingleWidget};
+    fn log_screen_shows_status_header_and_tail_log() {
+        let mut live = new_live(80, 20);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
 
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "running".to_string(),
+                stage: "build".to_string(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+            },
+        );
+
+        live.push_transcript_line("chat seed line".to_string());
+
+        app.screen = Screen::Log {
+            id: "g1".to_string(),
+        };
+        live.show_log("g1".to_string());
+        live.push_log_view_line("log one".to_string());
+        live.push_log_view_line("log two".to_string());
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("following: g1"),
+            "Log view should render its header.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("running") && visible.contains("build"),
+            "Log view should render live status and stage.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("log two"),
+            "Log view should show the newest log line.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("chat seed line"),
+            "Chat transcript must be occluded by the log screen.\nBuffer:\n{visible}"
+        );
+
+        // Esc returns to chat.
+        assert!(app.exit_screen());
+        live.exit_screen_view();
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("chat seed line"),
+            "Transcript should be restored after switching back to chat.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("following: g1"),
+            "Log view text must not survive the switch back to chat.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn log_view_tail_accounts_for_wrapped_lines() {
+        let mut live = new_live(12, 10);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.screen = Screen::Log {
+            id: "g1".to_string(),
+        };
+        live.show_log("g1".to_string());
+
+        // Four 13-char lines wrap to two rows each at width 12, followed by a
+        // long newest line. The body is only 7 rows tall, so a log-line-count
+        // tail would clip the newest entry; a wrapped-row tail keeps it
+        // visible.
+        for i in 0..4 {
+            live.push_log_view_line(format!("prior {i} long!"));
+        }
+        live.push_log_view_line("NEWEST_TAIL_END".to_string());
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("NEWEST"),
+            "The newest log line should remain visible after wrapping.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn debug_screen_occludes_chat_and_keeps_prompt() {
+        let mut live = new_live(80, 24);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live.push_transcript_line("some transcript line".to_string());
+        live.submit_prompt("hi".to_string());
+        live.replace_response("a response");
+
+        app.screen = Screen::Debug {
+            id: "g1".to_string(),
+        };
+        live.show_debug("g1".to_string());
+        live.push_debug_output("connected to gremlin g1".to_string());
+        live.debug_prompt_mut().unwrap().push_str("hello");
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("debug: g1"),
+            "Debug header should be visible.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("connected to gremlin g1"),
+            "Debug output should be visible.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("hello"),
+            "Debug prompt should be visible.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("a response"),
+            "Chat transcript must be occluded by the debug screen.\nBuffer:\n{visible}"
+        );
+
+        // Esc returns to chat and drops the view-local prompt.
+        assert!(app.exit_screen());
+        live.exit_screen_view();
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("a response"),
+            "Transcript should be restored after leaving debug.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("debug: g1"),
+            "Debug view text must not survive the switch back to chat.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn screen_mutation_methods_feed_views() {
         let mut live = new_live(80, 24);
 
-        // Watch-single log lines.
-        live.push_overlay(Box::new(WatchSingleWidget::new("g1".to_string())));
-        live.push_watch_single_line("log line one".to_string());
-        live.push_watch_single_line("log line two".to_string());
+        // Full-screen log view.
+        live.show_log("g1".to_string());
+        live.push_log_view_line("log line one".to_string());
+        live.push_log_view_line("log line two".to_string());
 
-        // Debug widget.
-        live.push_overlay(Box::new(DebugWidget::new("g1".to_string())));
+        // Full-screen debug view.
+        live.show_debug("g1".to_string());
         assert!(live.debug_connecting());
         assert!(!live.debug_connected());
 
@@ -1648,59 +2049,51 @@ mod tests {
         assert!(!live.debug_connecting());
         assert!(live.debug_connected());
 
-        // Prompt mutation.
         live.debug_prompt_mut().unwrap().push_str("abc");
         assert_eq!(live.take_debug_prompt().as_deref(), Some("abc"));
         assert_eq!(live.take_debug_prompt().as_deref(), Some(""));
 
-        // Connection state transitions.
         live.set_debug_connected(false);
         assert!(!live.debug_connected());
         assert!(!live.debug_connecting());
     }
 
     #[test]
-    fn short_viewport_with_overlay_does_not_panic() {
-        use crate::tui::widgets::WatchTableWidget;
-
+    fn short_viewport_with_screen_does_not_panic() {
         let mut live = new_live(80, 2);
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
 
-        app.overlay = Some(Overlay::Watch);
-        live.push_overlay(Box::new(WatchTableWidget::new()));
+        app.screen = Screen::Runs;
+        live.show_runs();
 
         live.compose(&app).unwrap();
 
         let visible = dump_buffer(live.backend().buffer());
         assert!(
-            visible.contains("GREMLINS"),
-            "Info bar should render even with an overlay on a 2-row viewport.\nBuffer:\n{visible}"
+            !visible.is_empty(),
+            "A full-screen view should render even on a 2-row viewport.\nBuffer:\n{visible}"
         );
     }
 
     #[test]
-    fn content_mutation_targets_transcript_after_overlay_push() {
-        use crate::tui::widgets::WatchTableWidget;
-
-        let mut live = new_live(80, 24);
+    fn full_screen_views_never_commit_to_scrollback() {
+        let mut live = new_live(80, 8);
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
 
-        // Push a non-blocking overlay first, then mutate the transcript.
-        app.overlay = Some(Overlay::Watch);
-        live.push_overlay(Box::new(WatchTableWidget::new()));
-
-        live.push_transcript_line("after overlay".to_string());
+        live.push_transcript_line("some transcript line".to_string());
         live.submit_prompt("hi".to_string());
-        live.replace_response("response after overlay");
+        live.replace_response("a response");
 
+        app.screen = Screen::Runs;
+        live.show_runs();
         live.compose(&app).unwrap();
 
-        let visible = dump_buffer(live.backend().buffer());
         assert!(
-            visible.contains("response after overlay"),
-            "Transcript mutation should target the transcript even with an overlay pushed.\nBuffer:\n{visible}"
+            live.scrollback().is_empty(),
+            "Full-screen views must never commit chat scrollback.\nScrollback:\n{:?}",
+            live.scrollback()
         );
     }
 

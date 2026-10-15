@@ -27,8 +27,9 @@ pub struct App {
     /// submitting a prompt (or starting a second reset) before the
     /// replacement session socket is installed.
     pub session_recreating: bool,
-    /// Active ephemeral overlay, if any.
-    pub overlay: Option<Overlay>,
+    /// Active screen. Chat is the default; the other variants are full-screen
+    /// views entered from slash commands and dismissed with `Esc`.
+    pub screen: Screen,
     /// Submitted inputs in chronological order (in-memory only).
     pub input_history: Vec<String>,
     /// Cursor into `input_history`; `None` means editing a fresh line.
@@ -64,31 +65,33 @@ impl ActiveRun {
     }
 }
 
-/// Ephemeral overlay mode. A pure marker used only for input routing and
-/// dismissal. Overlay-local state (log lines, debug prompt/history,
-/// connection flags) lives in the corresponding overlay widgets in
-/// `LiveArea`.
-#[derive(Debug, Clone)]
-pub enum Overlay {
-    /// Gremlins watch table. Non-blocking; main input bar still works.
-    Watch,
-    /// Single-gremlin log viewer. Blocking overlay.
-    WatchSingle,
-    /// Interactive debug session. Blocking overlay with its own prompt.
-    Debug,
+/// Which full screen is currently active.
+///
+/// Chat is the default. The other variants are entered from slash commands
+/// and dismissed by `Esc` (or the first `Ctrl+C` press), which always
+/// returns to [`Screen::Chat`]. Screen-local widget state (log lines, debug
+/// prompt/history, connection flags) lives in `LiveArea`'s screen view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Screen {
+    /// The normal chat transcript with the main input bar.
+    Chat,
+    /// Full-screen gremlins watch table.
+    Runs,
+    /// Full-screen tail-anchored log viewer for one gremlin.
+    Log { id: String },
+    /// Full-screen interactive debug session with its own prompt.
+    Debug { id: String },
 }
 
-impl Overlay {
-    /// Blocking overlays occlude the transcript and disable the main input
-    /// bar (slash commands are still accepted for `WatchSingle`; `Debug` has
-    /// its own prompt).
-    pub fn is_blocking(&self) -> bool {
-        !matches!(self, Overlay::Watch)
+impl Screen {
+    /// Whether the active screen owns a prompt that should receive keystrokes.
+    pub fn has_prompt(&self) -> bool {
+        matches!(self, Screen::Debug { .. })
     }
 
-    /// Whether this overlay owns a prompt that should receive keystrokes.
-    pub fn has_prompt(&self) -> bool {
-        matches!(self, Overlay::Debug)
+    /// Each non-chat screen is a full-screen view.
+    pub fn is_chat(&self) -> bool {
+        matches!(self, Screen::Chat)
     }
 }
 
@@ -107,7 +110,7 @@ impl App {
             following_log: None,
             active_request: false,
             session_recreating: false,
-            overlay: None,
+            screen: Screen::Chat,
             input_history: Vec::new(),
             history_cursor: None,
             width: 80,
@@ -225,38 +228,32 @@ impl App {
         }
     }
 
-    // ── Overlay helpers ────────────────────────────────────────────
+    // ── Screen helpers ──────────────────────────────────────────────
 
-    pub fn overlay_is_watch(&self) -> bool {
-        matches!(self.overlay, Some(Overlay::Watch))
+    /// Enter the full-screen runs table.
+    pub fn show_runs(&mut self) {
+        self.screen = Screen::Runs;
     }
 
-    /// Dismiss a blocking overlay. Returns true if one was dismissed.
-    pub fn dismiss_blocking_overlay(&mut self) -> bool {
-        if self.overlay.as_ref().is_some_and(Overlay::is_blocking) {
-            self.overlay = None;
-            true
-        } else {
+    /// Enter the full-screen single-gremlin log view.
+    pub fn show_log(&mut self, id: String) {
+        self.screen = Screen::Log { id };
+    }
+
+    /// Enter the full-screen interactive debug session.
+    pub fn show_debug(&mut self, id: String) {
+        self.screen = Screen::Debug { id };
+    }
+
+    /// Exit any non-chat screen and return to chat. Returns `true` when a
+    /// full-screen view was actually dismissed.
+    pub fn exit_screen(&mut self) -> bool {
+        if self.screen.is_chat() {
             false
-        }
-    }
-
-    /// Dismiss the non-blocking watch table. Returns true if it was dismissed.
-    pub fn dismiss_watch_overlay(&mut self) -> bool {
-        if self.overlay_is_watch() {
-            self.overlay = None;
-            true
         } else {
-            false
+            self.screen = Screen::Chat;
+            true
         }
-    }
-
-    pub fn open_watch_single(&mut self) {
-        self.overlay = Some(Overlay::WatchSingle);
-    }
-
-    pub fn open_debug(&mut self) {
-        self.overlay = Some(Overlay::Debug);
     }
 
     // ── Completion helpers ──────────────────────────────────────

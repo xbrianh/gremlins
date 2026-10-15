@@ -1,7 +1,8 @@
 //! LiveArea rendering widgets.
 //!
 //! The LiveArea screen is composed of a transcript widget (the single
-//! styled FIFO), an input bar, an info bar, and overlay widgets. Each
+//! styled FIFO with embedded reasoning and live-tool slots), an input bar,
+//! an info bar, and the full-screen debug view widget. Each
 //! widget is behind the [`LiveAreaWidget`] trait, owns its own rendering
 //! buffers, and knows how to lay itself out (via
 //! [`LiveAreaWidget::min_height`] and [`LiveAreaWidget::flexible`]) and paint
@@ -25,7 +26,7 @@ use ratatui::{
     widgets::{Paragraph, Widget, Wrap},
 };
 
-use crate::tui::app::{ActiveRun, Overlay};
+use crate::tui::app::ActiveRun;
 use crate::tui::buffer::{line_wrapped_height, tail_window, wrapped_height, LineBuffer};
 use crate::tui::markdown;
 use crate::tui::motif::{self, glyph};
@@ -34,8 +35,7 @@ use crate::tui::theme::DEFAULT_THEME;
 /// and [`LiveAreaWidget::min_height`].
 ///
 /// Stateless widgets (input bar, info bar) read their content from here
-/// rather than owning buffers of their own. Overlay widgets observe what is
-/// on screen (the active overlay mode and the daemon-derived run table).
+/// rather than owning buffers of their own.
 pub struct RenderContext<'a> {
     /// Current input-bar text.
     pub input: &'a str,
@@ -47,24 +47,10 @@ pub struct RenderContext<'a> {
     pub gremlin_count: &'a str,
     /// Cached project name.
     pub project_name: &'a str,
-    /// The active overlay mode, if any. Overlay widgets read this to decide
-    /// whether they are occluded by a blocking overlay.
-    pub overlay: Option<&'a Overlay>,
-    /// The daemon-derived run table (source of truth for the watch widget).
+    /// The daemon-derived run table (source of truth for the runs view).
     pub active_runs: &'a HashMap<String, ActiveRun>,
-    /// Height of the content region (viewport minus the fixed bars).
-    pub content_height: u16,
     /// Inline completion preview suffix (paint-only, never submitted).
     pub completion_preview: Option<&'a str>,
-}
-
-impl<'a> RenderContext<'a> {
-    /// Whether a blocking overlay is currently active. When true, the
-    /// content widgets (transcript) collapse to zero height so the blocking
-    /// overlay occupies the whole content region.
-    pub fn blocking_overlay(&self) -> bool {
-        self.overlay.as_ref().is_some_and(|o| o.is_blocking())
-    }
 }
 
 /// A single LiveArea rendering region.
@@ -175,6 +161,9 @@ pub struct TranscriptWidget {
     /// The current turn's ephemeral reasoning slot, rendered between the
     /// pre-response transcript head and the streaming response tail.
     reasoning: ReasoningWidget,
+    /// The current turn's ephemeral live tool-output slot, rendered between
+    /// reasoning and the streaming response tail.
+    tool: ToolOutputSlot,
     /// Raw response accumulator (for reconciliation).
     response_accumulator: String,
     /// FIFO index where the current turn starts (the pinned boundary).
@@ -211,6 +200,7 @@ impl TranscriptWidget {
         Self {
             scrollable: LineBuffer::new(),
             reasoning: ReasoningWidget::new(),
+            tool: ToolOutputSlot::new(),
             response_accumulator: String::new(),
             turn_start: None,
             response_start: None,
@@ -238,6 +228,17 @@ impl TranscriptWidget {
     #[allow(dead_code)]
     pub fn flush_reasoning(&mut self) {
         self.reasoning.flush();
+    }
+
+    /// Append live tool output (may be a partial chunk) to the current
+    /// turn's ephemeral tool slot.
+    pub fn push_tool_output_chunk(&mut self, text: &str) {
+        self.tool.push_text(text);
+    }
+
+    /// Clear the ephemeral tool slot at a turn boundary.
+    pub fn clear_tool_output(&mut self) {
+        self.tool.clear();
     }
 
     /// Append a system message. When a turn is active, the message is
@@ -341,6 +342,7 @@ impl TranscriptWidget {
     pub fn submit_prompt(&mut self, prompt: String) {
         self.invalidate_desired_cache();
         self.reasoning.clear();
+        self.tool.clear();
         let mut sep_index = None;
         if !self.scrollable.is_empty() {
             // Placeholder width; regenerated at `finalize` with the real
@@ -457,6 +459,7 @@ impl TranscriptWidget {
         self.rebuild_response();
         self.invalidate_desired_cache();
         self.reasoning.clear();
+        self.tool.clear();
         self.turn_start = None;
         self.response_start = None;
         self.prompt_end = 0;
@@ -471,6 +474,7 @@ impl TranscriptWidget {
     pub fn clear_current_turn(&mut self) {
         self.invalidate_desired_cache();
         self.reasoning.clear();
+        self.tool.clear();
         if let Some(t) = self.turn_start {
             self.scrollable.truncate(t);
             // The separator rule before the turn (pushed by `submit_prompt`)
@@ -497,6 +501,7 @@ impl TranscriptWidget {
     pub fn clear_scrollable(&mut self) {
         self.invalidate_desired_cache();
         self.reasoning.clear();
+        self.tool.clear();
         self.scrollable.clear();
         self.turn_start = None;
         self.response_start = None;
@@ -565,7 +570,8 @@ impl TranscriptWidget {
             .reasoning
             .desired_rows(width)
             .min(Self::REASONING_MAX_ROWS);
-        fifo.saturating_add(reasoning)
+        let tool = self.tool.desired_rows(width).min(Self::REASONING_MAX_ROWS);
+        fifo.saturating_add(reasoning).saturating_add(tool)
     }
 
     /// Drain the head of the transcript FIFO that does not fit in
@@ -580,10 +586,14 @@ impl TranscriptWidget {
             .reasoning
             .desired_rows(width)
             .min(Self::REASONING_MAX_ROWS);
-        // The FIFO keeps a one-row floor; the reasoning band yields its rows
-        // before the FIFO shrinks below that floor.
-        let reserved = reasoning_rows.min(available_rows.saturating_sub(1));
-        let fifo_rows = available_rows.saturating_sub(reserved);
+        let tool_rows = self.tool.desired_rows(width).min(Self::REASONING_MAX_ROWS);
+        // The FIFO keeps a one-row floor; the ephemeral slots yield their
+        // rows before the FIFO shrinks below that floor, reasoning first.
+        let reasoning_reserved = reasoning_rows.min(available_rows.saturating_sub(1));
+        let tool_reserved = tool_rows.min(available_rows.saturating_sub(reasoning_reserved + 1));
+        let fifo_rows = available_rows
+            .saturating_sub(reasoning_reserved)
+            .saturating_sub(tool_reserved);
         let (_overflow_rows, overflow_lines): (_, Vec<_>) =
             split_overflow(&self.scrollable, fifo_rows, width);
         if overflow_lines.is_empty() {
@@ -722,6 +732,22 @@ fn tool_line(name: &str) -> Line<'static> {
     ])
 }
 
+/// A single live tool-output line: brass tool bullet + nickel italic text.
+fn tool_output_line(text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{} ", glyph::TOOL),
+            Style::default().fg(DEFAULT_THEME.code_border),
+        ),
+        Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(DEFAULT_THEME.subtle)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ])
+}
+
 /// Strip common ANSI control sequences from live tool output.
 ///
 /// This is display-only tidying: the tool result returned to the model is
@@ -800,8 +826,8 @@ fn split_overflow(
     width: u16,
 ) -> (usize, Vec<Line<'static>>) {
     // Zero-area regions have no place to put overflow, and the transcript
-    // may be collapsed by a blocking overlay or a very short viewport. Keep
-    // the FIFO intact in those cases.
+    // may be collapsed by a very short viewport. Keep the FIFO intact in
+    // those cases.
     if width == 0 || available_rows == 0 {
         return (0, Vec::new());
     }
@@ -839,7 +865,12 @@ fn split_overflow(
 /// last `area.height` rows of the full content — keeps rows that were already
 /// scrolled off hidden even when the allocated area is temporarily taller than
 /// the requested height.
-fn render_wrapped_tail(lines: &[Line<'static>], area: Rect, buf: &mut Buffer, visible_rows: usize) {
+pub(crate) fn render_wrapped_tail(
+    lines: &[Line<'static>],
+    area: Rect,
+    buf: &mut Buffer,
+    visible_rows: usize,
+) {
     // Clear the region first so a shorter frame cannot leave stale cells from
     // a previous, taller live tail.
     for y in 0..area.height {
@@ -1154,12 +1185,14 @@ impl ReasoningWidget {
     }
 }
 
-/// Ephemeral, sticky live tail for running tools.
+/// Ephemeral, embedded live tail for running tool output.
 ///
-/// This is the `Bash`/`WebSearch` live pane. It buffers completed lines plus
-/// a trailing partial (mirroring [`ReasoningWidget`]), trims its head to its
-/// allocated height, collapses to zero when idle, and never reports overflow.
-pub struct LiveToolWidget {
+/// This is the `Bash`/`WebSearch` live slot inside [`TranscriptWidget`]. It
+/// buffers completed lines plus a trailing partial (mirroring
+/// [`ReasoningWidget`]), trims its head to its allocated height, collapses to
+/// zero when idle, and never reports overflow. Lines are ANSI-stripped and
+/// rendered with a brass [`glyph::TOOL`] prefix plus italic subtle text.
+pub struct ToolOutputSlot {
     lines: LineBuffer,
     partial: String,
     /// Wrapped rows scrolled off the top of the current remaining live tail.
@@ -1168,12 +1201,7 @@ pub struct LiveToolWidget {
     last_width: Cell<u16>,
 }
 
-impl LiveToolWidget {
-    /// Active floor: a small number of rows are reserved while output is
-    /// present so the tail stays visible; otherwise the widget collapses to
-    /// zero.
-    pub const ACTIVE_MIN_ROWS: u16 = 3;
-
+impl ToolOutputSlot {
     pub fn new() -> Self {
         Self {
             lines: LineBuffer::new(),
@@ -1191,10 +1219,7 @@ impl LiveToolWidget {
         while let Some(newline_pos) = self.partial.find('\n') {
             let raw_line: String = self.partial[..newline_pos].into();
             self.partial = self.partial[newline_pos + 1..].into();
-            self.lines.push(Line::from(Span::styled(
-                strip_ansi(&raw_line),
-                Style::default().fg(DEFAULT_THEME.subtle),
-            )));
+            self.lines.push(tool_output_line(&strip_ansi(&raw_line)));
         }
     }
 
@@ -1324,10 +1349,7 @@ impl LiveToolWidget {
     fn rendered_lines(&self) -> Vec<Line<'static>> {
         let mut out = self.lines.visible_lines().to_vec();
         if !self.partial.is_empty() {
-            out.push(Line::from(Span::styled(
-                strip_ansi(&self.partial),
-                Style::default().fg(DEFAULT_THEME.subtle),
-            )));
+            out.push(tool_output_line(&strip_ansi(&self.partial)));
         }
         out
     }
@@ -1366,49 +1388,9 @@ impl LiveToolWidget {
     }
 }
 
-impl Default for LiveToolWidget {
+impl Default for ToolOutputSlot {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl LiveAreaWidget for LiveToolWidget {
-    as_any_methods!();
-
-    #[cfg(feature = "telemetry")]
-    fn name(&self) -> &'static str {
-        "live_tool"
-    }
-
-    fn size_priority(&self) -> i32 {
-        // Below the transcript (priority 10) and above the embedded
-        // reasoning slot / fixed bars.
-        5
-    }
-
-    fn min_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
-        if ctx.blocking_overlay() || self.is_empty() {
-            0
-        } else {
-            Self::ACTIVE_MIN_ROWS
-        }
-    }
-
-    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
-        if ctx.blocking_overlay() {
-            0
-        } else {
-            self.desired_rows(width)
-        }
-    }
-
-    fn take_overflow(&mut self, available_rows: u16, width: u16) -> Vec<Line<'static>> {
-        self.trim_to(available_rows, width);
-        Vec::new()
-    }
-
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        self.render_band(area, buf);
     }
 }
 
@@ -1428,31 +1410,19 @@ impl LiveAreaWidget for TranscriptWidget {
         0
     }
 
-    fn min_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
+    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
         // The transcript is a plain FIFO with a one-row floor: it always
         // reserves a single row so a streaming response stays visible even
-        // when reasoning/tool widgets contest the space, but the floor no
-        // longer depends on where a turn happens to start. Content that does
-        // not fit is drained to scrollback. A blocking overlay collapses it
-        // to zero by the same logic.
-        if ctx.blocking_overlay() {
-            0
-        } else {
-            1
-        }
+        // when ephemeral slots contest the space. Content that does not fit
+        // is drained to scrollback.
+        1
     }
 
-    fn flexible(&self, ctx: &RenderContext) -> bool {
-        // When a blocking overlay is active the transcript collapses to zero
-        // and must not absorb leftover rows, mirroring the old `Length(0)`
-        // (inflexible) vs `Min` (flexible) split.
-        !ctx.blocking_overlay()
+    fn flexible(&self, _ctx: &RenderContext) -> bool {
+        true
     }
 
-    fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
-        if ctx.blocking_overlay() {
-            return 0;
-        }
+    fn desired_height(&self, width: u16, _ctx: &RenderContext) -> u16 {
         self.desired_height(width)
     }
 
@@ -1460,9 +1430,11 @@ impl LiveAreaWidget for TranscriptWidget {
         self.last_width = width;
         self.rebuild_separator(width);
         self.rebuild_response();
-        // Trim the reasoning slot to its capped band before measurement so
-        // layout never sees a taller ephemeral child than render will paint.
+        // Trim both ephemeral slots to their capped bands before measurement
+        // so layout never sees a taller ephemeral child than render will paint.
         self.reasoning
+            .trim_to(Self::REASONING_MAX_ROWS, width.saturating_sub(1));
+        self.tool
             .trim_to(Self::REASONING_MAX_ROWS, width.saturating_sub(1));
     }
 
@@ -1512,7 +1484,15 @@ impl LiveAreaWidget for TranscriptWidget {
             .desired_rows(width)
             .min(Self::REASONING_MAX_ROWS)
             .min(area.height.saturating_sub(1));
-        let fifo_rows = area.height.saturating_sub(reasoning_rows);
+        let tool_rows = self
+            .tool
+            .desired_rows(width)
+            .min(Self::REASONING_MAX_ROWS)
+            .min(area.height.saturating_sub(reasoning_rows + 1));
+        let fifo_rows = area
+            .height
+            .saturating_sub(reasoning_rows)
+            .saturating_sub(tool_rows);
 
         let head_rows = wrapped_height(head, width);
         let tail_rows = wrapped_height(tail, width);
@@ -1520,8 +1500,8 @@ impl LiveAreaWidget for TranscriptWidget {
         let (head_band, tail_band) = if tail.is_empty() {
             (head_rows.min(fifo_rows as usize) as u16, 0)
         } else {
-            // The response keeps at least one FIFO row after the reasoning
-            // band. Only a single over-tall head line can still exceed this
+            // The response keeps at least one FIFO row after the ephemeral
+            // bands. Only a single over-tall head line can still exceed this
             // after overflow; it is clipped top-anchored.
             let tail_floor = fifo_rows.min(1);
             let head_band = (head_rows as u16).min(fifo_rows.saturating_sub(tail_floor));
@@ -1548,10 +1528,18 @@ impl LiveAreaWidget for TranscriptWidget {
         }
 
         y = inner.y + head_band + reasoning_rows;
+        if tool_rows > 0 && !self.tool.is_empty() {
+            self.tool.trim_to(tool_rows, width);
+            let tool_area = Rect::new(inner.x, y, width, tool_rows);
+            self.tool.render_band(tool_area, buf);
+        }
+
+        y = inner.y + head_band + reasoning_rows + tool_rows;
         if tail_band > 0 && !tail.is_empty() {
-            if tail_rows <= tail_band as usize && reasoning_rows > 0 {
+            if tail_rows <= tail_band as usize && (reasoning_rows > 0 || tool_rows > 0) {
                 // Bottom-anchor the short response inside its allocated band
-                // so the blank rows sit between reasoning and response.
+                // so the blank rows sit between the ephemeral slots and
+                // response.
                 let tail_area = Rect::new(
                     inner.x,
                     inner.y + area.height.saturating_sub(tail_rows as u16),
@@ -1562,8 +1550,9 @@ impl LiveAreaWidget for TranscriptWidget {
                     .wrap(Wrap { trim: false })
                     .render(tail_area, buf);
             } else {
-                // Without reasoning the short response streams directly below
-                // the head with no blank gap; a tall response keeps its tail.
+                // Without ephemeral output the short response streams directly
+                // below the head with no blank gap; a tall response keeps its
+                // tail.
                 let tail_area = Rect::new(inner.x, y, width, tail_band);
                 render_wrapped_tail(tail, tail_area, buf, tail_band as usize);
             }
@@ -1976,215 +1965,11 @@ impl LiveAreaWidget for InfoBarWidget {
     }
 }
 
-/// The non-blocking gremlins watch table overlay.
-///
-/// Renders a table of active gremlin runs (id, status, stage, definition,
-/// project) plus a status-count footer. It owns no mutable buffers — all
-/// data is read from the render context. Its constraint reserves an upper
-/// portion of the layout and it returns no overflow.
-pub struct WatchTableWidget;
-
-impl WatchTableWidget {
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Desired height: the table header + one row per run + footer.
-    fn desired_height(&self, ctx: &RenderContext) -> u16 {
-        let rows = ctx.active_runs.len().max(1) as u16;
-        // header + rows + footer.
-        rows + 2
-    }
-}
-
-impl Default for WatchTableWidget {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LiveAreaWidget for WatchTableWidget {
-    as_any_methods!();
-
-    #[cfg(feature = "telemetry")]
-    fn name(&self) -> &'static str {
-        "watch_table"
-    }
-
-    fn size_priority(&self) -> i32 {
-        50
-    }
-
-    fn min_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
-        if ctx.blocking_overlay() {
-            return 0;
-        }
-        // Real minimum: just the header row. The half-region cap lives in
-        // `max_height`, so the minimum can never exceed it.
-        1
-    }
-
-    fn desired_height(&self, _width: u16, ctx: &RenderContext) -> u16 {
-        self.desired_height(ctx)
-    }
-
-    fn max_height(&self, ctx: &RenderContext) -> u16 {
-        // Cap at half the content region so the transcript below stays
-        // visible.
-        (ctx.content_height / 2).max(1)
-    }
-
-    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
-        let header_style = Style::default()
-            .fg(DEFAULT_THEME.heading_primary)
-            .add_modifier(Modifier::BOLD);
-        lines.push(Line::from(Span::styled(
-            "  ID        STATUS    STAGE       DEFINITION",
-            header_style,
-        )));
-        // Brass streamline rule under the header.
-        lines.push(motif::streamline_rule_brass(area.width));
-
-        let mut runs: Vec<(&String, &ActiveRun)> = ctx.active_runs.iter().collect();
-        runs.sort_by(|a, b| a.0.cmp(b.0));
-
-        for (id, run) in runs {
-            let (glyph, status_style) = match run.status.as_str() {
-                "running" => (glyph::RUNNING, Style::default().fg(DEFAULT_THEME.success)),
-                "failed" => (glyph::FAILED, Style::default().fg(DEFAULT_THEME.danger)),
-                "stopped" => (glyph::STOPPED, Style::default().fg(DEFAULT_THEME.subtle)),
-                _ => (glyph::DONE, Style::default().fg(DEFAULT_THEME.chrome)),
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(id.clone(), Style::default().fg(DEFAULT_THEME.text)),
-                Span::raw("  "),
-                Span::styled(format!("{glyph} "), status_style),
-                Span::styled(run.status.clone(), status_style),
-                Span::raw("  "),
-                Span::styled(run.stage.clone(), Style::default().fg(DEFAULT_THEME.subtle)),
-                Span::raw("  "),
-                Span::styled(
-                    run.definition.clone(),
-                    Style::default().fg(DEFAULT_THEME.subtle),
-                ),
-            ]));
-        }
-
-        let running = ctx
-            .active_runs
-            .values()
-            .filter(|r| r.status == "running")
-            .count();
-        let total = ctx.active_runs.len();
-        lines.push(Line::from(Span::styled(
-            format!("  {running} running · {total} total"),
-            Style::default()
-                .fg(DEFAULT_THEME.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        )));
-
-        if !lines.is_empty() {
-            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-            paragraph.render(area, buf);
-        }
-    }
-}
-
-/// The blocking single-gremlin log viewer overlay.
-///
-/// Owns the target gremlin id and its log-line buffer. Renders a header and
-/// a tail-anchored log view. Its constraint fills the content area above the
-/// fixed input/info bars and it returns no overflow.
-pub struct WatchSingleWidget {
-    id: String,
-    log_lines: Vec<String>,
-}
-
-impl WatchSingleWidget {
-    pub fn new(id: String) -> Self {
-        Self {
-            id,
-            log_lines: Vec::new(),
-        }
-    }
-
-    /// Append a log line.
-    pub fn push_line(&mut self, line: String) {
-        self.log_lines.push(line);
-    }
-}
-
-impl LiveAreaWidget for WatchSingleWidget {
-    as_any_methods!();
-
-    #[cfg(feature = "telemetry")]
-    fn name(&self) -> &'static str {
-        "watch_single"
-    }
-
-    fn size_priority(&self) -> i32 {
-        50
-    }
-
-    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
-        // Fills the entire content area above the fixed bars.
-        0
-    }
-
-    fn flexible(&self, _ctx: &RenderContext) -> bool {
-        true
-    }
-
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        let header = Line::from(vec![
-            Span::styled(
-                "◆ following: ",
-                Style::default()
-                    .fg(DEFAULT_THEME.heading_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                self.id.clone(),
-                Style::default()
-                    .fg(DEFAULT_THEME.danger)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " ◆",
-                Style::default()
-                    .fg(DEFAULT_THEME.heading_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-
-        let mut lines: Vec<Line<'static>> = vec![header];
-        lines.push(Line::from(""));
-
-        // Tail-anchored: keep only the last `area.height - 2` lines.
-        let body_rows = area.height.saturating_sub(2) as usize;
-        let start = self.log_lines.len().saturating_sub(body_rows);
-        for line in &self.log_lines[start..] {
-            lines.push(Line::from(Span::styled(
-                line.clone(),
-                Style::default().fg(DEFAULT_THEME.text),
-            )));
-        }
-
-        if !lines.is_empty() {
-            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-            paragraph.render(area, buf);
-        }
-    }
-}
-
-/// The blocking interactive debug session overlay.
+/// The full-screen interactive debug session view.
 ///
 /// Owns the target id, prompt text, output scrollback, and connection state
-/// (`connecting`/`connected`). Renders a header, output scrollback, and the
-/// debug prompt above the fixed input/info bars. It returns no overflow.
+/// (`connecting`/`connected`). Renders a header, output scrollback, and its
+/// own prompt. It fills the whole screen and returns no overflow.
 pub struct DebugWidget {
     id: String,
     input: String,
@@ -2258,7 +2043,7 @@ impl LiveAreaWidget for DebugWidget {
     }
 
     fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
-        // Fills the entire content area above the fixed bars.
+        // Fills the whole terminal while active.
         0
     }
 
@@ -2267,6 +2052,14 @@ impl LiveAreaWidget for DebugWidget {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
+        // Clear the full-screen region first so a shorter frame never leaves
+        // stale cells behind.
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+
         let status = if self.connecting {
             "connecting…"
         } else if self.connected {
@@ -3078,23 +2871,23 @@ mod tests {
         assert_eq!(reasoning.desired_rows(10), 7);
     }
 
-    // ── live tool widget ──────────────────────────────────────
+    // ── embedded live tool slot ─────────────────────────────────
 
     #[test]
-    fn live_tool_buffers_completed_lines_and_trailing_partial() {
-        let mut live = LiveToolWidget::new();
+    fn tool_slot_buffers_completed_lines_and_trailing_partial() {
+        let mut live = ToolOutputSlot::new();
         live.push_text("first\nsecond");
         let lines: Vec<String> = live
             .rendered_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(lines, vec!["first".to_string(), "second".to_string()]);
+        assert_eq!(lines, vec!["▸ first".to_string(), "▸ second".to_string()]);
     }
 
     #[test]
-    fn live_tool_trims_head_to_visible_height() {
-        let mut live = LiveToolWidget::new();
+    fn tool_slot_trims_head_to_visible_height() {
+        let mut live = ToolOutputSlot::new();
         for i in 0..8 {
             live.push_text(&format!("line {i}\n"));
         }
@@ -3110,16 +2903,16 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "line 5".to_string(),
-                "line 6".to_string(),
-                "line 7".to_string()
+                "▸ line 5".to_string(),
+                "▸ line 6".to_string(),
+                "▸ line 7".to_string(),
             ]
         );
     }
 
     #[test]
-    fn live_tool_clear_resets_tail() {
-        let mut live = LiveToolWidget::new();
+    fn tool_slot_clear_resets_tail() {
+        let mut live = ToolOutputSlot::new();
         live.push_text("one\ntwo\nthree\n");
         live.trim_to(1, 80);
         assert_eq!(live.desired_rows(80), 1);
@@ -3133,15 +2926,15 @@ mod tests {
     }
 
     #[test]
-    fn live_tool_strips_ansi_escape_sequences() {
-        let mut live = LiveToolWidget::new();
+    fn tool_slot_strips_ansi_escape_sequences() {
+        let mut live = ToolOutputSlot::new();
         live.push_text("\u{1b}[31mred\u{1b}[0m normal\n");
         let lines: Vec<String> = live
             .rendered_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(lines, vec!["red normal".to_string()]);
+        assert_eq!(lines, vec!["▸ red normal".to_string()]);
     }
 
     #[test]
@@ -3164,9 +2957,7 @@ mod tests {
             following_log: None,
             gremlin_count: "0",
             project_name: "",
-            overlay: None,
             active_runs: EMPTY.get_or_init(HashMap::new),
-            content_height: 0,
             completion_preview: None,
         }
     }
