@@ -22,6 +22,7 @@ http = "1"
 indexmap = { version = "2", features = ["serde"] }
 rig-core = { version = ">=0.43, <0.44", features = ["derive", "reqwest"] }
 rig-reqwest = "0.43"
+reqwest = { version = "0.13", features = ["blocking"] }
 bytes = "1"
 azure_identity = { version = "=1.1.0-beta.1", default-features = false, features = ["tokio", "reqwest_rustls"] }
 azure_core = "1.2.0-beta.1"
