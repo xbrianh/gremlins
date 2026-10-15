@@ -1638,7 +1638,10 @@ fn resolve_filepath_args(
 }
 
 /// Resolve one `filepath` source value to an absolute path, mirroring
-/// `bind_artifact`'s cwd-first, then `project_root` precedence.
+/// `bind_artifact`'s cwd-first, then `project_root` precedence. A relative
+/// `project_root` is anchored to `cwd` before joining so the resulting path is
+/// absolute even when `GREMLINS_PROJECT_ROOT` (or an equivalent override) is
+/// relative.
 fn resolve_filepath_value(value: &str, project_root: &Path, cwd: &Path) -> String {
     let path = Path::new(value);
     if path.is_absolute() {
@@ -1650,12 +1653,22 @@ fn resolve_filepath_value(value: &str, project_root: &Path, cwd: &Path) -> Strin
         return from_cwd.to_string_lossy().into_owned();
     }
 
-    let from_project = project_root.join(value);
+    let from_project = absolute_from(project_root, cwd).join(value);
     if from_project.is_file() {
         return from_project.to_string_lossy().into_owned();
     }
 
     value.to_string()
+}
+
+/// Return `path` as an absolute path, joining it to `cwd` when it is relative.
+/// An already-absolute path is returned unchanged.
+fn absolute_from(path: &Path, cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
 }
 
 fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String> {
@@ -1814,6 +1827,31 @@ mod tests {
                 "--plan".to_string(),
                 project_root
                     .join("plans/plan.md")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn filepath_args_anchor_relative_project_root_to_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_path_buf();
+        let project_root = PathBuf::from("project");
+        fs::create_dir_all(cwd.join("project/plans")).unwrap();
+        fs::write(cwd.join("project/plans/plan.md"), "plan").unwrap();
+
+        let args = resolve_filepath_args(
+            &["--plan".to_string(), "plans/plan.md".to_string()],
+            &inputs(&["filepath"]),
+            &project_root,
+            &cwd,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--plan".to_string(),
+                cwd.join("project/plans/plan.md")
                     .to_string_lossy()
                     .into_owned()
             ]
