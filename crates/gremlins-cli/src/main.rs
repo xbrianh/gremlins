@@ -1744,6 +1744,7 @@ async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
     use gremlins::schemas::bootstrap::{InputSource, InputSources};
+    use std::fs;
 
     fn inputs(plan_types: &[&str]) -> InputSources {
         let sources = [
