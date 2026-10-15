@@ -223,8 +223,20 @@ pub(crate) async fn run_agent_loop(
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
-    let (tool_output_tx, _) =
-        tokio::sync::broadcast::channel::<(String, String, String, String)>(1024);
+    // Only build the live-output broadcast when a subscriber will actually
+    // consume it. Non-interactive pipeline runs have no `stream_events`
+    // receiver, so building the channel would still cost per-line `String`
+    // allocation plus a forwarder that drains-and-discards every chunk.
+    let tool_output = if ctx
+        .stream_events
+        .as_ref()
+        .is_some_and(|se| se.wants_events())
+    {
+        let (tx, _) = tokio::sync::broadcast::channel::<tools::ToolOutputLine>(1024);
+        Some(tx)
+    } else {
+        None
+    };
     let mut tool_ctx = ToolContext {
         cwd: cwd.clone(),
         extra_env,
@@ -235,7 +247,7 @@ pub(crate) async fn run_agent_loop(
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         parent_history: None,
-        tool_output: Some(tool_output_tx),
+        tool_output,
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter);
 
@@ -1399,14 +1411,14 @@ async fn run_agent_loop_core(
             if let Some(rx) = live_rx.as_mut() {
                 loop {
                     match rx.recv().await {
-                        Ok((id, name, call, text)) => {
+                        Ok(line) => {
                             if let Some(se) = &stream_events {
                                 if se.wants_events() {
                                     se.send(InteractiveEvent::ToolOutputChunk {
-                                        id,
-                                        name,
-                                        call,
-                                        text,
+                                        id: line.id,
+                                        name: line.name,
+                                        call: line.call,
+                                        text: line.text,
                                     });
                                 }
                             }
@@ -1520,14 +1532,14 @@ async fn run_agent_loop_core(
         if let Some(rx) = live_rx.as_mut() {
             loop {
                 match rx.try_recv() {
-                    Ok((id, name, call, text)) => {
+                    Ok(line) => {
                         if let Some(se) = &stream_events {
                             if se.wants_events() {
                                 se.send(InteractiveEvent::ToolOutputChunk {
-                                    id,
-                                    name,
-                                    call,
-                                    text,
+                                    id: line.id,
+                                    name: line.name,
+                                    call: line.call,
+                                    text: line.text,
                                 });
                             }
                         }

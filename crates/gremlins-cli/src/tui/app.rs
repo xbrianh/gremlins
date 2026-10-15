@@ -248,22 +248,35 @@ impl App {
         self.ensure_watch_selection();
     }
 
-    /// Stable-sorted ids of gremlins that are currently running.
-    pub fn running_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .active_runs
-            .iter()
-            .filter(|(_, run)| run.status == "running")
-            .map(|(id, _)| id.clone())
-            .collect();
-        ids.sort();
+    /// Stable-sorted ids of every tracked gremlin, running first.
+    ///
+    /// Done/failed/stopped runs stay in the table so a run that just failed
+    /// doesn't vanish at the moment it's most interesting to inspect. The
+    /// selection falls back to the first non-running id when nothing is
+    /// running, so the table never points at nothing.
+    pub fn watch_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.active_runs.keys().cloned().collect();
+        ids.sort_by(|a, b| {
+            let ra = self
+                .active_runs
+                .get(a)
+                .map(|r| r.status.as_str())
+                .unwrap_or_default();
+            let rb = self
+                .active_runs
+                .get(b)
+                .map(|r| r.status.as_str())
+                .unwrap_or_default();
+            let running = |s: &str| s != "running";
+            running(ra).cmp(&running(rb)).then_with(|| a.cmp(b))
+        });
         ids
     }
 
-    /// Ensure the watch selection points at a running gremlin, choosing the
-    /// first sorted id when the selection is absent or stale.
+    /// Ensure the watch selection points at a listed gremlin, choosing the
+    /// first sorted id (running first) when the selection is absent or stale.
     pub fn ensure_watch_selection(&mut self) {
-        let ids = self.running_ids();
+        let ids = self.watch_ids();
         if ids.is_empty() {
             self.watch_selection = None;
             return;
@@ -278,13 +291,13 @@ impl App {
         }
     }
 
-    /// Move the watch selection through the stable-sorted running-id list.
+    /// Move the watch selection through the stable-sorted id list.
     pub fn watch_move(&mut self, delta: i32) {
         self.ensure_watch_selection();
         let Some(selected) = self.watch_selection.as_ref() else {
             return;
         };
-        let ids = self.running_ids();
+        let ids = self.watch_ids();
         let Some(current) = ids.iter().position(|id| id == selected) else {
             return;
         };
@@ -612,5 +625,65 @@ mod tests {
 
         app.cursor_end();
         assert_eq!(app.input_cursor, "hello".len());
+    }
+
+    #[test]
+    fn watch_ids_sorts_running_first_then_id() {
+        let mut app = App::new();
+        app.on_run_started("b".into(), "def".into(), "run".into());
+        app.on_run_started("a".into(), "def".into(), "run".into());
+        app.on_run_started("c".into(), "def".into(), "run".into());
+        app.on_run_completed("a".into());
+        app.on_run_failed("c".into());
+
+        // `b` is the only running gremlin; done/failed `a`/`c` follow, sorted
+        // by id within the non-running group.
+        assert_eq!(
+            app.watch_ids(),
+            vec!["b".to_string(), "a".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn ensure_watch_selection_picks_first_and_falls_back_to_finished() {
+        let mut app = App::new();
+        assert_eq!(app.watch_selection, None);
+
+        // An unknown-id failure inserts a finished run; with nothing running
+        // the selection must still point at it rather than nothing.
+        app.on_run_failed("f".into());
+        assert_eq!(app.watch_selection.as_deref(), Some("f"));
+
+        // A stable selection is not yanked away when a new run starts.
+        app.on_run_started("r".into(), "def".into(), "run".into());
+        assert_eq!(app.watch_selection.as_deref(), Some("f"));
+
+        // Once the selected run leaves the list, selection falls back to the
+        // first listed id (running runs sort first → "r").
+        app.active_runs.remove("f");
+        app.ensure_watch_selection();
+        assert_eq!(app.watch_selection.as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn watch_move_steps_and_clamps() {
+        let mut app = App::new();
+        app.on_run_started("b".into(), "def".into(), "run".into());
+        app.on_run_started("a".into(), "def".into(), "run".into());
+        app.on_run_started("c".into(), "def".into(), "run".into());
+        // First insert pins the selection; later inserts don't move it.
+        assert_eq!(app.watch_selection.as_deref(), Some("b"));
+
+        app.watch_move(1);
+        assert_eq!(app.watch_selection.as_deref(), Some("c"));
+        app.watch_move(1); // clamped at the end
+        assert_eq!(app.watch_selection.as_deref(), Some("c"));
+
+        app.watch_move(-1);
+        assert_eq!(app.watch_selection.as_deref(), Some("b"));
+        app.watch_move(-1);
+        assert_eq!(app.watch_selection.as_deref(), Some("a"));
+        app.watch_move(-1); // clamped at the start
+        assert_eq!(app.watch_selection.as_deref(), Some("a"));
     }
 }

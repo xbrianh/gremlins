@@ -28,6 +28,12 @@ pub mod glyph {
     pub const TASK_DONE: &str = "▣";
     /// Running status glyph.
     pub const RUNNING: &str = "▲";
+    /// Done status glyph.
+    pub const DONE: &str = "◆";
+    /// Failed status glyph.
+    pub const FAILED: &str = "✖";
+    /// Stopped status glyph.
+    pub const STOPPED: &str = "■";
     /// Column separator.
     pub const COLUMN: &str = "│";
 }

@@ -206,9 +206,11 @@ fn handle_esc_reset(
     active_turn: &mut Option<String>,
     client: &Arc<client::DaemonClient>,
 ) -> bool {
-    // Esc is a turn boundary for the ephemeral tool slot regardless of
-    // whether it exits a full-screen view or resets the chat state.
-    live_area.clear_tool_output();
+    // Note: Esc only clears the ephemeral tool slot when it actually cancels
+    // an in-flight turn (via `clear_current_turn` below). Clearing it up
+    // front was wrong: Esc on the Runs screen (closing a pane or returning
+    // to chat) while a turn streams in the background must not wipe that
+    // turn's live tool streams.
 
     // On the watch screen, Esc first closes an open stream pane and only
     // then exits back to chat.
@@ -460,13 +462,10 @@ enum DebugEvent {
     ToolOutputChunk {
         id: String,
         name: String,
-        call: String,
         output: String,
     },
     ToolResult {
-        id: String,
         name: String,
-        call: String,
         output: String,
     },
     Error(String),
@@ -538,11 +537,6 @@ fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            call: value
-                .get("call")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
             output: value
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -550,18 +544,8 @@ fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
                 .to_string(),
         },
         Some("tool_result") => DebugEvent::ToolResult {
-            id: value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
             name: value
                 .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            call: value
-                .get("call")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
@@ -1886,15 +1870,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     DebugEvent::ReasoningChunk { text } => {
                         live_area.push_debug_output(text);
                     }
-                    DebugEvent::ToolOutputChunk { id, name, call, output } => {
+                    DebugEvent::ToolOutputChunk { id, name, output } => {
                         log::debug!(
                             "debug ToolOutputChunk id={id} name={name} len={}",
                             output.len()
                         );
-                        live_area.push_tool_output_chunk(&id, &call, &output);
+                        // The debug socket and the chat stream are
+                        // independent: do NOT route these into the chat
+                        // transcript's live tool slot (which is occluded, or
+                        // worse — a background chat turn would commit the
+                        // debug call into its tool segment). Debug shows
+                        // final results via `ToolResult` below instead.
                     }
-                    DebugEvent::ToolResult { id, name, call, output } => {
-                        live_area.commit_tool_result(&id, &call);
+                    DebugEvent::ToolResult { name, output } => {
                         live_area.push_debug_output(format!("[tool: {name}] {output}"));
                     }
                     DebugEvent::Error(msg) => {

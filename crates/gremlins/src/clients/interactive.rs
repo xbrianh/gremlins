@@ -229,7 +229,10 @@ impl InteractiveChannels {
     /// Create a new channel triplet with a shared [`PauseToken`].
     pub(crate) fn new() -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
-        let (evt_tx, _) = broadcast::channel(16);
+        // Bumped well above the old 16 so a bursty tool-output stream (now
+        // coalesced to one chunk per 8 KiB read) doesn't lag the debug
+        // consumer on every Bash call.
+        let (evt_tx, _) = broadcast::channel(256);
         let pause = PauseToken::new();
         Self {
             cmd_tx,

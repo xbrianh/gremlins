@@ -701,7 +701,7 @@ inner width to children in every width-taking method.
 - `input_bar: InputBarWidget`
 - `info_bar: InfoBarWidget`
 - `screen_view: Option<ScreenView>` — a typed enum of full-screen bodies:
-  `Runs`, `Log`, `Debug`.
+  `Runs`, `Debug`.
 
 On each frame `compose` takes the scene out temporarily, builds an ordered
 `Vec<&mut dyn LiveAreaWidget>` by borrowing the concrete fields (chat =
@@ -874,42 +874,26 @@ streaming, the in-progress reasoning strand stays display-only and never
 enters the FIFO or scrollback; cancel (Esc), clear, and new-chat paths discard
 it without committing it.
 
-#### 8.4.4 Gremlins watch overlay
+#### 8.4.4 Gremlins watch (Runs screen)
+
+`/watch` switches to the full-screen **Runs** view, replacing the chat scene
+entirely — the transcript and input bar are occluded, not overlaid. The table
+lists every tracked gremlin with its status glyph (`▲` running, `◆` done, `✖`
+failed, `■` stopped), running runs first and each group sorted by id. `Up`/
+`Down` move the selection; `Ctrl+O` opens a tail-anchored inline log pane for
+the selected run; `Esc` closes the pane and then returns to chat.
 
 ```
-                        ~~~ terminal scrollback ~~~
-                        (older turns visible in
-                        tmux copy-mode, etc.)
-  > fix the login bug
-    1 tool · 850 tokens · 92% cache
-  > refactor middleware chain
-    2 tools · 550 tokens · 91% cache
-                     ─── viewport top ───
 ╔══════════════════════════════════════════════════════════════╗
-║  ┌─ gremlins watch ───────────────────────────────────────┐ ║
-║  │ ID          STATUS   STAGE        PROJECT               │ ║
-║  │ abc123      running  implement    gremlins              │ ║
-║  │ def456      running  review-code  gremlins              │ ║
-║  │ ghi789      done     —            other-project         │ ║
-║  │                                                        │ ║
-║  │ 2 running · 1 done                                     │ ║
-║  └────────────────────────────────────────────────────────┘ ║
+║  g r e m l i n s                                             ║
+║  ──────────────────────────────────────────────────────────  ║
+║  ▶ abc123  ▲ running  implement     gremlins                 ║
+║    def456  ▲ running  review-code   gremlins                 ║
+║    ghi789  ◆ done     —             other-project            ║
 ║                                                              ║
-║  > plan implement review                                   ║
-║    3 tools · 1.2K tokens · 85% cache                       ║
-║                                                              ║
-║  > fix the login bug                                       ║
-║    1 tool · 850 tokens · 92% cache                         ║
-║                                                              ║
-║  > ▌                                                         ║
-║  gremlins tui · 3 gremlins · project: gremlins              ║
+║  2 running · 3 total                                         ║
 ╚══════════════════════════════════════════════════════════════╝
-                     ─── viewport bottom ───
 ```
-
-The watch overlay occupies the upper portion. Transcript widgets flow below it;
-older ones scroll into terminal scrollback. The input bar still accepts chat —
-the overlay is non-blocking.
 
 ### 8.5 Widget lifecycle
 
@@ -930,7 +914,7 @@ the overlay is non-blocking.
               ┌─────────────────────┐
               │ transcript widget   │  same layout; tool lines, prompt and
               │ (finished)          │  response committed as history; reasoning
-              │                     │  frozen in its own widget
+              │                     │  committed as a retained tail
               └─────────────────────┘
                         │
            session ends / cleared
@@ -963,40 +947,42 @@ the overlay is non-blocking.
   discards the turn and its reasoning without committing it.
 
   system content (banner, events, command output) is pushed directly into the
-  transcript widget. Overlay widgets exist outside this lifecycle — they are
-  pushed/popped from the top of the widget stack, have no persistent state
-  when hidden, and are dismissed by `Esc`.
+  transcript widget. Full-screen views (`Runs`, `Debug`) exist outside this
+  lifecycle — they replace the chat scene while active and are dismissed by
+  `Esc`.
 ```
 
 ### 8.6 Input routing
 
-The input bar is the primary interaction surface. Key routing rules:
+The input bar belongs to the chat screen. Full-screen views replace it with
+their own controls (or none). Key routing rules:
 
-| State | Input bar behavior |
-|-------|-------------------|
-| Idle (no active turn, no overlay) | Accepts chat text and slash commands |
-| Active turn (streaming) | Disabled — input is not accepted |
-| Gremlins watch overlay visible | Accepts chat text and slash commands as normal |
-| Single gremlin watch visible | Accepts slash commands only |
-| Debug widget visible | Input bar disabled; debug prompt inside the overlay accepts debug commands |
+| Screen / state | Input bar behavior |
+|----------------|--------------------|
+| Chat, idle (no active turn) | Accepts chat text and slash commands |
+| Chat, active turn (streaming) | Disabled — input is not accepted |
+| Runs screen | No chat input; `Up`/`Down` move selection, `Ctrl+O` toggles the log pane |
+| Debug screen | Chat input bar disabled; the debug prompt accepts debug commands |
 
-`Esc` in order of priority:
+`Esc` (or the first `Ctrl+C` press) in order of priority:
 
-1. If a blocking overlay is visible (single watch, debug), dismiss the overlay.
-2. If a non-blocking overlay is visible (gremlins watch), dismiss the overlay.
-3. If an active turn is streaming, abort the turn (transition widget to finished, discard partial response).
+1. If the Runs screen's inline log pane is open, close the pane.
+2. If a full-screen view is active (`Runs` or `Debug`), exit back to chat.
+3. If an active turn is streaming, clear the input and cancel the turn
+   (`clear_current_turn` discards the partial turn, tool slots included).
 4. Otherwise, clear the input bar.
 
 ### 8.7 Summary
 
-The TUI is a stack of self-contained widgets laid out top-to-bottom. The
-transcript is the one elastic, overflow-producing widget; reasoning and tools
-are bounded, transient widgets that appear only during a streaming turn; the
-input and info bars are fixed and always pinned. Overlays are widgets pushed
-onto the top of the stack that occlude the content beneath them. The user
-never scrolls within the TUI — tmux and terminal features handle that. Widgets
-describe their own content and lifecycle; `LiveArea` just lays them out,
-commits overflow to scrollback, and diffs the result to the terminal.
+The TUI has two layout modes: the chat scene, and full-screen views (`Runs`,
+`Debug`) that wholly replace it while active. Within chat, widgets are laid
+out top-to-bottom — the transcript is the one elastic, overflow-producing
+widget; reasoning and live tool output are bounded, transient `StreamingWidget`
+children that appear only during a streaming turn; the input and info bars are
+fixed and always pinned. The user never scrolls within the TUI — tmux and
+terminal features handle that. Widgets describe their own content and
+lifecycle; `LiveArea` just lays them out, commits overflow to scrollback, and
+diffs the result to the terminal.
 
 ## 9. Chat backend
 

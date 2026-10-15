@@ -1428,8 +1428,11 @@ impl StreamingWidget {
     pub fn push_text(&mut self, text: &str) {
         self.partial.push_str(text);
         while let Some(newline_pos) = self.partial.find('\n') {
-            let line: String = self.partial[..newline_pos].to_string();
-            self.partial = self.partial[newline_pos + 1..].to_string();
+            // `drain` moves the remainder once per completed line and yields
+            // the line (including the newline) in a single allocation, rather
+            // than reallocating the trailing partial on every line.
+            let mut line: String = self.partial.drain(..=newline_pos).collect();
+            line.pop(); // drop the newline `drain` included
             let idx = self.line_count;
             let styled = self.style_line(&line, idx);
             if self.retain_tail {

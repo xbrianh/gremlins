@@ -366,13 +366,20 @@ impl<B: Backend> LiveArea<B> {
         let gremlin_count = app.gremlin_count_str();
         let ctx = self.render_context(app, &gremlin_count);
         let width = self.cols;
-        let mut widget: &mut dyn LiveAreaWidget = match scene
-            .screen_view
-            .as_mut()
-            .expect("a full-screen view must be shown before compose")
-        {
-            ScreenView::Runs(w) => w,
-            ScreenView::Debug(w) => w,
+        // The `ScreenView` invariant is maintained by the paired
+        // `app.show_*` / `live_area.show_*` calls in `mod.rs`. If those ever
+        // desync, fall back to composing chat instead of panicking in raw
+        // mode (a missed pairing in a future edit must not take the
+        // terminal down).
+        let mut widget: &mut dyn LiveAreaWidget = match scene.screen_view.as_mut() {
+            Some(view) => match view {
+                ScreenView::Runs(w) => w,
+                ScreenView::Debug(w) => w,
+            },
+            None => {
+                log::warn!("compose_screen_view without an active screen view; composing chat");
+                return self.compose_chat(scene, app);
+            }
         };
         let widgets = std::slice::from_mut(&mut widget);
         let layout = layout_widgets(&mut *widgets, width, self.rows, &ctx);
@@ -764,10 +771,11 @@ const WATCH_STREAM_MAX_LINES: usize = 2_000;
 
 /// Full-screen gremlins watch table with an optional inline stream pane.
 ///
-/// The table filters to running gremlins and sorts by id so the selection is
-/// stable regardless of `HashMap` iteration order. When `watch_following` is
-/// set, the view owns an internal vertical split and paints a tail-anchored
-/// live-log pane for the followed id.
+/// The table shows all tracked gremlins — running first, then done/failed/
+/// stopped — and sorts each group by id so the selection is stable regardless
+/// of `HashMap` iteration order. When `watch_following` is set, the view owns
+/// an internal vertical split and paints a tail-anchored live-log pane for
+/// the followed id.
 pub struct RunsView {
     stream_lines: VecDeque<String>,
 }
@@ -793,20 +801,25 @@ impl RunsView {
         self.stream_lines.clear();
     }
 
-    fn running_runs<'a>(
+    fn listed_runs<'a>(
         ctx: &'a RenderContext,
     ) -> Vec<(&'a String, &'a crate::tui::app::ActiveRun)> {
-        let mut runs: Vec<_> = ctx
-            .active_runs
-            .iter()
-            .filter(|(_, run)| run.status == "running")
-            .collect();
-        runs.sort_by(|a, b| a.0.cmp(b.0));
+        let mut runs: Vec<_> = ctx.active_runs.iter().collect();
+        runs.sort_by(|a, b| {
+            let running = |r: &(&String, &crate::tui::app::ActiveRun)| r.1.status != "running";
+            running(a).cmp(&running(b)).then_with(|| a.0.cmp(b.0))
+        });
         runs
     }
 
     fn run_row(id: &str, run: &crate::tui::app::ActiveRun, selected: bool) -> Line<'static> {
-        let glyph = motif::glyph::RUNNING;
+        let glyph = match run.status.as_str() {
+            "running" => motif::glyph::RUNNING,
+            "done" => motif::glyph::DONE,
+            "failed" => motif::glyph::FAILED,
+            "stopped" => motif::glyph::STOPPED,
+            _ => motif::glyph::DONE,
+        };
         let text = if selected {
             format!(
                 "▶ {id}  {glyph} {}  {}  {}",
@@ -848,7 +861,7 @@ impl RunsView {
         ];
         let header_wrapped = wrapped_height(&header_lines, area.width) as u16;
 
-        let runs = Self::running_runs(ctx);
+        let runs = Self::listed_runs(ctx);
         let running = runs.len();
         let total = ctx.active_runs.len();
         let footer_line = Line::from(Span::styled(
@@ -880,7 +893,7 @@ impl RunsView {
         );
         if runs.is_empty() {
             Paragraph::new(vec![Line::from(Span::styled(
-                "  no running gremlins",
+                "  no gremlins",
                 Style::default().fg(DEFAULT_THEME.subtle),
             ))])
             .wrap(Wrap { trim: false })
@@ -2070,6 +2083,22 @@ mod tests {
     fn empty_watch_table_renders_empty_state() {
         let mut live = new_live(40, 8);
         let mut app = App::new();
+
+        app.screen = Screen::Runs;
+        live.show_runs();
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("no gremlins"),
+            "A watch table with no runs at all should render an empty state.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn watch_table_shows_finished_runs() {
+        let mut live = new_live(40, 8);
+        let mut app = App::new();
         app.project_name = "gremlins".to_string();
 
         app.active_runs.insert(
@@ -2088,12 +2117,12 @@ mod tests {
 
         let visible = dump_buffer(live.backend().buffer());
         assert!(
-            visible.contains("no running gremlins"),
-            "Watch table should render an empty state when nothing is running.\nBuffer:\n{visible}"
+            visible.contains("g1"),
+            "Finished runs must stay in the watch table.\nBuffer:\n{visible}"
         );
         assert!(
-            !visible.contains("g1"),
-            "Finished runs must be filtered out of the watch table.\nBuffer:\n{visible}"
+            visible.contains(motif::glyph::DONE),
+            "A finished run should render its own status glyph.\nBuffer:\n{visible}"
         );
     }
 

@@ -72,6 +72,17 @@ impl SandboxMode {
     }
 }
 
+/// One live tool-output chunk streamed from a running tool into the TUI's
+/// embedded tool slot. Display-only; never reaches the model or the
+/// permanent transcript.
+#[derive(Clone, Debug)]
+pub(crate) struct ToolOutputLine {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) call: String,
+    pub(crate) text: String,
+}
+
 #[derive(Clone)]
 pub(crate) struct ToolContext {
     pub cwd: Option<PathBuf>,
@@ -86,11 +97,8 @@ pub(crate) struct ToolContext {
     /// tool calls (used only by `Fork`). `None` when unavailable.
     pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
     /// Optional live-output channel for streaming tool output lines from
-    /// `Bash` and `WebSearch` into the interactive TUI live pane. Each tuple
-    /// carries the tool-call id, the bare tool name, the formatted tool
-    /// call, and the output text.
-    pub(crate) tool_output:
-        Option<tokio::sync::broadcast::Sender<(String, String, String, String)>>,
+    /// `Bash` and `WebSearch` into the interactive TUI live pane.
+    pub(crate) tool_output: Option<tokio::sync::broadcast::Sender<ToolOutputLine>>,
 }
 
 impl ToolContext {
@@ -99,12 +107,12 @@ impl ToolContext {
     /// model are unaffected.
     pub(crate) fn emit_output(&self, id: &str, name: &str, call: &str, text: &str) {
         if let Some(tx) = &self.tool_output {
-            let _ = tx.send((
-                id.to_string(),
-                name.to_string(),
-                call.to_string(),
-                text.to_string(),
-            ));
+            let _ = tx.send(ToolOutputLine {
+                id: id.to_string(),
+                name: name.to_string(),
+                call: call.to_string(),
+                text: text.to_string(),
+            });
         }
     }
 }
@@ -1439,34 +1447,65 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
+/// Cursor state for [`emit_live_lines`]: `scan` marks the start of the line
+/// currently being assembled and `searched` how far into the buffer the
+/// previous call already looked for newlines.
+struct LineScanner {
+    scan: usize,
+    searched: usize,
+}
+
+impl LineScanner {
+    fn new() -> Self {
+        Self {
+            scan: 0,
+            searched: 0,
+        }
+    }
+}
+
 fn emit_live_lines(
     id: &str,
     name: &str,
     call: &str,
     ctx: &ToolContext,
     bytes: &[u8],
-    scan: &mut usize,
+    scanner: &mut LineScanner,
     flush: bool,
 ) {
-    // Emit each completed line as a separate chunk. A trailing newline is
-    // included so downstream line-buffered widgets can split without further
-    // knowledge of the tool's line discipline.
-    while *scan < bytes.len() {
-        let pos = match bytes[*scan..].iter().position(|&b| b == b'\n') {
+    // `scanner.scan` marks the start of the line currently being assembled;
+    // `scanner.searched` is how far into `bytes` the previous call already
+    // looked for newlines. Each call only searches the region appended since
+    // the last call, so a long newline-free run costs O(new bytes) instead of
+    // re-scanning the whole accumulated buffer on every 8 KiB read (the old
+    // `bytes[scan..]` scan was O(n²) on newline-free output).
+    //
+    // Completed lines are coalesced into a single chunk so a busy command
+    // that emits hundreds of lines per read costs one channel event rather
+    // than one event per line — per-line chunks would crowd the terminal
+    // `ToolResult`/`TurnComplete`/`Done` control events out of the bounded
+    // chat channel. Downstream line-buffered widgets split on `\n` anyway.
+    let mut merged = String::new();
+    let mut cursor = scanner.searched;
+    while cursor < bytes.len() {
+        let pos = match bytes[cursor..].iter().position(|&b| b == b'\n') {
             Some(pos) => pos,
             None => break,
         };
-        let end = *scan + pos;
-        let mut line = String::from_utf8_lossy(&bytes[*scan..end]).into_owned();
-        line.push('\n');
-        ctx.emit_output(id, name, call, &line);
-        *scan = end + 1;
+        let end = cursor + pos;
+        merged.push_str(&String::from_utf8_lossy(&bytes[scanner.scan..end]));
+        merged.push('\n');
+        cursor = end + 1;
+        scanner.scan = cursor;
     }
-    if flush && *scan < bytes.len() {
-        let mut line = String::from_utf8_lossy(&bytes[*scan..]).into_owned();
-        line.push('\n');
-        ctx.emit_output(id, name, call, &line);
-        *scan = bytes.len();
+    scanner.searched = bytes.len();
+    if flush && scanner.scan < bytes.len() {
+        merged.push_str(&String::from_utf8_lossy(&bytes[scanner.scan..]));
+        merged.push('\n');
+        scanner.scan = bytes.len();
+    }
+    if !merged.is_empty() {
+        ctx.emit_output(id, name, call, &merged);
     }
 }
 
@@ -1537,8 +1576,8 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) ->
         let mut stdout_done = stdout.is_none();
         let mut stderr_done = stderr.is_none();
         let mut read_error: Option<std::io::Error> = None;
-        let mut out_scan = 0usize;
-        let mut err_scan = 0usize;
+        let mut out_scanner = LineScanner::new();
+        let mut err_scanner = LineScanner::new();
         loop {
             if read_error.is_some() || (stdout_done && stderr_done) {
                 break;
@@ -1554,7 +1593,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) ->
                         }
                         Ok(n) => {
                             out.extend_from_slice(&out_buf[..n]);
-                            emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scan, false);
+                            emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, false);
                         }
                         Err(e) => {
                             stdout = None;
@@ -1572,7 +1611,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) ->
                         }
                         Ok(n) => {
                             err.extend_from_slice(&err_buf[..n]);
-                            emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scan, false);
+                            emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, false);
                         }
                         Err(e) => {
                             stderr = None;
@@ -1585,8 +1624,8 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) ->
         if let Some(e) = read_error {
             return Err(e);
         }
-        emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scan, true);
-        emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scan, true);
+        emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, true);
+        emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, true);
         Ok(())
     };
 
@@ -1732,8 +1771,8 @@ async fn websearch_invoke_with_cap(
         let mut stderr_done = stderr.is_none();
         let out_limit = data_limit;
         let err_limit = data_limit;
-        let mut out_scan = 0usize;
-        let mut err_scan = 0usize;
+        let mut out_scanner = LineScanner::new();
+        let mut err_scanner = LineScanner::new();
         loop {
             if capped || (stdout_done && stderr_done) {
                 break;
@@ -1752,7 +1791,7 @@ async fn websearch_invoke_with_cap(
                             }
                             let take = n.min(remaining);
                             out.extend_from_slice(&out_buf[..take]);
-                            emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scan, false);
+                            emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, false);
                             if take < n {
                                 capped = true;
                                 break;
@@ -1777,7 +1816,7 @@ async fn websearch_invoke_with_cap(
                             if body_room > 0 {
                                 let take = n.min(err_room);
                                 err.extend_from_slice(&err_buf[..take]);
-                                emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scan, false);
+                                emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, false);
                             } else if err_room == 0 {
                                 stderr_done = true;
                             }
@@ -1786,8 +1825,8 @@ async fn websearch_invoke_with_cap(
                 }
             }
         }
-        emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scan, true);
-        emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scan, true);
+        emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, true);
+        emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, true);
         capped
     };
     let capped = match tokio::time::timeout(Duration::from_secs(timeout_secs), read_all).await {
@@ -2701,6 +2740,53 @@ mod tests {
         // the interpreter is `bash` rather than a POSIX shell.
         let bash_only = serde_json::json!({"command": "diff <(echo a) <(echo a)"}).to_string();
         assert_eq!(bash_invoke(&c, &bash_only, "tool-test-id").await.trim(), "");
+    }
+
+    #[tokio::test]
+    async fn bash_streaming_emits_completed_lines_and_final_flush() {
+        let dir = tmp();
+        let mut c = ctx(&dir);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<ToolOutputLine>(8);
+        c.tool_output = Some(tx);
+
+        // No trailing newline: the final flush must emit the trailing partial
+        // with an appended `\n`.
+        let args = serde_json::json!({ "command": "printf 'a\\nbb\\nccc'" }).to_string();
+        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        assert_eq!(out, "a\nbb\nccc");
+
+        let mut chunks = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(line) => {
+                    assert_eq!(line.id, "tool-test-id");
+                    assert_eq!(line.name, "Bash");
+                    chunks.push(line.text);
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            }
+        }
+        let joined: String = chunks.concat();
+        assert_eq!(
+            joined, "a\nbb\nccc\n",
+            "live chunks must preserve line boundaries and flush the trailing partial"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_interleaved_stdout_stderr_preserves_stdout_then_stderr() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        // Interleave stdout/stderr writes so completion order is not trivially
+        // the emission order; the result string must still be stdout-then-stderr.
+        let args = serde_json::json!(
+            { "command": "printf out1; printf err1 >&2; printf out2; printf err2 >&2" }
+        )
+        .to_string();
+        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        assert_eq!(out, "out1out2err1err2");
     }
 
     #[tokio::test]
