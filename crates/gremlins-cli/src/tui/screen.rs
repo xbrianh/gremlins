@@ -15,6 +15,7 @@
 //! visible frame. The closure paints the visible tail into `curr` —
 //! the overflow content was already committed separately.
 
+use std::collections::VecDeque;
 use std::io::{self, Stdout};
 
 use crossterm::{
@@ -31,7 +32,7 @@ use ratatui::{
 };
 
 use crate::tui::app::App;
-use crate::tui::buffer::wrapped_height;
+use crate::tui::buffer::{line_wrapped_height, wrapped_height};
 use crate::tui::motif;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{
@@ -71,7 +72,6 @@ impl Default for Scene {
 /// Full-screen view bodies, typed by the screen they belong to.
 enum ScreenView {
     Runs(RunsView),
-    Log(LogView),
     Debug(DebugWidget),
 }
 
@@ -327,6 +327,9 @@ impl<B: Backend> LiveArea<B> {
             gremlin_count,
             project_name: app.project_name_str(),
             active_runs: &app.active_runs,
+            watch_selection: app.watch_selection.as_deref(),
+            watch_following: app.watch_following.as_deref(),
+            watch_follow_error: app.watch_follow_error.as_deref(),
             completion_preview: app.completion_preview_suffix(),
         }
     }
@@ -369,7 +372,6 @@ impl<B: Backend> LiveArea<B> {
             .expect("a full-screen view must be shown before compose")
         {
             ScreenView::Runs(w) => w,
-            ScreenView::Log(w) => w,
             ScreenView::Debug(w) => w,
         };
         let widgets = std::slice::from_mut(&mut widget);
@@ -415,11 +417,6 @@ impl<B: Backend> LiveArea<B> {
         self.scene.screen_view = Some(ScreenView::Runs(RunsView::new()));
     }
 
-    /// Show the full-screen single-gremlin log view.
-    pub fn show_log(&mut self, id: String) {
-        self.scene.screen_view = Some(ScreenView::Log(LogView::new(id)));
-    }
-
     /// Show the full-screen interactive debug session.
     pub fn show_debug(&mut self, id: String) {
         self.scene.screen_view = Some(ScreenView::Debug(DebugWidget::new(id)));
@@ -440,9 +437,9 @@ impl<B: Backend> LiveArea<B> {
         &mut self.scene.input_bar
     }
 
-    fn log_view_mut(&mut self) -> Option<&mut LogView> {
+    fn runs_view_mut(&mut self) -> Option<&mut RunsView> {
         match self.scene.screen_view.as_mut() {
-            Some(ScreenView::Log(w)) => Some(w),
+            Some(ScreenView::Runs(w)) => Some(w),
             _ => None,
         }
     }
@@ -599,10 +596,17 @@ impl<B: Backend> LiveArea<B> {
 
     // ── Full-screen view mutation ───────────────────────────────
 
-    /// Push a log line into the full-screen log view, if present.
-    pub fn push_log_view_line(&mut self, line: String) {
-        if let Some(w) = self.log_view_mut() {
-            w.push_line(line);
+    /// Push a log line into the watch stream pane, if present.
+    pub fn push_watch_line(&mut self, line: String) {
+        if let Some(w) = self.runs_view_mut() {
+            w.push_stream_line(line);
+        }
+    }
+
+    /// Clear the watch stream pane's log buffer.
+    pub fn clear_watch_stream(&mut self) {
+        if let Some(w) = self.runs_view_mut() {
+            w.clear_stream();
         }
     }
 
@@ -739,15 +743,334 @@ impl<B: Backend> Drop for LiveArea<B> {
     }
 }
 
-/// Full-screen gremlins watch table.
+/// Minimum rows kept for the inline stream body so the wrapped header cannot
+/// crowd the live tail out of a short or narrow terminal.
+const WATCH_STREAM_MIN_BODY_ROWS: u16 = 3;
+
+/// Maximum number of raw log lines retained in the inline stream pane. The
+/// renderer still tail-slices by wrapped rows, but this bound keeps the
+/// per-frame mapping cost independent of how long the pane has been open.
+const WATCH_STREAM_MAX_LINES: usize = 2_000;
+
+/// Full-screen gremlins watch table with an optional inline stream pane.
 ///
-/// Reads the run table straight from the render context: no persistent
-/// buffer, no height cap, no overflow.
-pub struct RunsView;
+/// The table filters to running gremlins and sorts by id so the selection is
+/// stable regardless of `HashMap` iteration order. When `watch_following` is
+/// set, the view owns an internal vertical split and paints a tail-anchored
+/// live-log pane for the followed id.
+pub struct RunsView {
+    stream_lines: VecDeque<String>,
+}
 
 impl RunsView {
     pub fn new() -> Self {
-        Self
+        Self {
+            stream_lines: VecDeque::new(),
+        }
+    }
+
+    /// Append a line to the inline stream pane, dropping the oldest raw lines
+    /// once the bounded buffer is full.
+    pub fn push_stream_line(&mut self, line: String) {
+        self.stream_lines.push_back(line);
+        while self.stream_lines.len() > WATCH_STREAM_MAX_LINES {
+            self.stream_lines.pop_front();
+        }
+    }
+
+    /// Clear the inline stream pane's log buffer.
+    pub fn clear_stream(&mut self) {
+        self.stream_lines.clear();
+    }
+
+    fn running_runs<'a>(
+        ctx: &'a RenderContext,
+    ) -> Vec<(&'a String, &'a crate::tui::app::ActiveRun)> {
+        let mut runs: Vec<_> = ctx
+            .active_runs
+            .iter()
+            .filter(|(_, run)| run.status == "running")
+            .collect();
+        runs.sort_by(|a, b| a.0.cmp(b.0));
+        runs
+    }
+
+    fn run_row(id: &str, run: &crate::tui::app::ActiveRun, selected: bool) -> Line<'static> {
+        let glyph = motif::glyph::RUNNING;
+        let text = if selected {
+            format!(
+                "▶ {id}  {glyph} {}  {}  {}",
+                run.status, run.stage, run.definition
+            )
+        } else {
+            format!(
+                "  {id}  {glyph} {}  {}  {}",
+                run.status, run.stage, run.definition
+            )
+        };
+        let style = if selected {
+            Style::default()
+                .fg(DEFAULT_THEME.midnight)
+                .bg(DEFAULT_THEME.cursor)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(DEFAULT_THEME.text)
+        };
+        Line::from(Span::styled(text, style))
+    }
+
+    fn render_table(&self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let header_style = Style::default()
+            .fg(DEFAULT_THEME.heading_primary)
+            .add_modifier(Modifier::BOLD);
+        let header_lines = vec![
+            Line::from(Span::styled("  g r e m l i n s", header_style)),
+            motif::streamline_rule_brass(area.width),
+        ];
+        let header_wrapped = wrapped_height(&header_lines, area.width) as u16;
+
+        let runs = Self::running_runs(ctx);
+        let running = runs.len();
+        let total = ctx.active_runs.len();
+        let footer_line = Line::from(Span::styled(
+            format!("  {running} running · {total} total"),
+            Style::default()
+                .fg(DEFAULT_THEME.accent_secondary)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let footer_wrapped = line_wrapped_height(&footer_line, area.width) as u16;
+
+        // Pin the header and footer, and give the run list the space between
+        // them. On a one-row viewport the footer wins and the list disappears.
+        let footer_rows = footer_wrapped.min(area.height);
+        let header_rows = header_wrapped.min(area.height.saturating_sub(footer_rows));
+        let body_rows = area
+            .height
+            .saturating_sub(header_rows)
+            .saturating_sub(footer_rows);
+
+        Paragraph::new(header_lines)
+            .wrap(Wrap { trim: false })
+            .render(Rect::new(area.x, area.y, area.width, header_rows), buf);
+
+        let body_area = Rect::new(
+            area.x,
+            area.y.saturating_add(header_rows),
+            area.width,
+            body_rows,
+        );
+        if runs.is_empty() {
+            Paragraph::new(vec![Line::from(Span::styled(
+                "  no running gremlins",
+                Style::default().fg(DEFAULT_THEME.subtle),
+            ))])
+            .wrap(Wrap { trim: false })
+            .render(body_area, buf);
+        } else {
+            // Scroll a contiguous window of running rows so the highlighted
+            // id stays visible even when the sorted list is taller than the
+            // table body.
+            let selected_idx = ctx
+                .watch_selection
+                .and_then(|selected| runs.iter().position(|(id, _)| (*id).as_str() == selected))
+                .unwrap_or(0);
+            let run_lines: Vec<Line<'static>> = runs
+                .iter()
+                .map(|(id, run)| {
+                    Self::run_row(
+                        (*id).as_str(),
+                        run,
+                        ctx.watch_selection == Some((*id).as_str()),
+                    )
+                })
+                .collect();
+
+            let mut prefix = Vec::with_capacity(run_lines.len() + 1);
+            prefix.push(0usize);
+            for line in &run_lines {
+                let next =
+                    prefix.last().copied().unwrap_or(0) + line_wrapped_height(line, area.width);
+                prefix.push(next);
+            }
+
+            let visible_rows = body_rows as usize;
+            let mut start = 0usize;
+            while start < selected_idx && prefix[selected_idx + 1] - prefix[start] > visible_rows {
+                start += 1;
+            }
+            let mut end = start;
+            while end < run_lines.len() && prefix[end + 1] - prefix[start] <= visible_rows {
+                end += 1;
+            }
+
+            Paragraph::new(run_lines[start..end].to_vec())
+                .wrap(Wrap { trim: false })
+                .render(body_area, buf);
+        }
+
+        if footer_rows > 0 {
+            let footer_area = Rect::new(
+                area.x,
+                area.y.saturating_add(header_rows).saturating_add(body_rows),
+                area.width,
+                footer_rows,
+            );
+            Paragraph::new(vec![footer_line])
+                .wrap(Wrap { trim: false })
+                .render(footer_area, buf);
+        }
+    }
+
+    fn render_stream(&self, area: Rect, buf: &mut Buffer, ctx: &RenderContext, id: &str) {
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].reset();
+            }
+        }
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let status = ctx
+            .active_runs
+            .get(id)
+            .map(|run| (run.status.as_str(), run.stage.as_str()))
+            .unwrap_or(("unknown", ""));
+        let finished = status.0 != "running";
+        let stream_error = ctx.watch_follow_error;
+
+        let header_label = if stream_error.is_some() {
+            "◆ stream error: "
+        } else {
+            "◆ following: "
+        };
+        let mut header_spans = vec![
+            Span::styled(
+                header_label,
+                Style::default()
+                    .fg(DEFAULT_THEME.heading_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                id.to_string(),
+                Style::default()
+                    .fg(DEFAULT_THEME.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if let Some(selected) = ctx.watch_selection {
+            header_spans.push(Span::styled(
+                "  selected: ",
+                Style::default().fg(DEFAULT_THEME.subtle),
+            ));
+            header_spans.push(Span::styled(
+                selected.to_string(),
+                Style::default().fg(DEFAULT_THEME.chrome),
+            ));
+        }
+
+        let status_line = Line::from(vec![
+            Span::styled("  status: ", Style::default().fg(DEFAULT_THEME.subtle)),
+            Span::styled(
+                status.0.to_string(),
+                match status.0 {
+                    "running" => Style::default().fg(DEFAULT_THEME.success),
+                    "failed" => Style::default().fg(DEFAULT_THEME.danger),
+                    _ => Style::default().fg(DEFAULT_THEME.text),
+                },
+            ),
+            Span::styled("  stage: ", Style::default().fg(DEFAULT_THEME.subtle)),
+            Span::styled(
+                status.1.to_string(),
+                Style::default().fg(DEFAULT_THEME.subtle),
+            ),
+        ]);
+
+        let header_lines = vec![Line::from(header_spans), status_line];
+        let header_wrapped = wrapped_height(&header_lines, area.width) as u16;
+
+        let mut footer_lines: Vec<Line<'static>> = Vec::new();
+        if let Some(message) = stream_error {
+            footer_lines.push(Line::from(Span::styled(
+                format!("  ◆ disconnected: {message}"),
+                Style::default()
+                    .fg(DEFAULT_THEME.danger)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        } else if finished {
+            footer_lines.push(Line::from(Span::styled(
+                "  ◆ stream finished",
+                Style::default()
+                    .fg(DEFAULT_THEME.accent_secondary)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        let footer_wrapped = if footer_lines.is_empty() {
+            0
+        } else {
+            wrapped_height(&footer_lines, area.width) as u16
+        };
+
+        // Reserve a minimum body band for the log tail, then pin the footer
+        // and let the wrapped header take whatever remains.
+        let footer_rows = footer_wrapped.min(area.height);
+        let max_header_rows = area
+            .height
+            .saturating_sub(footer_rows)
+            .saturating_sub(WATCH_STREAM_MIN_BODY_ROWS);
+        let header_rows = header_wrapped.min(max_header_rows);
+        let body_rows = area
+            .height
+            .saturating_sub(header_rows)
+            .saturating_sub(footer_rows);
+
+        if header_rows > 0 {
+            Paragraph::new(header_lines)
+                .wrap(Wrap { trim: false })
+                .render(Rect::new(area.x, area.y, area.width, header_rows), buf);
+        }
+
+        let body_area = Rect::new(
+            area.x,
+            area.y.saturating_add(header_rows),
+            area.width,
+            body_rows,
+        );
+        let log_lines: Vec<Line<'static>> = self
+            .stream_lines
+            .iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(DEFAULT_THEME.text),
+                ))
+            })
+            .collect();
+
+        // Tail-anchored by wrapped terminal rows, so a long wrapping entry
+        // never pushes the newest output below the visible body.
+        render_wrapped_tail(&log_lines, body_area, buf, body_rows as usize);
+
+        if footer_rows > 0 {
+            let footer_area = Rect::new(
+                area.x,
+                area.y.saturating_add(header_rows).saturating_add(body_rows),
+                area.width,
+                footer_rows,
+            );
+            Paragraph::new(footer_lines)
+                .wrap(Wrap { trim: false })
+                .render(footer_area, buf);
+        }
     }
 }
 
@@ -781,190 +1104,21 @@ impl LiveAreaWidget for RunsView {
                 buf[(area.x + x, area.y + y)].reset();
             }
         }
-
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
-        let header_style = Style::default()
-            .fg(DEFAULT_THEME.heading_primary)
-            .add_modifier(Modifier::BOLD);
-        lines.push(Line::from(Span::styled("  g r e m l i n s", header_style)));
-        lines.push(motif::streamline_rule_brass(area.width));
-
-        let mut runs: Vec<(&String, &crate::tui::app::ActiveRun)> =
-            ctx.active_runs.iter().collect();
-        runs.sort_by(|a, b| a.0.cmp(b.0));
-
-        for (id, run) in runs {
-            let (status_glyph, status_style) = match run.status.as_str() {
-                "running" => (
-                    motif::glyph::RUNNING,
-                    Style::default().fg(DEFAULT_THEME.success),
-                ),
-                "failed" => (
-                    motif::glyph::FAILED,
-                    Style::default().fg(DEFAULT_THEME.danger),
-                ),
-                "stopped" => (
-                    motif::glyph::STOPPED,
-                    Style::default().fg(DEFAULT_THEME.subtle),
-                ),
-                _ => (
-                    motif::glyph::DONE,
-                    Style::default().fg(DEFAULT_THEME.chrome),
-                ),
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(id.clone(), Style::default().fg(DEFAULT_THEME.text)),
-                Span::raw("  "),
-                Span::styled(format!("{status_glyph} "), status_style),
-                Span::styled(run.status.clone(), status_style),
-                Span::raw("  "),
-                Span::styled(run.stage.clone(), Style::default().fg(DEFAULT_THEME.subtle)),
-                Span::raw("  "),
-                Span::styled(
-                    run.definition.clone(),
-                    Style::default().fg(DEFAULT_THEME.subtle),
-                ),
-            ]));
+        if area.width == 0 || area.height == 0 {
+            return;
         }
 
-        let running = ctx
-            .active_runs
-            .values()
-            .filter(|r| r.status == "running")
-            .count();
-        let total = ctx.active_runs.len();
-        lines.push(Line::from(Span::styled(
-            format!("  {running} running · {total} total"),
-            Style::default()
-                .fg(DEFAULT_THEME.accent_secondary)
-                .add_modifier(Modifier::BOLD),
-        )));
-
-        if !lines.is_empty() {
-            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-            paragraph.render(area, buf);
-        }
-    }
-}
-
-/// Full-screen single-gremlin log viewer.
-///
-/// Owns its target id and log-line buffer. The header reflects the live
-/// status/stage from the render context; the body is a tail-anchored log.
-pub struct LogView {
-    id: String,
-    log_lines: Vec<String>,
-}
-
-impl LogView {
-    pub fn new(id: String) -> Self {
-        Self {
-            id,
-            log_lines: Vec::new(),
-        }
-    }
-
-    /// Append a log line.
-    pub fn push_line(&mut self, line: String) {
-        self.log_lines.push(line);
-    }
-}
-
-impl LiveAreaWidget for LogView {
-    #[cfg(feature = "telemetry")]
-    fn name(&self) -> &'static str {
-        "log_view"
-    }
-
-    fn size_priority(&self) -> i32 {
-        50
-    }
-
-    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
-        0
-    }
-
-    fn flexible(&self, _ctx: &RenderContext) -> bool {
-        true
-    }
-
-    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
-        for y in 0..area.height {
-            for x in 0..area.width {
-                buf[(area.x + x, area.y + y)].reset();
+        match ctx.watch_following {
+            Some(following) if area.width >= 2 => {
+                let left_width = area.width / 2;
+                let right_width = area.width - left_width;
+                let left_area = Rect::new(area.x, area.y, left_width, area.height);
+                let right_area = Rect::new(area.x + left_width, area.y, right_width, area.height);
+                self.render_table(left_area, buf, ctx);
+                self.render_stream(right_area, buf, ctx, following);
             }
+            _ => self.render_table(area, buf, ctx),
         }
-
-        let header = Line::from(vec![
-            Span::styled(
-                "◆ following: ",
-                Style::default()
-                    .fg(DEFAULT_THEME.heading_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                self.id.clone(),
-                Style::default()
-                    .fg(DEFAULT_THEME.danger)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " ◆",
-                Style::default()
-                    .fg(DEFAULT_THEME.heading_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-
-        let status = ctx
-            .active_runs
-            .get(&self.id)
-            .map(|run| (run.status.clone(), run.stage.clone()))
-            .unwrap_or_else(|| ("unknown".to_string(), String::new()));
-        let status_text = status.0;
-        let status_line = Line::from(vec![
-            Span::styled("  status: ", Style::default().fg(DEFAULT_THEME.subtle)),
-            Span::styled(
-                status_text.clone(),
-                match status_text.as_str() {
-                    "running" => Style::default().fg(DEFAULT_THEME.success),
-                    "failed" => Style::default().fg(DEFAULT_THEME.danger),
-                    _ => Style::default().fg(DEFAULT_THEME.text),
-                },
-            ),
-            Span::styled("  stage: ", Style::default().fg(DEFAULT_THEME.subtle)),
-            Span::styled(status.1, Style::default().fg(DEFAULT_THEME.subtle)),
-        ]);
-
-        let header_lines = vec![header, status_line, Line::from("")];
-        let header_rows = (wrapped_height(&header_lines, area.width) as u16).min(area.height);
-        Paragraph::new(header_lines)
-            .wrap(Wrap { trim: false })
-            .render(Rect::new(area.x, area.y, area.width, header_rows), buf);
-
-        let body_area = Rect::new(
-            area.x,
-            area.y.saturating_add(header_rows),
-            area.width,
-            area.height.saturating_sub(header_rows),
-        );
-        let body_rows = body_area.height as usize;
-        let log_lines: Vec<Line<'static>> = self
-            .log_lines
-            .iter()
-            .map(|line| {
-                Line::from(Span::styled(
-                    line.clone(),
-                    Style::default().fg(DEFAULT_THEME.text),
-                ))
-            })
-            .collect();
-
-        // Tail-anchored by wrapped terminal rows, so a long wrapping entry
-        // never pushes the newest output below the visible body.
-        render_wrapped_tail(&log_lines, body_area, buf, body_rows);
     }
 }
 
@@ -1769,7 +1923,7 @@ mod tests {
     }
 
     #[test]
-    fn log_screen_shows_status_header_and_tail_log() {
+    fn watch_pane_shows_followed_stream_and_status() {
         let mut live = new_live(80, 20);
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
@@ -1786,31 +1940,31 @@ mod tests {
 
         live.push_transcript_line("chat seed line".to_string());
 
-        app.screen = Screen::Log {
-            id: "g1".to_string(),
-        };
-        live.show_log("g1".to_string());
-        live.push_log_view_line("log one".to_string());
-        live.push_log_view_line("log two".to_string());
+        app.screen = Screen::Runs;
+        app.watch_selection = Some("g1".to_string());
+        app.watch_following = Some("g1".to_string());
+        live.show_runs();
+        live.push_watch_line("log one".to_string());
+        live.push_watch_line("log two".to_string());
 
         live.compose(&app).unwrap();
 
         let visible = dump_buffer(live.backend().buffer());
         assert!(
             visible.contains("following: g1"),
-            "Log view should render its header.\nBuffer:\n{visible}"
+            "Watch pane should render its header.\nBuffer:\n{visible}"
         );
         assert!(
             visible.contains("running") && visible.contains("build"),
-            "Log view should render live status and stage.\nBuffer:\n{visible}"
+            "Watch pane should render live status and stage.\nBuffer:\n{visible}"
         );
         assert!(
             visible.contains("log two"),
-            "Log view should show the newest log line.\nBuffer:\n{visible}"
+            "Watch pane should show the newest log line.\nBuffer:\n{visible}"
         );
         assert!(
             !visible.contains("chat seed line"),
-            "Chat transcript must be occluded by the log screen.\nBuffer:\n{visible}"
+            "Chat transcript must be occluded by the watch screen.\nBuffer:\n{visible}"
         );
 
         // Esc returns to chat.
@@ -1824,29 +1978,70 @@ mod tests {
         );
         assert!(
             !visible.contains("following: g1"),
-            "Log view text must not survive the switch back to chat.\nBuffer:\n{visible}"
+            "Watch pane text must not survive the switch back to chat.\nBuffer:\n{visible}"
         );
     }
 
     #[test]
-    fn log_view_tail_accounts_for_wrapped_lines() {
-        let mut live = new_live(12, 10);
+    fn watch_pane_keeps_tail_and_marks_finished_run() {
+        let mut live = new_live(80, 20);
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
 
-        app.screen = Screen::Log {
-            id: "g1".to_string(),
-        };
-        live.show_log("g1".to_string());
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "failed".to_string(),
+                stage: "build".to_string(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+            },
+        );
 
-        // Four 13-char lines wrap to two rows each at width 12, followed by a
-        // long newest line. The body is only 7 rows tall, so a log-line-count
-        // tail would clip the newest entry; a wrapped-row tail keeps it
-        // visible.
+        app.screen = Screen::Runs;
+        app.watch_selection = Some("g1".to_string());
+        app.watch_following = Some("g1".to_string());
+        live.show_runs();
+        live.push_watch_line("final terminal line".to_string());
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("final terminal line"),
+            "A non-running followed id must keep its rendered log tail.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("stream finished"),
+            "A non-running followed id must be marked finished.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn watch_pane_tail_accounts_for_wrapped_lines() {
+        let mut live = new_live(40, 10);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "running".to_string(),
+                stage: "build".to_string(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+            },
+        );
+
+        app.screen = Screen::Runs;
+        app.watch_selection = Some("g1".to_string());
+        app.watch_following = Some("g1".to_string());
+        live.show_runs();
+
         for i in 0..4 {
-            live.push_log_view_line(format!("prior {i} long!"));
+            live.push_watch_line(format!("prior {i} long line wraps!"));
         }
-        live.push_log_view_line("NEWEST_TAIL_END".to_string());
+        live.push_watch_line("NEWEST_TAIL_END".to_string());
 
         live.compose(&app).unwrap();
 
@@ -1854,6 +2049,37 @@ mod tests {
         assert!(
             visible.contains("NEWEST"),
             "The newest log line should remain visible after wrapping.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn empty_watch_table_renders_empty_state() {
+        let mut live = new_live(40, 8);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "done".to_string(),
+                stage: "done".to_string(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+            },
+        );
+
+        app.screen = Screen::Runs;
+        live.show_runs();
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("no running gremlins"),
+            "Watch table should render an empty state when nothing is running.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("g1"),
+            "Finished runs must be filtered out of the watch table.\nBuffer:\n{visible}"
         );
     }
 
@@ -1913,10 +2139,11 @@ mod tests {
     fn screen_mutation_methods_feed_views() {
         let mut live = new_live(80, 24);
 
-        // Full-screen log view.
-        live.show_log("g1".to_string());
-        live.push_log_view_line("log line one".to_string());
-        live.push_log_view_line("log line two".to_string());
+        // Inline watch stream pane.
+        live.show_runs();
+        live.push_watch_line("watch line one".to_string());
+        live.push_watch_line("watch line two".to_string());
+        live.clear_watch_stream();
 
         // Full-screen debug view.
         live.show_debug("g1".to_string());

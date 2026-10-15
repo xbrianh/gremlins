@@ -28,11 +28,105 @@ use editor::{open_editor, ReaderChannels, SuspendHandle};
 use gremlins::executor::socket;
 use screen::LiveArea;
 
-/// Abort the dedicated log-follow task for the full-screen log view.
-fn abort_log_view_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
+/// Drop-guard that aborts a JoinHandle on drop, ensuring a dedicated
+/// log-follow socket is closed even when the outer forwarding task is
+/// cancelled via `abort()`.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Abort the dedicated log-follow task for the watch stream pane.
+fn abort_watch_follow(handle: &mut Option<tokio::task::JoinHandle<()>>) {
     if let Some(handle) = handle.take() {
         handle.abort();
     }
+}
+
+/// Close the watch stream pane: release the follow socket and clear the
+/// rendered log tail.
+fn close_watch_follow(
+    app: &mut App,
+    live_area: &mut LiveArea,
+    watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    abort_watch_follow(watch_follow_handle);
+    app.watch_following = None;
+    app.watch_follow_error = None;
+    live_area.clear_watch_stream();
+}
+
+/// Open (or switch) the watch stream pane for `id`.
+///
+/// At most one watch follow socket exists at a time: any prior follow is
+/// aborted before the new one is spawned. Lines are scoped through the
+/// existing `view_log` channel so queued lines from a superseded follow are
+/// never painted into the new pane.
+fn start_watch_follow(
+    app: &mut App,
+    live_area: &mut LiveArea,
+    client: &Arc<client::DaemonClient>,
+    id: String,
+    log_tx: &mpsc::UnboundedSender<serde_json::Value>,
+    watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    watch_follow_generation: &mut u64,
+) {
+    abort_watch_follow(watch_follow_handle);
+    live_area.clear_watch_stream();
+    app.watch_following = Some(id.clone());
+    app.watch_follow_error = None;
+
+    // Each follow is tagged with a unique generation so messages queued by
+    // an aborted/superseded follow are never accepted after the same id is
+    // reopened.
+    *watch_follow_generation = watch_follow_generation.wrapping_add(1);
+    let generation = *watch_follow_generation;
+
+    let log_tx = log_tx.clone();
+    let client = Arc::clone(client);
+    let follow_id = id.clone();
+    let follow_task = tokio::spawn(async move {
+        match client.follow_log(&follow_id).await {
+            Ok((mut rx, handle)) => {
+                let _guard = AbortOnDrop(handle);
+                while let Some(raw) = rx.recv().await {
+                    let Some(line) = raw.get("line").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let tagged = serde_json::json!({
+                        "type": "view_log",
+                        "id": follow_id,
+                        "generation": generation,
+                        "line": line,
+                    });
+                    if log_tx.send(tagged).is_err() {
+                        break;
+                    }
+                }
+                // The socket closed without an explicit run-terminal event.
+                // Surface that state instead of leaving the pane claiming it
+                // is actively following.
+                let _ = log_tx.send(serde_json::json!({
+                    "type": "view_error",
+                    "id": follow_id,
+                    "generation": generation,
+                    "message": "log stream closed",
+                }));
+            }
+            Err(e) => {
+                let _ = log_tx.send(serde_json::json!({
+                    "type": "view_error",
+                    "id": follow_id,
+                    "generation": generation,
+                    "message": e,
+                }));
+            }
+        }
+    });
+    *watch_follow_handle = Some(follow_task);
 }
 
 /// Ctrl+C is treated as a reset key (exactly like Esc). A second press
@@ -61,8 +155,7 @@ fn ctrl_c_should_quit(pending_quit: &mut Option<Instant>, now: Instant) -> bool 
 fn exit_current_screen(
     app: &mut App,
     live_area: &mut LiveArea,
-    log_view_handle: &mut Option<tokio::task::JoinHandle<()>>,
-    log_view_following: &mut Option<String>,
+    watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
     debug_task: &mut Option<tokio::task::JoinHandle<()>>,
     debug_cmd_tx: &mut Option<mpsc::UnboundedSender<serde_json::Value>>,
     debug_evt_rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>,
@@ -75,10 +168,6 @@ fn exit_current_screen(
     live_area.exit_screen_view();
 
     match screen {
-        Screen::Log { .. } => {
-            abort_log_view_follow(log_view_handle);
-            *log_view_following = None;
-        }
         Screen::Debug { .. } => {
             // Drop the debug socket so the daemon sees EOF.
             if let Some(handle) = debug_task.take() {
@@ -87,7 +176,9 @@ fn exit_current_screen(
             *debug_cmd_tx = None;
             *debug_evt_rx = None;
         }
-        Screen::Runs | Screen::Chat => {}
+        Screen::Runs | Screen::Chat => {
+            close_watch_follow(app, live_area, watch_follow_handle);
+        }
     }
 
     true
@@ -95,18 +186,19 @@ fn exit_current_screen(
 
 /// Run the shared Esc / first-Ctrl+C reset path.
 ///
-/// Ordering is deliberate: a full-screen view returns to chat first, then
-/// the main input bar is cleared and any in-flight chat turn is cancelled.
+/// Ordering is deliberate: an open watch stream pane closes first, then any
+/// full-screen view returns to chat, then the main input bar is cleared and
+/// any in-flight chat turn is cancelled.
 ///
-/// Returns `true` when a screen was exited, in which case the caller should
-/// `continue` the event loop immediately; the clear/cancel path returns
-/// `false` and falls through, exactly as the original Esc arm did.
+/// Returns `true` when a screen was exited or a watch pane was closed, in
+/// which case the caller should `continue` the event loop immediately; the
+/// clear/cancel path returns `false` and falls through, exactly as the
+/// original Esc arm did.
 #[allow(clippy::too_many_arguments)]
 fn handle_esc_reset(
     app: &mut App,
     live_area: &mut LiveArea,
-    log_view_handle: &mut Option<tokio::task::JoinHandle<()>>,
-    log_view_following: &mut Option<String>,
+    watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
     debug_task: &mut Option<tokio::task::JoinHandle<()>>,
     debug_cmd_tx: &mut Option<mpsc::UnboundedSender<serde_json::Value>>,
     debug_evt_rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>,
@@ -118,11 +210,17 @@ fn handle_esc_reset(
     // whether it exits a full-screen view or resets the chat state.
     live_area.clear_tool_output();
 
+    // On the watch screen, Esc first closes an open stream pane and only
+    // then exits back to chat.
+    if app.screen == Screen::Runs && app.watch_following.is_some() {
+        close_watch_follow(app, live_area, watch_follow_handle);
+        return true;
+    }
+
     if exit_current_screen(
         app,
         live_area,
-        log_view_handle,
-        log_view_following,
+        watch_follow_handle,
         debug_task,
         debug_cmd_tx,
         debug_evt_rx,
@@ -734,9 +832,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
-    // Dedicated follow for the full-screen single-gremlin log view.
-    let mut log_view_handle: Option<tokio::task::JoinHandle<()>> = None;
-    let mut log_view_following: Option<String> = None;
+    // Dedicated follow for the inline watch stream pane.
+    let mut watch_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
+    // Monotonic token for the current watch follow; queued lines must match
+    // both id and generation before being painted.
+    let mut watch_follow_generation: u64 = 0;
     // ── Chat turn state ────────────────────────────────────────
     // (the chat request is sent from a detached task; we no longer need to
     // abort it, so no JoinHandle is kept)
@@ -755,16 +855,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut debug_evt_rx: Option<mpsc::UnboundedReceiver<DebugEvent>> = None;
     // Handle for the debug socket reader task (aborted on Esc).
     let mut debug_task: Option<tokio::task::JoinHandle<()>> = None;
-
-    /// Drop-guard that aborts a JoinHandle on drop, ensuring the dedicated
-    /// log-follow socket is closed even when the outer forwarding task is
-    /// cancelled via `abort()`.
-    struct AbortOnDrop(tokio::task::JoinHandle<()>);
-    impl Drop for AbortOnDrop {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
 
     // ── Startup banner ────────────────────────────────────────────
     for line in motif::spire_banner() {
@@ -799,8 +889,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if handle_esc_reset(
                                 &mut app,
                                 live_area,
-                                &mut log_view_handle,
-                                &mut log_view_following,
+                                &mut watch_follow_handle,
                                 &mut debug_task,
                                 &mut debug_cmd_tx,
                                 &mut debug_evt_rx,
@@ -815,14 +904,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
                             // Ctrl+D only dismisses the debug view's prompt;
-                            // Runs/Log fall through to the empty-input quit
-                            // path below, preserving the documented quit key.
+                            // Runs falls through to the empty-input quit path
+                            // below, preserving the documented quit key.
                             if app.screen.has_prompt()
                                 && exit_current_screen(
                                     &mut app,
                                     live_area,
-                                    &mut log_view_handle,
-                                    &mut log_view_following,
+                                    &mut watch_follow_handle,
                                     &mut debug_task,
                                     &mut debug_cmd_tx,
                                     &mut debug_evt_rx,
@@ -838,6 +926,29 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
                             live_area.invalidate();
+                        }
+                        KeyCode::Char('o')
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            if app.screen != Screen::Runs {
+                                continue;
+                            }
+                            let Some(selected) = app.watch_selection.clone() else {
+                                continue;
+                            };
+                            if app.watch_following.as_deref() == Some(selected.as_str()) {
+                                close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                            } else {
+                                start_watch_follow(
+                                    &mut app,
+                                    live_area,
+                                    &client,
+                                    selected,
+                                    &log_tx,
+                                    &mut watch_follow_handle,
+                                    &mut watch_follow_generation,
+                                );
+                            }
                         }
                         KeyCode::Char('g')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
@@ -918,8 +1029,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if handle_esc_reset(
                                 &mut app,
                                 live_area,
-                                &mut log_view_handle,
-                                &mut log_view_following,
+                                &mut watch_follow_handle,
                                 &mut debug_task,
                                 &mut debug_cmd_tx,
                                 &mut debug_evt_rx,
@@ -1050,55 +1160,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if let Some(result) = dispatch(&input) {
                                 match result {
                                     CommandResult::ShowRuns => {
+                                        close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
                                         app.show_runs();
                                         live_area.show_runs();
                                     }
-                                    CommandResult::ShowLog(id) => {
-                                        // Close any existing full-screen log follow first.
-                                        abort_log_view_follow(&mut log_view_handle);
-                                        log_view_following = Some(id.clone());
-                                        app.show_log(id.clone());
-                                        live_area.show_log(id.clone());
-                                        let log_tx = log_tx.clone();
-                                        let follow_id = id.clone();
-                                        let client = Arc::clone(&client);
-                                        let follow_task = tokio::spawn(async move {
-                                            match client.follow_log(&follow_id).await {
-                                                Ok((mut rx, handle)) => {
-                                                    let _guard = AbortOnDrop(handle);
-                                                    while let Some(raw) = rx.recv().await {
-                                                        let Some(line) = raw
-                                                            .get("line")
-                                                            .and_then(|v| v.as_str())
-                                                        else {
-                                                            continue;
-                                                        };
-                                                        let tagged = serde_json::json!({
-                                                            "type": "view_log",
-                                                            "id": follow_id,
-                                                            "line": line,
-                                                        });
-                                                        if log_tx.send(tagged).is_err() {
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    let _ = log_tx.send(
-                                                        serde_json::json!({
-                                                            "type": "view_error",
-                                                            "id": follow_id,
-                                                            "message": e,
-                                                        }),
-                                                    );
-                                                }
-                                            }
-                                        });
-                                        log_view_handle = Some(follow_task);
-                                    }
                                     CommandResult::Debug(id) => {
-                                        abort_log_view_follow(&mut log_view_handle);
-                                        log_view_following = None;
+                                        close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
                                         app.show_debug(id.clone());
                                         live_area.show_debug(id.clone());
                                         // Open a fresh socket and spawn the reader.
@@ -1149,8 +1216,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             handle.abort();
                                         }
                                         app.following_log = None;
-                                        abort_log_view_follow(&mut log_view_handle);
-                                        log_view_following = None;
+                                        close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
                                         if let Some(handle) = debug_task.take() {
                                             handle.abort();
                                         }
@@ -1344,8 +1410,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Up => {
-                            // History navigation only applies to the chat input bar.
-                            if app.screen.is_chat() {
+                            if app.screen == Screen::Runs {
+                                app.watch_move(-1);
+                            } else if app.screen.is_chat() {
                                 if let Some(entry) = app.history_up().map(|s| s.to_string()) {
                                     app.input = entry;
                                     app.reset_cursor_to_end();
@@ -1358,10 +1425,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 }
                             }
                         }
-                        KeyCode::Down if app.screen.is_chat()
-                            // Only replace the buffer when navigating; when the
-                            // cursor is already `None` (fresh line), leave it.
-                            && app.history_cursor.is_some() => {
+                        KeyCode::Down => {
+                            if app.screen == Screen::Runs {
+                                app.watch_move(1);
+                            } else if app.screen.is_chat() && app.history_cursor.is_some() {
                                 app.input = app.history_down().unwrap_or("").to_string();
                                 app.reset_cursor_to_end();
                                 app.clear_completion();
@@ -1371,6 +1438,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     app.width,
                                 );
                             }
+                        }
                         _ => {}
                     },
                     Event::Resize(cols, rows) => {
@@ -1389,6 +1457,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     gremlins::executor::DaemonEvent::RunCompleted { id, exit_code } => {
                         log::info!("[run completed] {id} (exit {exit_code})");
+                        if app.watch_following.as_deref() == Some(id.as_str()) {
+                            app.watch_follow_error = None;
+                            abort_watch_follow(&mut watch_follow_handle);
+                        }
                         app.on_run_completed(id);
                     }
                     gremlins::executor::DaemonEvent::RunFailed { id, exit_code, error } => {
@@ -1398,10 +1470,18 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         } else {
                             log::info!("[run failed] {id} (exit {exit_code}): {err_detail}");
                         }
+                        if app.watch_following.as_deref() == Some(id.as_str()) {
+                            app.watch_follow_error = None;
+                            abort_watch_follow(&mut watch_follow_handle);
+                        }
                         app.on_run_failed(id);
                     }
                     gremlins::executor::DaemonEvent::RunStopped { id } => {
                         log::info!("[run stopped] {id}");
+                        if app.watch_following.as_deref() == Some(id.as_str()) {
+                            app.watch_follow_error = None;
+                            abort_watch_follow(&mut watch_follow_handle);
+                        }
                         app.on_run_stopped(id);
                     }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
@@ -1411,9 +1491,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     gremlins::executor::DaemonEvent::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
                             live_area.push_transcript_line(line.clone());
-                        }
-                        if log_view_following.as_deref() == Some(&id) {
-                            live_area.push_log_view_line(line);
                         }
                     }
                     gremlins::executor::DaemonEvent::Bail { id, reason } => {
@@ -1493,6 +1570,18 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                 }
                 app.active_runs = runs;
+                app.ensure_watch_selection();
+                if let Some(following) = app.watch_following.as_deref() {
+                    let still_running = app
+                        .active_runs
+                        .get(following)
+                        .map(|run| run.status == "running")
+                        .unwrap_or(false);
+                    if !still_running {
+                        app.watch_follow_error = None;
+                        abort_watch_follow(&mut watch_follow_handle);
+                    }
+                }
             }
 
             // ── Log follow lines (from dedicated connections) ──
@@ -1506,26 +1595,34 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
                     }
                     Some("view_log") => {
-                        // Scope the line to the currently followed gremlin so
-                        // queued messages from an aborted follow can't leak
-                        // into a newly opened viewer for another id.
+                        // Scope the line to the current follow generation so
+                        // queued messages from an aborted or superseded follow
+                        // can't leak into a newly opened pane, even for the
+                        // same gremlin id.
+                        let generation = raw.get("generation").and_then(|v| v.as_u64());
                         if let (Some(id), Some(line)) = (
                             raw.get("id").and_then(|v| v.as_str()),
                             raw.get("line").and_then(|v| v.as_str()),
                         ) {
-                            if log_view_following.as_deref() == Some(id) {
-                                live_area.push_log_view_line(line.to_string());
+                            if app.watch_following.as_deref() == Some(id)
+                                && generation == Some(watch_follow_generation)
+                            {
+                                live_area.push_watch_line(line.to_string());
                             }
                         }
                     }
                     Some("view_error") => {
+                        let generation = raw.get("generation").and_then(|v| v.as_u64());
                         if let (Some(id), Some(message)) = (
                             raw.get("id").and_then(|v| v.as_str()),
                             raw.get("message").and_then(|v| v.as_str()),
                         ) {
-                            if log_view_following.as_deref() == Some(id) {
-                                live_area.push_log_view_line(format!("error: {message}"));
-                                log_view_following = None;
+                            if app.watch_following.as_deref() == Some(id)
+                                && generation == Some(watch_follow_generation)
+                            {
+                                live_area.push_watch_line(format!("error: {message}"));
+                                app.watch_follow_error = Some(message.to_string());
+                                abort_watch_follow(&mut watch_follow_handle);
                             }
                         }
                     }
@@ -1797,8 +1894,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
         handle.abort();
     }
 
-    // Abort any lingering full-screen log follow on exit.
-    if let Some(handle) = log_view_handle.take() {
+    // Abort any lingering watch follow on exit.
+    if let Some(handle) = watch_follow_handle.take() {
         handle.abort();
     }
 

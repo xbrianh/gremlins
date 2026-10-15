@@ -49,6 +49,12 @@ pub struct RenderContext<'a> {
     pub project_name: &'a str,
     /// The daemon-derived run table (source of truth for the runs view).
     pub active_runs: &'a HashMap<String, ActiveRun>,
+    /// Highlighted gremlin id on the `/watch` screen.
+    pub watch_selection: Option<&'a str>,
+    /// Gremlin whose inline watch stream pane is open, if any.
+    pub watch_following: Option<&'a str>,
+    /// Error from the current watch follow, if the dedicated socket died.
+    pub watch_follow_error: Option<&'a str>,
     /// Inline completion preview suffix (paint-only, never submitted).
     pub completion_preview: Option<&'a str>,
 }
@@ -3208,6 +3214,9 @@ mod tests {
             gremlin_count: "0",
             project_name: "",
             active_runs: EMPTY.get_or_init(HashMap::new),
+            watch_selection: None,
+            watch_following: None,
+            watch_follow_error: None,
             completion_preview: None,
         }
     }

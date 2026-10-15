@@ -4592,7 +4592,7 @@ stages: []
 
         for row in [
             "| `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |",
-            "| `/watch` / `/watch <id>` | none — TUI-only |",
+            "| `/watch` | none — TUI-only |",
             "| `/model` | none — TUI-only |",
             "| `/chat` | none — TUI-only |",
             "| `/clear` / `/new` | none — TUI-only |",
@@ -4607,6 +4607,10 @@ stages: []
         assert!(
             prompt.contains("`Ctrl+G`") && prompt.contains("external editor"),
             "must document the external editor keybinding"
+        );
+        assert!(
+            prompt.contains("`Ctrl+O`") && prompt.contains("arrow keys"),
+            "must document watch selection and live-log toggling"
         );
         assert!(
             prompt.contains("`Esc`") && prompt.contains("cancel an in-flight chat turn"),

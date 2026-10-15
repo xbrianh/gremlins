@@ -53,7 +53,7 @@ this section — do not try to run them yourself.
 | `/stop <id>` | stop a gremlin |
 | `/resume <id>` | resume a gremlin |
 | `/log <id>` | show gremlin log |
-| `/watch` / `/watch <id>` | show the gremlins table full-screen / open a full-screen single-gremlin log view |
+| `/watch` | show the running gremlins table; arrow keys select, `Ctrl+O` toggles an inline live log |
 | `/debug <id>` | open a full-screen interactive debug session |
 | `/model` | show default client |
 | `/chat` | chat is always active (type directly) |
@@ -66,7 +66,9 @@ this section — do not try to run them yourself.
 - `Ctrl+C` — first press acts like `Esc` (returns a full-screen view to chat, or clears input/cancels chat); press again within one second to exit the TUI.
 - `Ctrl+D` on an empty input — exit the TUI.
 - `Ctrl+L` — redraw the screen.
-- `Esc` — return a full-screen view to chat, or clear the input bar and cancel an in-flight chat turn.
+- `Esc` — in `/watch`, the first press closes an open live log and the next returns to chat; otherwise return a full-screen view to chat, or clear the input bar and cancel an in-flight chat turn.
+- `Ctrl+O` — in `/watch`: open or close the selected gremlin's live log.
+- `Up` / `Down` — in `/watch`: move the gremlin selection.
 - `Ctrl+G` — open the external editor to compose multi-line input.
 
 ### Interaction model
@@ -93,7 +95,7 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 | `/log <id>` | `gremlins log <id>` |
 | `/debug <id>` | `gremlins debug <id>` |
 | `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |
-| `/watch` / `/watch <id>` | none — TUI-only |
+| `/watch` | none — TUI-only |
 | `/model` | none — TUI-only |
 | `/chat` | none — TUI-only |
 | `/clear` / `/new` | none — TUI-only |

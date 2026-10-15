@@ -30,6 +30,13 @@ pub struct App {
     /// Active screen. Chat is the default; the other variants are full-screen
     /// views entered from slash commands and dismissed with `Esc`.
     pub screen: Screen,
+    /// Highlighted gremlin id on the `/watch` screen.
+    pub watch_selection: Option<String>,
+    /// Gremlin whose inline watch stream pane is open, if any.
+    pub watch_following: Option<String>,
+    /// Error from the current watch follow, if the dedicated socket died
+    /// while the run is still reported as running.
+    pub watch_follow_error: Option<String>,
     /// Submitted inputs in chronological order (in-memory only).
     pub input_history: Vec<String>,
     /// Cursor into `input_history`; `None` means editing a fresh line.
@@ -77,8 +84,6 @@ pub enum Screen {
     Chat,
     /// Full-screen gremlins watch table.
     Runs,
-    /// Full-screen tail-anchored log viewer for one gremlin.
-    Log { id: String },
     /// Full-screen interactive debug session with its own prompt.
     Debug { id: String },
 }
@@ -111,6 +116,9 @@ impl App {
             active_request: false,
             session_recreating: false,
             screen: Screen::Chat,
+            watch_selection: None,
+            watch_following: None,
+            watch_follow_error: None,
             input_history: Vec::new(),
             history_cursor: None,
             width: 80,
@@ -194,6 +202,7 @@ impl App {
                 project: self.project_name.clone(),
             },
         );
+        self.ensure_watch_selection();
     }
 
     /// Update state when a run completes.
@@ -226,6 +235,7 @@ impl App {
                     .insert(id.to_string(), ActiveRun::new(status));
             }
         }
+        self.ensure_watch_selection();
     }
 
     // ── Screen helpers ──────────────────────────────────────────────
@@ -233,11 +243,53 @@ impl App {
     /// Enter the full-screen runs table.
     pub fn show_runs(&mut self) {
         self.screen = Screen::Runs;
+        self.watch_following = None;
+        self.watch_follow_error = None;
+        self.ensure_watch_selection();
     }
 
-    /// Enter the full-screen single-gremlin log view.
-    pub fn show_log(&mut self, id: String) {
-        self.screen = Screen::Log { id };
+    /// Stable-sorted ids of gremlins that are currently running.
+    pub fn running_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .active_runs
+            .iter()
+            .filter(|(_, run)| run.status == "running")
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Ensure the watch selection points at a running gremlin, choosing the
+    /// first sorted id when the selection is absent or stale.
+    pub fn ensure_watch_selection(&mut self) {
+        let ids = self.running_ids();
+        if ids.is_empty() {
+            self.watch_selection = None;
+            return;
+        }
+        let stale = self
+            .watch_selection
+            .as_ref()
+            .map(|selected| !ids.contains(selected))
+            .unwrap_or(true);
+        if stale {
+            self.watch_selection = Some(ids[0].clone());
+        }
+    }
+
+    /// Move the watch selection through the stable-sorted running-id list.
+    pub fn watch_move(&mut self, delta: i32) {
+        self.ensure_watch_selection();
+        let Some(selected) = self.watch_selection.as_ref() else {
+            return;
+        };
+        let ids = self.running_ids();
+        let Some(current) = ids.iter().position(|id| id == selected) else {
+            return;
+        };
+        let next = (current as i64 + delta as i64).clamp(0, ids.len().saturating_sub(1) as i64);
+        self.watch_selection = Some(ids[next as usize].clone());
     }
 
     /// Enter the full-screen interactive debug session.
