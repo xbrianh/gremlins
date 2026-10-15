@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Widget, Wrap},
 };
@@ -379,7 +379,9 @@ impl TranscriptWidget {
     /// Build a committed stream block: flush the trailing partial, prepend
     /// an optional title row, then append the retained tail capped at the
     /// shared stream row count. Tools invoke this with their `◆` title;
-    /// reasoning invokes it without one.
+    /// reasoning invokes it without one. Retained logical lines are expanded
+    /// into pre-wrapped physical rows at the FIFO's inner body width before
+    /// insertion.
     fn commit_stream_block(
         &mut self,
         title: Option<&str>,
@@ -391,12 +393,101 @@ impl TranscriptWidget {
             block.push(tool_line(title));
         }
         let width = self.last_width.saturating_sub(1);
+        let body_width = width.saturating_sub(stream.body_indent);
         let rendered = stream.commit_lines();
-        if !rendered.is_empty() {
-            let window = tail_window(&rendered, width, Self::STREAM_MAX_ROWS as usize);
-            block.extend_from_slice(&rendered[window.start..]);
+        if body_width > 0 && !rendered.is_empty() {
+            let window = tail_window(&rendered, body_width, Self::STREAM_MAX_ROWS as usize);
+            block.extend(Self::expand_stream_tail(
+                &rendered[window.start..],
+                width,
+                stream.body_indent,
+            ));
         }
         block
+    }
+
+    /// Expand retained logical stream lines into pre-wrapped physical rows.
+    ///
+    /// Each logical line is wrapped at the FIFO's inner body width by
+    /// ratatui's `Paragraph::wrap(Wrap { trim: false })` path, then every
+    /// physical row is prefixed with the same body gutter the live renderer
+    /// reserves. All physical rows of the selected logical lines are kept;
+    /// `tail_window` alone enforces the `STREAM_MAX_ROWS` budget when it
+    /// chooses the logical tail.
+    fn expand_stream_tail(
+        lines: &[Line<'static>],
+        fifo_width: u16,
+        body_indent: u16,
+    ) -> Vec<Line<'static>> {
+        let body_width = fifo_width.saturating_sub(body_indent);
+        if body_width == 0 || lines.is_empty() {
+            return Vec::new();
+        }
+
+        let mut rows = Vec::new();
+        for line in lines {
+            let line_rows = line_wrapped_height(line, body_width);
+            if line_rows == 0 {
+                continue;
+            }
+            let render_area = Rect::new(0, 0, body_width, line_rows as u16);
+            let mut render_buf = Buffer::empty(render_area);
+            Paragraph::new(vec![line.clone()])
+                .wrap(Wrap { trim: false })
+                .render(render_area, &mut render_buf);
+            for y in 0..line_rows {
+                rows.push(Self::indent_rendered_row(
+                    &render_buf,
+                    y as u16,
+                    body_width,
+                    body_indent,
+                ));
+            }
+        }
+
+        rows
+    }
+
+    /// Rebuild one physical row rendered into `render_buf`, reserving the
+    /// left body gutter and keeping the row's ratatui-wrapped styling.
+    fn indent_rendered_row(
+        render_buf: &Buffer,
+        y: u16,
+        body_width: u16,
+        body_indent: u16,
+    ) -> Line<'static> {
+        let mut spans = Vec::new();
+        if body_indent > 0 {
+            spans.push(Span::raw(" ".repeat(body_indent as usize)));
+        }
+
+        // Drop trailing cells that `Buffer::empty` left untouched (empty
+        // cells carry `Color::Reset` and no modifiers) so short committed
+        // lines do not carry a full-width pad of blank cells. The stream
+        // stylers always set a non-reset foreground, so reset foreground is
+        // unambiguously an unpainted cell for this path.
+        let mut end = body_width;
+        while end > 0 {
+            let cell = &render_buf[(end - 1, y)];
+            if cell.symbol() == " "
+                && cell.fg == Color::Reset
+                && cell.bg == Color::Reset
+                && cell.modifier.is_empty()
+            {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+
+        for x in 0..end {
+            let cell = &render_buf[(x, y)];
+            if cell.symbol().is_empty() {
+                continue;
+            }
+            spans.push(Span::styled(cell.symbol().to_string(), cell.style()));
+        }
+        Line::from(spans)
     }
 
     /// Commit a finished tool stream as title + retained tail above the
@@ -936,17 +1027,16 @@ fn render_prompt(prompt: &str, rule_width: u16) -> Vec<Line<'static>> {
     out
 }
 
-/// A single reasoning line: four-space indent + nickel italic text.
+/// A single reasoning line: nickel italic text. The four-space body indent
+/// is reserved by [`StreamingWidget`] as a layout gutter, not baked into the
+/// line text.
 fn reasoning_line(text: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::raw("    "),
-        Span::styled(
-            text.to_string(),
-            Style::default()
-                .fg(DEFAULT_THEME.subtle)
-                .add_modifier(Modifier::ITALIC),
-        ),
-    ])
+    Line::from(vec![Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(DEFAULT_THEME.subtle)
+            .add_modifier(Modifier::ITALIC),
+    )])
 }
 
 /// A single tool-event line: chrome diamond + nickel italic name.
@@ -971,7 +1061,8 @@ fn tool_chrome_line(prefix: &str, text: &str) -> Line<'static> {
     ])
 }
 
-/// Streaming styler: reasoning lines use the four-space indent.
+/// Streaming styler: reasoning lines are plain nickel-italic text. The
+/// body indent is applied by [`StreamingWidget`] as a layout gutter.
 fn reasoning_stream_line(text: &str, _index: usize) -> Line<'static> {
     reasoning_line(text)
 }
@@ -979,7 +1070,8 @@ fn reasoning_stream_line(text: &str, _index: usize) -> Line<'static> {
 /// Streaming styler: live tool output is ANSI-stripped before it is painted.
 ///
 /// The tool slot's body indent is applied by [`StreamingWidget`] itself (via
-/// its configured `line_prefix`); this styler only styles the raw text.
+/// its configured `body_indent` gutter); this styler only styles the raw
+/// text.
 fn tool_stream_line(text: &str, _index: usize) -> Line<'static> {
     Line::from(vec![Span::styled(
         strip_ansi(text),
@@ -1097,6 +1189,34 @@ fn split_overflow(
 
     let overflow_lines = lines[..drop_count].to_vec();
     (dropped, overflow_lines)
+}
+
+/// Paint only the maintained wrapped tail of `lines` into `area` using
+/// ratatui's own `Paragraph::scroll` vertical offset.
+///
+/// `visible_rows` is the tail window maintained by the widget, recomputed for
+/// `width` by the caller. If the allocated area is taller than the maintained
+/// window, `Paragraph::scroll` still starts at the requested offset and the
+/// already-scrolled rows stay hidden; the extra area simply paints blank cells
+/// below the tail.
+fn render_scrolled_tail(
+    lines: &[Line<'static>],
+    area: Rect,
+    buf: &mut Buffer,
+    width: u16,
+    visible_rows: usize,
+) {
+    let height = (visible_rows.min(area.height as usize)) as u16;
+    if lines.is_empty() || width == 0 || height == 0 {
+        return;
+    }
+
+    let total = wrapped_height(lines, width);
+    let scroll = total.saturating_sub(height as usize).min(u16::MAX as usize) as u16;
+    Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0))
+        .render(area, buf);
 }
 
 /// Paint only the maintained wrapped tail of `lines` into `area`.
@@ -1302,11 +1422,11 @@ pub(crate) fn layout_widgets(
 /// `scrolled` offset measured against `last_width`, and styles each logical
 /// line with a caller-supplied styler (raw text + running line index →
 /// styled [`Line`]). An optional owned title row may be set with
-/// [`set_title`](Self::set_title); a per-line body prefix and a title-row
-/// prefix are carried as configuration so callers can match the transcript's
-/// tool chrome without hardcoding it in the styler. The stream trims its own
-/// head to the configured row cap (lossy tail), collapses to zero when no
-/// stream content is present, and never reports overflow.
+/// [`set_title`](Self::set_title); a title-row prefix and a left body gutter
+/// are carried as configuration so callers can match the transcript's tool
+/// chrome without hardcoding it in the styler. The stream trims its own head
+/// to the configured row cap (lossy tail), collapses to zero when no stream
+/// content is present, and never reports overflow.
 pub struct StreamingWidget {
     lines: LineBuffer,
     partial: String,
@@ -1326,9 +1446,9 @@ pub struct StreamingWidget {
     title: Option<String>,
     /// Prefix rendered before the title row (e.g. the `◆ ` tool chrome).
     title_prefix: String,
-    /// Prefix rendered before every streamed body line (e.g. a four-space
-    /// indent for the tool slot).
-    line_prefix: String,
+    /// Left gutter, in cells, reserved before every streamed body line (e.g.
+    /// a four-space indent for reasoning and tool output).
+    body_indent: u16,
     row_cap: u16,
     size_priority: i32,
     /// When true, the widget keeps a sliding tail of completed lines (capped
@@ -1352,7 +1472,7 @@ impl StreamingWidget {
             styler,
             title: None,
             title_prefix: String::new(),
-            line_prefix: String::new(),
+            body_indent: 0,
             row_cap,
             size_priority,
             retain_tail: false,
@@ -1373,9 +1493,9 @@ impl StreamingWidget {
         self
     }
 
-    /// Configure the prefix rendered before every streamed body line.
-    pub fn with_line_prefix(mut self, prefix: &str) -> Self {
-        self.line_prefix = prefix.to_string();
+    /// Configure the left gutter reserved before every streamed body line.
+    pub fn with_body_indent(mut self, indent: u16) -> Self {
+        self.body_indent = indent;
         self
     }
 
@@ -1395,32 +1515,33 @@ impl StreamingWidget {
         }
     }
 
-    /// The configured reasoning stream: four-space body indent, nickel
+    /// The configured reasoning stream: four-cell body gutter, nickel
     /// italic text, and a retained commit tail.
     pub fn reasoning(row_cap: u16) -> Self {
-        Self::new(reasoning_stream_line, row_cap, 20).retain_tail()
+        Self::new(reasoning_stream_line, row_cap, 20)
+            .with_body_indent(4)
+            .retain_tail()
     }
 
-    /// The configured live tool-output stream: four-space body indent, no
+    /// The configured live tool-output stream: four-cell body gutter, no
     /// bullet glyph, a `◆ `-prefixed title row, and a retained commit tail.
     /// Text is ANSI-stripped.
     pub fn tool(row_cap: u16) -> Self {
         Self::new(tool_stream_line, row_cap, 10)
             .with_title_prefix(&format!("{} ", glyph::DIAMOND))
-            .with_line_prefix("    ")
+            .with_body_indent(4)
             .retain_tail()
     }
 
-    /// Style one logical line, applying the configured body prefix.
+    /// The body text width: the outer width minus the reserved left gutter.
+    fn body_width(&self, width: u16) -> u16 {
+        width.saturating_sub(self.body_indent)
+    }
+
+    /// Style one logical line. The body gutter is reserved by the renderer,
+    /// not encoded in the line text.
     fn style_line(&self, text: &str, index: usize) -> Line<'static> {
-        let styled = (self.styler)(text, index);
-        if self.line_prefix.is_empty() {
-            return styled;
-        }
-        let mut spans = Vec::with_capacity(styled.spans.len() + 1);
-        spans.push(Span::raw(self.line_prefix.clone()));
-        spans.extend(styled.spans);
-        Line::from(spans)
+        (self.styler)(text, index)
     }
 
     /// Append text (may be a partial chunk). Completed lines are pushed into
@@ -1485,7 +1606,8 @@ impl StreamingWidget {
         self.lines.is_empty() && self.partial.is_empty()
     }
 
-    /// Re-anchor `scrolled` when the wrap width changes.
+    /// Re-anchor `scrolled` when the wrap width changes. `width` is the
+    /// body-text width (the outer width minus the configured body gutter).
     fn normalize_scroll(&self, width: u16) {
         if width == 0 {
             return;
@@ -1594,13 +1716,16 @@ impl StreamingWidget {
 
     /// Desired stream height, uncapped: the full wrapped height of the
     /// remaining live tail minus the wrapped rows already scrolled off.
+    /// Logical lines are measured at the body width (outer width minus the
+    /// reserved body gutter).
     pub fn desired_rows(&self, width: u16) -> u16 {
-        if self.is_empty() || width == 0 {
+        let body_width = self.body_width(width);
+        if self.is_empty() || body_width == 0 {
             return 0;
         }
-        self.normalize_scroll(width);
+        self.normalize_scroll(body_width);
         let rendered = self.rendered_lines();
-        let total = wrapped_height(&rendered, width);
+        let total = wrapped_height(&rendered, body_width);
         total
             .saturating_sub(self.scrolled.get())
             .min(u16::MAX as usize) as u16
@@ -1628,24 +1753,25 @@ impl StreamingWidget {
     /// Keep only the visible tail of the live stream; the head is discarded,
     /// never committed to terminal scrollback. Zero-area viewports are
     /// transient, so defer trimming rather than dropping content that had no
-    /// chance to paint.
+    /// chance to paint. Trim math measures logical lines at the body width.
     pub fn trim_to(&mut self, available_rows: u16, width: u16) {
-        if width == 0 || available_rows == 0 {
+        let body_width = self.body_width(width);
+        if body_width == 0 || available_rows == 0 {
             return;
         }
 
-        self.normalize_scroll(width);
+        self.normalize_scroll(body_width);
         let rendered = self.rendered_lines();
-        let total = wrapped_height(&rendered, width);
+        let total = wrapped_height(&rendered, body_width);
         let visible = total.saturating_sub(self.scrolled.get());
         let excess = visible.saturating_sub(available_rows as usize);
         if excess == 0 {
             return;
         }
 
-        let next_scrolled = self.consume_head(&rendered, self.scrolled.get() + excess, width);
+        let next_scrolled = self.consume_head(&rendered, self.scrolled.get() + excess, body_width);
         self.scrolled.set(next_scrolled);
-        self.last_width.set(width);
+        self.last_width.set(body_width);
     }
 
     fn title_line(&self) -> Option<Line<'static>> {
@@ -1738,7 +1864,7 @@ impl LiveAreaWidget for StreamingWidget {
             let title_rows = self.title_rows(area.width, ctx).min(area.height);
             if title_rows > 0 {
                 let title_area = Rect::new(area.x, y, area.width, title_rows);
-                render_wrapped_tail(&[line], title_area, buf, title_rows as usize);
+                render_scrolled_tail(&[line], title_area, buf, area.width, title_rows as usize);
                 y += title_rows;
             }
         }
@@ -1747,12 +1873,16 @@ impl LiveAreaWidget for StreamingWidget {
         if stream_height == 0 || self.is_empty() {
             return;
         }
-        let stream_area = Rect::new(area.x, y, area.width, stream_height);
-        self.trim_to(stream_area.height, stream_area.width);
+        let body_width = self.body_width(area.width);
+        if body_width == 0 {
+            return;
+        }
+        self.trim_to(stream_height, area.width);
         let lines = self.rendered_lines();
-        let total = wrapped_height(&lines, stream_area.width);
+        let total = wrapped_height(&lines, body_width);
         let visible_rows = total.saturating_sub(self.scrolled.get());
-        render_wrapped_tail(&lines, stream_area, buf, visible_rows);
+        let body_area = Rect::new(area.x + self.body_indent, y, body_width, stream_height);
+        render_scrolled_tail(&lines, body_area, buf, body_width, visible_rows);
     }
 
     fn take_overflow(
@@ -2665,7 +2795,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(reasoning_text, vec!["    thinking"]);
+        assert_eq!(reasoning_text, vec!["thinking"]);
     }
 
     #[test]
@@ -3117,7 +3247,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(text.contains(&"    thinking".to_string()), "{text:?}");
+        assert!(text.contains(&"thinking".to_string()), "{text:?}");
     }
 
     #[test]
@@ -3174,13 +3304,14 @@ mod tests {
         reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.push_text("tail\n");
 
-        // The prefixed head line wraps to 3 rows at width 10; the short
-        // trailing line is 1 row. With a 2-row allocation the scrolled
-        // offset must stay 2 (two rows of the head line hidden), not be
-        // clamped against the short tail line back to zero.
+        // The head line wraps to 5 body rows at outer width 10 (6 body
+        // columns); the short trailing line is 1 row. With a 2-row
+        // allocation the scrolled offset must stay 4 (four rows of the head
+        // line hidden), not be clamped against the short tail line back to
+        // zero.
         reasoning.trim_to(2, 10);
         assert_eq!(reasoning.desired_rows(10), 2);
-        assert_eq!(reasoning.scrolled.get(), 2);
+        assert_eq!(reasoning.scrolled.get(), 4);
     }
 
     #[test]
@@ -3191,11 +3322,11 @@ mod tests {
 
         reasoning.trim_to(2, 10);
         assert_eq!(reasoning.desired_rows(10), 2);
-        assert_eq!(reasoning.scrolled.get(), 1);
+        assert_eq!(reasoning.scrolled.get(), 3);
 
-        // At width 80 the whole line fits on a single row. The one row
-        // hidden at width 10 corresponds to a prefix that still occupies
-        // that one row, so the previously hidden characters must not
+        // At width 80 the whole line fits on a single body row. The three
+        // rows hidden at width 10 correspond to a prefix that still occupies
+        // one wide row, so the previously hidden characters must not
         // reappear; the tail asks for no visible rows until new content
         // arrives.
         assert_eq!(reasoning.desired_rows(80), 0);
@@ -3208,11 +3339,13 @@ mod tests {
         reasoning.push_text("abcdefghijklmnopqrstuvwxyz\n");
         reasoning.flush();
 
-        assert_eq!(reasoning.desired_rows(10), 3);
-        // Nothing has scrolled off yet, so narrowing to width 5 must ask for
-        // all six newly wrapped rows rather than clamping to the previous
-        // three visible rows.
-        assert_eq!(reasoning.desired_rows(5), 6);
+        // At outer width 10 the body gutter leaves 6 body columns, so the
+        // 26-char word wraps to 5 rows.
+        assert_eq!(reasoning.desired_rows(10), 5);
+        // Nothing has scrolled off yet, so narrowing the body to a single
+        // column must ask for all 26 newly wrapped rows rather than
+        // clamping to the previous five visible rows.
+        assert_eq!(reasoning.desired_rows(5), 26);
     }
 
     #[test]
@@ -3250,18 +3383,18 @@ mod tests {
 
     #[test]
     fn reasoning_desired_rows_are_wrapped_rows() {
-        // The four-space indent plus a 26-char word is 30 columns, which
-        // wraps to 3 rows at width 10.
+        // The body gutter leaves 6 columns at outer width 10, so a 26-char
+        // word wraps to 5 rows.
         let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("abcdefghijklmnopqrstuvwxyz");
-        assert_eq!(reasoning.desired_rows(10), 3);
+        assert_eq!(reasoning.desired_rows(10), 5);
 
-        // A 56-column line (four-space indent + 52-char word) wraps to 6
-        // rows, still reporting its natural wrapped height at the component
-        // level even though the transcript band cap is 5 rows.
+        // A 52-char word wraps to 9 six-column rows, still reporting its
+        // natural wrapped height at the component level even though the
+        // transcript band cap is 5 rows.
         let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.push_text("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz");
-        assert_eq!(reasoning.desired_rows(10), 6);
+        assert_eq!(reasoning.desired_rows(10), 9);
     }
 
     #[test]
@@ -3269,7 +3402,7 @@ mod tests {
         let ctx = input_ctx("", 0);
         let mut widget = StreamingWidget::new(reasoning_stream_line, 5, 10)
             .with_title_prefix("◆ ")
-            .with_line_prefix("    ");
+            .with_body_indent(4);
         widget.set_title("LIVE TITLE");
         for i in 0..8 {
             widget.push_text(&format!("line {i}\n"));
@@ -3284,11 +3417,53 @@ mod tests {
 
         let rows = rendered_rows(&buf, 20, 5);
         assert!(rows[0].contains("◆ LIVE TITLE"), "{rows:?}");
-        assert!(
-            rows.iter().any(|r| r.contains("        line 7")),
-            "{rows:?}"
-        );
+        assert!(rows.iter().any(|r| r.contains("    line 7")), "{rows:?}");
         assert!(!rows.iter().any(|r| r.contains("line 0")), "{rows:?}");
+    }
+
+    #[test]
+    fn streaming_widget_wrapped_body_indents_continuations_and_keeps_title_at_column_zero() {
+        let ctx = input_ctx("", 0);
+        let mut widget = StreamingWidget::new(reasoning_stream_line, 10, 10)
+            .with_title_prefix("◆ ")
+            .with_body_indent(4);
+        widget.set_title("TITLE");
+        widget.push_text("abcdefghijklmnopqrstuvwxyz\n");
+
+        let width = 10;
+        let area = Rect::new(0, 0, width, 8);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf, &ctx);
+
+        let rows = rendered_rows(&buf, width, 8);
+        assert_eq!(rows[0].trim_end(), "◆ TITLE", "{rows:?}");
+
+        // Body gutter is 4 cells at width 10, leaving 6 body columns. The
+        // 26-char word wraps into five rows, and every body row carries the
+        // reserved gutter instead of only the first one.
+        assert_eq!(rows[1].trim_end(), "    abcdef", "{rows:?}");
+        assert_eq!(rows[2].trim_end(), "    ghijkl", "{rows:?}");
+        assert_eq!(rows[3].trim_end(), "    mnopqr", "{rows:?}");
+        assert_eq!(rows[4].trim_end(), "    stuvwx", "{rows:?}");
+        assert_eq!(rows[5].trim_end(), "    yz", "{rows:?}");
+    }
+
+    #[test]
+    fn committed_stream_tail_indents_wrapped_body_rows_and_title_starts_at_column_zero() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.last_width = 11;
+
+        let mut tool = StreamingWidget::tool(10);
+        tool.push_text("abcdefghijklmnopqrstuvwxyz\n");
+        let block = transcript.commit_stream_block(Some("TITLE"), tool);
+
+        let rows = full_rendered_rows(&block, 10);
+        assert_eq!(rows[0].trim_end(), "◆ TITLE", "{rows:?}");
+        assert_eq!(rows[1].trim_end(), "    abcdef", "{rows:?}");
+        assert_eq!(rows[2].trim_end(), "    ghijkl", "{rows:?}");
+        assert_eq!(rows[3].trim_end(), "    mnopqr", "{rows:?}");
+        assert_eq!(rows[4].trim_end(), "    stuvwx", "{rows:?}");
+        assert_eq!(rows[5].trim_end(), "    yz", "{rows:?}");
     }
 
     #[test]
@@ -3421,10 +3596,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(
-            lines,
-            vec!["    first".to_string(), "    second".to_string()]
-        );
+        assert_eq!(lines, vec!["first".to_string(), "second".to_string()]);
     }
 
     #[test]
@@ -3445,9 +3617,9 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "    line 5".to_string(),
-                "    line 6".to_string(),
-                "    line 7".to_string(),
+                "line 5".to_string(),
+                "line 6".to_string(),
+                "line 7".to_string(),
             ]
         );
     }
@@ -3476,7 +3648,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(lines, vec!["    red normal".to_string()]);
+        assert_eq!(lines, vec!["red normal".to_string()]);
     }
 
     #[test]
@@ -3757,7 +3929,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(reasoning, vec!["    thinking".to_string()]);
+        assert_eq!(reasoning, vec!["thinking".to_string()]);
     }
 
     #[test]
