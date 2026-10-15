@@ -18,10 +18,6 @@ pub mod glyph {
     pub const CHEVRON: &str = "»";
     /// Gold center diamond for glint rules.
     pub const DIAMOND: &str = "◆";
-    /// Brass telemetry diamond for reasoning.
-    pub const TELEMETRY: &str = "◈";
-    /// Hollow telemetry diamond (streaming placeholder alternation).
-    pub const TELEMETRY_HOLLOW: &str = "◇";
     /// Blockquote bar (gold).
     pub const QUOTE_BAR: &str = "║";
     /// List bullet (brass).

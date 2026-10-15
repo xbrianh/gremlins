@@ -532,11 +532,10 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().reconcile_response(text);
     }
 
-    /// Unpin the current turn and clear its draft state. Tool-call lines are
-    /// already part of the transcript FIFO (inserted above the response), so
-    /// they survive the turn as ordinary scrollback. The embedded reasoning
-    /// and tool slots are cleared so finished history reads prompt → tool →
-    /// answer with no ephemeral output in between.
+    /// Unpin the current turn and clear its draft state. `finish_turn`
+    /// commits the retained reasoning tail into the transcript FIFO, then
+    /// clears the embedded reasoning and tool slots so finished history reads
+    /// prompt → reasoning → tools → answer.
     pub fn finish_turn(&mut self) {
         self.transcript_mut().finish_turn();
     }
@@ -1658,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_turn_clears_embedded_reasoning() {
+    fn finish_turn_commits_reasoning_tail() {
         let cols: u16 = 80;
         let rows: u16 = 12;
         let mut live_area = new_live(cols, rows);
@@ -1680,8 +1679,8 @@ mod tests {
             "finished response should remain in the FIFO.\nBuffer:\n{visible}"
         );
         assert!(
-            !visible.contains("thinking"),
-            "reasoning must vanish when the turn finishes.\nBuffer:\n{visible}"
+            visible.contains("    thinking"),
+            "finished reasoning tail should be committed to the transcript.\nBuffer:\n{visible}"
         );
     }
 
@@ -2457,11 +2456,18 @@ mod tests {
             combined.contains("Done") && combined.contains("grep"),
             "tool lines should survive as transcript content.\nCombined:\n{combined}"
         );
-        // Reasoning stays in its own widget and is never committed to
-        // terminal scrollback.
+        // The reasoning tail commits at turn end and overflows in FIFO order
+        // with the prompt and tool blocks.
         assert!(
-            !sb.contains("thinking..."),
-            "reasoning must not be flattened into the transcript/scrollback.\nScrollback:\n{sb}"
+            combined.contains("    thinking..."),
+            "reasoning tail should be committed like tool output.\nCombined:\n{combined}"
+        );
+        let prompt = combined.find("▍» hi").expect("prompt present");
+        let reasoning = combined.find("    thinking...").expect("reasoning present");
+        let tool = combined.find("◆ Done").expect("tool present");
+        assert!(
+            prompt < reasoning && reasoning < tool,
+            "committed order must be prompt → reasoning → tools.\nCombined:\n{combined}"
         );
     }
 }

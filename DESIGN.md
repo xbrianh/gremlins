@@ -725,9 +725,11 @@ output → response).
 styled lines plus a trailing partial, an optional title row supplied as a
 function of `RenderContext`, a scroll anchor (`scrolled`/`last_width`), a
 per-line styler, and a row cap. It tail-anchors, trims its own head, collapses
-to zero when idle, and never returns overflow. The reasoning instance uses
-alternating `◈`/`◉` nickel italic styling; the tool instance uses `▸` nickel
-italic styling with ANSI-stripped text.
+to zero when idle, and never returns overflow. The reasoning instance uses a
+four-space indent plus nickel italic text; the tool instance uses a `◆`
+chrome title and four-space-indented, nickel italic, ANSI-stripped text. Both
+constructors retain a sliding commit tail capped at the shared stream row
+count so turn-end commits never depend on how short the live band was painted.
 
 ### 8.3 Layout and rendering model
 
@@ -785,7 +787,7 @@ pinned at the viewport bottom.
                      ─── viewport bottom ───
 ```
 
-Each finished turn renders its full layout (prompt, reasoning window, tool
+Each finished turn renders its full layout (prompt, reasoning tail, tool
 list, response) plus the stats footer. Two blank lines separate adjacent
 widgets. Older turns scroll off the top into terminal scrollback. The input
 bar waits for the next message.
@@ -823,7 +825,7 @@ bar waits for the next message.
 
 The active turn sits at the bottom of the transcript area, just above the
 input bar. It renders the prompt, tool-call lines between the prompt and the
-response, a capped reasoning window, and the accumulating response. The
+response, a capped reasoning tail, and the accumulating response. The
 widget grows as content arrives; older finished turns scroll off the top of
 the viewport into terminal scrollback.
 
@@ -864,10 +866,13 @@ the viewport into terminal scrollback.
                      ─── viewport bottom ───
 ```
 
-When the turn finishes, the reasoning window freezes at its last 2–3 lines and
-a stats footer appears at the bottom of the widget. The widget is not
-expandable — its full content is always rendered and accessible in tmux
-copy-mode scrollback.
+When the turn finishes, the retained reasoning tail is committed to the
+transcript FIFO between the prompt and the tool blocks (prompt → reasoning →
+tools → response), so it appears in the finished history like committed tool
+output and may overflow into terminal scrollback. While the turn is still
+streaming, the in-progress reasoning strand stays display-only and never
+enters the FIFO or scrollback; cancel (Esc), clear, and new-chat paths discard
+it without committing it.
 
 #### 8.4.4 Gremlins watch overlay
 
@@ -947,11 +952,15 @@ the overlay is non-blocking.
               │                     │  lines, and in-flight response all dropped
               └─────────────────────┘
 
-  The reasoning widget is ephemeral: it populates during a turn and is cleared
-  when the next prompt is submitted; its content is never flattened into the
-  transcript. Tool-call lines, however, are folded directly into the transcript
-  FIFO between the prompt and the response, so they — like the prompt and
-  response — survive across turns as ordinary scrollback history.
+  The reasoning widget is ephemeral while the turn streams: it populates during
+  the turn and is display-only, never entering the transcript FIFO or terminal
+  scrollback until `Done`/`Ended`. At turn end its retained tail is committed
+  into the FIFO between the prompt and the tool-call lines, so the finished
+  reasoning block survives across turns as ordinary scrollback history.
+  Tool-call lines are folded directly into the transcript FIFO between the
+  prompt and the response as they complete, so they — like the prompt and
+  response — survive across turns as ordinary scrollback history. Esc/Error
+  discards the turn and its reasoning without committing it.
 
   system content (banner, events, command output) is pushed directly into the
   transcript widget. Overlay widgets exist outside this lifecycle — they are
