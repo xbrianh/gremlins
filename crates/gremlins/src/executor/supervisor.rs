@@ -1215,7 +1215,7 @@ async fn handle_launch(
         None => stage_inputs.clone(),
     };
 
-    if let Err(e) = validate_launch_inputs(&gremlin_def, &resolved_stage_inputs) {
+    if let Err(e) = validate_launch_inputs(&gremlin_def, &resolved_stage_inputs, &project_root) {
         return error_response(&e);
     }
 
@@ -3809,14 +3809,14 @@ fn check_shutdown(shutdown_tx: &watch::Sender<bool>) {
 }
 
 /// Resolve every `filepath`-typed bootstrap source value in `stage_inputs`
-/// against `project_root`.
+/// that names an existing file under `project_root`.
 ///
-/// Already-absolute values pass through unchanged. A relative value is
-/// always replaced with `project_root.join(value)` so validation and binding
-/// never consult the daemon's cwd: a value that names an existing file under
-/// `project_root` binds to that absolute path, while a value that does not
-/// still fails [`validate_source_values`] with the absolute path in the
-/// "expected an existing file" error. `string` sources are never rewritten.
+/// Already-absolute values pass through unchanged. Relative values become
+/// absolute paths only when `project_root.join(value)` names an existing file;
+/// otherwise the original value is preserved. This keeps missing-file
+/// diagnostics caller-shaped (validation still checks existence only under
+/// `project_root`) and preserves mixed `filepath`/`string` inline text
+/// verbatim for binding. `string`-only sources are never rewritten.
 fn resolve_filepath_source_values(
     source: &crate::schemas::bootstrap::InputSources,
     stage_inputs: &HashMap<String, String>,
@@ -3833,10 +3833,10 @@ fn resolve_filepath_source_values(
         if value.is_empty() || Path::new(value).is_absolute() {
             continue;
         }
-        resolved.insert(
-            key.clone(),
-            project_root.join(value).to_string_lossy().into_owned(),
-        );
+        let candidate = project_root.join(value);
+        if candidate.is_file() {
+            resolved.insert(key.clone(), candidate.to_string_lossy().into_owned());
+        }
     }
     resolved
 }
@@ -3844,6 +3844,7 @@ fn resolve_filepath_source_values(
 fn validate_launch_inputs(
     gremlin_def: &crate::definition::StaticDefinition,
     stage_inputs: &HashMap<String, String>,
+    project_root: &Path,
 ) -> Result<(), String> {
     use crate::schemas::bootstrap;
     match &gremlin_def.bootstrap.source {
@@ -3857,7 +3858,8 @@ fn validate_launch_inputs(
                     ));
                 }
             }
-            bootstrap::validate_source_values(source, stage_inputs).map_err(|e| format!("{e}"))?;
+            bootstrap::validate_source_values_under(source, stage_inputs, project_root)
+                .map_err(|e| format!("{e}"))?;
         }
         None => {
             if !stage_inputs.is_empty() {
@@ -4021,7 +4023,33 @@ mod tests {
     }
 
     #[test]
-    fn resolve_filepath_source_values_anchors_missing_relative_to_project_root() {
+    fn resolve_filepath_source_values_preserves_mixed_inline_text() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let source = InputSources::new(HashMap::from([(
+            "plan".to_string(),
+            InputSource::new(
+                "plan".to_string(),
+                vec!["filepath".to_string(), "string".to_string()],
+                true,
+            )
+            .unwrap(),
+        )]));
+
+        let inputs = HashMap::from([("plan".to_string(), "write more tests".to_string())]);
+        let resolved = resolve_filepath_source_values(&source, &inputs, &project_root);
+
+        assert_eq!(
+            resolved.get("plan").map(String::as_str),
+            Some("write more tests"),
+            "mixed-type values that are not existing files must stay verbatim"
+        );
+    }
+
+    #[test]
+    fn resolve_filepath_source_values_preserves_missing_relative() {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
@@ -4034,14 +4062,22 @@ mod tests {
         let with_missing = HashMap::from([("plan".to_string(), "missing.md".to_string())]);
         let resolved = resolve_filepath_source_values(&source, &with_missing, &project_root);
 
-        // The relative value must be anchored to `project_root` even when the
-        // file does not exist there, so validation can never accept a
-        // same-named file that happens to live in the daemon's cwd.
-        assert_eq!(
-            resolved.get("plan").map(String::as_str),
-            Some(project_root.join("missing.md").to_string_lossy().as_ref())
+        // The original value is preserved for the diagnostic...
+        assert_eq!(resolved.get("plan").map(String::as_str), Some("missing.md"));
+        // ...but validation checks existence only under `project_root`, so a
+        // same-named file in the daemon cwd can never satisfy it.
+        let error = crate::schemas::bootstrap::validate_source_values_under(
+            &source,
+            &resolved,
+            &project_root,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expected an existing file, got \"missing.md\""),
+            "unexpected error: {error}"
         );
-        assert!(crate::schemas::bootstrap::validate_source_values(&source, &resolved).is_err());
     }
 
     #[tokio::test]
@@ -4092,10 +4128,14 @@ stages: []
         // allowed to satisfy it.
         let resp = handle_launch(&request("missing.md"), sandbox.path(), &shutdown_tx).await;
         assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
-        assert!(resp
+        let message = resp
             .get("message")
             .and_then(Value::as_str)
-            .is_some_and(|m| m.contains("expected an existing file")));
+            .unwrap_or_default();
+        assert!(
+            message.contains("expected an existing file, got \"missing.md\""),
+            "missing file diagnostic must preserve the caller's value: {message}"
+        );
     }
 
     #[tokio::test]
