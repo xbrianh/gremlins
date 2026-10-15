@@ -1598,8 +1598,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         log::debug!("ReasoningChunk len={}", text.len());
                         live_area.push_reasoning_text(&text);
                     }
-                    ChatEvent::ToolOutputChunk { name, text, .. } => {
-                        log::debug!("ToolOutputChunk name={name} len={}", text.len());
+                    ChatEvent::ToolOutputChunk { name, call, text, .. } => {
+                        log::debug!(
+                            "ToolOutputChunk name={name} call={call} len={}",
+                            text.len()
+                        );
+                        live_area.set_tool_title(&call);
                         live_area.push_tool_output_chunk(&text);
                     }
                     ChatEvent::ToolResult { name, output, .. } => {

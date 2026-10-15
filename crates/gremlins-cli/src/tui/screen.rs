@@ -493,6 +493,11 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().push_tool_output_chunk(text);
     }
 
+    /// Set the live tool slot's title row. An empty title clears it.
+    pub fn set_tool_title(&mut self, title: &str) {
+        self.transcript_mut().set_tool_title(title);
+    }
+
     /// Clear the embedded tool slot at a turn boundary.
     pub fn clear_tool_output(&mut self) {
         self.transcript_mut().clear_tool_output();
@@ -1432,7 +1437,7 @@ mod tests {
         let lines: Vec<&str> = visible.lines().collect();
         let prompt = lines.iter().position(|l| l.contains("▍» hi"));
         let reasoning = lines.iter().position(|l| l.contains("thinking"));
-        let tool = lines.iter().position(|l| l.contains("▸ running a tool"));
+        let tool = lines.iter().position(|l| l.contains("    running a tool"));
         let response = lines.iter().position(|l| l.contains("answer"));
         assert!(
             prompt.is_some() && reasoning.is_some() && tool.is_some() && response.is_some(),

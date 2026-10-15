@@ -22,8 +22,6 @@ pub mod glyph {
     pub const TELEMETRY: &str = "◈";
     /// Hollow telemetry diamond (streaming placeholder alternation).
     pub const TELEMETRY_HOLLOW: &str = "◇";
-    /// Live tool-output bullet (single-width).
-    pub const TOOL: &str = "▸";
     /// Blockquote bar (gold).
     pub const QUOTE_BAR: &str = "║";
     /// List bullet (brass).

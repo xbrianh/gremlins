@@ -223,7 +223,7 @@ pub(crate) async fn run_agent_loop(
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
-    let (tool_output_tx, _) = tokio::sync::broadcast::channel::<(String, String)>(1024);
+    let (tool_output_tx, _) = tokio::sync::broadcast::channel::<(String, String, String)>(1024);
     let mut tool_ctx = ToolContext {
         cwd: cwd.clone(),
         extra_env,
@@ -1396,10 +1396,10 @@ async fn run_agent_loop_core(
             if let Some(rx) = live_rx.as_mut() {
                 loop {
                     match rx.recv().await {
-                        Ok((name, text)) => {
+                        Ok((name, call, text)) => {
                             if let Some(se) = &stream_events {
                                 if se.wants_events() {
-                                    se.send(InteractiveEvent::ToolOutputChunk { name, text });
+                                    se.send(InteractiveEvent::ToolOutputChunk { name, call, text });
                                 }
                             }
                         }
@@ -1512,10 +1512,10 @@ async fn run_agent_loop_core(
         if let Some(rx) = live_rx.as_mut() {
             loop {
                 match rx.try_recv() {
-                    Ok((name, text)) => {
+                    Ok((name, call, text)) => {
                         if let Some(se) = &stream_events {
                             if se.wants_events() {
-                                se.send(InteractiveEvent::ToolOutputChunk { name, text });
+                                se.send(InteractiveEvent::ToolOutputChunk { name, call, text });
                             }
                         }
                     }
@@ -1661,11 +1661,16 @@ pub(crate) fn apply_chunk(
 
 /// Format a tool call for human display — name plus the key argument.
 pub(crate) fn format_tool_call(tc: &ToolCall) -> String {
-    let name = &tc.function.name;
-    let args = &tc.function.arguments;
+    format_tool_call_parts(&tc.function.name, &tc.function.arguments)
+}
 
+/// Format a tool call from its already-parsed name and arguments.
+///
+/// This is the single formatting routine shared by the FIFO tool-event path
+/// and the live-output forwarder so both always render the same string.
+pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> String {
     // Extract the primary argument for common tools.
-    let detail: Option<String> = match name.as_str() {
+    let detail: Option<String> = match name {
         "Bash" => args
             .get("command")
             .and_then(|v| v.as_str())

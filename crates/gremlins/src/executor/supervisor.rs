@@ -2556,8 +2556,8 @@ async fn handle_debug(
                             break;
                         }
                     }
-                    Ok(InteractiveEvent::ToolOutputChunk { name, text }) => {
-                        let payload = serde_json::json!({"type": "tool_output_chunk", "name": name, "text": text});
+                    Ok(InteractiveEvent::ToolOutputChunk { name, call, text }) => {
+                        let payload = serde_json::json!({"type": "tool_output_chunk", "name": name, "call": call, "text": text});
                         if writer.write_json_line(&payload).await.is_err() {
                             let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
@@ -3069,8 +3069,8 @@ async fn run_chat_turn(
                             break;
                         }
                     }
-                    Some(InteractiveEvent::ToolOutputChunk { name, text }) => {
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "tool_output_chunk", "name": name, "text": text}));
+                    Some(InteractiveEvent::ToolOutputChunk { name, call, text }) => {
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "tool_output_chunk", "name": name, "call": call, "text": text}));
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
@@ -4768,10 +4768,11 @@ stages: []
     fn chat_payload_serializes_tool_output_chunk() {
         let value = super::chat_payload(
             &Some("t-9".to_string()),
-            serde_json::json!({"type": "tool_output_chunk", "name": "Bash", "text": "hi\n"}),
+            serde_json::json!({"type": "tool_output_chunk", "name": "Bash", "call": "Bash(command=\"ls\")", "text": "hi\n"}),
         );
         assert_eq!(value["type"], "tool_output_chunk");
         assert_eq!(value["name"], "Bash");
+        assert_eq!(value["call"], "Bash(command=\"ls\")");
         assert_eq!(value["text"], "hi\n");
         assert_eq!(value["turn"], "t-9");
     }

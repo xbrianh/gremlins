@@ -127,7 +127,13 @@ pub enum InteractiveEvent {
     ReasoningChunk { text: String },
     /// A line-buffered tool-output chunk streamed while a tool runs. This is
     /// display-only and never reaches the model or the permanent transcript.
-    ToolOutputChunk { name: String, text: String },
+    ToolOutputChunk {
+        name: String,
+        /// Formatted tool call (`format_tool_call` output), used by the TUI
+        /// as the live tool-slot title row.
+        call: String,
+        text: String,
+    },
     /// A tool result produced after execution.
     ToolResult { name: String, output: String },
     /// Interactive session ended.

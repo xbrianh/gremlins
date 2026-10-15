@@ -9,6 +9,7 @@ use regex::Regex;
 use rig_core::completion::ToolDefinition;
 use tokio::process::Command;
 
+use super::agent_loop::format_tool_call_parts;
 use super::task_kind::TaskKind;
 
 const GREP_MAX_LINES: usize = 2000;
@@ -85,16 +86,18 @@ pub(crate) struct ToolContext {
     /// tool calls (used only by `Fork`). `None` when unavailable.
     pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
     /// Optional live-output channel for streaming tool output lines from
-    /// `Bash` and `WebSearch` into the interactive TUI live pane.
-    pub(crate) tool_output: Option<tokio::sync::broadcast::Sender<(String, String)>>,
+    /// `Bash` and `WebSearch` into the interactive TUI live pane. Each tuple
+    /// carries the bare tool name, the formatted tool call, and the output
+    /// text.
+    pub(crate) tool_output: Option<tokio::sync::broadcast::Sender<(String, String, String)>>,
 }
 
 impl ToolContext {
     /// Send one completed live-output line for `name` to the optional
     /// display channel. Tool results returned to the model are unaffected.
-    pub(crate) fn emit_output(&self, name: &str, text: &str) {
+    pub(crate) fn emit_output(&self, name: &str, call: &str, text: &str) {
         if let Some(tx) = &self.tool_output {
-            let _ = tx.send((name.to_string(), text.to_string()));
+            let _ = tx.send((name.to_string(), call.to_string(), text.to_string()));
         }
     }
 }
@@ -1429,7 +1432,14 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
-fn emit_live_lines(name: &str, ctx: &ToolContext, bytes: &[u8], scan: &mut usize, flush: bool) {
+fn emit_live_lines(
+    name: &str,
+    call: &str,
+    ctx: &ToolContext,
+    bytes: &[u8],
+    scan: &mut usize,
+    flush: bool,
+) {
     // Emit each completed line as a separate chunk. A trailing newline is
     // included so downstream line-buffered widgets can split without further
     // knowledge of the tool's line discipline.
@@ -1441,13 +1451,13 @@ fn emit_live_lines(name: &str, ctx: &ToolContext, bytes: &[u8], scan: &mut usize
         let end = *scan + pos;
         let mut line = String::from_utf8_lossy(&bytes[*scan..end]).into_owned();
         line.push('\n');
-        ctx.emit_output(name, &line);
+        ctx.emit_output(name, call, &line);
         *scan = end + 1;
     }
     if flush && *scan < bytes.len() {
         let mut line = String::from_utf8_lossy(&bytes[*scan..]).into_owned();
         line.push('\n');
-        ctx.emit_output(name, &line);
+        ctx.emit_output(name, call, &line);
         *scan = bytes.len();
     }
 }
@@ -1461,6 +1471,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         Ok(s) => s,
         Err(e) => return e,
     };
+    let call = format_tool_call_parts("Bash", &args);
     let timeout_secs = args
         .get("timeout")
         .and_then(|v| v.as_u64())
@@ -1535,7 +1546,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
                         }
                         Ok(n) => {
                             out.extend_from_slice(&out_buf[..n]);
-                            emit_live_lines("Bash", ctx, &out, &mut out_scan, false);
+                            emit_live_lines("Bash", &call, ctx, &out, &mut out_scan, false);
                         }
                         Err(e) => {
                             stdout = None;
@@ -1553,7 +1564,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
                         }
                         Ok(n) => {
                             err.extend_from_slice(&err_buf[..n]);
-                            emit_live_lines("Bash", ctx, &err, &mut err_scan, false);
+                            emit_live_lines("Bash", &call, ctx, &err, &mut err_scan, false);
                         }
                         Err(e) => {
                             stderr = None;
@@ -1566,8 +1577,8 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         if let Some(e) = read_error {
             return Err(e);
         }
-        emit_live_lines("Bash", ctx, &out, &mut out_scan, true);
-        emit_live_lines("Bash", ctx, &err, &mut err_scan, true);
+        emit_live_lines("Bash", &call, ctx, &out, &mut out_scan, true);
+        emit_live_lines("Bash", &call, ctx, &err, &mut err_scan, true);
         Ok(())
     };
 
@@ -1615,6 +1626,7 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
         Ok(s) => s,
         Err(e) => return e,
     };
+    let call = format_tool_call_parts("WebSearch", &args);
     let timeout_secs = args
         .get("timeout")
         .and_then(|v| v.as_u64())
@@ -1727,7 +1739,7 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
                             }
                             let take = n.min(remaining);
                             out.extend_from_slice(&out_buf[..take]);
-                            emit_live_lines("WebSearch", ctx, &out, &mut out_scan, false);
+                            emit_live_lines("WebSearch", &call, ctx, &out, &mut out_scan, false);
                             if take < n {
                                 capped = true;
                                 break;
@@ -1752,7 +1764,7 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
                             if body_room > 0 {
                                 let take = n.min(err_room);
                                 err.extend_from_slice(&err_buf[..take]);
-                                emit_live_lines("WebSearch", ctx, &err, &mut err_scan, false);
+                                emit_live_lines("WebSearch", &call, ctx, &err, &mut err_scan, false);
                             } else if err_room == 0 {
                                 stderr_done = true;
                             }
@@ -1761,8 +1773,8 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
                 }
             }
         }
-        emit_live_lines("WebSearch", ctx, &out, &mut out_scan, true);
-        emit_live_lines("WebSearch", ctx, &err, &mut err_scan, true);
+        emit_live_lines("WebSearch", &call, ctx, &out, &mut out_scan, true);
+        emit_live_lines("WebSearch", &call, ctx, &err, &mut err_scan, true);
         capped
     };
     let capped = match tokio::time::timeout(Duration::from_secs(timeout_secs), read_all).await {

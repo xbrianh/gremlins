@@ -17,6 +17,9 @@ pub enum ChatEvent {
     },
     ToolOutputChunk {
         name: String,
+        /// Formatted tool call (`format_tool_call` output) used as the
+        /// live tool-slot title row.
+        call: String,
         text: String,
         turn: Option<String>,
     },
@@ -71,6 +74,11 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
         Some("tool_output_chunk") => Some(ChatEvent::ToolOutputChunk {
             name: value
                 .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            call: value
+                .get("call")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
@@ -192,16 +200,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_output_chunk_carries_name_and_turn() {
+    fn parse_tool_output_chunk_carries_name_call_and_turn() {
         let value = serde_json::json!({
             "type": "tool_output_chunk",
             "name": "Bash",
+            "call": "Bash(command=\"make -j8 check && make -j8 test\")",
             "text": "hello\n",
             "turn": "7",
         });
         match parse_chat_event(&value) {
-            Some(ChatEvent::ToolOutputChunk { name, text, turn }) => {
+            Some(ChatEvent::ToolOutputChunk {
+                name,
+                call,
+                text,
+                turn,
+            }) => {
                 assert_eq!(name, "Bash");
+                assert_eq!(call, "Bash(command=\"make -j8 check && make -j8 test\")");
                 assert_eq!(text, "hello\n");
                 assert_eq!(turn.as_deref(), Some("7"));
             }

@@ -226,6 +226,11 @@ impl TranscriptWidget {
         self.tool.push_text(text);
     }
 
+    /// Set the live tool slot's title row. An empty title clears it.
+    pub fn set_tool_title(&mut self, title: &str) {
+        self.tool.set_title(title);
+    }
+
     /// Clear the ephemeral tool slot at a turn boundary.
     pub fn clear_tool_output(&mut self) {
         self.tool.clear();
@@ -718,26 +723,16 @@ fn reasoning_line(text: &str, hollow: bool) -> Line<'static> {
 
 /// A single tool-event line: chrome diamond + nickel italic name.
 fn tool_line(name: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("{} ", glyph::DIAMOND),
-            Style::default().fg(DEFAULT_THEME.chrome),
-        ),
-        Span::styled(
-            name.to_string(),
-            Style::default()
-                .fg(DEFAULT_THEME.subtle)
-                .add_modifier(Modifier::ITALIC),
-        ),
-    ])
+    tool_chrome_line(&format!("{} ", glyph::DIAMOND), name)
 }
 
-/// A single live tool-output line: brass tool bullet + nickel italic text.
-fn tool_output_line(text: &str) -> Line<'static> {
+/// Chrome-prefixed live header/body line matching the transcript's tool-event
+/// styling: colored prefix + nickel italic text.
+fn tool_chrome_line(prefix: &str, text: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("{} ", glyph::TOOL),
-            Style::default().fg(DEFAULT_THEME.code_border),
+            prefix.to_string(),
+            Style::default().fg(DEFAULT_THEME.chrome),
         ),
         Span::styled(
             text.to_string(),
@@ -755,8 +750,16 @@ fn reasoning_stream_line(text: &str, index: usize) -> Line<'static> {
 }
 
 /// Streaming styler: live tool output is ANSI-stripped before it is painted.
+///
+/// The tool slot's body indent is applied by [`StreamingWidget`] itself (via
+/// its configured `line_prefix`); this styler only styles the raw text.
 fn tool_stream_line(text: &str, _index: usize) -> Line<'static> {
-    tool_output_line(&strip_ansi(text))
+    Line::from(vec![Span::styled(
+        strip_ansi(text),
+        Style::default()
+            .fg(DEFAULT_THEME.subtle)
+            .add_modifier(Modifier::ITALIC),
+    )])
 }
 
 /// Strip common ANSI control sequences from live tool output.
@@ -1071,10 +1074,12 @@ pub(crate) fn layout_widgets(
 /// trailing partial string, tail-anchors the visible portion with a
 /// `scrolled` offset measured against `last_width`, and styles each logical
 /// line with a caller-supplied styler (raw text + running line index →
-/// styled [`Line`]). An optional title row may be supplied as a function of
-/// [`RenderContext`]. The stream trims its own head to the configured row cap
-/// (lossy tail), collapses to zero when no stream content is present, and
-/// never reports overflow.
+/// styled [`Line`]). An optional owned title row may be set with
+/// [`set_title`](Self::set_title); a per-line body prefix and a title-row
+/// prefix are carried as configuration so callers can match the transcript's
+/// tool chrome without hardcoding it in the styler. The stream trims its own
+/// head to the configured row cap (lossy tail), collapses to zero when no
+/// stream content is present, and never reports overflow.
 pub struct StreamingWidget {
     lines: LineBuffer,
     partial: String,
@@ -1090,7 +1095,13 @@ pub struct StreamingWidget {
     /// visible tail at the same number of visible rows before updating this.
     last_width: Cell<u16>,
     styler: fn(&str, usize) -> Line<'static>,
-    title: Option<fn(&RenderContext) -> Line<'static>>,
+    /// Optional title row text. `None` (or an empty title) renders no row.
+    title: Option<String>,
+    /// Prefix rendered before the title row (e.g. the `◆ ` tool chrome).
+    title_prefix: String,
+    /// Prefix rendered before every streamed body line (e.g. a four-space
+    /// indent for the tool slot).
+    line_prefix: String,
     row_cap: u16,
     size_priority: i32,
 }
@@ -1105,23 +1116,38 @@ impl StreamingWidget {
             last_width: Cell::new(0),
             styler,
             title: None,
+            title_prefix: String::new(),
+            line_prefix: String::new(),
             row_cap,
             size_priority,
         }
     }
 
-    /// Build a titled streaming widget, e.g. a top-level sibling with a
-    /// live header row.
-    #[allow(dead_code)]
-    pub fn with_title(
-        title: fn(&RenderContext) -> Line<'static>,
-        styler: fn(&str, usize) -> Line<'static>,
-        row_cap: u16,
-        size_priority: i32,
-    ) -> Self {
-        Self {
-            title: Some(title),
-            ..Self::new(styler, row_cap, size_priority)
+    /// Configure the prefix rendered before the title row.
+    pub fn with_title_prefix(mut self, prefix: &str) -> Self {
+        self.title_prefix = prefix.to_string();
+        self
+    }
+
+    /// Configure the prefix rendered before every streamed body line.
+    pub fn with_line_prefix(mut self, prefix: &str) -> Self {
+        self.line_prefix = prefix.to_string();
+        self
+    }
+
+    /// Set or clear the title row. An empty title clears the row.
+    ///
+    /// The setter is idempotent: setting the same title is a no-op, so the
+    /// TUI can set it on every output chunk without invalidating layout or
+    /// repaint work.
+    pub fn set_title(&mut self, title: &str) {
+        let next = if title.is_empty() {
+            None
+        } else {
+            Some(title.to_string())
+        };
+        if self.title != next {
+            self.title = next;
         }
     }
 
@@ -1131,10 +1157,24 @@ impl StreamingWidget {
         Self::new(reasoning_stream_line, row_cap, 20)
     }
 
-    /// The configured live tool-output stream: brass tool bullet + nickel
-    /// italic text, ANSI-stripped.
+    /// The configured live tool-output stream: four-space body indent, no
+    /// bullet glyph, and a `◆ `-prefixed title row. Text is ANSI-stripped.
     pub fn tool(row_cap: u16) -> Self {
         Self::new(tool_stream_line, row_cap, 10)
+            .with_title_prefix(&format!("{} ", glyph::DIAMOND))
+            .with_line_prefix("    ")
+    }
+
+    /// Style one logical line, applying the configured body prefix.
+    fn style_line(&self, text: &str, index: usize) -> Line<'static> {
+        let styled = (self.styler)(text, index);
+        if self.line_prefix.is_empty() {
+            return styled;
+        }
+        let mut spans = Vec::with_capacity(styled.spans.len() + 1);
+        spans.push(Span::raw(self.line_prefix.clone()));
+        spans.extend(styled.spans);
+        Line::from(spans)
     }
 
     /// Append text (may be a partial chunk). Completed lines are pushed into
@@ -1145,7 +1185,7 @@ impl StreamingWidget {
             let line: String = self.partial[..newline_pos].to_string();
             self.partial = self.partial[newline_pos + 1..].to_string();
             let idx = self.line_count;
-            self.lines.push((self.styler)(&line, idx));
+            self.lines.push(self.style_line(&line, idx));
             self.line_count += 1;
         }
     }
@@ -1155,7 +1195,7 @@ impl StreamingWidget {
         if !self.partial.is_empty() {
             let line = std::mem::take(&mut self.partial);
             let idx = self.line_count;
-            self.lines.push((self.styler)(&line, idx));
+            self.lines.push(self.style_line(&line, idx));
             self.line_count += 1;
         }
     }
@@ -1167,6 +1207,7 @@ impl StreamingWidget {
         self.line_count = 0;
         self.scrolled.set(0);
         self.last_width.set(0);
+        self.title = None;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1298,7 +1339,7 @@ impl StreamingWidget {
     pub fn rendered_lines(&self) -> Vec<Line<'static>> {
         let mut out = self.lines.visible_lines().to_vec();
         if !self.partial.is_empty() {
-            out.push((self.styler)(&self.partial, self.line_count));
+            out.push(self.style_line(&self.partial, self.line_count));
         }
         out
     }
@@ -1326,17 +1367,21 @@ impl StreamingWidget {
         self.last_width.set(width);
     }
 
-    fn title_line(&self, ctx: &RenderContext) -> Option<Line<'static>> {
-        self.title.map(|f| f(ctx))
+    fn title_line(&self) -> Option<Line<'static>> {
+        let title = self.title.as_deref()?;
+        if title.is_empty() {
+            return None;
+        }
+        Some(tool_chrome_line(&self.title_prefix, title))
     }
 
     /// Wrapped title rows. Idle streams collapse to zero even when a title
     /// is configured, so the title never allocates screen space on its own.
-    fn title_rows(&self, width: u16, ctx: &RenderContext) -> u16 {
+    fn title_rows(&self, width: u16, _ctx: &RenderContext) -> u16 {
         if self.is_empty() || width == 0 {
             return 0;
         }
-        match self.title_line(ctx) {
+        match self.title_line() {
             None => 0,
             Some(line) => (wrapped_height(&[line], width).min(u16::MAX as usize)) as u16,
         }
@@ -1408,7 +1453,7 @@ impl LiveAreaWidget for StreamingWidget {
         }
 
         let mut y = area.y;
-        if let Some(line) = self.title_line(ctx) {
+        if let Some(line) = self.title_line() {
             let title_rows = self.title_rows(area.width, ctx).min(area.height);
             if title_rows > 0 {
                 let title_area = Rect::new(area.x, y, area.width, title_rows);
@@ -2903,17 +2948,11 @@ mod tests {
 
     #[test]
     fn streaming_widget_with_title_renders_title_line() {
-        fn title(_ctx: &RenderContext) -> Line<'static> {
-            Line::from(Span::styled(
-                "LIVE TITLE".to_string(),
-                Style::default()
-                    .fg(DEFAULT_THEME.heading_primary)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        }
-
         let ctx = input_ctx("", 0);
-        let mut widget = StreamingWidget::with_title(title, reasoning_stream_line, 5, 10);
+        let mut widget = StreamingWidget::new(reasoning_stream_line, 5, 10)
+            .with_title_prefix("◆ ")
+            .with_line_prefix("    ");
+        widget.set_title("LIVE TITLE");
         for i in 0..8 {
             widget.push_text(&format!("line {i}\n"));
         }
@@ -2926,19 +2965,16 @@ mod tests {
         widget.render(area, &mut buf, &ctx);
 
         let rows = rendered_rows(&buf, 20, 5);
-        assert!(rows[0].contains("LIVE TITLE"), "{rows:?}");
-        assert!(rows.iter().any(|r| r.contains("line 7")), "{rows:?}");
+        assert!(rows[0].contains("◆ LIVE TITLE"), "{rows:?}");
+        assert!(rows.iter().any(|r| r.contains("    ◇ line 7")), "{rows:?}");
         assert!(!rows.iter().any(|r| r.contains("line 0")), "{rows:?}");
     }
 
     #[test]
     fn streaming_widget_title_collapses_when_idle() {
-        fn title(_ctx: &RenderContext) -> Line<'static> {
-            Line::from(Span::raw("LIVE".to_string()))
-        }
-
         let ctx = input_ctx("", 0);
-        let widget = StreamingWidget::with_title(title, reasoning_stream_line, 5, 10);
+        let mut widget = StreamingWidget::new(reasoning_stream_line, 5, 10).with_title_prefix("◆ ");
+        widget.set_title("LIVE");
 
         assert!(widget.is_empty());
         assert_eq!(widget.min_height(20, &ctx), 0);
@@ -2948,20 +2984,12 @@ mod tests {
 
     #[test]
     fn streaming_widget_wrapping_title_paints_stream_after_measured_title_rows() {
-        fn title(_ctx: &RenderContext) -> Line<'static> {
-            Line::from(Span::styled(
-                "THIS TITLE WRAPS".to_string(),
-                Style::default()
-                    .fg(DEFAULT_THEME.heading_primary)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        }
-
         let ctx = input_ctx("", 0);
-        let mut widget = StreamingWidget::with_title(title, reasoning_stream_line, 5, 10);
+        let mut widget = StreamingWidget::new(reasoning_stream_line, 5, 10).with_title_prefix("◆ ");
+        widget.set_title("THIS TITLE WRAPS");
         widget.push_text("one\ntwo\nthree\n");
 
-        let width = 6;
+        let width = 10;
         let title_rows = widget.title_rows(width, &ctx) as usize;
         assert!(
             title_rows > 1,
@@ -3027,7 +3055,10 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(lines, vec!["▸ first".to_string(), "▸ second".to_string()]);
+        assert_eq!(
+            lines,
+            vec!["    first".to_string(), "    second".to_string()]
+        );
     }
 
     #[test]
@@ -3048,9 +3079,9 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "▸ line 5".to_string(),
-                "▸ line 6".to_string(),
-                "▸ line 7".to_string(),
+                "    line 5".to_string(),
+                "    line 6".to_string(),
+                "    line 7".to_string(),
             ]
         );
     }
@@ -3079,7 +3110,7 @@ mod tests {
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(lines, vec!["▸ red normal".to_string()]);
+        assert_eq!(lines, vec!["    red normal".to_string()]);
     }
 
     #[test]
