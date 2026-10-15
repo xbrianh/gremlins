@@ -1524,8 +1524,9 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 // ---------------------------------------------------------------------------
 
 async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Result<(), String> {
-    // Parse --key value pairs from the trailing free-form arguments.
-    let stage_inputs = parse_stage_inputs(raw_args)?;
+    // Parse --key value pairs up front so malformed trailing args fail fast,
+    // before any config or definition resolution.
+    parse_stage_inputs(raw_args)?;
 
     // Bootstrap the global config so path resolvers work.
     config::init_global().map_err(|e| e.to_string())?;
@@ -1543,6 +1544,22 @@ async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Resul
     let gremlin_def =
         StaticDefinition::from_yaml_file(&definition_path, None, default_client.as_deref())
             .map_err(|e| format!("invalid definition: {e}"))?;
+
+    // Resolve `filepath`-typed bootstrap sources to absolute paths so the
+    // daemon can bind them regardless of its own working directory. The
+    // precedence mirrors `gremlins::executor::bootstrap::bind_artifact`: the
+    // invoking cwd wins, then `project_root`.
+    let resolved_args = match &gremlin_def.bootstrap.source {
+        Some(source) => {
+            let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+            resolve_filepath_args(raw_args, source, &project_root, &cwd)
+        }
+        None => raw_args.to_vec(),
+    };
+
+    // Parse --key value pairs from the (possibly rewritten) free-form args,
+    // so validation sees the same absolute paths sent to the daemon.
+    let stage_inputs = parse_stage_inputs(&resolved_args)?;
 
     match &gremlin_def.bootstrap.source {
         Some(source) => {
@@ -1570,7 +1587,7 @@ async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Resul
     let response = executor_request(serde_json::json!({
         "op": "launch",
         "definition": definition,
-        "args": raw_args,
+        "args": resolved_args,
         "project_root": project_root.to_string_lossy(),
         "ephemeral": ephemeral,
     }))
@@ -1581,6 +1598,77 @@ async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Resul
     let id = response.get("id").and_then(|v| v.as_str()).unwrap_or("");
     println!("{id}");
     Ok(())
+}
+
+/// Rewrite `--key value` args so that `filepath`-typed bootstrap sources carry
+/// absolute paths. Other args pass through verbatim, in order.
+///
+/// Resolution precedence mirrors `gremlins::executor::bootstrap::bind_artifact`:
+/// an already-absolute path is kept as-is; otherwise the value is rooted at
+/// `cwd` when that names an existing file, then at `project_root` when that
+/// names an existing file. Values that resolve to no existing file are left
+/// untouched so validation still reports the original `expected an existing
+/// file` error.
+fn resolve_filepath_args(
+    args: &[String],
+    source: &bootstrap::InputSources,
+    project_root: &Path,
+    cwd: &Path,
+) -> Vec<String> {
+    let mut resolved = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let token = &args[i];
+        resolved.push(token.clone());
+
+        if let Some(key) = token.strip_prefix("--") {
+            let is_filepath = source
+                .sources
+                .get(key)
+                .is_some_and(|src| src.types.iter().any(|t| t == "filepath"));
+            if is_filepath && i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                i += 1;
+                let value = &args[i];
+                resolved.push(resolve_filepath_value(value, project_root, cwd));
+            }
+        }
+        i += 1;
+    }
+    resolved
+}
+
+/// Resolve one `filepath` source value to an absolute path, mirroring
+/// `bind_artifact`'s cwd-first, then `project_root` precedence. A relative
+/// `project_root` is anchored to `cwd` before joining so the resulting path is
+/// absolute even when `GREMLINS_PROJECT_ROOT` (or an equivalent override) is
+/// relative.
+fn resolve_filepath_value(value: &str, project_root: &Path, cwd: &Path) -> String {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return value.to_string();
+    }
+
+    let from_cwd = cwd.join(value);
+    if from_cwd.is_file() {
+        return from_cwd.to_string_lossy().into_owned();
+    }
+
+    let from_project = absolute_from(project_root, cwd).join(value);
+    if from_project.is_file() {
+        return from_project.to_string_lossy().into_owned();
+    }
+
+    value.to_string()
+}
+
+/// Return `path` as an absolute path, joining it to `cwd` when it is relative.
+/// An already-absolute path is returned unchanged.
+fn absolute_from(path: &Path, cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
 }
 
 fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String> {
@@ -1663,4 +1751,175 @@ async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
     };
 
     Ok(keep.iter().map(|s| s.to_string()).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gremlins::schemas::bootstrap::{InputSource, InputSources};
+    use std::fs;
+
+    fn inputs(plan_types: &[&str]) -> InputSources {
+        let sources = [
+            (
+                "plan".to_string(),
+                InputSource::new(
+                    "plan".to_string(),
+                    plan_types.iter().map(|t| (*t).to_string()).collect(),
+                    true,
+                )
+                .unwrap(),
+            ),
+            (
+                "instructions".to_string(),
+                InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
+                    .unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        InputSources::new(sources)
+    }
+
+    #[test]
+    fn filepath_args_resolve_relative_to_cwd_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd");
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        fs::write(cwd.join("plan.md"), "ctor plan").unwrap();
+        fs::write(project_root.join("plan.md"), "project plan").unwrap();
+
+        let args = resolve_filepath_args(
+            &["--plan".to_string(), "plan.md".to_string()],
+            &inputs(&["filepath"]),
+            &project_root,
+            &cwd,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--plan".to_string(),
+                cwd.join("plan.md").to_string_lossy().into_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn filepath_args_fall_back_to_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd");
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(project_root.join("plans")).unwrap();
+        fs::write(project_root.join("plans/plan.md"), "plan").unwrap();
+
+        let args = resolve_filepath_args(
+            &["--plan".to_string(), "plans/plan.md".to_string()],
+            &inputs(&["filepath"]),
+            &project_root,
+            &cwd,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--plan".to_string(),
+                project_root
+                    .join("plans/plan.md")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn filepath_args_anchor_relative_project_root_to_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_path_buf();
+        let project_root = PathBuf::from("project");
+        fs::create_dir_all(cwd.join("project/plans")).unwrap();
+        fs::write(cwd.join("project/plans/plan.md"), "plan").unwrap();
+
+        let args = resolve_filepath_args(
+            &["--plan".to_string(), "plans/plan.md".to_string()],
+            &inputs(&["filepath"]),
+            &project_root,
+            &cwd,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--plan".to_string(),
+                cwd.join("project/plans/plan.md")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn filepath_args_pass_through_absolute_and_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd");
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+
+        let args = resolve_filepath_args(
+            &[
+                "--plan".to_string(),
+                "/already/absolute.md".to_string(),
+                "--plan".to_string(),
+                "nope.md".to_string(),
+            ],
+            &inputs(&["filepath"]),
+            &project_root,
+            &cwd,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--plan".to_string(),
+                "/already/absolute.md".to_string(),
+                "--plan".to_string(),
+                "nope.md".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn filepath_args_leave_string_sources_and_ordering_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd");
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        fs::write(cwd.join("plan.md"), "plan").unwrap();
+
+        let args = resolve_filepath_args(
+            &[
+                "--instructions".to_string(),
+                "write more tests".to_string(),
+                "--plan".to_string(),
+                "plan.md".to_string(),
+                "--instructions".to_string(),
+                "also refactor".to_string(),
+            ],
+            &inputs(&["filepath", "string"]),
+            &project_root,
+            &cwd,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--instructions".to_string(),
+                "write more tests".to_string(),
+                "--plan".to_string(),
+                cwd.join("plan.md").to_string_lossy().into_owned(),
+                "--instructions".to_string(),
+                "also refactor".to_string(),
+            ]
+        );
+    }
 }
