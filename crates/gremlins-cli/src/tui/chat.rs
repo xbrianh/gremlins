@@ -31,31 +31,14 @@ pub enum ChatEvent {
         /// model text at turn end.
         summary: String,
         usage: Option<Value>,
-        /// The gremlin id, carried so the TUI can capture it on the first
-        /// turn and reuse it for subsequent messages.
-        id: Option<String>,
         turn: Option<String>,
     },
     Ended {
         reason: String,
-        /// The gremlin id, carried on terminal payloads so the TUI can
-        /// capture it even when the first turn ends abnormally.
-        id: Option<String>,
         turn: Option<String>,
     },
     Error {
         message: String,
-        /// The gremlin id, carried on terminal payloads so the TUI can
-        /// capture it even when the first turn fails.
-        id: Option<String>,
-        turn: Option<String>,
-    },
-    /// The daemon's ack for a chat request carries the gremlin id.
-    /// The TUI stores it so subsequent messages target the same gremlin,
-    /// even if Esc is pressed before Done/Ended arrives — without this
-    /// the next submit would create a second chat gremlin.
-    ChatId {
-        id: String,
         turn: Option<String>,
     },
 }
@@ -122,7 +105,6 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
                 .unwrap_or("")
                 .to_string(),
             usage: value.get("usage").cloned(),
-            id: value.get("id").and_then(|v| v.as_str()).map(String::from),
             turn,
         }),
         Some("ended") => Some(ChatEvent::Ended {
@@ -131,7 +113,6 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            id: value.get("id").and_then(|v| v.as_str()).map(String::from),
             turn,
         }),
         Some("error") => {
@@ -139,13 +120,12 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
             // lines are request/response errors and must stay in the FIFO
             // response queue, so only classify id-bearing errors as chat.
             let id = value.get("id").and_then(|v| v.as_str()).map(String::from);
-            id.map(|id| ChatEvent::Error {
+            id.map(|_| ChatEvent::Error {
                 message: value
                     .get("message")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown error")
                     .to_string(),
-                id: Some(id),
                 turn,
             })
         }
@@ -171,13 +151,11 @@ mod tests {
             Some(ChatEvent::Done {
                 text,
                 summary,
-                id,
                 turn,
                 ..
             }) => {
                 assert_eq!(text, "streamed response");
                 assert_eq!(summary, "answered the question");
-                assert_eq!(id.as_deref(), Some("chat-0000"));
                 assert_eq!(turn.as_deref(), Some("3"));
             }
             other => panic!("expected Done, got {other:?}"),

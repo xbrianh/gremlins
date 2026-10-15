@@ -15,6 +15,11 @@ pub fn socket_path(state_root: &Path) -> std::path::PathBuf {
     state_root.join("executor.sock")
 }
 
+/// Path to a session socket.
+pub fn session_socket_path(state_root: &Path, session_id: &str) -> std::path::PathBuf {
+    state_root.join(format!("{session_id}.sock"))
+}
+
 /// Path to the executor lock file.
 ///
 /// Prefer [`GremlinsDaemonLock::lock_path`] for new code; this free
@@ -248,6 +253,34 @@ pub async fn connect_socket(state_root: &Path) -> Result<UnixStream, String> {
     UnixStream::connect(&path)
         .await
         .map_err(|e| format!("failed to connect to executor at {}: {e}", path.display()))
+}
+
+/// Bind a session socket (`sess-<id>.sock`). Any stale socket file is
+/// unlinked before binding; session ids are unforgeable so there is no
+/// live-executor safety issue.
+pub fn bind_session_socket(state_root: &Path, session_id: &str) -> Result<UnixListener, String> {
+    let path = session_socket_path(state_root, session_id);
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    UnixListener::bind(&path)
+        .map_err(|e| format!("failed to bind session socket {}: {e}", path.display()))
+}
+
+/// Connect to a session socket by session id.
+pub async fn connect_session_socket(
+    state_root: &Path,
+    session_id: &str,
+) -> Result<UnixStream, String> {
+    let path = session_socket_path(state_root, session_id);
+    UnixStream::connect(&path)
+        .await
+        .map_err(|e| format!("failed to connect to session at {}: {e}", path.display()))
+}
+
+/// Remove a session socket file, best-effort.
+pub fn unlink_session_socket(state_root: &Path, session_id: &str) {
+    let _ = std::fs::remove_file(session_socket_path(state_root, session_id));
 }
 
 /// Read one JSON-line from an async buffered reader.
