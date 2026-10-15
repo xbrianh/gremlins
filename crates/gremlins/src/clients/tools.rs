@@ -98,21 +98,27 @@ pub(crate) struct ToolContext {
     pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
     /// Optional live-output channel for streaming tool output lines from
     /// `Bash` and `WebSearch` into the interactive TUI live pane.
-    pub(crate) tool_output: Option<tokio::sync::broadcast::Sender<ToolOutputLine>>,
+    pub(crate) tool_output: Option<tokio::sync::mpsc::Sender<ToolOutputLine>>,
 }
 
 impl ToolContext {
     /// Send one completed live-output line for the tool call identified by
     /// `id` to the optional display channel. Tool results returned to the
     /// model are unaffected.
-    pub(crate) fn emit_output(&self, id: &str, name: &str, call: &str, text: &str) {
+    ///
+    /// Awaits channel capacity so a slow live-output forwarder throttles the
+    /// producing read loop rather than overflowing the buffer and silently
+    /// dropping chunks from the live tool stream.
+    pub(crate) async fn emit_output(&self, id: &str, name: &str, call: &str, text: &str) {
         if let Some(tx) = &self.tool_output {
-            let _ = tx.send(ToolOutputLine {
-                id: id.to_string(),
-                name: name.to_string(),
-                call: call.to_string(),
-                text: text.to_string(),
-            });
+            let _ = tx
+                .send(ToolOutputLine {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    call: call.to_string(),
+                    text: text.to_string(),
+                })
+                .await;
         }
     }
 }
@@ -1464,7 +1470,7 @@ impl LineScanner {
     }
 }
 
-fn emit_live_lines(
+async fn emit_live_lines(
     id: &str,
     name: &str,
     call: &str,
@@ -1505,7 +1511,7 @@ fn emit_live_lines(
         scanner.scan = bytes.len();
     }
     if !merged.is_empty() {
-        ctx.emit_output(id, name, call, &merged);
+        ctx.emit_output(id, name, call, &merged).await;
     }
 }
 
@@ -1593,7 +1599,8 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) ->
                         }
                         Ok(n) => {
                             out.extend_from_slice(&out_buf[..n]);
-                            emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, false);
+                            emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, false)
+                                .await;
                         }
                         Err(e) => {
                             stdout = None;
@@ -1611,7 +1618,8 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) ->
                         }
                         Ok(n) => {
                             err.extend_from_slice(&err_buf[..n]);
-                            emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, false);
+                            emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, false)
+                                .await;
                         }
                         Err(e) => {
                             stderr = None;
@@ -1624,8 +1632,8 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) ->
         if let Some(e) = read_error {
             return Err(e);
         }
-        emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, true);
-        emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, true);
+        emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, true).await;
+        emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, true).await;
         Ok(())
     };
 
@@ -1791,7 +1799,8 @@ async fn websearch_invoke_with_cap(
                             }
                             let take = n.min(remaining);
                             out.extend_from_slice(&out_buf[..take]);
-                            emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, false);
+                            emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, false)
+                                .await;
                             if take < n {
                                 capped = true;
                                 break;
@@ -1816,7 +1825,8 @@ async fn websearch_invoke_with_cap(
                             if body_room > 0 {
                                 let take = n.min(err_room);
                                 err.extend_from_slice(&err_buf[..take]);
-                                emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, false);
+                                emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, false)
+                                    .await;
                             } else if err_room == 0 {
                                 stderr_done = true;
                             }
@@ -1825,8 +1835,8 @@ async fn websearch_invoke_with_cap(
                 }
             }
         }
-        emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, true);
-        emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, true);
+        emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, true).await;
+        emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, true).await;
         capped
     };
     let capped = match tokio::time::timeout(Duration::from_secs(timeout_secs), read_all).await {
@@ -2746,7 +2756,7 @@ mod tests {
     async fn bash_streaming_emits_completed_lines_and_final_flush() {
         let dir = tmp();
         let mut c = ctx(&dir);
-        let (tx, mut rx) = tokio::sync::broadcast::channel::<ToolOutputLine>(8);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(8);
         c.tool_output = Some(tx);
 
         // No trailing newline: the final flush must emit the trailing partial
@@ -2756,17 +2766,10 @@ mod tests {
         assert_eq!(out, "a\nbb\nccc");
 
         let mut chunks = Vec::new();
-        loop {
-            match rx.try_recv() {
-                Ok(line) => {
-                    assert_eq!(line.id, "tool-test-id");
-                    assert_eq!(line.name, "Bash");
-                    chunks.push(line.text);
-                }
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-                | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
-                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
-            }
+        while let Ok(line) = rx.try_recv() {
+            assert_eq!(line.id, "tool-test-id");
+            assert_eq!(line.name, "Bash");
+            chunks.push(line.text);
         }
         let joined: String = chunks.concat();
         assert_eq!(

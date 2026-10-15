@@ -1101,3 +1101,16 @@ sends `{"op": "chat", "session_id": "sess-…", "text": "..."}` on that
 session socket, and renders stream events (reasoning chunks, tool results,
 response text, turn completion) as transcript widgets. The TUI holds no
 conversation history — the daemon is the authority.
+
+### 9.7 Stream delivery contract
+
+Chat stream events are delivered losslessly under backpressure. The daemon
+uses a bounded mpsc channel for live stream events, but the bound limits
+memory rather than completeness: when the channel is full, the producer
+(agent loop / tool-output forwarder) awaits capacity instead of dropping.
+Live text deltas, reasoning deltas, and tool-output chunks therefore reach
+the front-end without gaps, while a slow front-end simply slows the agent
+loop. `run_chat_turn` remains the sole drainer of the chat stream channel,
+and each awaited send is raced against the turn's cancel token, so
+cancellation (`Esc`/`stop`) still unwinds promptly even when the channel is
+full.

@@ -13,7 +13,7 @@ use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent};
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 
 use super::backend::{ClientError, RunParams};
 use super::interactive::{
@@ -27,6 +27,53 @@ use super::tools::{self, ToolContext};
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
         let _ = tx.send(format!("{prefix}{msg}"));
+    }
+}
+
+/// Send one stream event with backpressure, while still observing
+/// cancellation. Returns `true` if the event was sent and `false` if
+/// cancellation won the race before the send completed.
+///
+/// The mpsc stream sender awaits channel capacity; racing that await
+/// against the cancel token means `Esc`/`stop` unwinds promptly even when
+/// the chat channel is full. Callers must propagate a `false` result so
+/// cancellation stops the relevant loop instead of being treated as a
+/// completed send.
+async fn send_stream_event(
+    se: &StreamEventSender,
+    event: InteractiveEvent,
+    cancel: &CancelToken,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => false,
+        _ = se.send(event) => true,
+    }
+}
+
+/// [`send_stream_event`] as a `Result`, so call sites can propagate
+/// cancellation with `?` instead of treating a lost race as a completed
+/// send.
+async fn send_stream_event_checked(
+    se: &StreamEventSender,
+    event: InteractiveEvent,
+    cancel: &CancelToken,
+) -> Result<(), ClientError> {
+    if send_stream_event(se, event, cancel).await {
+        Ok(())
+    } else {
+        Err(ClientError::Runtime {
+            message: "cancelled".into(),
+        })
+    }
+}
+
+/// Discard any tool-output lines currently queued in the live-output
+/// receiver. Used when leaving a tool batch without the normal post-batch
+/// drain so stale chunks cannot be replayed by a later batch.
+fn discard_tool_output(rx: &mut Option<mpsc::Receiver<tools::ToolOutputLine>>) {
+    if let Some(rx) = rx.as_mut() {
+        while rx.try_recv().is_ok() {}
     }
 }
 
@@ -223,19 +270,22 @@ pub(crate) async fn run_agent_loop(
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
-    // Only build the live-output broadcast when a subscriber will actually
+    // Only build the live-output channel when a subscriber will actually
     // consume it. Non-interactive pipeline runs have no `stream_events`
     // receiver, so building the channel would still cost per-line `String`
     // allocation plus a forwarder that drains-and-discards every chunk.
-    let tool_output = if ctx
+    // The bounded mpsc gives the read loop backpressure: when the forwarder
+    // or chat consumer is slow, `emit_output` awaits capacity instead of
+    // dropping live chunks.
+    let (tool_output_tx, tool_output_rx) = if ctx
         .stream_events
         .as_ref()
         .is_some_and(|se| se.wants_events())
     {
-        let (tx, _) = tokio::sync::broadcast::channel::<tools::ToolOutputLine>(1024);
-        Some(tx)
+        let (tx, rx) = mpsc::channel::<tools::ToolOutputLine>(1024);
+        (Some(tx), Some(rx))
     } else {
-        None
+        (None, None)
     };
     let mut tool_ctx = ToolContext {
         cwd: cwd.clone(),
@@ -247,7 +297,7 @@ pub(crate) async fn run_agent_loop(
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         parent_history: None,
-        tool_output,
+        tool_output: tool_output_tx,
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter);
 
@@ -290,6 +340,7 @@ pub(crate) async fn run_agent_loop(
         &ctx.params.log_tx,
         interactive,
         ctx.stream_events.clone(),
+        tool_output_rx,
         ctx.prepopulated_messages.clone(),
     )
     .await
@@ -348,6 +399,7 @@ pub(crate) async fn run_agent_loop_nested(
         0,
         completion_nudge_budget,
         &log_tx,
+        None,
         None,
         None,
         prepopulated_messages,
@@ -531,6 +583,7 @@ async fn run_agent_loop_core(
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     interactive: Option<InteractiveSession>,
     stream_events: Option<StreamEventSender>,
+    tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
 ) -> Result<CompletedRun, ClientError> {
     // Destructure the interactive session into its components so we can
@@ -544,6 +597,7 @@ async fn run_agent_loop_core(
 
     let original_system_prompt = system_prompt.clone();
     let mut system_prompt = system_prompt;
+    let mut live_output_rx = tool_output_rx;
     let mut history: Vec<Message> = prepopulated_messages.unwrap_or_default();
     let mut next_prompt = Message::user(prompt.to_string());
     let mut turns: usize = 0;
@@ -930,12 +984,20 @@ async fn run_agent_loop_core(
                         if se.wants_events() {
                             match &chunk {
                                 Item::Event(StreamEvent::Text { ref text, .. }) => {
-                                    se.send(InteractiveEvent::StreamChunk { text: text.clone() });
+                                    send_stream_event_checked(
+                                        se,
+                                        InteractiveEvent::StreamChunk { text: text.clone() },
+                                        cancel,
+                                    )
+                                    .await?;
                                 }
                                 Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
-                                    se.send(InteractiveEvent::ReasoningChunk {
-                                        text: text.clone(),
-                                    });
+                                    send_stream_event_checked(
+                                        se,
+                                        InteractiveEvent::ReasoningChunk { text: text.clone() },
+                                        cancel,
+                                    )
+                                    .await?;
                                 }
                                 Item::Event(StreamEvent::End {
                                     content: AssistantContent::ToolCall(tc),
@@ -943,9 +1005,14 @@ async fn run_agent_loop_core(
                                 }) => {
                                     // Emit tool calls as reasoning so they
                                     // appear in the live thought stream.
-                                    se.send(InteractiveEvent::ReasoningChunk {
-                                        text: format_tool_call(tc),
-                                    });
+                                    send_stream_event_checked(
+                                        se,
+                                        InteractiveEvent::ReasoningChunk {
+                                            text: format_tool_call(tc),
+                                        },
+                                        cancel,
+                                    )
+                                    .await?;
                                 }
                                 _ => {}
                             }
@@ -984,7 +1051,7 @@ async fn run_agent_loop_core(
             // reasoning from the failed attempt.
             if let Some(ref se) = stream_events {
                 if se.wants_events() {
-                    se.send(InteractiveEvent::StreamReset);
+                    send_stream_event_checked(se, InteractiveEvent::StreamReset, cancel).await?;
                 }
             }
             continue;
@@ -1019,11 +1086,16 @@ async fn run_agent_loop_core(
         if let Some(ref se) = stream_events {
             if se.wants_events() {
                 log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
-                se.send(InteractiveEvent::TurnComplete {
-                    turn: turn_num,
-                    text: text.clone(),
-                    tool_calls: tool_calls.iter().map(format_tool_call).collect(),
-                });
+                send_stream_event_checked(
+                    se,
+                    InteractiveEvent::TurnComplete {
+                        turn: turn_num,
+                        text: text.clone(),
+                        tool_calls: tool_calls.iter().map(format_tool_call).collect(),
+                    },
+                    cancel,
+                )
+                .await?;
             }
         }
 
@@ -1183,11 +1255,16 @@ async fn run_agent_loop_core(
                 if let Some(ref se) = stream_events {
                     if se.wants_events() {
                         log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
-                        se.send(InteractiveEvent::Done {
-                            text: result_text.clone(),
-                            summary: summary.clone(),
-                            usage: Some(usage.clone()),
-                        });
+                        send_stream_event_checked(
+                            se,
+                            InteractiveEvent::Done {
+                                text: result_text.clone(),
+                                summary: summary.clone(),
+                                usage: Some(usage.clone()),
+                            },
+                            cancel,
+                        )
+                        .await?;
                     }
                 }
                 // Capture the full message history (prior turns + this final
@@ -1403,28 +1480,29 @@ async fn run_agent_loop_core(
         let mut ctx = tool_ctx.clone();
         ctx.parent_history = fork_parent_history;
         // Forward live tool output only for the duration of this batch. The
-        // receiver is borrowed by the select below and is dropped as soon as
-        // the batch completes or is cancelled, so later batches never hear
-        // stale subscribers and Esc/clear cannot resurrect old chunks.
-        let mut live_rx = ctx.tool_output.as_ref().map(|tx| tx.subscribe());
+        // receiver is borrowed by the select below, so later batches never
+        // hear stale chunks and Esc/clear cannot resurrect old output.
+        // Capacity is reserved on the chat stream *before* a tool line is
+        // dequeued, so the select dropping this branch at batch completion
+        // can release an unused permit but can never drop an in-flight line.
         let forward_live_output = async {
-            if let Some(rx) = live_rx.as_mut() {
-                loop {
-                    match rx.recv().await {
-                        Ok(line) => {
-                            if let Some(se) = &stream_events {
-                                if se.wants_events() {
-                                    se.send(InteractiveEvent::ToolOutputChunk {
-                                        id: line.id,
-                                        name: line.name,
-                                        call: line.call,
-                                        text: line.text,
-                                    });
-                                }
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            if let (Some(se), Some(rx)) = (&stream_events, live_output_rx.as_mut()) {
+                if se.wants_events() {
+                    loop {
+                        let permit = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break,
+                            permit = se.reserve() => permit,
+                        };
+                        let Some(line) = rx.recv().await else {
+                            break;
+                        };
+                        permit.send(InteractiveEvent::ToolOutputChunk {
+                            id: line.id,
+                            name: line.name,
+                            call: line.call,
+                            text: line.text,
+                        });
                     }
                 }
             }
@@ -1457,6 +1535,7 @@ async fn run_agent_loop_core(
                 // to complete.
                 log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
                 send_log(log_tx, prefix, "exit: cancelled mid-tool");
+                discard_tool_output(&mut live_output_rx);
                 return Err(ClientError::Runtime {
                     message: "cancelled".into(),
                 });
@@ -1467,6 +1546,7 @@ async fn run_agent_loop_core(
                 // (files written, bash commands run) are not unwound.
                 log::info!("agent_loop: paused mid-tool (label={})", prefix);
                 send_log(log_tx, prefix, "pause: entering interactive mode (mid-tool)");
+                discard_tool_output(&mut live_output_rx);
                 if let Some(ref p) = pause {
                     p.reset();
                 }
@@ -1529,24 +1609,22 @@ async fn run_agent_loop_core(
         // Tools send their final chunks just before returning. The select
         // above stops at the first completed future, so drain anything still
         // sitting in the receiver before emitting ToolResult events.
-        if let Some(rx) = live_rx.as_mut() {
-            loop {
-                match rx.try_recv() {
-                    Ok(line) => {
-                        if let Some(se) = &stream_events {
-                            if se.wants_events() {
-                                se.send(InteractiveEvent::ToolOutputChunk {
-                                    id: line.id,
-                                    name: line.name,
-                                    call: line.call,
-                                    text: line.text,
-                                });
-                            }
-                        }
+        if let Some(rx) = live_output_rx.as_mut() {
+            while let Ok(line) = rx.try_recv() {
+                if let Some(se) = &stream_events {
+                    if se.wants_events() {
+                        send_stream_event_checked(
+                            se,
+                            InteractiveEvent::ToolOutputChunk {
+                                id: line.id,
+                                name: line.name,
+                                call: line.call,
+                                text: line.text,
+                            },
+                            cancel,
+                        )
+                        .await?;
                     }
-                    Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-                    | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
                 }
             }
         }
@@ -1573,12 +1651,17 @@ async fn run_agent_loop_core(
                     } else {
                         trunc(&output, 200)
                     };
-                    se.send(InteractiveEvent::ToolResult {
-                        id: job.id.clone(),
-                        name: job.name.clone(),
-                        call: job.call.clone(),
-                        output: display,
-                    });
+                    send_stream_event_checked(
+                        se,
+                        InteractiveEvent::ToolResult {
+                            id: job.id.clone(),
+                            name: job.name.clone(),
+                            call: job.call.clone(),
+                            output: display,
+                        },
+                        cancel,
+                    )
+                    .await?;
                 }
             }
             ledger.push(ledger_line(&job.name, &job.key, &output));
@@ -2173,6 +2256,42 @@ mod tests {
                 .unwrap();
         }
         assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn send_stream_event_cancels_while_channel_full() {
+        let token = CancelToken::new();
+        let (tx, _rx) = mpsc::channel::<InteractiveEvent>(1);
+        let sender = StreamEventSender::Mpsc(tx);
+
+        // Fill the only slot.
+        assert!(
+            send_stream_event(
+                &sender,
+                InteractiveEvent::StreamChunk { text: "one".into() },
+                &token,
+            )
+            .await,
+            "an unblocked send should complete"
+        );
+
+        token.cancel();
+
+        // The next send would block forever waiting for capacity; the cancel
+        // branch must win the race and report cancellation.
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            send_stream_event(
+                &sender,
+                InteractiveEvent::StreamChunk { text: "two".into() },
+                &token,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(false)),
+            "cancellation must interrupt a blocked stream send and report not sent"
+        );
     }
 
     fn loop_opts(filter: Option<&[String]>) -> LoopOpts<'_> {
@@ -4827,6 +4946,7 @@ mod tests {
                 Some(session),
                 Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
+                None,
             )
             .await
         });
@@ -4934,6 +5054,7 @@ mod tests {
                 Some(session),
                 Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
+                None,
             )
             .await
         });
@@ -5028,6 +5149,7 @@ mod tests {
                 Some(session),
                 Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
+                None,
             )
             .await
         });
@@ -5110,6 +5232,7 @@ mod tests {
                 &None,
                 Some(session),
                 Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                None,
                 None,
             )
             .await
