@@ -7,7 +7,7 @@ use rig_core::providers::copilot::{Copilot, CopilotConfig, CopilotIntent};
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::clients::agent_loop::{
     default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
@@ -23,6 +23,8 @@ const DEFAULT_MODEL: &str = "gpt-4o";
 
 const GITHUB_COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const GITHUB_COPILOT_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+const GH_CLI_TIMEOUT: Duration = Duration::from_secs(5);
+const GH_CLI_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const COPILOT_EDITOR_VERSION: &str = "vscode/1.107.0";
 const COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
 const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
@@ -73,11 +75,39 @@ fn github_access_token_env(name: &str) -> Option<String> {
 }
 
 /// Read `gh auth token`, returning `None` when the CLI or login is absent.
+///
+/// The child runs with stdin closed and prompts disabled, and is killed after
+/// a short deadline so a keychain prompt or hung `gh` cannot stall an
+/// unattended run.
 fn gh_auth_token() -> Option<String> {
-    let output = std::process::Command::new("gh")
+    let mut child = std::process::Command::new("gh")
         .args(["auth", "token"])
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .env("GH_PROMPT_DISABLED", "1")
+        .spawn()
         .ok()?;
+
+    let deadline = Instant::now() + GH_CLI_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(GH_CLI_POLL_INTERVAL),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+
+    let output = child.wait_with_output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -99,48 +129,90 @@ fn github_access_token() -> Option<String> {
 /// This mirrors rig's synchronous-free GitHub-token auth request shape: a `GET`
 /// to GitHub Copilot's token endpoint with the Copilot editor identity headers
 /// and the GitHub token in `Authorization: token ...`.
+///
+/// The blocking request runs on a fresh thread: `reqwest::blocking` uses an
+/// internal runtime and panics if it is entered from a tokio worker, so the
+/// exchange itself must never run on `CopilotBackend::build`'s calling thread.
 fn exchange_github_token(access_token: &str) -> Result<Copilot, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(GITHUB_COPILOT_TOKEN_TIMEOUT)
-        .build()
-        .map_err(|err| format!("failed to build GitHub Copilot token exchange client: {err}"))?;
+    let (session_token, api_base) = exchange_github_token_in_thread(access_token)?;
+    Ok(copilot_client(session_token, api_base))
+}
 
-    let response = client
-        .get(GITHUB_COPILOT_TOKEN_URL)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .header("editor-version", COPILOT_EDITOR_VERSION)
-        .header("editor-plugin-version", COPILOT_EDITOR_PLUGIN_VERSION)
-        .header("user-agent", COPILOT_USER_AGENT)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("token {access_token}"),
-        )
-        .send()
-        .map_err(|err| format!("GitHub Copilot token exchange failed: {err}"))?;
+fn exchange_github_token_in_thread(
+    access_token: &str,
+) -> Result<(String, Option<String>), String> {
+    let access_token = access_token.to_string();
+    std::thread::spawn(move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(GITHUB_COPILOT_TOKEN_TIMEOUT)
+            .build()
+            .map_err(|err| {
+                format!("failed to build GitHub Copilot token exchange client: {err}")
+            })?;
 
-    if !response.status().is_success() {
-        return Err(format!(
-            "GitHub Copilot token exchange failed with HTTP {}",
-            response.status()
-        ));
+        let response = client
+            .get(GITHUB_COPILOT_TOKEN_URL)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header("editor-version", COPILOT_EDITOR_VERSION)
+            .header("editor-plugin-version", COPILOT_EDITOR_PLUGIN_VERSION)
+            .header("user-agent", COPILOT_USER_AGENT)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("token {access_token}"),
+            )
+            .send()
+            .map_err(|err| format!("GitHub Copilot token exchange failed: {err}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(format!(
+                "GitHub Copilot token exchange failed with HTTP {status}{}",
+                token_exchange_error_detail(&body)
+            ));
+        }
+
+        let record: CopilotTokenResponse = response.json().map_err(|err| {
+            format!("GitHub Copilot token exchange response was invalid: {err}")
+        })?;
+        let CopilotTokenResponse { token, endpoints } = record;
+        let api_base = endpoints
+            .and_then(|endpoints| endpoints.api)
+            .map(|api| api.trim().to_string())
+            .filter(|api| !api.is_empty());
+        let session_token = token
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                "GitHub Copilot token exchange response did not include a session token"
+                    .to_string()
+            })?;
+
+        Ok((session_token, api_base))
+    })
+    .join()
+    .map_err(|_| "GitHub Copilot token exchange panicked".to_string())?
+}
+
+/// Render a small, non-empty response body snippet for exchange errors.
+fn token_exchange_error_detail(body: &str) -> String {
+    const MAX_BODY_BYTES: usize = 512;
+
+    let body = body.trim();
+    if body.is_empty() {
+        return String::new();
     }
 
-    let record: CopilotTokenResponse = response
-        .json()
-        .map_err(|err| format!("GitHub Copilot token exchange response was invalid: {err}"))?;
-    let CopilotTokenResponse { token, endpoints } = record;
-    let api_base = endpoints
-        .and_then(|endpoints| endpoints.api)
-        .map(|api| api.trim().to_string())
-        .filter(|api| !api.is_empty());
-    let session_token = token
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty())
-        .ok_or_else(|| {
-            "GitHub Copilot token exchange response did not include a session token".to_string()
-        })?;
-
-    Ok(copilot_client(session_token, api_base))
+    let mut end = body.len().min(MAX_BODY_BYTES);
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    let snippet = &body[..end];
+    if end < body.len() {
+        format!(": {snippet}...")
+    } else {
+        format!(": {snippet}")
+    }
 }
 
 fn copilot_client(session_token: String, api_base: Option<String>) -> Copilot {
@@ -558,6 +630,17 @@ mod tests {
         .unwrap();
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
         assert!(resolve_auth().is_ok());
+    }
+
+    #[test]
+    fn auth_missing_credentials_error_names_github_sources() {
+        let _guard = isolated_env();
+
+        let err = resolve_auth().unwrap_err();
+        assert!(err.contains("GITHUB_COPILOT_API_KEY"), "got: {err}");
+        assert!(err.contains("GITHUB_TOKEN"), "got: {err}");
+        assert!(err.contains("GH_TOKEN"), "got: {err}");
+        assert!(err.contains("gh auth token"), "got: {err}");
     }
 
     #[test]
