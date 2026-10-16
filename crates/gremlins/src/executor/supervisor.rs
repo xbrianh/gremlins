@@ -2733,13 +2733,25 @@ async fn handle_chat(
 
     let project_root = project_root.unwrap_or_else(config::project_root);
 
-    // 2. Get default model
+    // 2. Get default model, resolving `profile:` references through the
+    //    model-profiles table. Resolution is required here: unlike the
+    //    pipeline path (which bakes profiles during definition load), the
+    //    chat gremlin is built directly from the raw settings value and would
+    //    otherwise hand `profile:<name>` straight to `Client::parse`.
     let default_model = match config::global_config() {
         Ok(cfg) => match cfg.default_model() {
-            Some(c) => match ModelURI::parse(c) {
-                Ok(uri) => uri,
+            Some(c) => match config::resolve_model_reference(c, &cfg) {
+                Ok(resolved) => match ModelURI::parse(&resolved) {
+                    Ok(uri) => uri,
+                    Err(e) => {
+                        let resp =
+                            error_response(&format!("invalid default model {resolved:?}: {e}"));
+                        let _ = writer.write_json_line(&resp).await;
+                        return;
+                    }
+                },
                 Err(e) => {
-                    let resp = error_response(&format!("invalid default model {c:?}: {e}"));
+                    let resp = error_response(&format!("invalid default model: {e}"));
                     let _ = writer.write_json_line(&resp).await;
                     return;
                 }
