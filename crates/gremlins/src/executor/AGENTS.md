@@ -55,8 +55,9 @@ metadata or `clean` never pays for the runtime.
 
 Client resolution order lives in `run.rs::resolve_model_spec`:
 1. stage's own `model:`; 2. enclosing composite's explicit model;
-3. `default-model-by-stage` runtime config (exact → longest prefix);
-4. definition `default_model`.
+3. selected default profile's `model-by-stage` (exact → longest prefix);
+4. `default-model-by-stage` runtime config (exact → longest prefix);
+5. definition `default_model`.
 
 ### State and artifacts
 

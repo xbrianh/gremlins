@@ -74,6 +74,7 @@ impl From<PathsSection> for PathOverrides {
 pub struct ModelProfile {
     pub model: String,
     pub task_models: Option<IndexMap<String, String>>,
+    pub model_by_stage: Option<IndexMap<String, String>>,
 }
 
 /// Effective retry backoff schedules from `settings.yaml`.
@@ -99,6 +100,8 @@ pub struct Config {
     tui_model: Option<String>,
     exact_stage_models: HashMap<String, String>,
     prefix_stage_models: HashMap<String, String>,
+    profile_exact_stage_models: HashMap<String, String>,
+    profile_prefix_stage_models: HashMap<String, String>,
     default_task_models: Option<IndexMap<String, String>>,
     model_profiles: IndexMap<String, ModelProfile>,
     path_overrides: PathOverrides,
@@ -201,6 +204,8 @@ struct ProfileFile {
     model: Option<StrictString>,
     #[serde(rename = "task-models", default)]
     task_models: Option<IndexMap<String, StrictString>>,
+    #[serde(rename = "model-by-stage", default)]
+    model_by_stage: Option<IndexMap<String, StrictString>>,
 }
 
 fn validate_backoff_schedule(name: &str, schedule: Vec<f64>) -> Result<Vec<f64>, ConfigError> {
@@ -283,11 +288,23 @@ impl Config {
             .default_task_models
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
 
-        // Validate profile-level task-models keys before consuming the map.
+        // Validate profile-level task-models keys and model-by-stage values
+        // before consuming the map. Profiles are flat: a model-by-stage value
+        // that names another profile is a load-time error.
         if let Some(profiles) = cfg_file.model_profiles.as_ref() {
-            for profile in profiles.values() {
+            for (name, profile) in profiles {
                 if let Some(m) = profile.task_models.as_ref() {
                     validate_task_models_keys(m.keys())?;
+                }
+                if let Some(stage_models) = profile.model_by_stage.as_ref() {
+                    for value in stage_models.values() {
+                        if value.0.strip_prefix("profile/").is_some() {
+                            return Err(ConfigError::Profile(format!(
+                                "model-by-stage in model profile {name:?} may not use \
+                                 profile/ references"
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -300,11 +317,15 @@ impl Config {
                 let task_models = profile
                     .task_models
                     .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
+                let model_by_stage = profile
+                    .model_by_stage
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
                 (
                     name,
                     ModelProfile {
                         model: profile.model.map(|s| s.0).unwrap_or_default(),
                         task_models,
+                        model_by_stage,
                     },
                 )
             })
@@ -336,6 +357,21 @@ impl Config {
         };
         let (exact_stage_models, prefix_stage_models) = parse_stage_models(stage_models.as_ref());
 
+        // The effective global default-model may select a profile. When it
+        // does, that profile's model-by-stage map becomes a separate
+        // profile-scoped stage-model layer. Values are concrete specs and are
+        // deliberately not resolved through the profile table.
+        let (profile_exact_stage_models, profile_prefix_stage_models) = {
+            let selected_profile = default_model
+                .as_deref()
+                .and_then(profile_name)
+                .and_then(|name| model_profiles.get(name));
+            match selected_profile.and_then(|profile| profile.model_by_stage.as_ref()) {
+                Some(map) => parse_stage_models(Some(map)),
+                None => (HashMap::new(), HashMap::new()),
+            }
+        };
+
         let path_overrides = cfg_file.paths.map(PathOverrides::from).unwrap_or_default();
 
         let backoff = match cfg_file.backoff {
@@ -357,6 +393,8 @@ impl Config {
             tui_model,
             exact_stage_models,
             prefix_stage_models,
+            profile_exact_stage_models,
+            profile_prefix_stage_models,
             default_task_models: task_models,
             model_profiles,
             path_overrides,
@@ -377,6 +415,15 @@ impl Config {
     /// Returns `(exact_map, prefix_map)` from `default-model-by-stage`.
     pub fn default_model_by_stage(&self) -> (&HashMap<String, String>, &HashMap<String, String>) {
         (&self.exact_stage_models, &self.prefix_stage_models)
+    }
+
+    /// Returns `(exact_map, prefix_map)` from the `model-by-stage` map of the
+    /// model profile selected by the effective global `default-model`, if any.
+    pub fn profile_model_by_stage(&self) -> (&HashMap<String, String>, &HashMap<String, String>) {
+        (
+            &self.profile_exact_stage_models,
+            &self.profile_prefix_stage_models,
+        )
     }
 
     /// The raw `default-task-models` map, in declaration order.
@@ -1618,6 +1665,77 @@ default-model-by-stage:
                 "got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn test_config_profile_model_by_stage_parses_selected_profile() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile/fast"
+model-profiles:
+  fast:
+    model: cmd/fast
+    model-by-stage:
+      plan: cmd/profile-plan
+      review-*: cmd/profile-review
+  other:
+    model: cmd/other
+    model-by-stage:
+      plan: cmd/other-plan
+"#,
+        ));
+        let cfg = Config::load().unwrap();
+
+        let (exact, prefix) = cfg.profile_model_by_stage();
+        assert_eq!(exact.get("plan").unwrap(), "cmd/profile-plan");
+        assert_eq!(prefix.get("review-").unwrap(), "cmd/profile-review");
+        assert!(!exact.contains_key("other"));
+        assert!(!prefix.contains_key("other-"));
+
+        let profile = cfg.model_profiles().get("fast").unwrap();
+        assert_eq!(
+            profile
+                .model_by_stage
+                .as_ref()
+                .unwrap()
+                .get("plan")
+                .unwrap(),
+            "cmd/profile-plan"
+        );
+    }
+
+    #[test]
+    fn test_config_profile_model_by_stage_ignored_for_concrete_default_model() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "cmd/concrete"
+model-profiles:
+  fast:
+    model: cmd/fast
+    model-by-stage:
+      plan: cmd/profile-plan
+"#,
+        ));
+        let cfg = Config::load().unwrap();
+        let (exact, prefix) = cfg.profile_model_by_stage();
+        assert!(exact.is_empty());
+        assert!(prefix.is_empty());
+    }
+
+    #[test]
+    fn test_config_profile_model_by_stage_rejects_nested_profile() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile/fast"
+model-profiles:
+  fast:
+    model: cmd/fast
+    model-by-stage:
+      plan: "profile/other"
+  other:
+    model: cmd/other
+"#,
+        ));
+        let err = Config::load().unwrap_err();
+        assert!(matches!(err, ConfigError::Profile(_)), "got: {err:?}");
+        assert!(err.to_string().contains("model-by-stage"), "got: {err}");
     }
 
     #[test]

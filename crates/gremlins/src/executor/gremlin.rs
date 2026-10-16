@@ -172,6 +172,12 @@ pub(crate) struct RuntimeConfig {
     pub stage_models_exact: HashMap<String, String>,
     /// Prefix-match stage→client mappings from config.
     pub stage_models_prefix: HashMap<String, String>,
+    /// Exact-match stage→client mappings from the selected default model
+    /// profile's `model-by-stage`, if any.
+    pub profile_stage_models_exact: HashMap<String, String>,
+    /// Prefix-match stage→client mappings from the selected default model
+    /// profile's `model-by-stage`, if any.
+    pub profile_stage_models_prefix: HashMap<String, String>,
     /// The default model from settings.yaml, if any.
     pub default_model: Option<String>,
     /// The default task-models from settings.yaml, if any.
@@ -195,6 +201,8 @@ impl Clone for RuntimeConfig {
         Self {
             stage_models_exact: self.stage_models_exact.clone(),
             stage_models_prefix: self.stage_models_prefix.clone(),
+            profile_stage_models_exact: self.profile_stage_models_exact.clone(),
+            profile_stage_models_prefix: self.profile_stage_models_prefix.clone(),
             default_model: self.default_model.clone(),
             default_task_models: self.default_task_models.clone(),
             base_process_env: self.base_process_env.clone(),
@@ -214,6 +222,11 @@ impl RuntimeConfig {
             .map(|c| c.default_model_by_stage())
             .map(|(e, p)| (e.clone(), p.clone()))
             .unwrap_or_default();
+        let (profile_stage_exact, profile_stage_prefix) = cfg
+            .as_ref()
+            .map(|c| c.profile_model_by_stage())
+            .map(|(e, p)| (e.clone(), p.clone()))
+            .unwrap_or_default();
         let default_model = cfg
             .as_ref()
             .and_then(|c| c.default_model().map(String::from));
@@ -222,6 +235,8 @@ impl RuntimeConfig {
         Self {
             stage_models_exact: stage_exact,
             stage_models_prefix: stage_prefix,
+            profile_stage_models_exact: profile_stage_exact,
+            profile_stage_models_prefix: profile_stage_prefix,
             default_model,
             default_task_models,
             base_process_env,

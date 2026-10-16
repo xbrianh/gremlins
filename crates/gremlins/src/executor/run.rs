@@ -152,8 +152,9 @@ async fn run_stage_scoped(
 /// Resolve the model spec for a stage, consulting:
 /// 1. The stage's own `model:` field (always wins)
 /// 2. The enclosing composite's explicit `model:` (new — the `fill_model` replacement)
-/// 3. `default-model-by-stage` from runtime config (exact → longest prefix)
-/// 4. The definition's `default_model`
+/// 3. The selected default profile's `model-by-stage` (exact → longest prefix)
+/// 4. `default-model-by-stage` from runtime config (exact → longest prefix)
+/// 5. The definition's `default_model`
 fn resolve_model_spec(
     stage: &ExecutorStage,
     gremlin: &Gremlin,
@@ -177,38 +178,56 @@ fn resolve_model_spec(
         })
     };
 
-    // 3. Consult default-model-by-stage from runtime config
-    {
-        let exact = &gremlin.runtime_config.stage_models_exact;
-        let prefix = &gremlin.runtime_config.stage_models_prefix;
-
-        // Exact match
-        if let Some(model_spec) = exact.get(stage_name) {
-            return parse(model_spec);
-        }
-
-        // Longest prefix match
-        let mut best: Option<(&str, &str)> = None;
-        for (prefix_key, model_spec) in prefix {
-            if stage_name.starts_with(prefix_key.as_str()) {
-                match best {
-                    Some((prev_key, _prev_spec)) if prefix_key.len() > prev_key.len() => {
-                        best = Some((prefix_key, model_spec));
-                    }
-                    None => {
-                        best = Some((prefix_key, model_spec));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if let Some((_prefix_key, model_spec)) = best {
-            return parse(model_spec);
-        }
+    // 3. Consult the selected default profile's model-by-stage map.
+    if let Some(model_spec) = resolve_from_stage_models(
+        stage_name,
+        &gremlin.runtime_config.profile_stage_models_exact,
+        &gremlin.runtime_config.profile_stage_models_prefix,
+    ) {
+        return parse(model_spec);
     }
 
-    // 4. Fall back to definition default
+    // 4. Consult default-model-by-stage from runtime config
+    if let Some(model_spec) = resolve_from_stage_models(
+        stage_name,
+        &gremlin.runtime_config.stage_models_exact,
+        &gremlin.runtime_config.stage_models_prefix,
+    ) {
+        return parse(model_spec);
+    }
+
+    // 5. Fall back to definition default
     Ok(gremlin.definition.default_model().clone())
+}
+
+/// Look up `stage_name` in an (exact, prefix) stage-model pair.
+///
+/// Exact keys always beat prefix keys. When multiple prefixes match, the
+/// longest prefix wins.
+fn resolve_from_stage_models<'a>(
+    stage_name: &str,
+    exact: &'a HashMap<String, String>,
+    prefix: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    if let Some(model_spec) = exact.get(stage_name) {
+        return Some(model_spec);
+    }
+
+    let mut best: Option<(&str, &str)> = None;
+    for (prefix_key, model_spec) in prefix {
+        if stage_name.starts_with(prefix_key.as_str()) {
+            match best {
+                Some((prev_key, _prev_spec)) if prefix_key.len() > prev_key.len() => {
+                    best = Some((prefix_key, model_spec));
+                }
+                None => {
+                    best = Some((prefix_key, model_spec));
+                }
+                _ => {}
+            }
+        }
+    }
+    best.map(|(_prefix_key, model_spec)| model_spec)
 }
 
 /// The client a stage runs with: resolved via [`resolve_model_spec`], then
@@ -1340,6 +1359,126 @@ mod tests {
             !by_kind.contains_key(&TaskKind::Implement),
             "stage-model entries must not appear in the task-model map"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_model_spec_profile_map_wins_over_global_map() {
+        let stages = vec![AgentBuilder::new("plan").prompt("hi").build().unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
+
+        gremlin
+            .runtime_config
+            .profile_stage_models_exact
+            .insert("plan".to_string(), "cmd/profile-plan".to_string());
+        gremlin
+            .runtime_config
+            .stage_models_exact
+            .insert("plan".to_string(), "cmd/global-plan".to_string());
+
+        let stage = take_first_stage(&mut gremlin).await;
+        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
+        assert_eq!(resolved.to_string(), "cmd/profile-plan");
+    }
+
+    #[tokio::test]
+    async fn resolve_model_spec_profile_exact_beats_profile_prefix() {
+        let stages = vec![AgentBuilder::new("plan-stage")
+            .prompt("hi")
+            .build()
+            .unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
+
+        gremlin
+            .runtime_config
+            .profile_stage_models_exact
+            .insert("plan-stage".to_string(), "cmd/profile-exact".to_string());
+        gremlin
+            .runtime_config
+            .profile_stage_models_prefix
+            .insert("plan-".to_string(), "cmd/profile-prefix".to_string());
+
+        let stage = take_first_stage(&mut gremlin).await;
+        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
+        assert_eq!(resolved.to_string(), "cmd/profile-exact");
+    }
+
+    #[tokio::test]
+    async fn resolve_model_spec_profile_prefix_wins_over_global_prefix() {
+        let stages = vec![AgentBuilder::new("plan-work").prompt("hi").build().unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
+
+        gremlin
+            .runtime_config
+            .profile_stage_models_prefix
+            .insert("plan-".to_string(), "cmd/profile-prefix".to_string());
+        gremlin
+            .runtime_config
+            .stage_models_prefix
+            .insert("plan-".to_string(), "cmd/global-prefix".to_string());
+
+        let stage = take_first_stage(&mut gremlin).await;
+        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
+        assert_eq!(resolved.to_string(), "cmd/profile-prefix");
+    }
+
+    #[tokio::test]
+    async fn resolve_model_spec_stage_model_beats_profile_map() {
+        let stages = vec![AgentBuilder::new("plan")
+            .model(model("cmd/stage"))
+            .prompt("hi")
+            .build()
+            .unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
+
+        gremlin
+            .runtime_config
+            .profile_stage_models_exact
+            .insert("plan".to_string(), "cmd/profile-plan".to_string());
+
+        let stage = take_first_stage(&mut gremlin).await;
+        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
+        assert_eq!(resolved.to_string(), "cmd/stage");
+    }
+
+    #[tokio::test]
+    async fn resolve_model_spec_enclosing_model_beats_profile_map() {
+        let stages = vec![AgentBuilder::new("plan").prompt("hi").build().unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
+
+        gremlin
+            .runtime_config
+            .profile_stage_models_exact
+            .insert("plan".to_string(), "cmd/profile-plan".to_string());
+
+        let stage = take_first_stage(&mut gremlin).await;
+        let enclosing = model("cmd/enclosing");
+        let resolved = resolve_model_spec(&stage, &gremlin, Some(&enclosing)).unwrap();
+        assert_eq!(resolved.to_string(), "cmd/enclosing");
+    }
+
+    #[tokio::test]
+    async fn resolve_model_spec_falls_back_to_global_map() {
+        let stages = vec![AgentBuilder::new("review").prompt("hi").build().unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
+
+        gremlin
+            .runtime_config
+            .stage_models_exact
+            .insert("review".to_string(), "cmd/global-review".to_string());
+
+        let stage = take_first_stage(&mut gremlin).await;
+        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
+        assert_eq!(resolved.to_string(), "cmd/global-review");
+    }
+
+    #[tokio::test]
+    async fn resolve_model_spec_falls_back_to_definition_default() {
+        let stages = vec![AgentBuilder::new("review").prompt("hi").build().unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
+
+        let stage = take_first_stage(&mut gremlin).await;
+        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
+        assert_eq!(resolved.to_string(), "cmd/default");
     }
 
     #[tokio::test]
