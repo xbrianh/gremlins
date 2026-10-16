@@ -167,7 +167,8 @@ fn split_params_suffix(rest: &str) -> Result<SplitParams<'_>, String> {
 /// the model rather than rejected: `openrouter:some/model:free` names the model
 /// `some/model:free`. Only a suffix that parses as a parameter list is split
 /// off, and only a repeated key within one is an error. `provider_and_model` in
-/// `openai_protocol` re-splits a spec by the same rule, so the two agree.
+/// `openai_protocol` calls [`split_spec`] and discards the params component, so
+/// the two cannot drift.
 pub fn parse_spec(s: &str) -> Result<(String, String, IndexMap<String, String>), String> {
     let (provider, model, extra_params) = split_spec(s)?;
     Ok((provider.to_string(), model.to_string(), extra_params))

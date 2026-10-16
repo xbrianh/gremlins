@@ -569,17 +569,33 @@ mod tests {
 
     #[test]
     fn provider_and_model_agrees_with_parse_spec_on_plain_and_param_specs() {
-        for spec in [
-            "openai:gpt-4o",
-            "openai:gpt-4o:foo=bar",
-            "openai:gpt-4o:top_p=0.7,n=3",
-            "openrouter:anthropic/claude-sonnet-4:free",
-            "openrouter:google/gemini-2.5-flash:online",
-            "openrouter:some/model:free",
-            "openai:gpt-4o:reasoning=high,bad",
-            "cmd:echo hello:world=foo",
+        for (spec, expected) in [
+            ("openai:gpt-4o", Some(("openai", "gpt-4o"))),
+            ("openai:gpt-4o:foo=bar", Some(("openai", "gpt-4o"))),
+            ("openai:gpt-4o:top_p=0.7,n=3", Some(("openai", "gpt-4o"))),
+            (
+                "openrouter:anthropic/claude-sonnet-4:free",
+                Some(("openrouter", "anthropic/claude-sonnet-4:free")),
+            ),
+            (
+                "openrouter:google/gemini-2.5-flash:online",
+                Some(("openrouter", "google/gemini-2.5-flash:online")),
+            ),
+            (
+                "openrouter:some/model:free",
+                Some(("openrouter", "some/model:free")),
+            ),
+            (
+                "openai:gpt-4o:reasoning=high,bad",
+                Some(("openai", "gpt-4o:reasoning=high,bad")),
+            ),
+            (
+                "cmd:echo hello:world=foo",
+                Some(("cmd", "echo hello:world=foo")),
+            ),
         ] {
             assert_provider_and_model_agrees_with_parse_spec(spec);
+            assert_eq!(provider_and_model(spec), expected, "{spec:?}");
         }
     }
 
