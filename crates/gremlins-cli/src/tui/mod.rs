@@ -1635,7 +1635,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 let is_terminal = app
                                     .active_runs
                                     .get(id)
-                                    .map_or(false, |r| r.status != "running");
+                                    .is_some_and(|r| r.status != "running");
                                 if !is_terminal {
                                     live_area.push_watch_line(format!("error: {message}"));
                                     app.watch_follow_error = Some(message.to_string());
