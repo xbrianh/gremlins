@@ -114,6 +114,11 @@ async fn run_stage_scoped(
     // dispatched via run_stage). Clone to avoid borrowing conflicts.
     let inherited = gremlin.enclosing_task_models.clone();
     let enclosing_task_models = enclosing_task_models.or(inherited.as_ref());
+    // Forked parallel children carry the group's effective model as an
+    // inherited enclosing model; it must keep beating profile stage-model
+    // resolution, exactly as it would if passed explicitly down the tree.
+    let inherited_model = gremlin.enclosing_model.clone();
+    let enclosing_model = enclosing_model.or(inherited_model.as_ref());
     send_log(
         &gremlin.runtime_config.log_tx,
         format!(
@@ -1247,6 +1252,7 @@ mod tests {
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
+            enclosing_model: None,
         };
         (sandbox, gremlin)
     }

@@ -696,6 +696,7 @@ mod tests {
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
+            enclosing_model: None,
         };
         (sandbox, gremlin)
     }

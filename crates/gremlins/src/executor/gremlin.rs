@@ -286,6 +286,12 @@ pub struct Gremlin {
     /// (sequence or parallel). Set during fork; used by run_stage_scoped
     /// when no explicit enclosing_task_models is passed.
     pub(crate) enclosing_task_models: Option<IndexMap<String, String>>,
+    /// Explicit model inherited from an enclosing composite stage when this
+    /// gremlin was forked for a parallel child. Consulted by
+    /// `run_stage_scoped` before profile `model-by-stage` resolution so a
+    /// parallel group's `model:` (or its outer composite's `model:`) keeps
+    /// beating the selected profile's stage map.
+    pub(crate) enclosing_model: Option<ModelURI>,
 }
 
 impl Gremlin {
@@ -482,6 +488,7 @@ impl Gremlin {
             scratch_dir,
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
+            enclosing_model: None,
         };
 
         // 5. Create an empty log file.
@@ -618,6 +625,7 @@ impl Gremlin {
             scratch_dir,
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
+            enclosing_model: None,
         })
     }
 
@@ -776,7 +784,9 @@ impl Gremlin {
     ///
     /// When `effective_model` is `Some`, the child's provider is mutated via
     /// [`GremlinDefinition::with_model`] so `default_model()` reflects
-    /// the override.
+    /// the override, and the child also stores it as its inherited
+    /// `enclosing_model` so it is consulted before profile
+    /// `model-by-stage` resolution during dispatch.
     ///
     /// Fork creates the child state directory, copies artifacts, seeds the
     /// registry, and writes an initial state.json. It does **not** populate
@@ -934,6 +944,7 @@ impl Gremlin {
             scratch_dir: child_scratch_dir,
             clean_cmds: self.clean_cmds.clone(),
             enclosing_task_models: self.enclosing_task_models.clone(),
+            enclosing_model: effective_model.cloned(),
         })
     }
 
@@ -2044,6 +2055,7 @@ mod tests {
             scratch_dir: ScratchDir::Persistent(scratch_dir),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
+            enclosing_model: None,
         }
     }
 
