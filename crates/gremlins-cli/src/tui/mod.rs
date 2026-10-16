@@ -590,7 +590,8 @@ fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
 }
 
 /// Build the reasoning-stream stats title shown on each `TurnComplete`:
-/// the just-completed turn's delta followed by the conversation-wide total.
+/// the `clanking` header label, the just-completed turn's delta, and the
+/// conversation-wide total.
 fn stats_title(stats: Option<&serde_json::Value>, total: Option<&serde_json::Value>) -> String {
     let turn = stats
         .and_then(|v| v.get("turn"))
@@ -598,12 +599,12 @@ fn stats_title(stats: Option<&serde_json::Value>, total: Option<&serde_json::Val
         .map(|v| v.to_string())
         .unwrap_or_else(|| "-".to_string());
     let mut parts = [
-        format!("turn {turn}"),
+        format!("clanking · turn {turn}"),
         usage_title_part(stats),
         format!("Σ {}", usage_title_part(total)),
     ];
     if stats.is_none() {
-        parts[0] = "turn -".to_string();
+        parts[0] = "clanking · turn -".to_string();
     }
     parts.join(" · ")
 }
@@ -2204,7 +2205,7 @@ mod tests {
 
         assert_eq!(
             title,
-            "turn 3 · in 100 · out 50 · cache 40 (+5 new) · reason 30 · Σ in 400 · out 200 · cache 150 (+15 new) · reason 120",
+            "clanking · turn 3 · in 100 · out 50 · cache 40 (+5 new) · reason 30 · Σ in 400 · out 200 · cache 150 (+15 new) · reason 120",
             "{title}"
         );
     }
@@ -2215,7 +2216,7 @@ mod tests {
 
         assert_eq!(
             title,
-            "turn - · in - · out - · cache - (+- new) · reason - · Σ in - · out - · cache - (+- new) · reason -"
+            "clanking · turn - · in - · out - · cache - (+- new) · reason - · Σ in - · out - · cache - (+- new) · reason -"
         );
     }
 

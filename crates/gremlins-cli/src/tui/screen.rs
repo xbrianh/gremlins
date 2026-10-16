@@ -45,6 +45,11 @@ use crate::tui::widgets::{
 /// tracked each frame from the live widget stack.
 const INITIAL_RESERVED_ROWS: u16 = 2;
 
+/// Placeholder reasoning title shown as soon as the first reasoning chunk of
+/// a turn arrives. The `◈` glyph itself stays in the stream's configured
+/// title prefix; this text is the label layer only.
+const REASONING_PLACEHOLDER_TITLE: &str = "clanking";
+
 /// The typed widget owner.
 ///
 /// Chat widgets live in concrete fields, and full-screen bodies live behind
@@ -500,9 +505,15 @@ impl<B: Backend> LiveArea<B> {
         self.reasoning_mut().flush();
     }
 
-    /// Append reasoning text (may be a partial chunk).
+    /// Append reasoning text (may be a partial chunk). The first chunk of a
+    /// turn establishes the `clanking` placeholder title so the live band
+    /// shows its header immediately instead of waiting for `TurnComplete`.
     pub fn push_reasoning_text(&mut self, text: &str) {
-        self.reasoning_mut().push_text(text);
+        let reasoning = self.reasoning_mut();
+        if reasoning.title_is_empty() {
+            reasoning.set_title(REASONING_PLACEHOLDER_TITLE);
+        }
+        reasoning.push_text(text);
     }
 
     /// Replace the reasoning stream's title row with the live
@@ -1738,6 +1749,128 @@ mod tests {
         assert!(
             visible.contains("    thinking"),
             "finished reasoning tail should be committed to the transcript.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn reasoning_placeholder_title_gives_way_to_turn_complete_stats() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("◈ clanking"),
+            "first reasoning chunk should surface the clanking placeholder header.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("thinking"),
+            "first reasoning body should paint beside the placeholder header.\nBuffer:\n{visible}"
+        );
+        assert_eq!(
+            visible.matches('◈').count(),
+            1,
+            "the placeholder header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
+        );
+
+        live_area.set_reasoning_title(
+            "clanking · turn 3 · in 100 · out 50 · cache 40 (+5 new) · reason 30 · Σ in 400 · out 200 · cache 150 (+15 new) · reason 120",
+        );
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("◈ clanking · turn 3"),
+            "TurnComplete stats should replace the placeholder without losing the clanking prefix.\nBuffer:\n{visible}"
+        );
+        assert_eq!(
+            visible.matches('◈').count(),
+            1,
+            "the stats header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn finish_turn_commits_clanking_header_then_tail_before_response() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+        live_area.replace_response("answer");
+        live_area.finish_turn();
+
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        let lines: Vec<&str> = visible.lines().collect();
+        let prompt = lines.iter().position(|l| l.contains("▍» hi"));
+        let header = lines.iter().position(|l| l.contains("◈ clanking"));
+        let reasoning = lines.iter().position(|l| l.contains("    thinking"));
+        let response = lines.iter().position(|l| l.contains("answer"));
+        assert_eq!(
+            visible.matches("◈ clanking").count(),
+            1,
+            "exactly one committed reasoning header should carry clanking.\nBuffer:\n{visible}"
+        );
+        let (Some(prompt), Some(header), Some(reasoning), Some(response)) =
+            (prompt, header, reasoning, response)
+        else {
+            panic!(
+                "prompt, clanking header, reasoning tail, and response should all be visible.\nBuffer:\n{visible}"
+            );
+        };
+        assert!(
+            prompt < header && header < reasoning && reasoning < response,
+            "committed order must be prompt → clanking header → reasoning tail → response.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn turn_without_reasoning_commits_clanking_stats_header_once() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.set_reasoning_title(
+            "clanking · turn 2 · in 10 · out 5 · cache 4 (+1 new) · reason 3 · Σ in 20 · out 10 · cache 8 (+2 new) · reason 6",
+        );
+        live_area.replace_response("answer");
+        live_area.finish_turn();
+
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        let lines: Vec<&str> = visible.lines().collect();
+        let header = lines.iter().position(|l| l.contains("◈ clanking"));
+        let response = lines.iter().position(|l| l.contains("answer"));
+        assert_eq!(
+            visible.matches("◈ clanking").count(),
+            1,
+            "no-body turns should commit exactly one clanking stats header.\nBuffer:\n{visible}"
+        );
+        let (Some(header), Some(response)) = (header, response) else {
+            panic!(
+                "clanking stats header and response should both be visible.\nBuffer:\n{visible}"
+            );
+        };
+        assert!(
+            header < response,
+            "committed stats header must precede the response.\nBuffer:\n{visible}"
         );
     }
 

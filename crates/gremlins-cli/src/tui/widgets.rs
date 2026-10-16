@@ -1029,6 +1029,25 @@ fn tool_chrome_line(prefix: &str, text: &str) -> Line<'static> {
     ])
 }
 
+/// Chrome/gold reasoning header, kept separate from the shared tool-header
+/// styling. The `◈` glyph prefix stays in its own span and the title label
+/// is rendered in gold bold so it reads as a prominent art-deco header above
+/// the dim italic reasoning body.
+fn reasoning_chrome_line(prefix: &str, text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            prefix.to_string(),
+            Style::default().fg(DEFAULT_THEME.chrome),
+        ),
+        Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(DEFAULT_THEME.heading_primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
 /// Streaming styler: reasoning lines are plain nickel-italic text. The
 /// body indent is applied by [`StreamingWidget`] as a layout gutter.
 fn reasoning_stream_line(text: &str, _index: usize) -> Line<'static> {
@@ -1430,6 +1449,9 @@ pub struct StreamingWidget {
     /// Left gutter, in cells, reserved before every streamed body line (e.g.
     /// a four-space indent for reasoning and tool output).
     body_indent: u16,
+    /// Whether the title row is rendered through the reasoning-specific
+    /// chrome/gold style rather than the shared tool-header style.
+    reasoning_title_style: bool,
     row_cap: u16,
     size_priority: i32,
     /// When true, the widget keeps a sliding tail of completed lines (capped
@@ -1457,6 +1479,7 @@ impl StreamingWidget {
             render_title_when_empty: false,
             left_margin: 0,
             body_indent: 0,
+            reasoning_title_style: false,
             row_cap,
             size_priority,
             retain_tail: false,
@@ -1519,6 +1542,14 @@ impl StreamingWidget {
         self
     }
 
+    /// Render the title row through the reasoning-specific chrome/gold
+    /// style. This is intentionally separate from `with_title_prefix` so the
+    /// shared tool `◆` header path is never altered by reasoning callers.
+    pub fn with_reasoning_title_style(mut self) -> Self {
+        self.reasoning_title_style = true;
+        self
+    }
+
     /// Set or clear the title row. An empty title clears the row.
     ///
     /// The setter is idempotent: setting the same title is a no-op, so the
@@ -1535,6 +1566,11 @@ impl StreamingWidget {
         }
     }
 
+    /// Whether no title row is currently configured.
+    pub fn title_is_empty(&self) -> bool {
+        self.title.as_deref().is_none_or(str::is_empty)
+    }
+
     /// The configured reasoning stream: four-cell body gutter, `◈ `-prefixed
     /// chrome title, nickel italic text, and a retained commit tail. The
     /// title renders and commits even when the stream has no reasoning body,
@@ -1544,6 +1580,7 @@ impl StreamingWidget {
         Self::new(reasoning_stream_line, row_cap, 20)
             .with_title_prefix(&format!("{} ", glyph::REASONING))
             .with_body_indent(4)
+            .with_reasoning_title_style()
             .retain_tail()
             .retain_title_when_empty()
             .render_title_when_empty()
@@ -1815,7 +1852,12 @@ impl StreamingWidget {
         if title.is_empty() {
             return None;
         }
-        Some(tool_chrome_line(&self.title_prefix, title))
+        let line = if self.reasoning_title_style {
+            reasoning_chrome_line(&self.title_prefix, title)
+        } else {
+            tool_chrome_line(&self.title_prefix, title)
+        };
+        Some(line)
     }
 
     /// Wrapped title rows. Streams that opt into `render_title_when_empty`
@@ -3510,6 +3552,45 @@ mod tests {
         // lines up with the live band.
         assert_eq!(rows[0].trim_end(), " ◈ TITLE", "{rows:?}");
         assert_eq!(rows[1].trim_end(), "     abcdef", "{rows:?}");
+    }
+
+    #[test]
+    fn reasoning_title_uses_chrome_gold_style_distinct_from_tool_headers() {
+        let ctx = input_ctx("", 0);
+
+        // Reasoning headers render the glyph in chrome and the label in gold
+        // bold, making them stronger than the nickel italic reasoning body.
+        let mut reasoning = StreamingWidget::reasoning(5).with_left_margin(1);
+        reasoning.set_title("clanking");
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buf = Buffer::empty(area);
+        reasoning.render(area, &mut buf, &ctx);
+
+        assert_eq!(buf[(1, 0)].symbol(), "◈");
+        assert_eq!(buf[(1, 0)].style().fg, Some(DEFAULT_THEME.chrome));
+        assert_eq!(buf[(3, 0)].style().fg, Some(DEFAULT_THEME.heading_primary));
+        assert!(buf[(3, 0)].style().add_modifier.contains(Modifier::BOLD));
+
+        // The shared `◆` tool-header path remains nickel italic, not gold
+        // bold, even when the same title text is rendered through it.
+        let mut tool_like = StreamingWidget::new(reasoning_stream_line, 5, 10)
+            .with_title_prefix("◆ ")
+            .render_title_when_empty();
+        tool_like.set_title("clanking");
+        let mut tool_buf = Buffer::empty(area);
+        tool_like.render(area, &mut tool_buf, &ctx);
+
+        assert_eq!(tool_buf[(0, 0)].symbol(), "◆");
+        assert_eq!(tool_buf[(0, 0)].style().fg, Some(DEFAULT_THEME.chrome));
+        assert_eq!(tool_buf[(2, 0)].style().fg, Some(DEFAULT_THEME.subtle));
+        assert!(tool_buf[(2, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::ITALIC));
+        assert!(!tool_buf[(2, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD));
     }
 
     #[test]
