@@ -142,7 +142,7 @@ async fn main() {
             args,
             ephemeral,
             model,
-        }) => launch(&definition, &args, ephemeral, model.as_deref()).await,
+        }) => launch(&definition, args, ephemeral, model).await,
         Some(Cmds::Ls { here }) => ls(here).await,
         Some(Cmds::Info { id }) => info(&id).await,
         Some(Cmds::Stop { id }) => stop(&id).await,
@@ -1526,13 +1526,20 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 
 async fn launch(
     definition: &str,
-    raw_args: &[String],
+    mut raw_args: Vec<String>,
     ephemeral: bool,
-    model_override: Option<&str>,
+    cli_model: Option<String>,
 ) -> Result<(), String> {
+    // `--model` is a reserved launch option, but the free-form bootstrap-arg
+    // list is a trailing var-arg, so clap captures `--model` there once any
+    // bootstrap input has been seen. Pull it back out before bootstrap
+    // parsing so `gremlins launch demo --goal text --model cmd/true` works.
+    let model_override = extract_model_override(&mut raw_args, cli_model)?;
+    let model_override = model_override.as_deref();
+
     // Parse --key value pairs up front so malformed trailing args fail fast,
     // before any config or definition resolution.
-    parse_stage_inputs(raw_args)?;
+    parse_stage_inputs(&raw_args)?;
 
     // Bootstrap the global config so path resolvers work.
     config::init_global().map_err(|e| e.to_string())?;
@@ -1561,7 +1568,7 @@ async fn launch(
     let resolved_args = match &gremlin_def.bootstrap.source {
         Some(source) => {
             let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
-            resolve_filepath_args(raw_args, source, &project_root, &cwd)
+            resolve_filepath_args(&raw_args, source, &project_root, &cwd)
         }
         None => raw_args.to_vec(),
     };
@@ -1681,6 +1688,52 @@ fn absolute_from(path: &Path, cwd: &Path) -> PathBuf {
     }
 }
 
+/// Remove the reserved `--model` option from the free-form bootstrap args.
+///
+/// Supports both `--model value` and `--model=value` spellings. The
+/// `cli_model` value (if clap happened to parse the flag before the trailing
+/// var-arg began) is used as the initial value, so supplying `--model` twice is
+/// still caught.
+fn extract_model_override(
+    args: &mut Vec<String>,
+    cli_model: Option<String>,
+) -> Result<Option<String>, String> {
+    let mut model = cli_model;
+    let mut bootstrap_args = Vec::with_capacity(args.len());
+    let mut i = 0;
+
+    while i < args.len() {
+        let token = &args[i];
+
+        if let Some(value) = token.strip_prefix("--model=") {
+            if model.is_some() {
+                return Err("--model may only be supplied once".to_string());
+            }
+            if value.is_empty() {
+                return Err("--model requires a value".to_string());
+            }
+            model = Some(value.to_string());
+        } else if token == "--model" {
+            if model.is_some() {
+                return Err("--model may only be supplied once".to_string());
+            }
+            i += 1;
+            let value = args
+                .get(i)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| "--model requires a value".to_string())?;
+            model = Some(value.clone());
+        } else {
+            bootstrap_args.push(token.clone());
+        }
+
+        i += 1;
+    }
+
+    *args = bootstrap_args;
+    Ok(model)
+}
+
 fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String> {
     let mut map = HashMap::new();
     let mut i = 0;
@@ -1768,6 +1821,42 @@ mod tests {
     use super::*;
     use gremlins::schemas::bootstrap::{InputSource, InputSources};
     use std::fs;
+
+    #[test]
+    fn launch_parser_reserves_model_after_bootstrap_inputs() {
+        let cli = Cli::try_parse_from([
+            "gremlins", "launch", "demo", "--goal", "text", "--model", "cmd/true",
+        ])
+        .expect("launch args must parse");
+
+        let Some(Cmds::Launch {
+            definition,
+            mut args,
+            model,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected launch command");
+        };
+
+        assert_eq!(definition, "demo");
+        let model_override = extract_model_override(&mut args, model).unwrap();
+        assert_eq!(model_override.as_deref(), Some("cmd/true"));
+        assert_eq!(args, vec!["--goal".to_string(), "text".to_string()]);
+    }
+
+    #[test]
+    fn extract_model_override_rejects_duplicate_model() {
+        let mut args = vec![
+            "--goal".to_string(),
+            "text".to_string(),
+            "--model".to_string(),
+            "openai/gpt-4".to_string(),
+            "--model=cmd/true".to_string(),
+        ];
+        let err = extract_model_override(&mut args, None).unwrap_err();
+        assert!(err.contains("once"), "got: {err}");
+    }
 
     fn inputs(plan_types: &[&str]) -> InputSources {
         let sources = [

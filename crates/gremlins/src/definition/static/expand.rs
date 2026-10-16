@@ -612,6 +612,22 @@ fn _expand_entry(
     Ok(vec![entry])
 }
 
+/// Reject legacy `client`/`task-clients` model-selection keys at a recipe
+/// call site *before* expansion copies only `model`/`task-models` onto the
+/// expanded stage(s). Without this check those keys are silently dropped.
+fn reject_legacy_call_site_model_keys(
+    call_site_map: &serde_yaml::Mapping,
+) -> Result<(), SchemaError> {
+    for (legacy, replacement) in [("client", "model"), ("task-clients", "task-models")] {
+        if call_site_map.contains_key(legacy) {
+            return Err(SchemaError::Generic(format!(
+                "stage-definition call site: '{legacy}' is no longer supported; use '{replacement}' instead"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate call-site interpolation shape before distributing to stages.
 /// Rejects scalars, non-mapping values, misspelled/legacy sub-keys, and
 /// non-mapping `inputs`/`outputs` values — the same validation that
@@ -690,6 +706,7 @@ fn _expand_stage_def(
     })?;
 
     let call_site_map = call_site.as_mapping().unwrap();
+    reject_legacy_call_site_model_keys(call_site_map)?;
 
     if let Some(inner_list) = def_map.get("stages").and_then(|v| v.as_sequence()) {
         if inner_list.is_empty() {
@@ -1327,5 +1344,63 @@ interpolation:
             inputs.get("baz").and_then(|v| v.as_str()).unwrap(),
             "content(\"artifact://baz.md\")"
         );
+    }
+
+    #[test]
+    fn recipe_call_site_rejects_legacy_model_keys_before_expansion() {
+        struct NotFoundResolver;
+        impl DefinitionResolver for NotFoundResolver {
+            fn resolve(
+                &self,
+                name: &str,
+                _project_root: &std::path::Path,
+            ) -> Result<PathBuf, SchemaError> {
+                Err(SchemaError::DefinitionNotFound {
+                    name: name.to_string(),
+                    available: String::new(),
+                })
+            }
+        }
+
+        for (legacy, replacement) in [("client", "model"), ("task-clients", "task-models")] {
+            let definition =
+                serde_yaml::from_str::<serde_yaml::Value>("type: agent\nprompt: hi\n").unwrap();
+
+            let call_site = serde_yaml::from_str::<serde_yaml::Value>(&format!(
+                "name: test\n{legacy}: openai/gpt-4\n"
+            ))
+            .unwrap();
+
+            let mut stage_defs = HashMap::new();
+            stage_defs.insert("mydef".to_string(), definition);
+
+            let prompt_dir = PathBuf::from(".");
+            let project_root = PathBuf::from(".");
+            let overlay_dir = Path::new(".");
+            let chain: Vec<PathBuf> = vec![];
+            let named_prompts = HashMap::new();
+            let seen_defs = HashSet::new();
+            let resolver = NotFoundResolver;
+
+            let err = _expand_stage_def(
+                &call_site,
+                "mydef",
+                &stage_defs,
+                &prompt_dir,
+                &project_root,
+                overlay_dir,
+                &chain,
+                &named_prompts,
+                &seen_defs,
+                &resolver,
+            )
+            .expect_err("recipe call sites with legacy model keys must be rejected");
+
+            let msg = err.to_string();
+            assert!(
+                msg.contains(legacy) && msg.contains(replacement),
+                "error must name {legacy:?} and its replacement {replacement:?}, got: {msg}"
+            );
+        }
     }
 }

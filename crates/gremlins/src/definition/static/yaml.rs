@@ -36,6 +36,19 @@ const MISSING_DEFAULT_MODEL: &str = "gremlin definition is missing 'default_mode
      'default_model' in the definition YAML, pass --model on the command line, or set \
      'default-model' in settings.yaml";
 
+/// Legacy model-selection keys carried over from the `client` grammar.
+///
+/// These were renamed in #1928/#1931 with **no** backward-compatibility
+/// aliases. A YAML file that still uses them is rejected rather than silently
+/// ignoring the model selection and falling back to a default (or losing a
+/// stage override).
+const LEGACY_DEFAULT_MODEL_KEYS: [(&str, &str); 2] = [
+    ("default_client", "default_model"),
+    ("default_task_clients", "default_task_models"),
+];
+const LEGACY_STAGE_MODEL_KEYS: [(&str, &str); 2] =
+    [("client", "model"), ("task-clients", "task-models")];
+
 // ---------------------------------------------------------------------------
 // Public constructors
 // ---------------------------------------------------------------------------
@@ -139,6 +152,8 @@ fn from_expanded_value(
             label: path.display().to_string(),
             got: format!("{expanded:?}"),
         })?;
+
+    reject_legacy_default_model_keys(root)?;
 
     let name = root
         .get("name")
@@ -278,6 +293,7 @@ fn stage_from_yaml(
             "stage {name:?}: must have a 'type' field"
         )));
     }
+    reject_legacy_stage_model_keys(mapping, &name)?;
 
     match stage_type {
         "agent" => agent_from_yaml(mapping, &name, settings, effective_profile),
@@ -297,6 +313,30 @@ fn yaml_str(mapping: &Mapping, key: &str) -> Option<String> {
         .filter(|v| !v.is_null())
         .and_then(Value::as_str)
         .map(String::from)
+}
+
+/// Reject legacy top-level model-selection keys on a definition mapping.
+fn reject_legacy_default_model_keys(root: &Mapping) -> Result<(), SchemaError> {
+    for (legacy, replacement) in LEGACY_DEFAULT_MODEL_KEYS {
+        if root.contains_key(legacy) {
+            return Err(SchemaError::Generic(format!(
+                "top-level '{legacy}' is no longer supported; use '{replacement}' instead"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject legacy stage-level model-selection keys on a stage mapping.
+fn reject_legacy_stage_model_keys(mapping: &Mapping, label: &str) -> Result<(), SchemaError> {
+    for (legacy, replacement) in LEGACY_STAGE_MODEL_KEYS {
+        if mapping.contains_key(legacy) {
+            return Err(SchemaError::Generic(format!(
+                "{label}: '{legacy}' is no longer supported; use '{replacement}' instead"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Read the nested `interpolation:` structure: `{inputs: {…}, outputs: {…}}`.
@@ -786,6 +826,8 @@ fn land_from_yaml_builder(
     mapping: &Mapping,
     settings: Option<&config::Config>,
 ) -> Result<(StageSpec, Vec<String>), SchemaError> {
+    reject_legacy_stage_model_keys(mapping, "land")?;
+
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
     // Reject legacy options.cmds — land_cmds / clean_cmds are the only
@@ -990,6 +1032,7 @@ mod tests {
     use crate::clients::client::ModelURI;
     use crate::definition::GremlinDefinition;
     use crate::stage_spec::parallel::ErrorPolicy;
+    use std::fs;
 
     fn model(spec: &str) -> ModelURI {
         ModelURI::parse(spec).unwrap()
@@ -1290,6 +1333,97 @@ mod tests {
             assert!(
                 msg.contains("Scout"),
                 "error must list the allowed kinds, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_yaml_file_rejects_legacy_top_level_model_keys() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let project = sandbox.path().join("project");
+        let overlay = project.join(".gremlins");
+        fs::create_dir_all(&overlay).unwrap();
+
+        for (legacy, replacement) in [
+            ("default_client", "default_model"),
+            ("default_task_clients", "default_task_models"),
+        ] {
+            let definition_path = overlay.join(format!("legacy-{legacy}.yaml"));
+            fs::write(
+                &definition_path,
+                format!("{legacy}: openai/gpt-4\nstages: []\n"),
+            )
+            .unwrap();
+
+            let err = StaticDefinition::from_yaml_file(&definition_path, None, None)
+                .expect_err("legacy top-level model keys must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(legacy) && msg.contains(replacement),
+                "error must name {legacy:?} and its replacement {replacement:?}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_yaml_file_rejects_legacy_stage_model_keys() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let project = sandbox.path().join("project");
+        let overlay = project.join(".gremlins");
+        fs::create_dir_all(&overlay).unwrap();
+
+        for (legacy, replacement) in [("client", "model"), ("task-clients", "task-models")] {
+            let definition_path = overlay.join(format!("legacy-stage-{legacy}.yaml"));
+            let value = match legacy {
+                "client" => "openai/gpt-4",
+                _ => "{Scout: openai/gpt-4}",
+            };
+            fs::write(
+                &definition_path,
+                format!(
+                    "default_model: openai/gpt-4\nstages:\n  - name: plan\n    type: agent\n    {legacy}: {value}\n"
+                ),
+            )
+            .unwrap();
+
+            let err = StaticDefinition::from_yaml_file(&definition_path, None, None)
+                .expect_err("legacy stage model keys must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(legacy) && msg.contains(replacement),
+                "error must name {legacy:?} and its replacement {replacement:?}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_expanded_bytes_rejects_legacy_model_keys() {
+        let _sandbox = crate::test_support::Sandbox::new();
+
+        for (kind, yaml) in [
+            (
+                "default_client",
+                "__gremlins_expanded__: true\nname: old\ndefault_client: openai/gpt-4\nstages: []\n",
+            ),
+            (
+                "default_task_clients",
+                "__gremlins_expanded__: true\nname: old\ndefault_model: openai/gpt-4\ndefault_task_clients:\n  Scout: openai/gpt-4\nstages: []\n",
+            ),
+            (
+                "stage-client",
+                "__gremlins_expanded__: true\nname: old\ndefault_model: openai/gpt-4\nstages:\n  - name: plan\n    type: agent\n    client: openai/gpt-4\n",
+            ),
+            (
+                "stage-task-clients",
+                "__gremlins_expanded__: true\nname: old\ndefault_model: openai/gpt-4\nstages:\n  - name: plan\n    type: agent\n    task-clients:\n      Scout: openai/gpt-4\n",
+            ),
+        ] {
+            let err = StaticDefinition::from_expanded_bytes(yaml.as_bytes(), None, None)
+                .expect_err("expanded definitions with legacy keys must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("no longer supported"),
+                "{kind}: expected a legacy-key rejection, got: {msg}"
             );
         }
     }
