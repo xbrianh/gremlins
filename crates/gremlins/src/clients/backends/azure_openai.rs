@@ -441,6 +441,10 @@ impl Backend for AzureOpenAiBackend {
         None
     }
 
+    fn resolved_params(&self) -> Option<ResolvedParams> {
+        Some(self.state.resolved.clone())
+    }
+
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         openai_protocol::resolve_openai_protocol("azure-openai", raw)
     }

@@ -19,7 +19,6 @@ use indexmap::IndexMap;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::backends;
 use crate::clients::interactive::InteractiveSession;
-use crate::clients::model::GremlinsModel;
 use crate::clients::protocol::CompletedRun;
 
 /// The six tools every native agent may call.
@@ -554,17 +553,26 @@ impl Eq for Client {}
 /// Provider-agnostic model resolver for `task-models` entries.
 ///
 /// Parses `spec` with [`Client`], builds or looks up the provider's backend in
-/// the shared lazy pool, and delegates to [`Backend::make_model`]. Returns
-/// `None` for malformed specs, unknown providers, the `cmd` backend, and
-/// backend-build failures — callers fall back to the parent model without
-/// surfacing an error.
-pub(crate) fn resolve_model(spec: &str) -> Option<GremlinsModel> {
+/// the shared lazy pool, and delegates to [`Backend::make_model`] and
+/// [`Backend::resolved_params`]. The returned [`TaskModel`] carries the target
+/// provider's own request options, so a cross-provider override never inherits
+/// the parent model's `temperature`/`max_tokens`/`extra`. Returns `None` for
+/// malformed specs, unknown providers, the `cmd` backend, and backend-build
+/// failures — callers fall back to the parent model without surfacing an error.
+pub(crate) fn resolve_model(spec: &str) -> Option<super::task::TaskModel> {
     let client = Client::parse(spec).ok()?;
     if client.provider() == "cmd" {
         return None;
     }
     let backend = client.get_or_build_backend().ok()?;
-    backend.make_model(spec)
+    let model = backend.make_model(spec)?;
+    let resolved = backend.resolved_params()?;
+    Some(super::task::TaskModel {
+        model,
+        temperature: resolved.temperature,
+        max_tokens: resolved.max_tokens,
+        extra: resolved.additional_value(),
+    })
 }
 
 #[cfg(test)]

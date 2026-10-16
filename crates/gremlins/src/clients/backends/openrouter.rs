@@ -165,6 +165,10 @@ impl Backend for OpenRouterBackend {
         None
     }
 
+    fn resolved_params(&self) -> Option<ResolvedParams> {
+        Some(self.state.resolved.clone())
+    }
+
     fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == PROVIDER_NAME {

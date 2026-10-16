@@ -404,6 +404,10 @@ impl Backend for AnthropicBackend {
         None
     }
 
+    fn resolved_params(&self) -> Option<ResolvedParams> {
+        Some(self.state.resolved.clone())
+    }
+
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         let mut additional = serde_json::Map::new();
         // Enable prompt caching by default (5-min TTL). Users can override via

@@ -18,17 +18,31 @@ use super::tools::{self, ToolContext};
 pub(crate) fn build_task_selector(
     factory: TaskModelFactory,
     by_kind: &HashMap<TaskKind, String>,
-) -> Option<TaskModelSelector<GremlinsModel>> {
+) -> Option<TaskModelSelector> {
     let by_kind = by_kind.clone();
     TaskModelSelector::new(by_kind, factory)
 }
 
 const MAX_DEPTH: u32 = 3;
 
+/// A model selected for a Task invocation, paired with the request options
+/// resolved by the backend that built it.
+///
+/// `temperature`, `max_tokens`, and `extra` are the target provider's resolved
+/// values — never the parent's — so a cross-provider override does not leak an
+/// Anthropic `cache_control`/128 000-token default onto an OpenAI model.
+#[derive(Clone, Debug)]
+pub(crate) struct TaskModel {
+    pub(crate) model: GremlinsModel,
+    pub(crate) temperature: Option<f64>,
+    pub(crate) max_tokens: Option<u64>,
+    pub(crate) extra: Option<serde_json::Value>,
+}
+
 /// Builds the model named by a matching `task-models` entry, for use by one
 /// Task invocation.  Returns `None` when the spec names a provider this
 /// backend does not serve — the caller falls back to the parent's model.
-pub(crate) type TaskModelFactory<M = GremlinsModel> = Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
+pub(crate) type TaskModelFactory = Arc<dyn Fn(&str) -> Option<TaskModel> + Send + Sync>;
 
 /// Lookup map for `task-models`, keyed by the exact [`TaskKind`] spelling.
 /// Shared behind an `Arc` so a Task fan-out clones one pointer per invocation
@@ -52,12 +66,12 @@ impl TaskModelOverrides {
 /// keeps the parent's model. Cloning a selector is O(1) — both halves sit behind
 /// an `Arc` — which matters because a Task fan-out clones one per invocation.
 #[derive(Clone)]
-pub struct TaskModelSelector<M = GremlinsModel> {
+pub struct TaskModelSelector {
     overrides: Arc<TaskModelOverrides>,
-    factory: TaskModelFactory<M>,
+    factory: TaskModelFactory,
 }
 
-impl<M> std::fmt::Debug for TaskModelSelector<M> {
+impl std::fmt::Debug for TaskModelSelector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskModelSelector")
             .field("overrides", &self.overrides)
@@ -65,12 +79,12 @@ impl<M> std::fmt::Debug for TaskModelSelector<M> {
     }
 }
 
-impl<M: Clone> TaskModelSelector<M> {
+impl TaskModelSelector {
     /// Assemble a selector from parsed config. Returns `None` when the map is
     /// empty — the common case, where nothing ever needs building.
     pub(crate) fn new(
         by_kind: HashMap<TaskKind, String>,
-        factory: TaskModelFactory<M>,
+        factory: TaskModelFactory,
     ) -> Option<Self> {
         if by_kind.is_empty() {
             return None;
@@ -81,23 +95,20 @@ impl<M: Clone> TaskModelSelector<M> {
         })
     }
 
-    /// The model for a Task of `kind`, or a clone of `default_model` when no
+    /// The [`TaskModel`] for a Task of `kind`, or a clone of `default` when no
     /// entry matches or when the matching entry names a provider this backend
     /// cannot serve.
     ///
     /// Returns `(model, spec_string)` where `spec_string` is the matched
     /// `task-models` entry (for logging), or `None` when no entry matched or
     /// the factory could not build a model for the matched spec.
-    fn model_for(&self, kind: TaskKind, default_model: &M) -> (M, Option<String>)
-    where
-        M: Clone,
-    {
+    fn model_for(&self, kind: TaskKind, default: &TaskModel) -> (TaskModel, Option<String>) {
         match self.overrides.spec_for(kind) {
             Some(spec) => match (self.factory)(spec) {
                 Some(m) => (m, Some(spec.to_string())),
-                None => (default_model.clone(), None),
+                None => (default.clone(), None),
             },
-            None => (default_model.clone(), None),
+            None => (default.clone(), None),
         }
     }
 }
@@ -152,7 +163,7 @@ fn task_prefix(base: &str, chain: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_task_runner(
     model: GremlinsModel,
-    task_model_selector: Option<TaskModelSelector<GremlinsModel>>,
+    task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -189,7 +200,7 @@ pub(crate) fn make_task_runner(
 #[allow(clippy::too_many_arguments)]
 fn make_task_runner_at_depth(
     model: GremlinsModel,
-    task_model_selector: Option<TaskModelSelector<GremlinsModel>>,
+    task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -232,18 +243,28 @@ fn make_task_runner_at_depth(
                     return format!("Error: task max depth ({MAX_DEPTH}) exceeded");
                 }
 
-                // A selector, when configured, may swap in a different model based
-                // on this task's own `kind`; otherwise the parent's stands.
-                // Fork always inherits the parent model directly and never consults
-                // the task-models lookup.
-                let (selected_model, _selected_spec) = if kind == TaskKind::Fork {
-                    (model.clone(), None)
+                // A selector, when configured, may swap in a different model
+                // based on this task's own `kind`; otherwise the parent's
+                // stands. Fork always inherits the parent model directly and
+                // never consults the task-models lookup.
+                let parent_selection = TaskModel {
+                    model: model.clone(),
+                    temperature,
+                    max_tokens,
+                    extra: extra.clone(),
+                };
+                let (selected, _selected_spec) = if kind == TaskKind::Fork {
+                    (parent_selection.clone(), None)
                 } else {
                     match &task_model_selector {
-                        Some(selector) => selector.model_for(kind, &model),
-                        None => (model.clone(), None),
+                        Some(selector) => selector.model_for(kind, &parent_selection),
+                        None => (parent_selection.clone(), None),
                     }
                 };
+                let selected_model = selected.model.clone();
+                let selected_temperature = selected.temperature;
+                let selected_max_tokens = selected.max_tokens;
+                let selected_extra = selected.extra.clone();
                 // Use the model's own id() when available; fall back to the
                 // parent model name so that log lines always identify the
                 // actual model sent to the API.
@@ -275,9 +296,9 @@ fn make_task_runner_at_depth(
                     new_chain,
                     completion_nudge_budget,
                     log_tx.clone(),
-                    temperature,
-                    max_tokens,
-                    extra.clone(),
+                    selected_temperature,
+                    selected_max_tokens,
+                    selected_extra.clone(),
                 ));
 
                 let work_root = tools::worktree_root(task_cwd.as_deref());
@@ -310,9 +331,9 @@ fn make_task_runner_at_depth(
                     max_turns,
                     completion_nudge_budget,
                     log_tx.clone(),
-                    temperature,
-                    max_tokens,
-                    extra.clone(),
+                    selected_temperature,
+                    selected_max_tokens,
+                    selected_extra.clone(),
                     prepopulated_messages,
                 )
                 .await;
@@ -349,6 +370,19 @@ mod tests {
 
     fn gm(model: DynModel<Completion>) -> GremlinsModel {
         GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
+    }
+
+    /// A [`TaskModel`] wrapping a mock completion model with no request
+    /// options, for selector tests that distinguish the built model by its
+    /// carried options.
+    fn gm_mock_task() -> TaskModel {
+        let model = rig_core::test_utils::MockCompletionModel::from_turns([]);
+        TaskModel {
+            model: gm(model.erase()),
+            temperature: None,
+            max_tokens: None,
+            extra: None,
+        }
     }
 
     #[test]
@@ -401,31 +435,42 @@ mod tests {
 
     #[test]
     fn task_model_selector_builds_matched_model_or_defaults() {
-        let factory: TaskModelFactory<String> =
-            Arc::new(|spec: &str| Some(format!("built:{spec}")));
+        let target = TaskModel {
+            model: gm(rig_core::test_utils::MockCompletionModel::from_turns([]).erase()),
+            temperature: Some(0.2),
+            max_tokens: Some(123),
+            extra: Some(serde_json::json!({ "parallel_tool_calls": true })),
+        };
+        let factory: TaskModelFactory = Arc::new(move |spec: &str| {
+            assert_eq!(spec, "openai/mini");
+            Some(target.clone())
+        });
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
             factory,
         )
         .expect("a non-empty task-models map yields a selector");
 
+        let (selected, spec) = selector.model_for(TaskKind::Scout, &gm_mock_task());
+        assert_eq!(spec.as_deref(), Some("openai/mini"));
+        assert_eq!(selected.temperature, Some(0.2));
+        assert_eq!(selected.max_tokens, Some(123));
         assert_eq!(
-            selector.model_for(TaskKind::Scout, &"default".to_string()),
-            (
-                "built:openai/mini".to_string(),
-                Some("openai/mini".to_string())
-            )
+            selected.extra,
+            Some(serde_json::json!({ "parallel_tool_calls": true }))
         );
-        // No match — the default model stands.
-        assert_eq!(
-            selector.model_for(TaskKind::Review, &"default".to_string()),
-            ("default".to_string(), None)
-        );
+
+        // No match — the default model and its options stand.
+        let (selected, spec) = selector.model_for(TaskKind::Review, &gm_mock_task());
+        assert_eq!(spec, None);
+        assert_eq!(selected.temperature, None);
+        assert_eq!(selected.max_tokens, None);
+        assert_eq!(selected.extra, None);
     }
 
     #[test]
     fn task_model_selector_falls_back_when_factory_returns_none() {
-        let factory: TaskModelFactory<String> = Arc::new(|_spec: &str| None);
+        let factory: TaskModelFactory = Arc::new(|_spec: &str| None);
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
             factory,
@@ -433,31 +478,60 @@ mod tests {
         .expect("a non-empty map yields a selector");
 
         // Spec matches but factory returns None — fall back to default.
-        assert_eq!(
-            selector.model_for(TaskKind::Scout, &"default".to_string()),
-            ("default".to_string(), None)
-        );
+        let (selected, spec) = selector.model_for(TaskKind::Scout, &gm_mock_task());
+        assert_eq!(spec, None);
+        assert_eq!(selected.temperature, None);
+        assert_eq!(selected.max_tokens, None);
+        assert_eq!(selected.extra, None);
     }
 
     #[test]
     fn task_model_selector_is_none_when_unconfigured() {
-        let factory: TaskModelFactory<String> = Arc::new(|_: &str| Some(String::new()));
+        let factory: TaskModelFactory = Arc::new(|_spec: &str| None);
         assert!(TaskModelSelector::new(HashMap::new(), factory).is_none());
     }
 
     #[test]
     fn build_task_selector_does_not_eagerly_resolve_entries() {
-        let parent = gm(rig_core::test_utils::MockCompletionModel::from_turns([]).erase());
-        let factory: TaskModelFactory = Arc::new(|_spec| None);
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_flag = calls.clone();
+        let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
+            calls_flag.fetch_add(1, Ordering::SeqCst);
+            None
+        });
         let selector = build_task_selector(
             factory,
             &HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
         )
         .expect("a non-empty task-models map yields a selector");
 
-        let (model, spec) = selector.model_for(TaskKind::Scout, &parent);
+        // Construction alone must not resolve (and therefore not build) any
+        // backend: the whole point of the factory is lazy credential access.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "selector construction must not resolve entries"
+        );
+
+        let (selected, spec) = selector.model_for(TaskKind::Scout, &gm_mock_task());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the matching lookup must resolve the entry exactly once"
+        );
         assert_eq!(spec, None);
-        assert_eq!(model.name(), parent.name());
+        assert_eq!(selected.temperature, None);
+        assert_eq!(selected.max_tokens, None);
+        assert_eq!(selected.extra, None);
+
+        // A non-matching kind must not trigger another resolution.
+        let (_selected, spec) = selector.model_for(TaskKind::Implement, &gm_mock_task());
+        assert_eq!(spec, None);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a non-matching lookup must not resolve the factory"
+        );
     }
 
     fn depth_test_ctx() -> ToolContext {
@@ -644,11 +718,13 @@ mod tests {
         );
     }
 
-    /// A parent's resolved `temperature`, `max_tokens`, and passthrough
-    /// (`extra`) must be the exact values the nested task's `LoopOpts` uses —
-    /// not dropped or swapped during the task-runner wiring.
+    /// A matched, non-fork override must run with the *target* model's own
+    /// resolved request options — not the parent model's. This mirrors a
+    /// cross-provider swap (e.g. an Anthropic parent delegating one task to
+    /// `openai/gpt-4o`), where the parent's defaults would be invalid for the
+    /// child provider.
     #[tokio::test]
-    async fn resolved_params_propagate_to_nested_task() {
+    async fn task_override_uses_target_resolved_options() {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         let ctx = depth_test_ctx();
@@ -674,15 +750,26 @@ mod tests {
                 MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
+        // The overridden model is the one that actually answers the task.
         let child = MockCompletionModel::from_stream_turns([vec![
             MockStreamEvent::text("scout result"),
             done_call("d2", "scout result"),
             MockStreamEvent::final_response_with_default_usage(),
         ]]);
 
+        // The parent's options must not leak through the override.
+        let parent_extra = serde_json::json!({ "cache_control": { "type": "ephemeral" } });
+        let target_extra = serde_json::json!({ "parallel_tool_calls": true });
+        let target_extra_for_factory = target_extra.clone();
         let child_handle = child.clone();
-        let factory: TaskModelFactory =
-            Arc::new(move |_spec: &str| Some(gm(child_handle.clone().erase())));
+        let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
+            Some(TaskModel {
+                model: gm(child_handle.clone().erase()),
+                temperature: Some(0.7),
+                max_tokens: Some(8192),
+                extra: Some(target_extra_for_factory.clone()),
+            })
+        });
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".to_string())]),
             factory,
@@ -690,7 +777,6 @@ mod tests {
         .expect("configured");
 
         let cancel = super::super::agent_loop::CancelToken::new();
-        let extra = serde_json::json!({"parallel_tool_calls": true, "foo": "bar"});
         let runner = make_task_runner(
             gm(parent.clone().erase()),
             Some(selector),
@@ -698,14 +784,14 @@ mod tests {
             cancel,
             ctx,
             String::new(),
-            "model".into(),
+            "parent".into(),
             5.0,
             10,
             0,
             None,
-            Some(0.7),
-            Some(8192),
-            Some(extra.clone()),
+            Some(0.1),
+            Some(1111),
+            Some(parent_extra.clone()),
         );
 
         let output = runner(TaskKind::Scout, "go".into(), None).await;
@@ -715,18 +801,66 @@ mod tests {
             assert_eq!(
                 req.temperature,
                 Some(0.7),
-                "nested turn must carry temperature"
+                "nested turn must carry the target temperature, not the parent's"
             );
             assert_eq!(
                 req.max_tokens,
                 Some(8192),
-                "nested turn must carry max_tokens"
+                "nested turn must carry the target max_tokens, not the parent's"
             );
             assert_eq!(
                 req.additional_params,
-                Some(extra.clone()),
-                "nested turn must carry the parent passthrough"
+                Some(target_extra.clone()),
+                "nested turn must carry the target passthrough, not the parent's"
             );
+        }
+    }
+
+    /// When the factory cannot resolve a matched spec, the task falls back to
+    /// the parent model *and* keeps the parent's request options.
+    #[tokio::test]
+    async fn task_fallback_preserves_parent_options() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let ctx = depth_test_ctx();
+        let child = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("fallback result"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+
+        let factory: TaskModelFactory = Arc::new(|_spec: &str| None);
+        let selector = TaskModelSelector::new(
+            HashMap::from([(TaskKind::Scout, "openai/mini".to_string())]),
+            factory,
+        )
+        .expect("configured");
+
+        let cancel = super::super::agent_loop::CancelToken::new();
+        let extra = serde_json::json!({ "foo": "bar" });
+        let runner = make_task_runner(
+            gm(child.clone().erase()),
+            Some(selector),
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            "parent".into(),
+            5.0,
+            10,
+            0,
+            None,
+            Some(0.3),
+            Some(4242),
+            Some(extra.clone()),
+        );
+
+        let output = runner(TaskKind::Scout, "go".into(), None).await;
+        assert!(!output.contains("Task error"), "unexpected error: {output}");
+
+        for req in child.requests() {
+            assert_eq!(req.temperature, Some(0.3));
+            assert_eq!(req.max_tokens, Some(4242));
+            assert_eq!(req.additional_params, Some(extra.clone()));
         }
     }
 

@@ -45,7 +45,7 @@ pub struct RunParams {
     /// provider-agnostic factory builds a backend only when a
     /// matching task kind actually runs and otherwise falls back to
     /// the parent model.
-    pub task_models: Option<TaskModelSelector<GremlinsModel>>,
+    pub task_models: Option<TaskModelSelector>,
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
     pub cancel_token: Option<Arc<CancelToken>>,
@@ -129,6 +129,17 @@ pub trait Backend: Send + Sync {
     /// Called by the provider-agnostic selector factory when a `task-models`
     /// override matches a task kind that is actually running.
     fn make_model(&self, spec: &str) -> Option<GremlinsModel>;
+
+    /// The request options this backend resolved for the spec it was built
+    /// from (`temperature`, `max_tokens`, and the passthrough `extra` object).
+    ///
+    /// The provider-agnostic selector pairs this with [`Backend::make_model`]
+    /// so a cross-provider `task-models` override carries the target backend's
+    /// own defaults instead of the parent's. Backends with no request options
+    /// (the command backend) return `None`.
+    fn resolved_params(&self) -> Option<ResolvedParams> {
+        None
+    }
 
     async fn resume(&self) -> Result<CompletedRun, ClientError>;
 
