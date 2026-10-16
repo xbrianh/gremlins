@@ -10,6 +10,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, Notify};
 
+use super::protocol::{TurnStats, UsageStats};
+
 /// A resettable signal that interrupts the agent loop at any async yield point.
 /// Modelled on [`CancelToken`] but with a public `reset()` so the agent can
 /// resume normal operation after a debug session ends.
@@ -110,6 +112,10 @@ pub enum InteractiveEvent {
         text: String,
         /// Tool calls from the completed turn.
         tool_calls: Vec<String>,
+        /// Per-turn token/cache delta for the completed turn.
+        stats: Option<TurnStats>,
+        /// Token/cache totals for the current prompt, including this turn.
+        totals: Option<UsageStats>,
     },
     /// Agent called Done while interactive.
     Done {

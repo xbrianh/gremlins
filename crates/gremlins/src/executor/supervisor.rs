@@ -22,6 +22,7 @@ use crate::clients::client::Client;
 use crate::clients::interactive::{
     InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle, StreamEventSender,
 };
+use crate::clients::protocol::UsageStats;
 use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
@@ -2523,8 +2524,8 @@ async fn handle_debug(
                         // Agent re-entered interactive mode (after RunOneTurn).
                         // No action needed — we're already in the interactive loop.
                     }
-                    Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls }) => {
-                        let payload = serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls});
+                    Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls, stats, totals }) => {
+                        let payload = serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals});
                         if writer.write_json_line(&payload).await.is_err() {
                             let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
                             break;
@@ -2969,6 +2970,55 @@ async fn reinsert_chat_gremlin(id: &str, gremlin: Gremlin, session: &SessionHand
     true
 }
 
+/// Read the persisted `state.json.token_usage` object as a [`UsageStats`].
+///
+/// Chat gremlins persist aggregate token usage after each prompt. The chat
+/// forwarder captures this *before* the current turn starts so nested task
+/// runs and the just-completed prompt's usage are not folded in twice.
+fn usage_stats_from_state(value: Option<&serde_json::Value>) -> UsageStats {
+    let obj = value
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    UsageStats {
+        prompt_tokens: obj
+            .get("prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        completion_tokens: obj
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        cached_input_tokens: obj
+            .get("cached_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        cache_creation_input_tokens: obj
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        reasoning_tokens: obj
+            .get("reasoning_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        turns: obj.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+    }
+}
+
+/// Add a per-prompt usage delta to a conversation baseline.
+fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> UsageStats {
+    UsageStats {
+        prompt_tokens: baseline.prompt_tokens + delta.prompt_tokens,
+        completion_tokens: baseline.completion_tokens + delta.completion_tokens,
+        cached_input_tokens: baseline.cached_input_tokens + delta.cached_input_tokens,
+        cache_creation_input_tokens: baseline
+            .cache_creation_input_tokens
+            .saturating_add(delta.cache_creation_input_tokens),
+        reasoning_tokens: baseline.reasoning_tokens + delta.reasoning_tokens,
+        turns: baseline.turns + delta.turns,
+    }
+}
+
 /// Build a chat-protocol JSON line, tagging it with the client's turn id
 /// (when present) so the TUI can drop stale events from a superseded turn.
 fn chat_payload(turn: &Option<String>, fields: serde_json::Value) -> serde_json::Value {
@@ -3007,6 +3057,14 @@ async fn run_chat_turn(
     let turn_cancel = ctx.turn_cancel;
     let session = ctx.session;
     let done = ctx.done;
+
+    // Capture the conversation baseline from the gremlin's persisted state
+    // *before* moving it into the stage runner. `run_stage` accumulates the
+    // current prompt's usage into the same state after completion, so this
+    // must be a pre-turn snapshot. Missing state (the first chat prompt) is
+    // treated as zero.
+    let baseline_usage = usage_stats_from_state(gremlin.state.read_field("token_usage").as_ref());
+
     // Spawn the stage runner so we can select on it alongside stream events.
     let mut run_task = tokio::spawn(async move {
         let result = crate::executor::run::run_stage(&stage, &mut gremlin).await;
@@ -3087,8 +3145,9 @@ async fn run_chat_turn(
                             break;
                         }
                     }
-                    Some(InteractiveEvent::TurnComplete { turn: tc_turn, text, tool_calls }) => {
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "turn_complete", "turn": tc_turn, "text": text, "tool_calls": tool_calls}));
+                    Some(InteractiveEvent::TurnComplete { turn: tc_turn, text, tool_calls, stats, totals }) => {
+                        let total = totals.as_ref().map(|totals| add_usage_stats(&baseline_usage, totals));
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "turn_complete", "turn": tc_turn, "text": text, "tool_calls": tool_calls, "stats": stats, "total": total}));
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
@@ -3096,6 +3155,7 @@ async fn run_chat_turn(
                     Some(InteractiveEvent::Done { text, summary, usage }) => {
                         // Re-insert the gremlin before emitting `done`.
                         finish(&id, &mut run_task, &turn_cancel, &session, &done).await;
+                        let usage = usage.as_ref().map(|usage| add_usage_stats(&baseline_usage, usage));
                         let payload = chat_payload(&turn, serde_json::json!({"type": "done", "id": id, "text": text, "summary": summary, "usage": usage}));
                         let _ = writer.write_json_line(&payload).await;
                         return;
@@ -3888,10 +3948,11 @@ fn validate_launch_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_chat_gremlin, handle_artifact, handle_launch, resolve_chat_env,
-        resolve_filepath_source_values,
+        add_usage_stats, create_chat_gremlin, handle_artifact, handle_launch, resolve_chat_env,
+        resolve_filepath_source_values, usage_stats_from_state,
     };
     use crate::builders::{AgentBuilder, DefinitionBuilder};
+    use crate::clients::protocol::UsageStats;
     use crate::executor::socket;
     use crate::schemas::bootstrap::{InputSource, InputSources};
     use crate::test_support::Sandbox;
@@ -3953,6 +4014,65 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
+    }
+
+    #[test]
+    fn add_usage_stats_sums_baseline_and_prompt_totals() {
+        let baseline = UsageStats {
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            cached_input_tokens: 30,
+            cache_creation_input_tokens: 40,
+            reasoning_tokens: 50,
+            turns: 2,
+        };
+        let delta = UsageStats {
+            prompt_tokens: 5,
+            completion_tokens: 6,
+            cached_input_tokens: 7,
+            cache_creation_input_tokens: 8,
+            reasoning_tokens: 9,
+            turns: 1,
+        };
+
+        let total = add_usage_stats(&baseline, &delta);
+
+        assert_eq!(total.prompt_tokens, 15);
+        assert_eq!(total.completion_tokens, 26);
+        assert_eq!(total.cached_input_tokens, 37);
+        assert_eq!(total.cache_creation_input_tokens, 48);
+        assert_eq!(total.reasoning_tokens, 59);
+        assert_eq!(total.turns, 3);
+    }
+
+    #[test]
+    fn usage_stats_from_state_reads_persisted_usage_and_defaults_missing_state() {
+        let state = serde_json::json!({
+            "prompt_tokens": 11,
+            "completion_tokens": 12,
+            "cached_input_tokens": 13,
+            "cache_creation_input_tokens": 14,
+            "reasoning_tokens": 15,
+            "turns": 3
+        });
+
+        let stats = usage_stats_from_state(Some(&state));
+
+        assert_eq!(stats.prompt_tokens, 11);
+        assert_eq!(stats.completion_tokens, 12);
+        assert_eq!(stats.cached_input_tokens, 13);
+        assert_eq!(stats.cache_creation_input_tokens, 14);
+        assert_eq!(stats.reasoning_tokens, 15);
+        assert_eq!(stats.turns, 3);
+
+        let stats = usage_stats_from_state(None);
+
+        assert_eq!(stats.prompt_tokens, 0);
+        assert_eq!(stats.completion_tokens, 0);
+        assert_eq!(stats.cached_input_tokens, 0);
+        assert_eq!(stats.cache_creation_input_tokens, 0);
+        assert_eq!(stats.reasoning_tokens, 0);
+        assert_eq!(stats.turns, 0);
     }
 
     #[test]

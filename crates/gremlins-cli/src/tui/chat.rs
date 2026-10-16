@@ -36,6 +36,11 @@ pub enum ChatEvent {
     TurnComplete {
         text: String,
         tool_calls: Vec<String>,
+        /// Per-turn token/cache delta from the completed agent-loop turn.
+        stats: Option<Value>,
+        /// Conversation-wide token/cache total (the current prompt's running
+        /// total plus the persisted chat-gremlin baseline).
+        total: Option<Value>,
         turn: Option<String>,
     },
     Done {
@@ -137,6 +142,8 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            stats: value.get("stats").filter(|v| !v.is_null()).cloned(),
+            total: value.get("total").filter(|v| !v.is_null()).cloned(),
             turn,
         }),
         Some("done") => Some(ChatEvent::Done {

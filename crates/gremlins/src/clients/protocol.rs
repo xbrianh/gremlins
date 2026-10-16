@@ -13,6 +13,21 @@ pub struct UsageStats {
     pub turns: usize,
 }
 
+/// One turn's token/cache delta.
+///
+/// Field names intentionally mirror [`UsageStats`] so chat consumers see the
+/// same canonical wire keys for both per-turn and aggregate usage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnStats {
+    /// The agent-loop turn index that produced this usage.
+    pub turn: usize,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletedRun {
     pub exit_code: i32,

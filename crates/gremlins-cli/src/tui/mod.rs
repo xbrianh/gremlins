@@ -566,6 +566,48 @@ fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
     }
 }
 
+/// Read a canonical token/cache field from a usage object.
+fn usage_field(usage: Option<&serde_json::Value>, field: &str) -> Option<u64> {
+    usage.and_then(|v| v.get(field)).and_then(|v| v.as_u64())
+}
+
+/// Format one usage object as the compact token/cache portion of the live
+/// stats title. Missing values render as dashes.
+fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
+    let field = |name: &str| usage_field(usage, name);
+    let num = |name: &str| match field(name) {
+        Some(v) => v.to_string(),
+        None => "-".to_string(),
+    };
+    format!(
+        "in {} · out {} · cache {} (+{} new) · reason {}",
+        num("prompt_tokens"),
+        num("completion_tokens"),
+        num("cached_input_tokens"),
+        num("cache_creation_input_tokens"),
+        num("reasoning_tokens")
+    )
+}
+
+/// Build the reasoning-stream stats title shown on each `TurnComplete`:
+/// the just-completed turn's delta followed by the conversation-wide total.
+fn stats_title(stats: Option<&serde_json::Value>, total: Option<&serde_json::Value>) -> String {
+    let turn = stats
+        .and_then(|v| v.get("turn"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let mut parts = [
+        format!("turn {turn}"),
+        usage_title_part(stats),
+        format!("Σ {}", usage_title_part(total)),
+    ];
+    if stats.is_none() {
+        parts[0] = "turn -".to_string();
+    }
+    parts.join(" · ")
+}
+
 /// Daemon broadcast events (run lifecycle, log lines, etc.) are forwarded
 /// to every connection, including the debug socket. They are not part of
 /// the debug protocol and are filtered out.
@@ -1735,7 +1777,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
                         live_area.commit_tool_result(&id, &call);
                     }
-                    ChatEvent::TurnComplete { text, tool_calls, .. } => {
+                    ChatEvent::TurnComplete { text, tool_calls, stats, total, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
                         live_area.clear_tool_output();
                         // `text` is the model's full response for the just-completed
@@ -1751,6 +1793,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // list is the safety net that reconciles anything still
                         // uncommitted when the turn finishes.
                         live_area.reconcile_tool_calls(&tool_calls);
+                        // The reasoning stream's title row is the live stats line:
+                        // per-turn delta plus the conversation-wide total.
+                        live_area.set_reasoning_title(&stats_title(
+                            stats.as_ref(),
+                            total.as_ref(),
+                        ));
                     }
                     ChatEvent::Done { text, summary, usage, .. } => {
                         log::debug!("Done text_len={} summary_len={} has_current_turn={}",
@@ -1776,11 +1824,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // Build usage summary line.
                         if let Some(usage) = usage {
                             if let (Some(prompt), Some(completion)) = (
-                                usage.get("input_tokens").and_then(|v| v.as_u64()),
-                                usage.get("output_tokens").and_then(|v| v.as_u64()),
+                                usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+                                usage.get("completion_tokens").and_then(|v| v.as_u64()),
                             ) {
                                 let cache_read = usage
-                                    .get("cache_read_input_tokens")
+                                    .get("cached_input_tokens")
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0);
                                 let pct = if prompt > 0 {
@@ -2082,9 +2130,47 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_chat_request, ctrl_c_should_quit, format_socket_response};
+    use super::{build_chat_request, ctrl_c_should_quit, format_socket_response, stats_title};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn stats_title_formats_turn_delta_and_conversation_total() {
+        let stats = serde_json::json!({
+            "turn": 3,
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cached_input_tokens": 40,
+            "cache_creation_input_tokens": 5,
+            "reasoning_tokens": 30
+        });
+        let total = serde_json::json!({
+            "turn": 4,
+            "prompt_tokens": 400,
+            "completion_tokens": 200,
+            "cached_input_tokens": 150,
+            "cache_creation_input_tokens": 15,
+            "reasoning_tokens": 120
+        });
+
+        let title = stats_title(Some(&stats), Some(&total));
+
+        assert_eq!(
+            title,
+            "turn 3 · in 100 · out 50 · cache 40 (+5 new) · reason 30 · Σ in 400 · out 200 · cache 150 (+15 new) · reason 120",
+            "{title}"
+        );
+    }
+
+    #[test]
+    fn stats_title_renders_dashes_when_usage_is_absent() {
+        let title = stats_title(None, None);
+
+        assert_eq!(
+            title,
+            "turn - · in - · out - · cache - (+- new) · reason - · Σ in - · out - · cache - (+- new) · reason -"
+        );
+    }
 
     #[test]
     fn format_artifact_content_splits_embedded_newlines() {

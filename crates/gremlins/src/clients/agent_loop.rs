@@ -20,7 +20,7 @@ use super::interactive::{
     InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken, StreamEventSender,
 };
 use super::log_util::trunc;
-use super::protocol::{CompletedRun, UsageStats};
+use super::protocol::{CompletedRun, TurnStats, UsageStats};
 use super::tools::{self, ToolContext};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
@@ -519,6 +519,31 @@ fn usage_stats(
         reasoning_tokens: reasoning,
         turns,
     }
+}
+
+fn turn_stats(turn: usize, usage: Option<&Usage>) -> Option<TurnStats> {
+    let u = usage?;
+    // `response.partial().usage` is a bare `Usage` struct, so the stream-end
+    // handler wraps it in `Some` even when the provider reported no token
+    // fields at all. In that case consumers must see `None` (unavailable
+    // usage), not a measured zero-filled record. Explicitly reported zeros
+    // are preserved because only the all-absent case is filtered out.
+    if u.input_tokens.is_none()
+        && u.output_tokens.is_none()
+        && u.cached_input_tokens.is_none()
+        && u.cache_creation_input_tokens.is_none()
+        && u.reasoning_tokens.is_none()
+    {
+        return None;
+    }
+    Some(TurnStats {
+        turn,
+        prompt_tokens: u.input_tokens.unwrap_or(0),
+        completion_tokens: u.output_tokens.unwrap_or(0),
+        cached_input_tokens: u.cached_input_tokens.unwrap_or(0),
+        cache_creation_input_tokens: u.cache_creation_input_tokens.unwrap_or(0),
+        reasoning_tokens: u.reasoning_tokens.unwrap_or(0),
+    })
 }
 
 fn completed_run(
@@ -1083,6 +1108,30 @@ async fn run_agent_loop_core(
             tool_calls.len(),
         );
 
+        // Fold this turn's provider usage into the running totals before
+        // building TurnComplete so the per-prompt totals include the
+        // just-completed turn. Keep `turn_stats` None when the provider
+        // reported no usage (or the turn completed without a usage block),
+        // and treat every field as zero in that case.
+        let turn_stats = turn_stats(turn_num, turn_usage.as_ref());
+        if let Some(ref u) = turn_usage {
+            total_prompt_tokens += u.input_tokens.unwrap_or(0);
+            total_completion_tokens += u.output_tokens.unwrap_or(0);
+            total_cached_tokens += u.cached_input_tokens.unwrap_or(0);
+            total_cache_creation_tokens += u.cache_creation_input_tokens.unwrap_or(0);
+            total_reasoning_tokens += u.reasoning_tokens.unwrap_or(0);
+        }
+        let totals = usage_stats(
+            turn_num + 1,
+            total_prompt_tokens,
+            total_completion_tokens,
+            total_cached_tokens,
+            total_cache_creation_tokens,
+            total_reasoning_tokens,
+        );
+
+        emit_turn_stats(prefix, turn_num, turn_stats.as_ref(), &totals, log_tx);
+
         // Emit TurnComplete via stream_events, before text/tool_calls
         // are consumed by the rest of the turn processing.
         if let Some(ref se) = stream_events {
@@ -1094,6 +1143,8 @@ async fn run_agent_loop_core(
                         turn: turn_num,
                         text: text.clone(),
                         tool_calls: tool_calls.iter().map(format_tool_call).collect(),
+                        stats: turn_stats.clone(),
+                        totals: Some(totals),
                     },
                     cancel,
                 )
@@ -1133,14 +1184,6 @@ async fn run_agent_loop_core(
             turn_usage.as_ref(),
             log_tx,
         );
-
-        if let Some(ref u) = turn_usage {
-            total_prompt_tokens += u.input_tokens.unwrap_or(0);
-            total_completion_tokens += u.output_tokens.unwrap_or(0);
-            total_cached_tokens += u.cached_input_tokens.unwrap_or(0);
-            total_cache_creation_tokens += u.cache_creation_input_tokens.unwrap_or(0);
-            total_reasoning_tokens += u.reasoning_tokens.unwrap_or(0);
-        }
 
         turn_num += 1;
         turn_retries = 0;
@@ -1992,6 +2035,26 @@ pub(crate) fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value
             let _ = f.flush();
         }
     }
+}
+
+/// Emit a structured per-turn token/cache log line for every completed turn.
+///
+/// This is always logged regardless of the telemetry gate; timing and output
+/// byte-ratio extras live behind the separate [`emit_turn_metrics`] path.
+fn emit_turn_stats(
+    prefix: &str,
+    turn: usize,
+    stats: Option<&TurnStats>,
+    totals: &UsageStats,
+    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) {
+    let payload = serde_json::json!({
+        "type": "turn_stats",
+        "turn": turn,
+        "stats": stats,
+        "totals": totals,
+    });
+    send_log(log_tx, prefix, &payload.to_string());
 }
 
 /// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.
