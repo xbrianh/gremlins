@@ -766,6 +766,12 @@ mod tests {
         // anymore; it fails through the normal stub grammar.
         let err = ModelURI::parse("profile:foo").unwrap_err();
         assert!(err.contains("expected 'provider/model'"), "{err:?}");
+
+        // The parts-based constructor funnels through the same
+        // [`ModelURI::from_parts`] chokepoint, so it must reject `profile`
+        // before any provider allowlist check runs.
+        let err = Client::new("profile".into(), "foo".into(), IndexMap::new()).unwrap_err();
+        assert!(err.contains("reserved profile-reference prefix"), "{err:?}");
     }
 
     #[test]

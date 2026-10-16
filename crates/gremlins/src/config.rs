@@ -751,9 +751,10 @@ pub(crate) fn resolve_tui_chat_model(
 /// This is the shared spelling used by every model-profile resolution path
 /// ([`resolve_model_reference`], `default-model-by-stage` in [`Config::load`],
 /// and task-model inheritance in the YAML loader). The old `profile:<name>`
-/// spelling is intentionally not recognized here: it parses as a literal
-/// `provider/model` stub and is rejected by the client grammar, where
-/// `profile` is a reserved provider name.
+/// spelling is intentionally not recognized here: it passes through
+/// resolution unchanged and fails normal client-specifier shape parsing.
+/// Only a provider token of `profile` (as in `profile/<name>`) reaches the
+/// reserved-profile-prefix check in the model grammar.
 pub fn profile_name(spec: &str) -> Option<&str> {
     spec.strip_prefix("profile/")
 }
