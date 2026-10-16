@@ -156,6 +156,11 @@ impl ModelURI {
     /// interpreted. The portion after the first `?` is parsed with
     /// [`parse_params_list`].
     ///
+    /// The provider name `profile` is reserved for load-time model-profile
+    /// references (`profile/<name>`). It is rejected here as a provider so a
+    /// profile reference can never be misparsed as a literal
+    /// `provider/model` spec.
+    ///
     /// `cmd` is stub-only and verbatim: everything after `cmd/` is the shell
     /// command, including any `?`, `&`, or `/`. The command backend never has
     /// params, and `model://cmd/...` is rejected.
@@ -272,6 +277,11 @@ impl ModelURI {
         if provider.contains('/') {
             return Err(format!(
                 "invalid client specifier {full:?}: provider must not contain '/'"
+            ));
+        }
+        if provider == "profile" {
+            return Err(format!(
+                "invalid client specifier {full:?}: 'profile' is a reserved profile-reference prefix and cannot be used as a provider"
             ));
         }
         if provider == "cmd" {
@@ -765,6 +775,28 @@ mod tests {
         let uri = ModelURI::parse("cmd/echo hello?x=1").unwrap();
         assert_eq!(uri.to_string(), "cmd/echo hello?x=1");
         assert!(ModelURI::parse("model://cmd/echo hello").is_err());
+    }
+
+    #[test]
+    fn profile_provider_is_reserved_in_model_grammar() {
+        for spec in ["profile/foo", "model://profile/foo"] {
+            let err = ModelURI::parse(spec).unwrap_err();
+            assert!(
+                err.contains("reserved profile-reference prefix"),
+                "{spec:?} -> {err:?}"
+            );
+        }
+
+        // The old `profile:<name>` colon spelling is not a profile lookup
+        // anymore; it fails through the normal stub grammar.
+        let err = ModelURI::parse("profile:foo").unwrap_err();
+        assert!(err.contains("expected 'provider/model'"), "{err:?}");
+
+        // The parts-based constructor funnels through the same
+        // [`ModelURI::from_parts`] chokepoint, so it must reject `profile`
+        // before any provider allowlist check runs.
+        let err = Client::new("profile".into(), "foo".into(), IndexMap::new()).unwrap_err();
+        assert!(err.contains("reserved profile-reference prefix"), "{err:?}");
     }
 
     #[test]

@@ -316,7 +316,7 @@ impl Config {
                 let resolved: Result<IndexMap<String, String>, String> = map
                     .into_iter()
                     .map(|(k, v)| {
-                        let resolved = if let Some(name) = v.strip_prefix("profile:") {
+                        let resolved = if let Some(name) = profile_name(&v) {
                             let profile = model_profiles.get(name).ok_or_else(|| {
                                 format!("unknown model profile {name:?} in default-model-by-stage")
                             })?;
@@ -746,13 +746,26 @@ pub(crate) fn resolve_tui_chat_model(
     Ok(None)
 }
 
+/// Extract a profile name from a `profile/<name>` model reference.
+///
+/// This is the shared spelling used by every model-profile resolution path
+/// ([`resolve_model_reference`], `default-model-by-stage` in [`Config::load`],
+/// and task-model inheritance in the YAML loader). The old `profile:<name>`
+/// spelling is intentionally not recognized here: it passes through
+/// resolution unchanged and fails normal client-specifier shape parsing.
+/// Only a provider token of `profile` (as in `profile/<name>`) reaches the
+/// reserved-profile-prefix check in the model grammar.
+pub fn profile_name(spec: &str) -> Option<&str> {
+    spec.strip_prefix("profile/")
+}
+
 /// Resolve a model reference through the flat `model-profiles` table.
 ///
-/// Strings starting with `profile:` are profile lookups; everything else is
+/// Strings starting with `profile/` are profile lookups; everything else is
 /// already a `provider/model[?k=v,...]` spec and passes through unchanged. An
 /// unknown profile is an error.
 pub fn resolve_model_reference(spec: &str, config: &Config) -> Result<String, String> {
-    let name = match spec.strip_prefix("profile:") {
+    let name = match profile_name(spec) {
         Some(name) => name,
         None => return Ok(spec.to_string()),
     };
@@ -1185,6 +1198,7 @@ mod tests {
     use super::*;
     use std::fs;
 
+    use crate::clients::client::Client;
     use crate::test_support::{EnvGuard, Sandbox};
 
     // -----------------------------------------------------------------------
@@ -1214,7 +1228,7 @@ not-a-key: 1"#,
     #[test]
     fn test_resolve_model_reference_resolves_profiles_and_passes_through() {
         let _sandbox = Sandbox::with_config(Some(
-            r#"default-model: "profile:fast"
+            r#"default-model: "profile/fast"
 model-profiles:
   fast:
     model: cmd/echo
@@ -1225,25 +1239,39 @@ model-profiles:
         let cfg = Config::load().unwrap();
 
         assert_eq!(
-            resolve_model_reference("profile:fast", &cfg).unwrap(),
+            resolve_model_reference("profile/fast", &cfg).unwrap(),
             "cmd/echo"
         );
         assert_eq!(
-            resolve_model_reference("profile:smart", &cfg).unwrap(),
+            resolve_model_reference("profile/smart", &cfg).unwrap(),
             "model://xai/grok-4?reasoning=high"
         );
         assert_eq!(
             resolve_model_reference("openai/gpt-4o", &cfg).unwrap(),
             "openai/gpt-4o"
         );
-        assert!(resolve_model_reference("profile:nope", &cfg).is_err());
-        // Only the exact `profile:` prefix triggers resolution; a stray
-        // delimiter (e.g. `profile;` or `profile/`) is treated as a literal
-        // `provider/model` spec and passes through unchanged.
+        assert!(resolve_model_reference("profile/nope", &cfg).is_err());
+        // The old `profile:` spelling is no longer a profile lookup. It
+        // passes through the config resolver unchanged and is rejected later
+        // by the client grammar as an invalid provider/model spec.
         assert_eq!(
-            resolve_model_reference("profile;", &cfg).unwrap(),
-            "profile;"
+            resolve_model_reference("profile:fast", &cfg).unwrap(),
+            "profile:fast"
         );
+    }
+
+    #[test]
+    fn test_profile_provider_is_reserved_in_client_grammar() {
+        for spec in ["profile/foo", "model://profile/foo"] {
+            let err = Client::parse(spec).unwrap_err();
+            assert!(
+                err.contains("reserved profile-reference prefix"),
+                "{spec:?} -> {err:?}"
+            );
+        }
+
+        let err = Client::parse("profile:foo").unwrap_err();
+        assert!(err.contains("expected 'provider/model'"), "{err:?}");
     }
 
     #[test]
@@ -1539,6 +1567,57 @@ model-profiles:
             "openrouter/doomclientv5"
         );
         assert_eq!(prefix.get("plan-").unwrap(), "openai/gpt-5");
+    }
+
+    #[test]
+    fn test_config_default_model_by_stage_resolves_profiles() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"model-profiles:
+  fast:
+    model: cmd/echo
+default-model-by-stage:
+  chat: profile/fast
+  plan-*: profile/fast
+"#,
+        ));
+        let cfg = Config::load().unwrap();
+        let (exact, prefix) = cfg.default_model_by_stage();
+        assert_eq!(exact.get("chat").unwrap(), "cmd/echo");
+        assert_eq!(prefix.get("plan-").unwrap(), "cmd/echo");
+    }
+
+    #[test]
+    fn test_config_default_model_by_stage_profile_errors_keep_context() {
+        {
+            let _sandbox = Sandbox::with_config(Some(
+                r#"default-model-by-stage:
+  chat: profile/nope
+"#,
+            ));
+            let err = Config::load().unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("unknown model profile \"nope\" in default-model-by-stage"),
+                "got: {err}"
+            );
+        }
+
+        {
+            let _sandbox = Sandbox::with_config(Some(
+                r#"model-profiles:
+  empty:
+    model: ""
+default-model-by-stage:
+  chat: profile/empty
+"#,
+            ));
+            let err = Config::load().unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("model profile \"empty\" has no model"),
+                "got: {err}"
+            );
+        }
     }
 
     #[test]

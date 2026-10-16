@@ -172,11 +172,11 @@ fn from_expanded_value(
     // stages inherit when they don't supply their own model.
     let yaml_default_profile: Option<String> = raw_yaml_default_model
         .as_ref()
-        .and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+        .and_then(|raw| config::profile_name(raw).map(|s| s.to_string()));
     let override_default_profile: Option<String> =
-        default_model_override.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+        default_model_override.and_then(|raw| config::profile_name(raw).map(|s| s.to_string()));
     let config_default_profile: Option<String> =
-        config_default_model.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+        config_default_model.and_then(|raw| config::profile_name(raw).map(|s| s.to_string()));
 
     // Bake every stage and default model with the current settings profile
     // (source-definition path only). Expanded definitions from
@@ -512,7 +512,7 @@ fn yaml_model(
 /// Global `default-task-models` are NOT merged here; that happens at
 /// runtime so composite-stage inheritance works correctly.
 ///
-/// When the stage's `model` references a profile (e.g. `profile:foo`),
+/// When the stage's `model` references a profile (e.g. `profile/foo`),
 /// that profile's `task_models` are used as a base layer; the stage's own
 /// `task-models` entries win on key conflict.  When the stage has no
 /// `model` of its own but `effective_profile` names a profile (because
@@ -527,10 +527,10 @@ fn yaml_task_models(
     let stage = yaml_string_map_ordered(mapping, "task-models")?;
 
     // Resolve which profile (if any) contributes task-models as a base.
-    // Priority: the stage's own `model: profile:…` wins; otherwise the
+    // Priority: the stage's own `model: profile/<name>` wins; otherwise the
     // effective default-profile from the definition.
     let profile_name: Option<String> = yaml_str(mapping, "model")
-        .and_then(|raw| raw.strip_prefix("profile:").map(|name| name.to_string()))
+        .and_then(|raw| config::profile_name(&raw).map(|name| name.to_string()))
         .or_else(|| effective_profile.map(|s| s.to_string()));
 
     let profile_task_models: Option<IndexMap<String, String>> = settings.and_then(|settings| {
@@ -1032,10 +1032,150 @@ mod tests {
     use crate::clients::client::ModelURI;
     use crate::definition::GremlinDefinition;
     use crate::stage_spec::parallel::ErrorPolicy;
+    use crate::test_support::Sandbox;
     use std::fs;
+    use std::path::PathBuf;
 
     fn model(spec: &str) -> ModelURI {
         ModelURI::parse(spec).unwrap()
+    }
+
+    // ------------------------------------------------------------------
+    // Profile-reference YAML-loader regression tests
+    // ------------------------------------------------------------------
+
+    const PROFILE_SETTINGS: &str = r#"
+model-profiles:
+  demo:
+    model: cmd/echo
+    task-models:
+      Scout: cmd/scout
+      Implement: cmd/implement
+"#;
+
+    const DEFINITION_WITH_DEFAULT_PROFILE: &str = r#"
+default_model: profile/demo
+stages:
+  - name: plan
+    type: agent
+    prompt:
+      - "hello\n"
+    task-models:
+      Implement: cmd/stage-implement
+"#;
+
+    const DEFINITION_WITHOUT_DEFAULT: &str = r#"
+stages:
+  - name: plan
+    type: agent
+    prompt:
+      - "hello\n"
+    task-models:
+      Implement: cmd/stage-implement
+"#;
+
+    const DEFINITION_WITH_STAGE_PROFILE: &str = r#"
+default_model: cmd/default
+stages:
+  - name: plan
+    type: agent
+    prompt:
+      - "hello\n"
+    model: profile/demo
+    task-models:
+      Implement: cmd/stage-implement
+"#;
+
+    fn write_definition(sandbox: &Sandbox, yaml: &str) -> PathBuf {
+        let overlay = sandbox.path().join("project").join(".gremlins");
+        fs::create_dir_all(&overlay).unwrap();
+        let definition_path = overlay.join("demo.yaml");
+        fs::write(&definition_path, yaml).unwrap();
+        definition_path
+    }
+
+    fn load_with_profile_settings(
+        definition_yaml: &str,
+        model_override: Option<&str>,
+        config_default_model: Option<&str>,
+    ) -> (Sandbox, StaticDefinition) {
+        let sandbox = Sandbox::with_config(Some(PROFILE_SETTINGS));
+        let definition_path = write_definition(&sandbox, definition_yaml);
+        let def = StaticDefinition::from_yaml_file(
+            &definition_path,
+            model_override,
+            config_default_model,
+        )
+        .expect("profile reference must resolve through the YAML loader");
+        (sandbox, def)
+    }
+
+    /// Shared assertions for profile-derived `task-models` inheritance and
+    /// hermetic baking: the profile's entries are preserved, stage entries win
+    /// on conflict, and the serialized definition contains only concrete specs
+    /// and round-trips through `from_expanded_bytes` without settings.
+    fn assert_profile_definition_round_trips(
+        def: &StaticDefinition,
+        default_model: &str,
+        stage_model: Option<&str>,
+    ) {
+        assert_eq!(def.default_model().to_string(), default_model);
+
+        let stage = &def.stages[0];
+        let task_models = stage
+            .task_models()
+            .expect("profile task-models must be inherited");
+        assert_eq!(
+            task_models.get("Scout").map(String::as_str),
+            Some("cmd/scout")
+        );
+        assert_eq!(
+            task_models.get("Implement").map(String::as_str),
+            Some("cmd/stage-implement")
+        );
+        match stage_model {
+            Some(expected) => assert_eq!(stage.model().unwrap().to_string(), expected),
+            None => assert!(stage.model().is_none()),
+        }
+
+        let yaml = def.to_expanded_yaml();
+        let yaml_str = serde_yaml::to_string(&yaml).unwrap();
+        assert!(
+            !yaml_str.contains("profile/"),
+            "baked definition must not keep a profile reference: {yaml_str}"
+        );
+        assert!(
+            yaml_str.contains(default_model),
+            "baked definition must carry the concrete default model: {yaml_str}"
+        );
+        assert!(
+            yaml_str.contains("cmd/scout") && yaml_str.contains("cmd/stage-implement"),
+            "baked definition must carry resolved profile task-models: {yaml_str}"
+        );
+
+        let bytes = def
+            .serialize()
+            .expect("serialized definition must be valid YAML");
+        let reloaded = StaticDefinition::from_expanded_bytes(&bytes, None, None)
+            .expect("baked definition must reload without settings");
+        assert_eq!(reloaded.default_model().to_string(), default_model);
+
+        let reloaded_stage = &reloaded.stages[0];
+        let reloaded_task_models = reloaded_stage
+            .task_models()
+            .expect("reloaded definition must keep profile task-models");
+        assert_eq!(
+            reloaded_task_models.get("Scout").map(String::as_str),
+            Some("cmd/scout")
+        );
+        assert_eq!(
+            reloaded_task_models.get("Implement").map(String::as_str),
+            Some("cmd/stage-implement")
+        );
+        match stage_model {
+            Some(expected) => assert_eq!(reloaded_stage.model().unwrap().to_string(), expected),
+            None => assert!(reloaded_stage.model().is_none()),
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1426,5 +1566,32 @@ mod tests {
                 "{kind}: expected a legacy-key rejection, got: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn yaml_loader_resolves_definition_default_profile_task_models() {
+        let (_sandbox, def) =
+            load_with_profile_settings(DEFINITION_WITH_DEFAULT_PROFILE, None, None);
+        assert_profile_definition_round_trips(&def, "cmd/echo", None);
+    }
+
+    #[test]
+    fn yaml_loader_resolves_cli_model_override_profile_task_models() {
+        let (_sandbox, def) =
+            load_with_profile_settings(DEFINITION_WITHOUT_DEFAULT, Some("profile/demo"), None);
+        assert_profile_definition_round_trips(&def, "cmd/echo", None);
+    }
+
+    #[test]
+    fn yaml_loader_resolves_settings_default_profile_task_models() {
+        let (_sandbox, def) =
+            load_with_profile_settings(DEFINITION_WITHOUT_DEFAULT, None, Some("profile/demo"));
+        assert_profile_definition_round_trips(&def, "cmd/echo", None);
+    }
+
+    #[test]
+    fn yaml_loader_resolves_per_stage_profile_task_models() {
+        let (_sandbox, def) = load_with_profile_settings(DEFINITION_WITH_STAGE_PROFILE, None, None);
+        assert_profile_definition_round_trips(&def, "cmd/default", Some("cmd/echo"));
     }
 }
